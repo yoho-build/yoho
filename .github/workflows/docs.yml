@@ -25,6 +25,11 @@ jobs:
         with:
           path: site
   deploy:
+    # GitHub Pages cannot be enabled while this repo is private (API: current plan
+    # does not support Pages), so deploy-pages returns 404. Skip deploy until the
+    # repo is public. github.event.repository is present for both push and
+    # workflow_dispatch (repository is a required webhook field; private is set).
+    if: ${{ !github.event.repository.private }}
     needs: build
     runs-on: ubuntu-latest
     environment:
