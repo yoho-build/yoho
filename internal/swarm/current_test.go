@@ -126,3 +126,32 @@ func TestFailedFirstFinishRemovesCurrent(t *testing.T) {
 		t.Errorf("current = %q, want none", l)
 	}
 }
+
+// A fresh Version whose finish switched `current` before the connection
+// dropped: recovery resets current and puts the stack back on the previous
+// Release's record, not just the link.
+func TestFreshVersionFailureRestoresPreviousStack(t *testing.T) {
+	withRoot(t)
+	fastPolling(t)
+	ctx := context.Background()
+	h := newFake(newSim())
+	if _, err := (Runtime{}).Deploy(ctx, testDeploy(t, h, nil)); err != nil {
+		t.Fatal(err)
+	}
+	h.mu.Lock()
+	h.scripts = nil
+	h.mu.Unlock()
+	fh := &flakyHost{fakeHost: h, after: true, fail: func(s string) bool {
+		return strings.Contains(s, "ln -sfn") && strings.Contains(s, "releases/v2") && strings.Contains(s, "current") && !strings.Contains(s, "readlink")
+	}}
+	d := testDeploy(t, fh, nil)
+	d.Version = "v2"
+	if _, err := (Runtime{}).Deploy(ctx, d); err == nil {
+		t.Fatal("want error")
+	}
+	all := h.all()
+	i := strings.LastIndex(all, "docker stack deploy")
+	if i < 0 || !strings.Contains(all[i:], "releases/v1/compose.yaml") {
+		t.Fatalf("last stack deploy is not the v1 record:\n%s", all)
+	}
+}

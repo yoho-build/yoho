@@ -327,11 +327,10 @@ func (a *app) newDeploy(s *session, images map[string]string, forPlan bool) (*pl
 	} else {
 		out = s.store.Redactor(a.ui.Progress())
 	}
+	// Built are the Services Yoho built from a build: section; images also
+	// holds the pulled image-only Services, which rollback must never retag.
+	built := builtServices(proj, images)
 	composefile.StripBuild(proj, images)
-	built := sortedKeys(images)
-	if built == nil {
-		built = []string{}
-	}
 	svcSecrets, refs, err := serviceSecrets(s.store, s.r)
 	if err != nil {
 		return nil, err
@@ -343,6 +342,19 @@ func (a *app) newDeploy(s *session, images map[string]string, forPlan bool) (*pl
 		Proxy: a.proxyConfig(), RetainReleases: a.cfg.RetainReleases, Hook: s.hook,
 		Out: out,
 	}, nil
+}
+
+// builtServices lists, sorted and never nil, the Services of p that have a
+// build section and an image in images. Call it before StripBuild.
+func builtServices(p *types.Project, images map[string]string) []string {
+	out := []string{}
+	for name, sc := range p.Services {
+		if sc.Build != nil && images[name] != "" {
+			out = append(out, name)
+		}
+	}
+	sort.Strings(out)
+	return out
 }
 
 // rollout runs the runtime's Deploy for d.

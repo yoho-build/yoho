@@ -277,6 +277,12 @@ func (Runtime) Deploy(ctx context.Context, d *plan.Deploy) (_ *release.Release, 
 		default:
 			r.resetCurrent(context.WithoutCancel(ctx), liveVersion, d.Version)
 			_ = deploy.WriteJSON(context.WithoutCancel(ctx), h, path.Join(relDir, "release.json"), rel)
+			if stackTouched && liveDir != relDir {
+				// A fresh Version failed after the stack may have taken its
+				// spec; the Release that was current has an intact record,
+				// so put the stack back on it (or mark it partial).
+				r.restoreStack(context.WithoutCancel(ctx), d, liveDir, true, c.Plan)
+			}
 		}
 	}()
 
