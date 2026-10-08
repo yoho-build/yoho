@@ -163,6 +163,9 @@ func Images(ctx context.Context, o Options) (map[string]Image, error) {
 			}
 		}
 		fmt.Fprintf(o.Out, "Build engine: %s (%s)\n", engine, reason)
+		if engine == EngineContainer {
+			noteContainerUpdate(ctx, o.Exec)
+		}
 	case "remote":
 		if o.Builder.Remote == "" {
 			return nil, errors.New("builder.location=remote needs builder.remote")

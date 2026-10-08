@@ -17,6 +17,8 @@ yoho builder status   # which engine Yoho will use and Apple container state
 yoho builder setup    # install/upgrade Apple container, Rosetta, builder VM; smoke-test a linux/amd64 build (-y: no prompts)
 ```
 
+If Apple container is older than the latest release, `yoho builder status` and builds that use it print `run yoho builder setup to upgrade (needs sudo)`; the build check runs at most once a day, skips quietly when the network fails, and stays off when `YOHO_NO_UPDATE_CHECK=1`.
+
 ## Cross-builds
 
 Servers are usually amd64. `builder.platforms` defaults to the Server's architecture, so an Apple silicon laptop produces `linux/amd64` images through Rosetta. Override with `platforms: [linux/amd64, linux/arm64]`.

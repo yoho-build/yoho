@@ -97,22 +97,29 @@ func containerVersion(ctx context.Context) (string, error) {
 	return v, nil
 }
 
-// versionLess compares dotted numeric versions.
-func versionLess(a, b string) bool {
-	pa, pb := strings.Split(strings.TrimPrefix(a, "v"), "."), strings.Split(strings.TrimPrefix(b, "v"), ".")
-	for i := 0; i < len(pa) || i < len(pb); i++ {
-		var x, y int
-		if i < len(pa) {
-			x, _ = strconv.Atoi(pa[i])
-		}
-		if i < len(pb) {
-			y, _ = strconv.Atoi(pb[i])
-		}
-		if x != y {
-			return x < y
-		}
+// versionLess compares dotted numeric versions (1.10.0 is newer than 1.5.0).
+func versionLess(a, b string) bool { return build.VersionLess(a, b) }
+
+// containerStatusValue is the "container" row: installed version, latest
+// release when GitHub answered, and an upgrade hint when the install is older.
+func containerStatusValue(installed string, installedOK bool, latest string, latestOK bool) string {
+	cv := "not installed"
+	if installedOK {
+		cv = installed
 	}
-	return false
+	if !latestOK {
+		if installedOK && versionLess(installed, minContainerVersion) {
+			cv += " (older than " + minContainerVersion + "; run `yoho builder setup`)"
+		}
+		return cv + " · latest unknown (offline?)"
+	}
+	cv += " · latest " + latest
+	if installedOK && versionLess(installed, latest) {
+		cv += "; run `yoho builder setup` to upgrade (needs sudo)"
+	} else if installedOK && versionLess(installed, minContainerVersion) {
+		cv += " (older than " + minContainerVersion + "; run `yoho builder setup`)"
+	}
+	return cv
 }
 
 type containerRelease struct {
@@ -206,19 +213,7 @@ func builderStatus(cmd *cobra.Command, g *globals) error {
 	if runtime.GOOS == "darwin" {
 		ver, verr := containerVersion(ctx)
 		latest, lerr := latestContainerRelease(ctx)
-		cv := "not installed"
-		if verr == nil {
-			cv = ver
-			if versionLess(ver, minContainerVersion) {
-				cv += " (older than " + minContainerVersion + "; run `yoho builder setup`)"
-			}
-		}
-		if lerr == nil {
-			cv += " · latest " + latest.Version
-		} else {
-			cv += " · latest unknown (offline?)"
-		}
-		rows = append(rows, []string{"container", cv})
+		rows = append(rows, []string{"container", containerStatusValue(ver, verr == nil, latest.Version, lerr == nil)})
 		if verr == nil {
 			svc := "running"
 			if err := build.ContainerStatus(ctx, osBuildExec); err != nil {
