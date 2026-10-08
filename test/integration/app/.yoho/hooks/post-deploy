@@ -1,0 +1,5 @@
+#!/bin/sh
+# Echo the deployed version into the Actions step summary when one is set.
+if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
+  echo "$YOHO_VERSION" >> "$GITHUB_STEP_SUMMARY"
+fi

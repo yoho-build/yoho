@@ -1,0 +1,404 @@
+name: integration
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: integration-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  compose:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+      - parallel:
+          - name: Build yoho
+            run: go build -o "$RUNNER_TEMP/bin/yoho" ./cmd/yoho
+          - name: Pre-pull images
+            run: docker pull basecamp/kamal-proxy:v0.10.2 && docker pull alpine:3.22 && docker pull golang:1.26-alpine
+          - name: Start sshd for localhost
+            run: . ./test/integration/run.sh && setup_localhost_ssh
+      - name: Prepare app
+        run: |
+          set -eu
+          APP="$RUNNER_TEMP/app"
+          echo "APP=$APP" >> "$GITHUB_ENV"
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+          rm -rf "$APP"
+          mkdir -p "$APP"
+          cp -a test/integration/app/. "$APP/"
+          sed "s/__USER__/${USER}/g; s/__RUNTIME__/compose/" "$APP/yoho.yml.tmpl" > "$APP/yoho.yml"
+          git -C "$APP" init -b main
+          git -C "$APP" config user.email "yoho-ci@example.com"
+          git -C "$APP" config user.name "yoho-ci"
+          git -C "$APP" add -A
+          git -C "$APP" commit -m "ci app"
+          test -z "$(git -C "$APP" status --porcelain)"
+      - name: Config check and plan
+        working-directory: ${{ runner.temp }}/app
+        run: |
+          set -eu
+          yoho config check
+          set +e
+          yoho plan --detailed-exitcode
+          code=$?
+          set -e
+          if [ "$code" -ne 2 ]; then
+            echo "plan exit $code, want 2" >&2
+            exit 1
+          fi
+      - name: First deploy
+        working-directory: ${{ runner.temp }}/app
+        run: |
+          set -eu
+          . "$GITHUB_WORKSPACE/test/integration/run.sh"
+          start=$(date +%s)
+          yoho deploy
+          echo "first deploy $(( $(date +%s) - start ))s"
+          sha=$(git rev-parse HEAD)
+          assert_http http://127.0.0.1:18080/up 200
+          i=0
+          while [ "$i" -lt 20 ]; do
+            if curl -fsS --max-time 5 http://127.0.0.1:18080/version | jq -e --arg v "$sha" '.version == $v' >/dev/null; then
+              exit 0
+            fi
+            i=$((i + 1))
+            sleep 2
+          done
+          echo "version never became $sha" >&2
+          curl -fsS http://127.0.0.1:18080/version >&2 || true
+          exit 1
+      - name: Commit second version
+        working-directory: ${{ runner.temp }}/app
+        run: |
+          set -eu
+          sed -i 's/marker-v1/marker-v2/' main.go
+          git add main.go
+          git commit -m "bump marker"
+          test -z "$(git status --porcelain)"
+          git rev-parse HEAD > "$RUNNER_TEMP/sha2.txt"
+          git rev-parse HEAD~1 > "$RUNNER_TEMP/sha1.txt"
+      - name: Request loop
+        id: loop
+        working-directory: ${{ runner.temp }}/app
+        run: |
+          set -eu
+          . "$GITHUB_WORKSPACE/test/integration/run.sh"
+          loop_requests http://127.0.0.1:18080/version 90 "$RUNNER_TEMP/loop.txt"
+        background: true
+      - name: Apply second version
+        working-directory: ${{ runner.temp }}/app
+        run: |
+          set -eu
+          start=$(date +%s)
+          yoho apply --auto-approve
+          echo $(( $(date +%s) - start )) > "$RUNNER_TEMP/deploy_s.txt"
+      - name: Wait for request loop
+        wait: loop
+      - name: Assert zero downtime
+        working-directory: ${{ runner.temp }}/app
+        run: |
+          set -eu
+          . "$GITHUB_WORKSPACE/test/integration/run.sh"
+          fail=$(fail_count "$RUNNER_TEMP/loop.txt")
+          ok=$(ok_count "$RUNNER_TEMP/loop.txt")
+          echo "$ok" > "$RUNNER_TEMP/req_ok.txt"
+          echo "$fail" > "$RUNNER_TEMP/req_fail.txt"
+          echo "requests ok=$ok fail=$fail"
+          test "$fail" = "0"
+          test "$ok" -gt 0
+          sha1=$(cat "$RUNNER_TEMP/sha1.txt")
+          sha2=$(cat "$RUNNER_TEMP/sha2.txt")
+          grep -F "$sha1" "$RUNNER_TEMP/loop.txt" >/dev/null
+          grep -F "$sha2" "$RUNNER_TEMP/loop.txt" >/dev/null
+      - name: Plan is clean
+        working-directory: ${{ runner.temp }}/app
+        run: |
+          set -eu
+          set +e
+          yoho plan --detailed-exitcode
+          code=$?
+          set -e
+          if [ "$code" -ne 0 ]; then
+            echo "plan exit $code, want 0" >&2
+            exit 1
+          fi
+      - name: Rollback to first release
+        working-directory: ${{ runner.temp }}/app
+        run: |
+          set -eu
+          yoho releases
+          sha1=$(cat "$RUNNER_TEMP/sha1.txt")
+          yoho rollback "$(printf '%.12s' "$sha1")"
+          i=0
+          while [ "$i" -lt 20 ]; do
+            if curl -fsS --max-time 5 http://127.0.0.1:18080/version | jq -e --arg v "$sha1" '.version == $v' >/dev/null; then
+              exit 0
+            fi
+            i=$((i + 1))
+            sleep 2
+          done
+          echo "rollback did not serve $sha1" >&2
+          curl -fsS http://127.0.0.1:18080/version >&2 || true
+          exit 1
+      - name: Backup and restore
+        working-directory: ${{ runner.temp }}/app
+        run: |
+          set -eu
+          note="hello-ci-$(date +%s)"
+          curl -fsS -X POST http://127.0.0.1:18080/notes --data-binary "$note"
+          curl -fsS http://127.0.0.1:18080/notes | grep -F "$note"
+          yoho backup run nightly
+          id=$(yoho backup list nightly --json | jq -rs 'map(select(.event=="row"))[0].id // empty')
+          test -n "$id"
+          echo "backup $id"
+          yoho app exec web -- sh -c 'rm -f /data/notes.txt'
+          if curl -fsS http://127.0.0.1:18080/notes | grep -F "$note"; then
+            echo "note still present after delete" >&2
+            exit 1
+          fi
+          yoho backup restore "$id" --yes
+          i=0
+          while [ "$i" -lt 20 ]; do
+            if curl -fsS --max-time 5 http://127.0.0.1:18080/notes | grep -F "$note"; then
+              exit 0
+            fi
+            i=$((i + 1))
+            sleep 2
+          done
+          echo "note was not restored" >&2
+          exit 1
+      - name: Deploy staging
+        working-directory: ${{ runner.temp }}/app
+        run: |
+          set -eu
+          yoho -d staging deploy
+          sha1=$(cat "$RUNNER_TEMP/sha1.txt")
+          sha2=$(cat "$RUNNER_TEMP/sha2.txt")
+          i=0
+          while [ "$i" -lt 20 ]; do
+            code=$(curl -sS -o "$RUNNER_TEMP/staging-version.txt" -w '%{http_code}' --max-time 5 -H 'Host: staging.local' http://127.0.0.1:18080/version || true)
+            if [ "$code" = "200" ] && jq -e --arg v "$sha2" '.version == $v' "$RUNNER_TEMP/staging-version.txt" >/dev/null; then
+              break
+            fi
+            i=$((i + 1))
+            sleep 2
+          done
+          test "$i" -lt 20
+          curl -fsS --max-time 5 http://127.0.0.1:18080/version | jq -e --arg v "$sha1" '.version == $v' >/dev/null
+      - name: Releases JSON
+        working-directory: ${{ runner.temp }}/app
+        run: yoho releases --json | jq -e 'select(.event=="row")' >/dev/null
+      - name: Diagnostics
+        if: always()
+        run: |
+          set +e
+          if [ -f "$APP/yoho.yml" ]; then
+            cd "$APP"
+            yoho proxy status | tee "$RUNNER_TEMP/proxy-status.txt"
+            yoho app ps | tee "$RUNNER_TEMP/app-ps.txt"
+          fi
+          docker ps -a | tee "$RUNNER_TEMP/docker-ps.txt"
+          exit 0
+      - name: Step summary
+        if: always()
+        run: |
+          set -eu
+          deploy=$(cat "$RUNNER_TEMP/deploy_s.txt" 2>/dev/null || echo n/a)
+          ok=$(cat "$RUNNER_TEMP/req_ok.txt" 2>/dev/null || echo n/a)
+          fail=$(cat "$RUNNER_TEMP/req_fail.txt" 2>/dev/null || echo n/a)
+          case "$deploy" in
+            n/a) cell=$deploy ;;
+            *) cell="${deploy}s" ;;
+          esac
+          {
+            echo "| job | deploy time | requests ok | requests failed |"
+            echo "| --- | --- | --- | --- |"
+            echo "| compose | $cell | $ok | $fail |"
+          } >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: integration-logs-compose
+          path: ${{ runner.temp }}/*.txt
+          if-no-files-found: ignore
+
+  swarm:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+      - parallel:
+          - name: Build yoho
+            run: go build -o "$RUNNER_TEMP/bin/yoho" ./cmd/yoho
+          - name: Pre-pull images
+            run: docker pull basecamp/kamal-proxy:v0.10.2 && docker pull alpine:3.22 && docker pull golang:1.26-alpine
+          - name: Start sshd for localhost
+            run: . ./test/integration/run.sh && setup_localhost_ssh
+      - name: Init swarm and prepare app
+        run: |
+          set -eu
+          docker swarm init --advertise-addr 127.0.0.1
+          APP="$RUNNER_TEMP/app"
+          echo "APP=$APP" >> "$GITHUB_ENV"
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+          rm -rf "$APP"
+          mkdir -p "$APP"
+          cp -a test/integration/app/. "$APP/"
+          sed "s/__USER__/${USER}/g; s/__RUNTIME__/swarm/" "$APP/yoho.yml.tmpl" > "$APP/yoho.yml"
+          git -C "$APP" init -b main
+          git -C "$APP" config user.email "yoho-ci@example.com"
+          git -C "$APP" config user.name "yoho-ci"
+          git -C "$APP" add -A
+          git -C "$APP" commit -m "ci app"
+          test -z "$(git -C "$APP" status --porcelain)"
+      - name: First deploy
+        working-directory: ${{ runner.temp }}/app
+        run: |
+          set -eu
+          . "$GITHUB_WORKSPACE/test/integration/run.sh"
+          yoho config check
+          yoho deploy
+          sha=$(git rev-parse HEAD)
+          assert_http http://127.0.0.1:18080/up 200
+          i=0
+          while [ "$i" -lt 30 ]; do
+            if curl -fsS --max-time 5 http://127.0.0.1:18080/version | jq -e --arg v "$sha" '.version == $v' >/dev/null; then
+              exit 0
+            fi
+            i=$((i + 1))
+            sleep 2
+          done
+          echo "version never became $sha" >&2
+          exit 1
+      - name: Commit second version
+        working-directory: ${{ runner.temp }}/app
+        run: |
+          set -eu
+          sed -i 's/marker-v1/marker-v2/' main.go
+          git add main.go
+          git commit -m "bump marker"
+          git rev-parse HEAD > "$RUNNER_TEMP/sha2.txt"
+          git rev-parse HEAD~1 > "$RUNNER_TEMP/sha1.txt"
+      - name: Request loop
+        id: loop
+        run: |
+          set -eu
+          . "$GITHUB_WORKSPACE/test/integration/run.sh"
+          loop_requests http://127.0.0.1:18080/version 90 "$RUNNER_TEMP/loop.txt"
+        background: true
+      - name: Apply second version
+        working-directory: ${{ runner.temp }}/app
+        run: |
+          set -eu
+          start=$(date +%s)
+          yoho apply --auto-approve
+          echo $(( $(date +%s) - start )) > "$RUNNER_TEMP/deploy_s.txt"
+      - name: Wait for request loop
+        wait: loop
+      - name: Assert zero downtime and roll back
+        working-directory: ${{ runner.temp }}/app
+        run: |
+          set -eu
+          . "$GITHUB_WORKSPACE/test/integration/run.sh"
+          fail=$(fail_count "$RUNNER_TEMP/loop.txt")
+          ok=$(ok_count "$RUNNER_TEMP/loop.txt")
+          echo "$ok" > "$RUNNER_TEMP/req_ok.txt"
+          echo "$fail" > "$RUNNER_TEMP/req_fail.txt"
+          echo "requests ok=$ok fail=$fail"
+          test "$fail" = "0"
+          test "$ok" -gt 0
+          sha1=$(cat "$RUNNER_TEMP/sha1.txt")
+          sha2=$(cat "$RUNNER_TEMP/sha2.txt")
+          grep -F "$sha1" "$RUNNER_TEMP/loop.txt" >/dev/null
+          grep -F "$sha2" "$RUNNER_TEMP/loop.txt" >/dev/null
+          yoho rollback "$(printf '%.12s' "$sha1")"
+          i=0
+          while [ "$i" -lt 30 ]; do
+            if curl -fsS --max-time 5 http://127.0.0.1:18080/version | jq -e --arg v "$sha1" '.version == $v' >/dev/null; then
+              exit 0
+            fi
+            i=$((i + 1))
+            sleep 2
+          done
+          echo "rollback did not serve $sha1" >&2
+          exit 1
+      - name: Diagnostics
+        if: always()
+        run: |
+          set +e
+          if [ -f "$APP/yoho.yml" ]; then
+            cd "$APP"
+            yoho proxy status | tee "$RUNNER_TEMP/proxy-status.txt"
+            yoho app ps | tee "$RUNNER_TEMP/app-ps.txt"
+          fi
+          docker ps -a | tee "$RUNNER_TEMP/docker-ps.txt"
+          exit 0
+      - name: Step summary
+        if: always()
+        run: |
+          set -eu
+          deploy=$(cat "$RUNNER_TEMP/deploy_s.txt" 2>/dev/null || echo n/a)
+          ok=$(cat "$RUNNER_TEMP/req_ok.txt" 2>/dev/null || echo n/a)
+          fail=$(cat "$RUNNER_TEMP/req_fail.txt" 2>/dev/null || echo n/a)
+          case "$deploy" in
+            n/a) cell=$deploy ;;
+            *) cell="${deploy}s" ;;
+          esac
+          {
+            echo "| job | deploy time | requests ok | requests failed |"
+            echo "| --- | --- | --- | --- |"
+            echo "| swarm | $cell | $ok | $fail |"
+          } >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: integration-logs-swarm
+          path: ${{ runner.temp }}/*.txt
+          if-no-files-found: ignore
+
+  e2e-go:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+      - name: Start sshd for localhost
+        run: . ./test/integration/run.sh && setup_localhost_ssh
+      - name: E2E tests
+        timeout-minutes: 20
+        run: |
+          set -eu
+          start=$(date +%s)
+          YOHO_E2E=1 YOHO_E2E_SSH="$USER@127.0.0.1" go test -race ./...
+          echo $(( $(date +%s) - start )) > "$RUNNER_TEMP/deploy_s.txt"
+      - name: Step summary
+        if: always()
+        run: |
+          set -eu
+          deploy=$(cat "$RUNNER_TEMP/deploy_s.txt" 2>/dev/null || echo n/a)
+          case "$deploy" in
+            n/a) cell=$deploy ;;
+            *) cell="${deploy}s" ;;
+          esac
+          {
+            echo "| job | deploy time | requests ok | requests failed |"
+            echo "| --- | --- | --- | --- |"
+            echo "| e2e-go | $cell | n/a | n/a |"
+          } >> "$GITHUB_STEP_SUMMARY"

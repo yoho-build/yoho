@@ -1,0 +1,11 @@
+# Loaded only for Destination staging. A host route coexists with
+# production's catch-all on the shared Proxy.
+services:
+  web:
+    x-yoho:
+      proxy:
+        hosts: [staging.local]
+        port: 8080
+      secrets:
+        - APP_TOKEN
+      release_command: ["/app", "migrate"]

@@ -1,0 +1,25 @@
+app: ci
+servers:
+  local:
+    ssh: __USER__@127.0.0.1
+    root: /home/__USER__/yoho
+destinations:
+  production:
+    servers: [local]
+    runtime: __RUNTIME__
+  staging:
+    servers: [local]
+proxy:
+  http_port: 18080
+  https_port: 0
+backups:
+  targets:
+    local:
+      type: archive
+      format: tar.gz
+      repository: /home/__USER__/yoho/archives
+      keep_last: 2
+  jobs:
+    nightly:
+      destination: production
+      target: local

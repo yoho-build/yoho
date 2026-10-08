@@ -1,0 +1,37 @@
+services:
+  web:
+    build: .
+    stop_grace_period: 15s
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8080/up"]
+      interval: 2s
+      timeout: 3s
+      retries: 20
+      start_period: 3s
+    volumes:
+      - data:/data
+    # Placement keeps the named volume legal on runtime swarm (a proxied
+    # service cannot also be stateful). Compose ignores the constraint.
+    deploy:
+      placement:
+        constraints:
+          - node.role == manager
+    x-yoho:
+      proxy:
+        port: 8080
+      secrets:
+        - APP_TOKEN
+      release_command: ["/app", "migrate"]
+
+  files:
+    image: alpine:3.22
+    command: ["sh", "-c", "mkdir -p /data && sleep infinity"]
+    volumes:
+      - data:/data
+    x-yoho:
+      stateful: true
+      backup:
+        volumes: [data]
+
+volumes:
+  data:
