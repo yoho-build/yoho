@@ -20,4 +20,9 @@ jobs:
       - name: Publish GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "$GITHUB_REF_NAME" dist/* --generate-notes
+        run: |
+          set -eu
+          case "$GITHUB_REF_NAME" in
+            *-*) gh release create "$GITHUB_REF_NAME" dist/* --generate-notes --prerelease ;;
+            *) gh release create "$GITHUB_REF_NAME" dist/* --generate-notes ;;
+          esac

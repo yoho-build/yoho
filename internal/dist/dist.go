@@ -5,11 +5,14 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
@@ -26,11 +29,31 @@ var ErrDevBuild = errors.New("dev build: no release to download")
 // Tests point it at an httptest server.
 var ReleaseBase = "https://github.com/" + Repo + "/releases/download"
 
+// APIBase is the GitHub REST API origin used when a token is available.
+// Tests point it at an httptest server.
+var APIBase = "https://api.github.com"
+
+// currentToken returns a GitHub token, or "" to use the public release URLs.
+// Tests replace it. discoverToken never logs the token.
+var currentToken = discoverToken
+
+// errNotFound is a download that returned HTTP 404. Callers map it to a
+// release error. It is not wrapped with the URL.
+var errNotFound = errors.New("not found")
+
 // httpClient bounds a download when the caller context has no deadline.
+// CheckRedirect is nil, so Go's default policy applies: Authorization is
+// stripped when a redirect changes host. GitHub asset URLs redirect to a
+// CDN; the token must not be forwarded there.
 var httpClient = &http.Client{Timeout: 3 * time.Minute}
 
 // maxAsset is a guard against a huge or hostile response.
 const maxAsset = 256 << 20
+
+const (
+	acceptAPI   = "application/vnd.github+json"
+	acceptAsset = "application/octet-stream"
+)
 
 // AssetName maps a docker-style platform (linux/amd64) to a release asset.
 func AssetName(platform string) (string, error) {
@@ -55,6 +78,10 @@ func AssetName(platform string) (string, error) {
 // (default: UserCacheDir/yoho/bin) and returns the cached path. A cached
 // file is reused when its sha256 matches checksums.txt. version "dev" or
 // empty returns ErrDevBuild.
+//
+// With a token (GITHUB_TOKEN, else GH_TOKEN, else `gh auth token`), the
+// bytes come from the GitHub REST API. Otherwise the public release URLs
+// are used.
 func Download(ctx context.Context, version, platform, cacheDir string) (string, error) {
 	if version == "" || version == "dev" {
 		return "", ErrDevBuild
@@ -73,7 +100,14 @@ func Download(ctx context.Context, version, platform, cacheDir string) (string, 
 		}
 	}
 	dest := filepath.Join(cacheDir, version, asset)
-	sum, err := fetchChecksum(ctx, version, asset)
+	token := strings.TrimSpace(currentToken(ctx))
+
+	var sum, binURL string
+	if token != "" {
+		sum, binURL, err = fetchAPI(ctx, token, version, asset)
+	} else {
+		sum, err = fetchChecksum(ctx, version, asset)
+	}
 	if err != nil {
 		return "", err
 	}
@@ -83,7 +117,12 @@ func Download(ctx context.Context, version, platform, cacheDir string) (string, 
 		}
 		return dest, nil
 	}
-	body, err := get(ctx, assetURL(version, asset))
+	var body []byte
+	if token != "" {
+		body, err = getAsset(ctx, token, binURL, fmt.Errorf("release %s has no asset %s", version, asset))
+	} else {
+		body, err = getPublic(ctx, version, assetURL(version, asset))
+	}
 	if err != nil {
 		return "", err
 	}
@@ -135,8 +174,16 @@ func assetURL(version, name string) string {
 	return strings.TrimRight(ReleaseBase, "/") + "/" + version + "/" + name
 }
 
+func releaseURL(version string) string {
+	return strings.TrimRight(APIBase, "/") + "/repos/" + Repo + "/releases/tags/" + url.PathEscape(version)
+}
+
+func privateRepoHint(version string) error {
+	return fmt.Errorf("release %s not found; if the repo is private set GITHUB_TOKEN or log in with gh", version)
+}
+
 func fetchChecksum(ctx context.Context, version, asset string) (string, error) {
-	body, err := get(ctx, assetURL(version, "checksums.txt"))
+	body, err := getPublic(ctx, version, assetURL(version, "checksums.txt"))
 	if err != nil {
 		return "", err
 	}
@@ -145,6 +192,55 @@ func fetchChecksum(ctx context.Context, version, asset string) (string, error) {
 		return "", fmt.Errorf("release %s has no asset %s", version, asset)
 	}
 	return sum, nil
+}
+
+type ghAsset struct {
+	Name string `json:"name"`
+	URL  string `json:"url"`
+}
+
+type ghRelease struct {
+	Assets []ghAsset `json:"assets"`
+}
+
+// fetchAPI loads checksums.txt through the REST API and returns the sum
+// plus the binary asset's API URL. The release document is fetched once.
+func fetchAPI(ctx context.Context, token, version, asset string) (sum, binURL string, err error) {
+	body, err := get(ctx, releaseURL(version), token, acceptAPI)
+	if errors.Is(err, errNotFound) {
+		return "", "", fmt.Errorf("release %s not found", version)
+	}
+	if err != nil {
+		return "", "", err
+	}
+	var rel ghRelease
+	if err := json.Unmarshal(body, &rel); err != nil {
+		return "", "", fmt.Errorf("release %s: invalid response", version)
+	}
+	var sumURL string
+	for _, a := range rel.Assets {
+		switch a.Name {
+		case "checksums.txt":
+			sumURL = a.URL
+		case asset:
+			binURL = a.URL
+		}
+	}
+	if sumURL == "" {
+		return "", "", fmt.Errorf("release %s has no asset %s", version, "checksums.txt")
+	}
+	if binURL == "" {
+		return "", "", fmt.Errorf("release %s has no asset %s", version, asset)
+	}
+	sumBody, err := getAsset(ctx, token, sumURL, fmt.Errorf("release %s has no asset %s", version, "checksums.txt"))
+	if err != nil {
+		return "", "", err
+	}
+	sum, ok := checksumEntry(string(sumBody), asset)
+	if !ok {
+		return "", "", fmt.Errorf("release %s has no asset %s", version, asset)
+	}
+	return sum, binURL, nil
 }
 
 // checksumEntry finds asset in a sha256sum file ("<hash>  name" or "<hash> *name").
@@ -175,40 +271,83 @@ func fileSumMatches(path, sum string) (bool, error) {
 	return hex.EncodeToString(h.Sum(nil)) == sum, nil
 }
 
-func get(ctx context.Context, url string) ([]byte, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+func getPublic(ctx context.Context, version, rawURL string) ([]byte, error) {
+	body, err := get(ctx, rawURL, "", "")
+	if errors.Is(err, errNotFound) {
+		return nil, privateRepoHint(version)
+	}
+	return body, err
+}
+
+func getAsset(ctx context.Context, token, rawURL string, notFound error) ([]byte, error) {
+	body, err := get(ctx, rawURL, token, acceptAsset)
+	if errors.Is(err, errNotFound) {
+		return nil, notFound
+	}
+	return body, err
+}
+
+func get(ctx context.Context, rawURL, token, accept string) ([]byte, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
 	if err != nil {
 		return nil, err
 	}
 	req.Header.Set("User-Agent", "yoho")
+	if accept != "" {
+		req.Header.Set("Accept", accept)
+	}
+	if token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
 	resp, err := httpClient.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("download %s: %w", url, err)
+		return nil, fmt.Errorf("download %s: %w", rawURL, err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode == http.StatusNotFound {
-		version, name := urlVersionName(url)
-		return nil, fmt.Errorf("release %s has no asset %s", version, name)
+		return nil, errNotFound
 	}
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("download %s: HTTP %s", url, resp.Status)
+		return nil, fmt.Errorf("download %s: HTTP %s", rawURL, resp.Status)
 	}
 	body, err := io.ReadAll(io.LimitReader(resp.Body, maxAsset+1))
 	if err != nil {
-		return nil, fmt.Errorf("download %s: %w", url, err)
+		return nil, fmt.Errorf("download %s: %w", rawURL, err)
 	}
 	if len(body) > maxAsset {
-		return nil, fmt.Errorf("download %s: response exceeds %d bytes", url, maxAsset)
+		return nil, fmt.Errorf("download %s: response exceeds %d bytes", rawURL, maxAsset)
 	}
 	return body, nil
 }
 
-func urlVersionName(raw string) (version, name string) {
-	base := strings.TrimRight(ReleaseBase, "/") + "/"
-	rest := strings.TrimPrefix(raw, base)
-	version, name, _ = strings.Cut(rest, "/")
-	if name == "" {
-		name = rest
+// discoverToken checks GITHUB_TOKEN, then GH_TOKEN, then `gh auth token`.
+// The gh lookup is skipped when gh is not on PATH, times out after 3s, and
+// ignores failures. The token is returned to the caller and never logged.
+func discoverToken(ctx context.Context) string {
+	if t := strings.TrimSpace(os.Getenv("GITHUB_TOKEN")); t != "" {
+		return t
 	}
-	return version, name
+	if t := strings.TrimSpace(os.Getenv("GH_TOKEN")); t != "" {
+		return t
+	}
+	return ghAuthToken(ctx)
+}
+
+func ghAuthToken(ctx context.Context) string {
+	exe, err := exec.LookPath("gh")
+	if err != nil {
+		return ""
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	ctx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, exe, "auth", "token")
+	out, err := cmd.Output()
+	if err != nil {
+		return ""
+	}
+	line, _, _ := strings.Cut(string(out), "\n")
+	return strings.TrimSpace(line)
 }
