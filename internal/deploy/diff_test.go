@@ -219,3 +219,48 @@ func TestDiffRouteHostsChange(t *testing.T) {
 		t.Errorf("%+v", c)
 	}
 }
+
+// stopDB rewrites the inspect JSON so the db container is not running.
+func stopDB(t *testing.T, st *fakeState, status string, code int, policy string) {
+	t.Helper()
+	var all []map[string]any
+	if err := json.Unmarshal([]byte(st.containers), &all); err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range all {
+		if c["Config"].(map[string]any)["Labels"].(map[string]any)["com.docker.compose.service"] == "db" {
+			c["State"] = map[string]any{"Running": false, "Status": status, "ExitCode": code}
+			c["HostConfig"] = map[string]any{"RestartPolicy": map[string]any{"Name": policy}}
+		}
+	}
+	b, _ := json.Marshal(all)
+	st.containers = string(b)
+}
+
+func TestDiffOneShotService(t *testing.T) {
+	for _, tc := range []struct {
+		name, status, policy string
+		code                 int
+		action               plan.Action
+		reason               string
+	}{
+		{"exited 0 restart no", "exited", "no", 0, plan.ActionNoop, ""},
+		{"exited 0 restart unset", "exited", "", 0, plan.ActionNoop, ""},
+		{"exited 1", "exited", "no", 1, plan.ActionUpdate, "exited 1"},
+		{"stopped long-running", "exited", "unless-stopped", 0, plan.ActionUpdate, "not running"},
+		{"created", "created", "no", 0, plan.ActionUpdate, "not running"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h, st, _ := deployed(t)
+			stopDB(t, st, tc.status, tc.code, tc.policy)
+			cs, err := Compose{}.Diff(context.Background(), testDeploy(t, h, io.Discard))
+			if err != nil {
+				t.Fatal(err)
+			}
+			c := byKey(cs)["service db"]
+			if c.Action != tc.action || (tc.reason != "" && (len(c.Reasons) != 1 || c.Reasons[0] != tc.reason)) {
+				t.Errorf("%+v", c)
+			}
+		})
+	}
+}

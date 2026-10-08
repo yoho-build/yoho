@@ -34,8 +34,15 @@ var planKey = []byte("yoho-plan-placeholder-key-000000")
 type container struct {
 	Name  string `json:"Name"`
 	State struct {
-		Running bool `json:"Running"`
+		Running  bool   `json:"Running"`
+		Status   string `json:"Status"`
+		ExitCode int    `json:"ExitCode"`
 	} `json:"State"`
+	HostConfig struct {
+		RestartPolicy struct {
+			Name string `json:"Name"`
+		} `json:"RestartPolicy"`
+	} `json:"HostConfig"`
 	Config struct {
 		Image  string            `json:"Image"`
 		Labels map[string]string `json:"Labels"`
@@ -68,6 +75,26 @@ func projectContainers(ctx context.Context, h remote.Host, project string) ([]co
 		cs = append(cs, c)
 	}
 	return cs, nil
+}
+
+// oneShotExit reports whether every container is an exited one-shot (restart
+// policy "no", the compose default) and returns the first non-zero exit code,
+// or 0 when all exited cleanly. Such Services (init, sync jobs) are done, not
+// down. Callers have already matched image and config to the current Release.
+func oneShotExit(cs []container) (int, bool) {
+	code := 0
+	for _, ct := range cs {
+		if p := ct.HostConfig.RestartPolicy.Name; p != "" && p != "no" {
+			return 0, false
+		}
+		if ct.State.Running || !strings.EqualFold(ct.State.Status, "exited") {
+			return 0, false
+		}
+		if code == 0 {
+			code = ct.State.ExitCode
+		}
+	}
+	return code, len(cs) > 0
 }
 
 // currentRelease loads the compiled state of the Release `current` points at.
@@ -310,6 +337,14 @@ func (c Compose) Diff(ctx context.Context, d *plan.Deploy) ([]plan.Change, error
 			reasons = append(reasons, fmt.Sprintf("replicas %d → %d", running, sp.Replicas))
 		}
 		if len(reasons) == 0 && running == 0 {
+			if code, oneShot := oneShotExit(cs); oneShot {
+				if code == 0 {
+					add("service", sp.Name, plan.ActionNoop, false)
+				} else {
+					add("service", sp.Name, plan.ActionUpdate, false, fmt.Sprintf("exited %d", code))
+				}
+				continue
+			}
 			add("service", sp.Name, plan.ActionUpdate, false, "not running")
 			continue
 		}
