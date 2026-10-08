@@ -784,9 +784,27 @@ func (r *runner) finish(ctx context.Context, d *plan.Deploy, rel *release.Releas
 		r.logf("warning: pruning old releases failed: %v", err)
 	}
 	// Same image cleanup as compose. Swarm's `stack deploy --prune` removes
-	// services, not images. One manager: worker disks are not touched.
-	deploy.PruneImages(ctx, r.h, d.App, r.logf)
+	// services, not images. Release records live only on the manager, so the
+	// retained-image keep-set is computed there once and passed to every
+	// Server. Each Server also keeps images its own containers use.
+	r.pruneImages(ctx, d)
 	return nil
+}
+
+// pruneImages removes this App's unused images on every Server. Errors are
+// warnings, logged by PruneImages (and here when the keep-set cannot be read).
+func (r *runner) pruneImages(ctx context.Context, d *plan.Deploy) {
+	keep, err := deploy.RetainedImageRefs(ctx, r.h, d.App)
+	if err != nil {
+		r.logf("warning: %v", err)
+		return
+	}
+	opts := deploy.PruneOptions{Keep: keep}
+	for _, s := range d.Servers {
+		deploy.PruneImages(ctx, s.Host, d.App, func(format string, a ...any) {
+			fmt.Fprintf(r.out, "["+s.Name+"] "+format+"\n", a...)
+		}, opts)
+	}
 }
 
 // prune keeps the newest RetainReleases Releases (always current), their

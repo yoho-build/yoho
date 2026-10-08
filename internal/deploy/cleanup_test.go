@@ -1,8 +1,13 @@
 package deploy
 
 import (
+	"context"
+	"fmt"
+	"os"
 	"strings"
 	"testing"
+
+	"github.com/yoho-build/yoho/internal/remote"
 )
 
 func TestImageListAndRemoveScripts(t *testing.T) {
@@ -83,6 +88,125 @@ func TestSelectImageRemovalsContainerd(t *testing.T) {
 		if got[i] != want[i] {
 			t.Errorf("[%d] got %+v want %+v", i, got[i], want[i])
 		}
+	}
+}
+
+// scriptHost records every command. PruneImages only needs Output and Run.
+type scriptHost struct {
+	scripts []string
+	fn      func(script string) (string, error)
+}
+
+func (h *scriptHost) Name() string { return "worker" }
+
+func (h *scriptHost) Run(ctx context.Context, c remote.Cmd) error {
+	_, err := h.Output(ctx, c)
+	return err
+}
+
+func (h *scriptHost) Output(ctx context.Context, c remote.Cmd) (string, error) {
+	h.scripts = append(h.scripts, c.Script)
+	if h.fn != nil {
+		return h.fn(c.Script)
+	}
+	return "", nil
+}
+
+func (h *scriptHost) WriteFile(context.Context, string, []byte, os.FileMode, bool) error {
+	return nil
+}
+func (h *scriptHost) ReadFile(context.Context, string, bool) ([]byte, error) {
+	return nil, os.ErrNotExist
+}
+func (h *scriptHost) Close() error { return nil }
+
+func (h *scriptHost) all() string { return strings.Join(h.scripts, "\n---\n") }
+
+func TestPruneImagesPrecomputedKeep(t *testing.T) {
+	rows := strings.Join([]string{
+		"sha256:stale|yoho/shop-web|old|0",
+		"sha256:used|yoho/shop-web|live|0",
+		"sha256:kept|yoho/shop-web|v1|0",
+	}, "\n")
+	h := &scriptHost{fn: func(script string) (string, error) {
+		switch {
+		case strings.Contains(script, "docker image ls"):
+			return rows, nil
+		case strings.Contains(script, "docker ps -a"):
+			return "yoho/shop-web:live\n", nil
+		default:
+			return "", nil
+		}
+	}}
+	keep := map[string]bool{"docker.io/yoho/shop-web:v1": true}
+	var logs []string
+	PruneImages(context.Background(), h, "shop", func(format string, a ...any) {
+		logs = append(logs, fmt.Sprintf(format, a...))
+	}, PruneOptions{Keep: keep})
+
+	all := h.all()
+	if strings.Contains(all, "release.json") {
+		t.Fatalf("precomputed keep read Release records:\n%s", all)
+	}
+	if !strings.Contains(all, "docker image rm 'sha256:stale'") {
+		t.Fatalf("unused image not removed:\n%s", all)
+	}
+	for _, id := range []string{"sha256:used", "sha256:kept"} {
+		if strings.Contains(all, "docker image rm '"+id+"'") {
+			t.Errorf("removed %s:\n%s", id, all)
+		}
+	}
+	if strings.Contains(all, "--force") || strings.Contains(all, " -f") {
+		t.Fatalf("removal was forced:\n%s", all)
+	}
+	if _, leaked := keep["yoho/shop-web:live"]; leaked {
+		t.Fatal("container ref leaked into the caller's keep-set")
+	}
+	if !strings.Contains(strings.Join(logs, "\n"), "removed 1 old image(s): yoho/shop-web:old") {
+		t.Fatalf("logs %q", logs)
+	}
+
+	// A second Server reuses the same map. Its container set must not inherit
+	// the first Server's, and the retained ref must still be kept.
+	other := &scriptHost{fn: func(script string) (string, error) {
+		switch {
+		case strings.Contains(script, "docker image ls"):
+			return "sha256:other|yoho/shop-web|live|0\nsha256:kept|yoho/shop-web|v1|0\n", nil
+		case strings.Contains(script, "docker ps -a"):
+			return "", nil
+		default:
+			return "", nil
+		}
+	}}
+	PruneImages(context.Background(), other, "shop", nil, PruneOptions{Keep: keep})
+	if !strings.Contains(other.all(), "docker image rm 'sha256:other'") {
+		t.Fatalf("second server kept an image only the first server's container used:\n%s", other.all())
+	}
+	if strings.Contains(other.all(), "docker image rm 'sha256:kept'") {
+		t.Fatalf("second server removed a retained release image:\n%s", other.all())
+	}
+}
+
+func TestPruneImagesNilKeepReadsReleases(t *testing.T) {
+	h := &scriptHost{fn: func(script string) (string, error) {
+		switch {
+		case strings.Contains(script, "docker image ls"):
+			return "sha256:stale|yoho/shop-web|old|0\nsha256:kept|yoho/shop-web|v1|0\n", nil
+		case strings.Contains(script, "release.json"):
+			return `{"images":{"web":"docker.io/yoho/shop-web:v1"}}`, nil
+		case strings.Contains(script, "docker ps -a"):
+			return "", nil
+		default:
+			return "", nil
+		}
+	}}
+	PruneImages(context.Background(), h, "shop", nil, PruneOptions{})
+	all := h.all()
+	if !strings.Contains(all, "release.json") {
+		t.Fatal("nil Keep did not read Release records")
+	}
+	if !strings.Contains(all, "docker image rm 'sha256:stale'") || strings.Contains(all, "docker image rm 'sha256:kept'") {
+		t.Fatalf("compose keep set:\n%s", all)
 	}
 }
 

@@ -3,6 +3,7 @@ package deploy
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"path"
 	"slices"
 	"strings"
@@ -49,12 +50,25 @@ func (r *runner) removeStaleRoutes(ctx context.Context, plans []servicePlan) {
 // that record and its platform child. Untagged rows (<none>) are the dangling
 // platform children that listing does show; they are removed by ID too.
 func pruneImages(ctx context.Context, r *runner, d *plan.Deploy) {
-	PruneImages(ctx, r.h, d.App, r.logf)
+	PruneImages(ctx, r.h, d.App, r.logf, PruneOptions{})
 }
 
-// PruneImages is pruneImages for a Host. Swarm uses it on the manager; the
-// compose runtime uses it on the Destination's Server. logf may be nil.
-func PruneImages(ctx context.Context, h remote.Host, app string, logf func(string, ...any)) {
+// PruneOptions configures PruneImages. The zero value is the compose
+// behaviour: retained Release image refs are read from Release records on
+// the Host being pruned.
+type PruneOptions struct {
+	// Keep is the retained Release image refs, already computed. Swarm
+	// computes this once on the manager (Release records exist only there)
+	// and passes the same map to every Server. A non-nil Keep skips reading
+	// Release records on this Host. Images used by containers on this Host
+	// are still kept. Nil means read the records on h.
+	Keep map[string]bool
+}
+
+// PruneImages is pruneImages for a Host. The compose runtime calls it on
+// the Destination's Server. Swarm calls it on every Server, with Keep set
+// to the manager's retained Release image refs. logf may be nil.
+func PruneImages(ctx context.Context, h remote.Host, app string, logf func(string, ...any), opts PruneOptions) {
 	if logf == nil {
 		logf = func(string, ...any) {}
 	}
@@ -72,25 +86,10 @@ func PruneImages(ctx context.Context, h remote.Host, app string, logf func(strin
 	if len(rows) == 0 {
 		return
 	}
-	keep := map[string]bool{}
-	// Retained Releases of every Destination of this App on the Server.
-	// Release directories are already pruned, so only retained records remain.
-	appRoot := path.Join(release.Root, "apps", app)
-	rels, err := h.Output(ctx, remote.Cmd{Script: "for f in " + remote.Quote(appRoot) + "/*/releases/*/release.json; do [ -f \"$f\" ] && cat \"$f\"; done; true"})
+	keep, err := imageKeepSet(ctx, h, app, opts)
 	if err != nil {
-		logf("warning: list releases: %v", err)
+		logf("warning: %v", err)
 		return
-	}
-	dec := json.NewDecoder(strings.NewReader(rels))
-	for dec.More() {
-		var rel release.Release
-		if err := dec.Decode(&rel); err != nil {
-			logf("warning: not pruning images, unreadable release record: %v", err)
-			return
-		}
-		for _, im := range rel.Images {
-			keep[canonicalImageRef(im)] = true
-		}
 	}
 	used, err := h.Output(ctx, remote.Cmd{Script: "docker ps -a --format '{{.Image}}'"})
 	if err != nil {
@@ -112,6 +111,46 @@ func PruneImages(ctx context.Context, h remote.Host, app string, logf func(strin
 	if len(removed) > 0 {
 		logf("removed %d old image(s): %s", len(removed), strings.Join(removed, ", "))
 	}
+}
+
+// imageKeepSet is the retained-Release half of the keep set. A precomputed
+// Keep is copied so later container refs cannot leak into the caller's map
+// or into the next Server that reuses it.
+func imageKeepSet(ctx context.Context, h remote.Host, app string, opts PruneOptions) (map[string]bool, error) {
+	if opts.Keep != nil {
+		keep := make(map[string]bool, len(opts.Keep))
+		for ref, held := range opts.Keep {
+			if held {
+				keep[canonicalImageRef(ref)] = true
+			}
+		}
+		return keep, nil
+	}
+	return RetainedImageRefs(ctx, h, app)
+}
+
+// RetainedImageRefs returns image refs referenced by retained Release
+// records of app on h. Release directories are already pruned, so only
+// retained records remain. Keys are canonical image refs. The map is
+// non-nil when err is nil.
+func RetainedImageRefs(ctx context.Context, h remote.Host, app string) (map[string]bool, error) {
+	appRoot := path.Join(release.Root, "apps", app)
+	rels, err := h.Output(ctx, remote.Cmd{Script: "for f in " + remote.Quote(appRoot) + "/*/releases/*/release.json; do [ -f \"$f\" ] && cat \"$f\"; done; true"})
+	if err != nil {
+		return nil, fmt.Errorf("list releases: %w", err)
+	}
+	keep := map[string]bool{}
+	dec := json.NewDecoder(strings.NewReader(rels))
+	for dec.More() {
+		var rel release.Release
+		if err := dec.Decode(&rel); err != nil {
+			return nil, fmt.Errorf("not pruning images, unreadable release record: %w", err)
+		}
+		for _, im := range rel.Images {
+			keep[canonicalImageRef(im)] = true
+		}
+	}
+	return keep, nil
 }
 
 // imageListScript lists this App's images, including dangling ones (-a).

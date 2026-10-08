@@ -432,6 +432,70 @@ func TestPruneKeepsRetainedSecrets(t *testing.T) {
 	}
 }
 
+// releaseGuard fails closed if a worker tries to read Release records.
+// Those exist only on the manager; image pruning must use the passed keep-set.
+type releaseGuard struct {
+	*fakeHost
+	readRelease bool
+}
+
+func (g *releaseGuard) Run(ctx context.Context, c remote.Cmd) error {
+	_, err := g.Output(ctx, c)
+	return err
+}
+
+func (g *releaseGuard) Output(ctx context.Context, c remote.Cmd) (string, error) {
+	if strings.Contains(c.Script, "release.json") {
+		g.readRelease = true
+		return "", errors.New("release records are only on the manager")
+	}
+	return g.fakeHost.Output(ctx, c)
+}
+
+func TestWorkerPrunesUnusedImages(t *testing.T) {
+	withRoot(t)
+	fastPolling(t)
+	sim := newSim()
+	mgr := newFake(sim)
+	edge := &releaseGuard{fakeHost: &fakeHost{name: "edge", local: &remote.Local{}, respond: func(script string) (string, error) {
+		switch {
+		case strings.Contains(script, "docker image ls"):
+			return strings.Join([]string{
+				"sha256:stale|shop-web|old|0",
+				"sha256:used|shop-web|live|0",
+				"sha256:kept|shop-web|v1|0",
+			}, "\n"), nil
+		case strings.Contains(script, "docker ps -a"):
+			return "shop-web:live\n", nil
+		default:
+			return sim.respond(script)
+		}
+	}}}
+	d := testDeploy(t, mgr, nil)
+	d.Servers = append(d.Servers, plan.NamedHost{Name: "edge", Server: config.Server{SSH: "yoho@203.0.113.11"}, Host: edge})
+	if _, err := (Runtime{}).Deploy(context.Background(), d); err != nil {
+		t.Fatal(err)
+	}
+	if edge.readRelease {
+		t.Fatal("worker read Release records")
+	}
+	all := edge.all()
+	if indexOf(edge.fakeHost, "docker image ls -a", "--filter 'label=yoho.app=shop'") < 0 {
+		t.Fatalf("worker did not list images:\n%s", all)
+	}
+	if indexOf(edge.fakeHost, "docker image rm 'sha256:stale'") < 0 {
+		t.Fatalf("worker did not remove the unused image:\n%s", all)
+	}
+	for _, id := range []string{"sha256:used", "sha256:kept"} {
+		if indexOf(edge.fakeHost, "docker image rm '"+id+"'") >= 0 {
+			t.Errorf("worker removed %s:\n%s", id, all)
+		}
+	}
+	if strings.Contains(all, "--force") {
+		t.Error("image removal must not be forced")
+	}
+}
+
 func TestWorkerNeverCreatesLocalNetwork(t *testing.T) {
 	withRoot(t)
 	fastPolling(t)
