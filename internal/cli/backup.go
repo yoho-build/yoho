@@ -275,6 +275,9 @@ func backupRunCmd(g *globals) *cobra.Command {
 			}
 			defer closeHosts()
 			h := hosts[0]
+			if len(hosts) > 1 {
+				u.Info("Backup runs only on %s (the first Server of %s)", h.Name, a.destName)
+			}
 			hook := a.hookFunc(a.serverVersion(ctx, h.Host), "backup", hosts)
 			hookEnv := map[string]string{"YOHO_SUBCOMMAND": "run", "YOHO_BACKUP_JOB": j.name, "YOHO_BACKUP_TARGET": j.targetName}
 			if err = hook(ctx, "pre-backup", hookEnv); err != nil {

@@ -8,7 +8,7 @@ yoho schedule status             # timer state, next/last run, last result
 yoho schedule remove [JOB...]
 ```
 
-Without `JOB` they act on every Backup job of the Destination (install: those with a schedule). Timers are installed on the Destination's first Server, which is where Backups run. `install --binary PATH` supplies the Linux binary yourself.
+Without `JOB` they act on every Backup job of the Destination (install: those with a schedule). On a multi-Server Destination, Scheduled Jobs are installed, checked, and removed only on the first Server (the Swarm manager). `install --binary PATH` supplies the Linux binary yourself.
 
 Jobs come from `backups.jobs.<name>.schedule` (systemd `OnCalendar`, e.g. `*-*-* 03:00:00`). Jobs without a schedule are on demand only.
 

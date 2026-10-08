@@ -49,6 +49,6 @@ yoho backup restore ID [--job JOB] [-y]    # restore; confirmation required unle
 
 ## Swarm
 
-On a Destination with `runtime: swarm`, Backups run on the first Server. Stateful Services are pinned there, so that host has the task container and the volume. The container is the running task (`docker ps` filtered by `com.docker.swarm.service.name=<project>_<service>`). Stack volumes are named `<project>_<volume>` (label `com.docker.stack.namespace=<project>`). Restore scales the Service to 0, replaces the volume, then scales it back to the previous replica count and waits until that many tasks are running. Pause, dump, and `docker exec` use the task container, same as compose.
+On a multi-Server Destination, `yoho backup run`, `list`, and `restore` use only the first Server (the Swarm manager). Stateful Services are pinned there, so that host has the task container and the volume. The container is the running task (`docker ps` filtered by `com.docker.swarm.service.name=<project>_<service>`). Stack volumes are named `<project>_<volume>` (label `com.docker.stack.namespace=<project>`). Restore scales the Service to 0, replaces the volume, then scales it back to the previous replica count and waits until that many tasks are running. Pause, dump, and `docker exec` use the task container, same as compose.
 
 To recover a lost Server: `yoho setup`, `yoho deploy`, `yoho backup restore`. Schedule recurring runs with [scheduled jobs](scheduled-jobs.md).

@@ -154,6 +154,9 @@ func (a *app) installJobs(ctx context.Context, hosts []plan.NamedHost, names []s
 	}
 
 	h := hosts[0]
+	if len(hosts) > 1 {
+		u.Info("Scheduled Jobs run only on %s (the first Server of %s)", h.Name, a.destName)
+	}
 	step := u.Step(h.Name, "Prepare yoho binary")
 	platform, err := build.ServerPlatform(ctx, h.Host)
 	var binary string
