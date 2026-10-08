@@ -17,6 +17,8 @@ Every Service with `x-yoho.proxy` sits behind one shared kamal-proxy per Server 
 
 Stateful Services are recreated stop-first, never scaled. Volumes are never removed.
 
+On Docker 25 or newer, Yoho compiles `start_period: 60s` and `start_interval: 1s` into a proxied Service's healthcheck when neither is set, so the first probes run every second while the container starts.
+
 ## Ports
 
 Defaults are 80/443. If the Server already uses them: `proxy.http_port: 8080`, `proxy.https_port: 0`. Behind Cloudflare Tunnel, no published ports and no TLS are needed; see [Cloudflare Tunnel](cloudflare-tunnel.md).

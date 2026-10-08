@@ -32,3 +32,5 @@ Small decisions that don't warrant an ADR. ADRs live in `docs/adr/`.
 - Runtime: compose default, swarm opt-in, switch = downtime migration (ADR 0007). Swarm zero-downtime via start-first + VIP; `strict_drain` option.
 - Swarm images: built locally, pushed to each node over SSH in parallel; registry optional.
 - Secret refs: map `{NAME: KEY}` and Kamal-style list `["KEY", "NAME:KEY"]`.
+- Fast health probes: when Yoho waits on a healthcheck (proxied compose cutover, or any Swarm service healthcheck) and the user set neither `start_period` nor `start_interval`, and the server Docker is 25 or newer, the compiled file sets `start_period: 60s` and `start_interval: 1s` so the first probes run every second while the container starts. User values are kept. Older engines omit both, because they reject `start_interval`.
+- Swarm update width: when `deploy.update_config.parallelism` is unset, it defaults to the replica count (all new tasks start together, still start-first) and `monitor: 5s` unless set; the same defaults apply to `rollback_config`. `failure_action` stays `rollback`. One-at-a-time plus a 30s monitor was most of a two-replica deploy.

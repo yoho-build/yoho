@@ -17,7 +17,7 @@ func compileTest(t *testing.T, d *plan.Deploy) ([]byte, []servicePlan, map[strin
 	if err != nil {
 		t.Fatal(err)
 	}
-	out, plans, err := compile(d, "primary", "/srv/yoho/apps/shop/production/secrets/G1", svc, []byte("0123456789abcdef0123456789abcdef"))
+	out, plans, err := compile(d, "primary", "/srv/yoho/apps/shop/production/secrets/G1", svc, []byte("0123456789abcdef0123456789abcdef"), "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -149,6 +149,68 @@ func TestCompileLayout(t *testing.T) {
 	// The caller's project must be untouched.
 	if _, ok := d.Project.Services["web"].Labels["yoho.app"]; ok {
 		t.Error("compile mutated d.Project")
+	}
+}
+
+func TestCompileFastStartHealth(t *testing.T) {
+	d := testDeploy(t, nil, nil)
+	src := strings.Replace(testCompose, "  db:\n    image: postgres:17\n", "  db:\n    image: postgres:17\n    healthcheck:\n      test: [\"CMD\", \"pg_isready\"]\n", 1)
+	d.Project = loadProject(t, src)
+	gen := map[string]string{"POSTGRES_PASSWORD": "generated-PG-password"}
+	svc, err := serviceSecrets(d, gen, t.Logf)
+	if err != nil {
+		t.Fatal(err)
+	}
+	key := []byte("0123456789abcdef0123456789abcdef")
+	out, _, err := compile(d, "primary", "/srv/yoho/apps/shop/production/secrets/G1", svc, key, "25.0.3")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var doc map[string]any
+	if err := yaml.Unmarshal(out, &doc); err != nil {
+		t.Fatal(err)
+	}
+	web := doc["services"].(map[string]any)["web"].(map[string]any)["healthcheck"].(map[string]any)
+	if web["start_period"] != "60s" || web["start_interval"] != "1s" {
+		t.Errorf("proxied healthcheck = %v", web)
+	}
+	db := doc["services"].(map[string]any)["db"].(map[string]any)["healthcheck"].(map[string]any)
+	if _, ok := db["start_interval"]; ok || db["start_period"] != nil {
+		t.Errorf("non-proxied compose healthcheck must be unchanged: %v", db)
+	}
+	if d.Project.Services["web"].HealthCheck.StartPeriod != nil {
+		t.Error("compile mutated the caller's healthcheck")
+	}
+
+	// User-set start_period is kept, and the missing start_interval is not filled in.
+	src = strings.Replace(src, "http://localhost:3000/up\"]\n", "http://localhost:3000/up\"]\n      start_period: 10s\n", 1)
+	d.Project = loadProject(t, src)
+	out, _, err = compile(d, "primary", "/srv/yoho/apps/shop/production/secrets/G1", svc, key, "29.1.0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := yaml.Unmarshal(out, &doc); err != nil {
+		t.Fatal(err)
+	}
+	web = doc["services"].(map[string]any)["web"].(map[string]any)["healthcheck"].(map[string]any)
+	if web["start_period"] != "10s" {
+		t.Errorf("user start_period = %v", web["start_period"])
+	}
+	if _, ok := web["start_interval"]; ok {
+		t.Errorf("user start_period must block the default start_interval: %v", web)
+	}
+
+	d.Project = loadProject(t, testCompose)
+	out, _, err = compile(d, "primary", "/srv/yoho/apps/shop/production/secrets/G1", svc, key, "24.0.9")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := yaml.Unmarshal(out, &doc); err != nil {
+		t.Fatal(err)
+	}
+	web = doc["services"].(map[string]any)["web"].(map[string]any)["healthcheck"].(map[string]any)
+	if _, ok := web["start_interval"]; ok || web["start_period"] != nil {
+		t.Errorf("Docker 24 must not get start_interval: %v", web)
 	}
 }
 

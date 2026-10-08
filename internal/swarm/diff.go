@@ -85,6 +85,7 @@ func compileDesired(ctx context.Context, d *plan.Deploy, key []byte, generated m
 		GenerationDir: release.SecretsDir(d.App, d.Destination, "planned"),
 		SvcSecrets:    svcSecrets,
 		HMACKey:       key,
+		DockerVersion: deploy.DockerServerVersion(ctx, d.Servers[0].Host),
 	})
 }
 

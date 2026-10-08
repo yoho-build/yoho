@@ -182,7 +182,7 @@ func (Runtime) Deploy(ctx context.Context, d *plan.Deploy) (_ *release.Release, 
 	generation := start.Format("20060102T150405Z") + "-" + d.Version
 	genDir := release.SecretsDir(d.App, d.Destination, generation)
 
-	c, err := compile(d, compileInput{PinHost: pinHost, GenerationDir: genDir, SvcSecrets: svcSecrets, HMACKey: key})
+	c, err := compile(d, compileInput{PinHost: pinHost, GenerationDir: genDir, SvcSecrets: svcSecrets, HMACKey: key, DockerVersion: deploy.DockerServerVersion(ctx, h)})
 	if err != nil {
 		return nil, err
 	}

@@ -139,7 +139,7 @@ func (c Compose) Deploy(ctx context.Context, d *plan.Deploy) (_ *release.Release
 		return nil, err
 	}
 
-	composeYAML, plans, err := compile(d, srv.Name, genDir, svcSecrets, key)
+	composeYAML, plans, err := compile(d, srv.Name, genDir, svcSecrets, key, DockerServerVersion(ctx, h))
 	if err != nil {
 		return nil, err
 	}

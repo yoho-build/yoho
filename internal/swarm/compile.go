@@ -28,9 +28,10 @@ const (
 	defaultDrainTimeout  = 30
 )
 
-// Swarm rolling update defaults (ADR 0007): new task first, one at a time,
-// automatic rollback when a task fails within the monitor window.
-const updateMonitor = "30s"
+// Swarm rolling update defaults (ADR 0007): new tasks first so old tasks keep
+// serving, every replica at once unless parallelism is set, and a short
+// monitor so a failed task rolls back without a long quiet window.
+const updateMonitor = "5s"
 
 // servicePlan is what the runtime needs to know about a Service after
 // compiling. Stored in releases/<version>/plan.json.
@@ -91,6 +92,9 @@ type compileInput struct {
 	// Service -> container name -> value.
 	SvcSecrets map[string]map[string]string
 	HMACKey    []byte
+	// DockerVersion is `docker version` Server.Version. Empty or below 25
+	// skips start_interval; older engines reject that field.
+	DockerVersion string
 }
 
 // compiled is the result of compile.
@@ -410,10 +414,25 @@ func compile(d *plan.Deploy, in compileInput) (*compiled, error) {
 			setDefault(up, "order", "start-first")
 			setDefault(rb, "order", "start-first")
 		}
-		setDefault(up, "parallelism", 1)
+		// Unset parallelism matches the replica count so every new task starts
+		// together. Global mode has no fixed count; 0 updates every task at once.
+		// Rollback uses the same width and monitor unless the user set them.
+		setDefault(up, "parallelism", replicas)
 		setDefault(up, "failure_action", "rollback")
 		setDefault(up, "monitor", updateMonitor)
-		setDefault(rb, "parallelism", 1)
+		setDefault(rb, "parallelism", replicas)
+		setDefault(rb, "monitor", updateMonitor)
+
+		if deploy.UseFastStart(ext, ps.HealthCheck, true, in.DockerVersion) {
+			if hc, ok := s["healthcheck"].(map[string]any); ok {
+				if _, ok := hc["start_period"]; !ok {
+					if _, ok := hc["start_interval"]; !ok {
+						hc["start_period"] = deploy.FastStartPeriod
+						hc["start_interval"] = deploy.FastStartInterval
+					}
+				}
+			}
+		}
 
 		onNet := false
 		if ext.Proxy != nil {

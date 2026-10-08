@@ -61,15 +61,24 @@ func get(t *testing.T, v any, keys ...string) any {
 func TestCompileUpdateConfig(t *testing.T) {
 	_, doc := compileTest(t, nil)
 	web := get(t, doc, "services", "web", "deploy")
-	want := map[string]any{"order": "start-first", "parallelism": 1, "failure_action": "rollback", "monitor": "30s"}
+	want := map[string]any{"order": "start-first", "parallelism": 1, "failure_action": "rollback", "monitor": "5s"}
 	if got := get(t, web, "update_config"); !reflect.DeepEqual(got, want) {
 		t.Errorf("web update_config = %v", got)
 	}
-	if got := get(t, web, "rollback_config"); !reflect.DeepEqual(got, map[string]any{"order": "start-first", "parallelism": 1}) {
+	if got := get(t, web, "rollback_config"); !reflect.DeepEqual(got, map[string]any{"order": "start-first", "parallelism": 1, "monitor": "5s"}) {
 		t.Errorf("web rollback_config = %v", got)
 	}
 	if got := get(t, doc, "services", "worker", "deploy", "replicas"); got != 2 {
 		t.Errorf("worker replicas (from scale) = %v", got)
+	}
+	if got := get(t, doc, "services", "worker", "deploy", "update_config", "parallelism"); got != 2 {
+		t.Errorf("worker parallelism = %v, want replica count", got)
+	}
+	if got := get(t, doc, "services", "worker", "deploy", "rollback_config", "parallelism"); got != 2 {
+		t.Errorf("worker rollback parallelism = %v, want replica count", got)
+	}
+	if got := get(t, doc, "services", "worker", "deploy", "update_config", "monitor"); got != "5s" {
+		t.Errorf("worker monitor = %v", got)
 	}
 
 	db := get(t, doc, "services", "db", "deploy")
@@ -84,6 +93,95 @@ func TestCompileUpdateConfig(t *testing.T) {
 	}
 	if got := get(t, db, "placement", "constraints"); !reflect.DeepEqual(got, []any{"node.hostname == node-1"}) {
 		t.Errorf("db placement = %v", got)
+	}
+}
+
+func TestCompileKeepsUserUpdateConfig(t *testing.T) {
+	d := testDeploy(t, nil, nil)
+	src := strings.Replace(testCompose, `  worker:
+    image: shop-web:v1
+    command: ["bin/jobs"]
+    scale: 2
+    pull_policy: never
+`, `  worker:
+    image: shop-web:v1
+    command: ["bin/jobs"]
+    deploy:
+      replicas: 4
+      update_config:
+        parallelism: 1
+        monitor: 15s
+      rollback_config:
+        parallelism: 3
+    pull_policy: never
+`, 1)
+	d.Project = loadProject(t, src)
+	c, err := compile(d, compileInput{PinHost: "node-1", HMACKey: testKey})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var doc map[string]any
+	if err := yaml.Unmarshal(c.YAML, &doc); err != nil {
+		t.Fatal(err)
+	}
+	up := get(t, doc, "services", "worker", "deploy", "update_config").(map[string]any)
+	if up["parallelism"] != 1 || up["monitor"] != "15s" || up["order"] != "start-first" || up["failure_action"] != "rollback" {
+		t.Errorf("user update_config = %v", up)
+	}
+	rb := get(t, doc, "services", "worker", "deploy", "rollback_config").(map[string]any)
+	if rb["parallelism"] != 3 || rb["monitor"] != "5s" || rb["order"] != "start-first" {
+		t.Errorf("rollback_config = %v", rb)
+	}
+	if get(t, doc, "services", "worker", "deploy", "replicas") != 4 {
+		t.Errorf("replicas = %v", get(t, doc, "services", "worker", "deploy", "replicas"))
+	}
+}
+
+func TestCompileFastStartHealth(t *testing.T) {
+	_, doc := compileTest(t, func(in *compileInput) { in.DockerVersion = "25.0.3" })
+	hc := get(t, doc, "services", "web", "healthcheck").(map[string]any)
+	if hc["start_period"] != "60s" || hc["start_interval"] != "1s" {
+		t.Errorf("web healthcheck = %v", hc)
+	}
+
+	d := testDeploy(t, nil, nil)
+	src := strings.Replace(testCompose, `    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:3000/up"]
+`, `    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:3000/up"]
+      start_interval: 2s
+`, 1)
+	src = strings.Replace(src, "  worker:\n    image: shop-web:v1\n", "  worker:\n    image: shop-web:v1\n    healthcheck:\n      test: [\"CMD\", \"true\"]\n", 1)
+	d.Project = loadProject(t, src)
+	c, err := compile(d, compileInput{PinHost: "node-1", HMACKey: testKey, DockerVersion: "29.0.0"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := yaml.Unmarshal(c.YAML, &doc); err != nil {
+		t.Fatal(err)
+	}
+	web := get(t, doc, "services", "web", "healthcheck").(map[string]any)
+	if web["start_interval"] != "2s" {
+		t.Errorf("user start_interval = %v", web["start_interval"])
+	}
+	if _, ok := web["start_period"]; ok {
+		t.Errorf("user start_interval must block the default start_period: %v", web)
+	}
+	worker := get(t, doc, "services", "worker", "healthcheck").(map[string]any)
+	if worker["start_period"] != "60s" || worker["start_interval"] != "1s" {
+		t.Errorf("non-proxied swarm healthcheck = %v", worker)
+	}
+
+	c, err = compile(d, compileInput{PinHost: "node-1", HMACKey: testKey, DockerVersion: "24.0.9"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := yaml.Unmarshal(c.YAML, &doc); err != nil {
+		t.Fatal(err)
+	}
+	worker = get(t, doc, "services", "worker", "healthcheck").(map[string]any)
+	if _, ok := worker["start_interval"]; ok {
+		t.Errorf("Docker 24 must not get start_interval: %v", worker)
 	}
 }
 

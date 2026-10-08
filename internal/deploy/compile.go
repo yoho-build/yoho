@@ -142,7 +142,9 @@ func versioned(image, version string) bool {
 
 // compile produces the per-Server compose file and the cutover plan. The
 // file references secrets by path only; it never contains secret values.
-func compile(d *plan.Deploy, server, generationDir string, svcSecrets map[string]map[string]string, hmacKey []byte) ([]byte, []servicePlan, error) {
+// dockerVersion is the server engine version from `docker version`; empty
+// or below 25 skips fast-start healthcheck fields.
+func compile(d *plan.Deploy, server, generationDir string, svcSecrets map[string]map[string]string, hmacKey []byte, dockerVersion string) ([]byte, []servicePlan, error) {
 	// Deep copy: d.Project stays untouched for the caller.
 	p, err := d.Project.WithServicesTransform(func(_ string, s types.ServiceConfig) (types.ServiceConfig, error) { return s, nil })
 	if err != nil {
@@ -171,6 +173,7 @@ func compile(d *plan.Deploy, server, generationDir string, svcSecrets map[string
 	}
 	needNet := false
 	var plans []servicePlan
+	var fastStart []string
 
 	for _, name := range sortedKeys(p.Services) {
 		s := p.Services[name]
@@ -235,6 +238,9 @@ func compile(d *plan.Deploy, server, generationDir string, svcSecrets map[string
 		}
 		_, onNet := s.Networks[proxy.Network]
 		needNet = needNet || onNet
+		if UseFastStart(ext, s.HealthCheck, false, dockerVersion) {
+			fastStart = append(fastStart, name)
+		}
 		p.Services[name] = s
 
 		replicas := s.GetScale()
@@ -269,6 +275,10 @@ func compile(d *plan.Deploy, server, generationDir string, svcSecrets map[string
 	raw, err := p.MarshalYAML()
 	if err != nil {
 		return nil, nil, fmt.Errorf("marshal compose: %w", err)
+	}
+	raw, err = injectFastStart(raw, fastStart)
+	if err != nil {
+		return nil, nil, err
 	}
 	out, err := escapeDollars(raw)
 	if err != nil {
