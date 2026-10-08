@@ -273,7 +273,7 @@ func Steps(ctx context.Context, h remote.Host, cfg Config, osi OSInfo, priv bool
 		ports := append([]int(nil), cfg.ProxyPorts...)
 		ports = append(ports, sc.AllowPorts...)
 		ports = append(ports, sshPorts(ctx, h, priv)...)
-		steps = append(steps, firewallStep(ports))
+		steps = append(steps, firewallStep(ports, priv))
 	}
 	if sc.AutoUpdates == nil || *sc.AutoUpdates {
 		steps = append(steps, autoUpdatesStep())
@@ -440,32 +440,31 @@ func dirsStep(user string) *Step {
 	}
 }
 
-func firewallStep(ports []int) *Step {
+// ufwStatusScript is the privileged inspection. `ufw` is often only in
+// /usr/sbin or /sbin, which a non-login PATH does not include.
+const ufwStatusScript = "ufw status 2>/dev/null || /usr/sbin/ufw status 2>/dev/null || /sbin/ufw status 2>/dev/null || true"
+
+// ufwLocateScript reports whether ufw exists without running it. `ufw status`
+// needs root, and a normal user's PATH omits the sbin directories.
+const ufwLocateScript = `if command -v ufw >/dev/null 2>&1 || [ -x /usr/sbin/ufw ] || [ -x /sbin/ufw ]; then echo found; else echo missing; fi`
+
+func firewallStep(ports []int, priv bool) *Step {
 	ports = uniqueSorted(ports)
 	var allow []string
 	for _, p := range ports {
 		allow = append(allow, fmt.Sprintf("%d/tcp", p))
 	}
 	return &Step{
-		ID: "firewall", Title: "ufw firewall allowing " + strings.Join(allow, ", "), checkSudo: true,
+		ID: "firewall", Title: "ufw firewall allowing " + strings.Join(allow, ", "),
 		check: func(ctx context.Context, h remote.Host) (bool, string, error) {
-			out, err := h.Output(ctx, remote.Cmd{Script: "ufw status 2>/dev/null || true", Sudo: true})
-			if err != nil {
-				return false, "", err
-			}
-			var todo []string
-			if !strings.Contains(out, "Status: active") {
-				todo = append(todo, "enable ufw")
-			}
-			for _, a := range allow {
-				if !ufwAllows(out, a) {
-					todo = append(todo, "allow "+a)
+			if priv {
+				out, err := h.Output(ctx, remote.Cmd{Script: ufwStatusScript, Sudo: true})
+				if err != nil {
+					return false, "", err
 				}
+				return ufwStatusResult(out, allow)
 			}
-			if len(todo) == 0 {
-				return false, "ok", nil
-			}
-			return true, strings.Join(todo, "; ") + " (note: ports published by Docker bypass ufw; bind private ports to 127.0.0.1)", nil
+			return ufwUnprivileged(ctx, h)
 		},
 		apply: func(ctx context.Context, h remote.Host) error {
 			script := "command -v ufw >/dev/null 2>&1 || { apt-get update -q; apt-get install -y -q ufw; }\n"
@@ -476,6 +475,64 @@ func firewallStep(ports []int) *Step {
 			return run(ctx, h, script+"ufw --force enable\n")
 		},
 	}
+}
+
+func ufwStatusResult(out string, allow []string) (bool, string, error) {
+	var todo []string
+	if !strings.Contains(out, "Status: active") {
+		todo = append(todo, "enable ufw")
+	}
+	for _, a := range allow {
+		if !ufwAllows(out, a) {
+			todo = append(todo, "allow "+a)
+		}
+	}
+	if len(todo) == 0 {
+		return false, "ok", nil
+	}
+	return true, strings.Join(todo, "; ") + " (note: ports published by Docker bypass ufw; bind private ports to 127.0.0.1)", nil
+}
+
+// ufwUnprivileged reads the world-readable ufw.conf when status cannot run.
+// An enabled firewall is ok with a note: rules stay unverified, and the run
+// is not failed for lack of sudo.
+func ufwUnprivileged(ctx context.Context, h remote.Host) (bool, string, error) {
+	out, err := h.Output(ctx, remote.Cmd{Script: ufwLocateScript})
+	if err != nil {
+		return false, "", err
+	}
+	if strings.TrimSpace(out) != "found" {
+		return true, "ufw not installed", nil
+	}
+	b, err := h.ReadFile(ctx, "/etc/ufw/ufw.conf", false)
+	if err != nil {
+		return true, "cannot read /etc/ufw/ufw.conf", nil
+	}
+	switch ufwEnabled(string(b)) {
+	case "yes":
+		return false, "enabled (rules not verified without sudo)", nil
+	case "no":
+		return true, "ufw installed but disabled", nil
+	default:
+		return true, "cannot read ENABLED from /etc/ufw/ufw.conf", nil
+	}
+}
+
+// ufwEnabled returns the last ENABLED= value in ufw.conf, ignoring comments.
+func ufwEnabled(conf string) string {
+	got := ""
+	for _, line := range strings.Split(conf, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		k, v, ok := strings.Cut(line, "=")
+		if !ok || strings.TrimSpace(k) != "ENABLED" {
+			continue
+		}
+		got = strings.Trim(strings.TrimSpace(v), `"'`)
+	}
+	return got
 }
 
 // ufwAllows reports whether `ufw status` lists an ALLOW rule for port.

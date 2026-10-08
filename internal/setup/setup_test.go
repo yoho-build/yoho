@@ -123,6 +123,18 @@ func TestPlanAsRoot(t *testing.T) {
 	if !strings.Contains(fwp.Step.Title, "2222/tcp") {
 		t.Fatalf("detected SSH port missing: %s", fwp.Step.Title)
 	}
+	sawStatus := false
+	for _, c := range h.cmds {
+		if strings.HasPrefix(c.Script, "ufw status") {
+			sawStatus = true
+			if !strings.Contains(c.Script, "/usr/sbin/ufw") || !strings.Contains(c.Script, "/sbin/ufw") {
+				t.Fatalf("privileged ufw lookup: %s", c.Script)
+			}
+		}
+	}
+	if !sawStatus {
+		t.Fatal("root plan did not run ufw status")
+	}
 	if got["timezone"].Needed {
 		t.Fatal("timezone already set")
 	}
@@ -177,6 +189,86 @@ func TestPlanWithoutSudoIsBlocked(t *testing.T) {
 	}
 	if len(h.cmds) != 0 {
 		t.Fatal("blocked steps must not run")
+	}
+}
+
+func TestFirewallWithoutPrivileges(t *testing.T) {
+	const confYes = "# Set to yes to start on boot. Eg: 'ufw allow 22/tcp'\n# ENABLED=no\nENABLED=yes\nLOGLEVEL=low\n"
+	cases := []struct {
+		name       string
+		locate     string
+		conf       string
+		wantNeeded bool
+		detail     string
+	}{
+		{name: "not installed", locate: "missing", wantNeeded: true, detail: "ufw not installed"},
+		{name: "disabled", locate: "found", conf: "ENABLED=no\n", wantNeeded: true, detail: "ufw installed but disabled"},
+		{name: "enabled", locate: "found", conf: confYes, wantNeeded: false, detail: "enabled (rules not verified without sudo)"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			h := host(ubuntu, "none")
+			orig := h.respond
+			h.respond = func(s string) string {
+				if strings.Contains(s, "/usr/sbin/ufw") && strings.Contains(s, "echo found") {
+					return tc.locate
+				}
+				return orig(s)
+			}
+			if tc.conf != "" {
+				h.files["/etc/ufw/ufw.conf"] = []byte(tc.conf)
+			}
+			plan, err := Plan(context.Background(), h, Config{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			var fw PlannedStep
+			found := false
+			for _, p := range plan {
+				if p.Step.ID == "firewall" {
+					fw = p
+					found = true
+				}
+			}
+			if !found {
+				t.Fatal("no firewall step")
+			}
+			if fw.Needed != tc.wantNeeded || fw.Detail != tc.detail {
+				t.Fatalf("needed=%v detail=%q blocked=%q", fw.Needed, fw.Detail, fw.Blocked)
+			}
+			if tc.wantNeeded && !strings.Contains(fw.Blocked, "needs sudo") {
+				t.Fatalf("blocked %q", fw.Blocked)
+			}
+			if !tc.wantNeeded && fw.Blocked != "" {
+				t.Fatalf("enabled firewall blocked the run: %q", fw.Blocked)
+			}
+			sawLocate := false
+			for _, c := range h.cmds {
+				if strings.Contains(c.Script, "ufw status") {
+					t.Fatalf("unprivileged plan ran ufw status: %s", c.Script)
+				}
+				if strings.Contains(c.Script, "echo found") {
+					sawLocate = true
+					if !strings.Contains(c.Script, "/usr/sbin/ufw") || !strings.Contains(c.Script, "/sbin/ufw") {
+						t.Fatalf("locate script: %s", c.Script)
+					}
+				}
+			}
+			if !sawLocate {
+				t.Fatal("did not look for /usr/sbin/ufw or /sbin/ufw")
+			}
+			h.cmds = nil
+			err = Apply(context.Background(), h, plan, func(PlannedStep) bool { return true }, nil)
+			if err == nil || !strings.Contains(err.Error(), "need sudo") {
+				t.Fatalf("err = %v", err)
+			}
+			if strings.Contains(err.Error(), "firewall") != tc.wantNeeded {
+				t.Fatalf("err = %v", err)
+			}
+			if len(h.cmds) != 0 {
+				t.Fatal("blocked steps must not run")
+			}
+		})
 	}
 }
 
