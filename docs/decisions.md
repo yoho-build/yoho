@@ -24,7 +24,8 @@ Small decisions that don't warrant an ADR. ADRs live in `docs/adr/`.
 - License MIT (delegated). GitHub repo `yoho-build/yoho`; domains yohodev.com + yoho.sh available, user to register.
 - Generated secrets (Coolify-style): `x-yoho.generate`, created once on the Server, `yoho secrets backup` to password manager, included in encrypted Backups.
 - Each Service gets only secrets it declares in `x-yoho.secrets`, with aliasing (container name ← secrets key). Common `.yoho/secrets` + `.yoho/secrets.<destination>`.
-- Version = git SHA, `_uncommitted_<rand>` suffix with warning; image tag = version; Release stores digests.
+- Version = git SHA; a dirty tree appends `_uncommitted_<8 hex>` (content hash, with a warning); image tag = version; Release stores digests.
+- The dirty suffix hashes uncommitted content, not a random id, so plan/apply converges: `yoho plan` after `yoho deploy` on the same uncommitted tree does not show a spurious image change (ADR 0008).
 - Migrations: `x-yoho.release_command` in a one-off container from the new image before cutover; failure aborts. Pre-migration Backup off by default.
 - Rollback: redeploy a previous Release (digests + compose), zero-downtime; volumes and migrations untouched, warned. Keep last 5 Releases per Server.
 - Swarm (`docker stack deploy`) supported from the start, not compose-only. Details pending research.

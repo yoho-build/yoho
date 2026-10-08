@@ -55,4 +55,4 @@ Plan: 0 to add, 1 to change, 1 to replace, 1 to destroy.
 
 `+` create, `~` update in place, `-/+` replace (stop then start: non-proxied and Stateful Services), `-` delete. Unchanged resources are hidden; with none changing it prints `No changes. Your Servers match the configuration.` With `--json`, plan emits one `change` event per change and a `plan_summary` event.
 
-Image references in the plan are the ones the Version would build; uncommitted work gets a new Version each run, so pass `--version` to compare repeatedly.
+Image references in the plan are the ones the Version would build. Uncommitted work uses a version hashed from that content, so repeated plans match until the content changes. Pass `--version` to pin a tag.

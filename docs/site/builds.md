@@ -35,4 +35,4 @@ Servers are usually amd64. `builder.platforms` defaults to the Server's architec
 2. `load`: `docker save | ssh docker load`.
 3. `registry`: configure `registry:`.
 
-Image tag is the Version (git SHA, or `_uncommitted_<rand>` with a warning). Use `yoho deploy --version V` to override, `--skip-build` to reuse built images.
+Image tag is the Version (git SHA, or `_uncommitted_<8 hex>` from a hash of the uncommitted content, with a warning). Use `yoho deploy --version V` to override, `--skip-build` to reuse built images.
