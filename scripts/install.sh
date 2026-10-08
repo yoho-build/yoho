@@ -88,8 +88,11 @@ if [ -n "$token" ]; then
 else
 	base="https://github.com/${repo}/releases/latest/download"
 	if [ -n "$tag" ]; then base="https://github.com/${repo}/releases/download/${tag}"; fi
-	public_get "$base/$asset" "$tmpdir/$asset"
-	public_get "$base/checksums.txt" "$tmpdir/checksums.txt"
+	public_get "$base/$asset" "$tmpdir/$asset" &&
+		public_get "$base/checksums.txt" "$tmpdir/checksums.txt" || {
+		echo "yoho: release ${tag:-latest} not found; if the repo is private set GITHUB_TOKEN or GH_TOKEN" >&2
+		exit 1
+	}
 fi
 
 want=$(awk -v asset="$asset" '$1 ~ /^[0-9a-fA-F]{64}$/ {
