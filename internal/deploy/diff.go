@@ -309,6 +309,7 @@ func (c Compose) Diff(ctx context.Context, d *plan.Deploy) ([]plan.Change, error
 			continue
 		}
 		var reasons []string
+		relChanged := false
 		running := 0
 		for _, ct := range cs {
 			if ct.State.Running {
@@ -350,9 +351,22 @@ func (c Compose) Diff(ctx context.Context, d *plan.Deploy) ([]plan.Change, error
 			if op, ok := cur.plans[sp.Name]; ok && !samePlanProxy(op, sp) {
 				reasons = append(reasons, "proxy settings changed")
 			}
+			// x-yoho is stripped from the compiled file, so a changed
+			// release_command shows only in the plan. It restarts nothing,
+			// but the deploy must run so the command does.
+			if op, ok := cur.plans[sp.Name]; ok && !slices.Equal(op.ReleaseCommand, sp.ReleaseCommand) {
+				relChanged = true
+			}
 		}
 		if running > 0 && running != sp.Replicas {
 			reasons = append(reasons, fmt.Sprintf("replicas %d → %d", running, sp.Replicas))
+		}
+		if relChanged && len(reasons) == 0 && running > 0 {
+			add("service", sp.Name, plan.ActionUpdate, false, "release_command changed")
+			continue
+		}
+		if relChanged && running > 0 {
+			reasons = append(reasons, "release_command changed")
 		}
 		if len(reasons) == 0 && running == 0 {
 			if code, oneShot := oneShotExit(cs); oneShot {

@@ -48,7 +48,7 @@ func checkOwnership(ctx context.Context, h remote.Host, app, dest string, plans 
 	}
 	for _, o := range parseOwners(out) {
 		if o.foreign(app, dest) {
-			return fmt.Errorf("compose project %s already runs containers of %s; App %s Destination %s would replace them. Rename the App or Destination", project, o, app, dest)
+			return &release.OwnershipError{Msg: fmt.Sprintf("compose project %s already runs containers of %s; App %s Destination %s would replace them. Rename the App or Destination", project, o, app, dest)}
 		}
 	}
 	routes, err := proxy.List(ctx, h)
@@ -68,7 +68,7 @@ func checkOwnership(ctx context.Context, h remote.Host, app, dest string, plans 
 			continue
 		}
 		if o, foreign := routeOwner(ctx, h, rt, app, dest); foreign {
-			return fmt.Errorf("proxy route %s already routes to containers of %s; App %s Destination %s would take it over. Rename the App, Destination or Service", rt.Service, o, app, dest)
+			return &release.OwnershipError{Msg: fmt.Sprintf("proxy route %s already routes to containers of %s; App %s Destination %s would take it over. Rename the App, Destination or Service", rt.Service, o, app, dest)}
 		}
 	}
 	return nil

@@ -219,7 +219,7 @@ func (a *app) buildAndShip(ctx context.Context, s *session, skipBuild bool) (map
 	if skipBuild {
 		for name, svc := range s.r.Project.Services {
 			if svc.Build != nil {
-				images[name] = build.ImageName(a.cfg.Registry, a.cfg.App, name, s.ver)
+				images[name] = build.ImageName(a.cfg.Registry, a.cfg.App, a.destName, name, s.ver)
 			}
 		}
 		return images, nil
@@ -349,7 +349,7 @@ func (a *app) rollout(ctx context.Context, s *session, d *plan.Deploy) (*release
 		f.Flush()
 	}
 	if err != nil {
-		step.Fail(err, "previous Release keeps serving; see `yoho releases` and rerun with -v")
+		step.Fail(err, hintFor(err, "previous Release keeps serving; see `yoho releases` and rerun with -v"))
 		return nil, &silentError{err}
 	}
 	step.Done()
@@ -578,7 +578,7 @@ func rollbackCmd(g *globals) *cobra.Command {
 			step := a.ui.Step(hosts[0].Name, "Redeploy %s", shortVersion(target))
 			rel, err := a.runtime().Rollback(ctx, d, target)
 			if err != nil {
-				step.Fail(err, "see `yoho releases`")
+				step.Fail(err, hintFor(err, "see `yoho releases`"))
 				a.ui.Finished(err, "")
 				return &silentError{err}
 			}

@@ -122,7 +122,7 @@ func (a *app) collectChanges(ctx context.Context, s *session) (changes []plan.Ch
 	images := map[string]string{}
 	for _, name := range sortedKeys(s.r.Project.Services) {
 		if s.r.Project.Services[name].Build != nil {
-			images[name] = build.ImageName(a.cfg.Registry, a.cfg.App, name, s.ver)
+			images[name] = build.ImageName(a.cfg.Registry, a.cfg.App, a.destName, name, s.ver)
 		}
 	}
 	d, err := a.newDeploy(s, images, true)
@@ -134,7 +134,7 @@ func (a *app) collectChanges(ctx context.Context, s *session) (changes []plan.Ch
 	if p, ok := a.runtime().(plan.Planner); ok {
 		rc, perr := p.Diff(ctx, d)
 		if perr != nil {
-			step.Fail(perr, "check that Docker is running on the Server")
+			step.Fail(perr, hintFor(perr, "check that Docker is running on the Server"))
 			return nil, false, &silentError{perr}
 		}
 		changes = append(changes, rc...)
@@ -158,7 +158,7 @@ func (a *app) collectChanges(ctx context.Context, s *session) (changes []plan.Ch
 	changes = append(changes, tc...)
 	sc, err := a.planSchedules(ctx, s.hosts, s.store)
 	if err != nil {
-		step.Fail(err, "check the Scheduled Jobs on the Server")
+		step.Fail(err, hintFor(err, "check the Scheduled Jobs on the Server"))
 		return nil, false, &silentError{err}
 	}
 	changes = append(changes, sc...)
@@ -339,7 +339,7 @@ func (a *app) apply(ctx context.Context, o applyOptions) (err error) {
 	}
 	urls += tunnelURLs
 	if err = a.applySchedules(ctx, s.hosts, s.store); err != nil {
-		u.Step("", "Scheduled Jobs").Fail(err, "run `yoho schedule status`")
+		u.Step("", "Scheduled Jobs").Fail(err, hintFor(err, "run `yoho schedule status`"))
 		return &silentError{err}
 	}
 	u.Finished(nil, fmt.Sprintf("Deployed %s@%s to %s in %s%s", a.cfg.App, shortVersion(version), a.destName, time.Since(start).Round(100*time.Millisecond), urls))

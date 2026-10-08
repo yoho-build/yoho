@@ -238,8 +238,11 @@ func (r *runner) cutoverProxied(ctx context.Context, sp servicePlan) error {
 	if len(old) > 0 {
 		// kamal-proxy has drained them; docker stop honors stop_grace_period.
 		r.logf("removing old %s container(s)", sp.Name)
-		if err := r.h.Run(ctx, remote.Cmd{Script: "set -e\ndocker stop " + remote.QuoteArgs(old...) + " >/dev/null\ndocker rm " + remote.QuoteArgs(old...) + " >/dev/null"}); err != nil {
-			return fmt.Errorf("remove old %s containers (traffic already switched): %w", sp.Name, err)
+		// The route already targets the new containers: the deploy is
+		// committed. A failure here leaves stray old containers, not a
+		// failed Release, so it is only a warning.
+		if err := r.h.Run(context.WithoutCancel(ctx), remote.Cmd{Script: "set -e\ndocker stop " + remote.QuoteArgs(old...) + " >/dev/null\ndocker rm " + remote.QuoteArgs(old...) + " >/dev/null"}); err != nil {
+			r.logf("warning: traffic is switched, but removing the old %s container(s) failed (remove them with `docker rm -f %s`): %v", sp.Name, strings.Join(old, " "), err)
 		}
 	}
 	return nil

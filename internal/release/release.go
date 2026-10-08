@@ -32,6 +32,14 @@ var Root = DefaultRoot
 // DefaultRoot is used when config.Server.Root is empty.
 const DefaultRoot = "/var/lib/yoho"
 
+// OwnershipError reports a name (compose project, Proxy route, Scheduled Job
+// unit) that another App or Destination already uses on the Server. The names
+// join App and Destination with '-', so App foo-bar / prod and App foo /
+// bar-prod collide.
+type OwnershipError struct{ Msg string }
+
+func (e *OwnershipError) Error() string { return e.Msg }
+
 // AppDir is the per-App, per-Destination directory on a Server.
 func AppDir(app, destination string) string {
 	return path.Join(Root, "apps", app, destination)

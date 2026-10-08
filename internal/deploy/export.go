@@ -63,3 +63,15 @@ func WriteJSON(ctx context.Context, h remote.Host, p string, v any) error {
 
 // SHA256Hex is the hex SHA-256 of b.
 func SHA256Hex(b []byte) string { return sha256Hex(b) }
+
+// SnapshotRelease returns the files of relDir when it holds a Release that is
+// not a failed attempt, else nil. Used with RestoreRelease so a failed
+// redeploy of a Version keeps the record of the working one.
+func SnapshotRelease(ctx context.Context, h remote.Host, relDir string) map[string][]byte {
+	return snapshotRelease(ctx, h, relDir)
+}
+
+// RestoreRelease writes a SnapshotRelease back (best effort).
+func RestoreRelease(ctx context.Context, h remote.Host, relDir string, snap map[string][]byte, logf func(string, ...any)) {
+	restoreRelease(ctx, h, relDir, snap, logf)
+}

@@ -28,7 +28,7 @@ Validate with `yoho config check`; print the resolved file with `yoho config sho
 | `builder.secrets` | Keys passed to buildx as `--secret id=KEY,env=KEY`. |
 | `builder.exclude` | Paths excluded when syncing source for `location: server`. |
 | `transport.mode` | `auto` (pussh, then save/load, then registry), `pussh`, `load`, `registry`. |
-| `registry` | Optional: `server`, `username`, `password_secret`, `prefix` (images become `<prefix>/<app>-<service>`). |
+| `registry` | Optional: `server`, `username`, `password_secret`, `prefix` (Yoho-built images become `<prefix>/<app>-<destination>-<service>:<version>`, so Destinations that share a Server never share a tag). |
 | `secrets.providers.<n>` | `type`: `op`, `bw`, `bws`, `command`; `command` (argv, reference appended); `account`. |
 | `secrets.values.<KEY>` | `provider`, `ref`, optional `destinations`. |
 | `proxy.image` | kamal-proxy image, pinned by default. |

@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/yoho-build/yoho/internal/config"
+	"github.com/yoho-build/yoho/internal/release"
 	"github.com/yoho-build/yoho/internal/remote"
 )
 
@@ -339,5 +340,47 @@ func TestSpecCarriesSecretFingerprintsNotValues(t *testing.T) {
 	}
 	if len(s.SecretFingerprints) != 2 || s.SecretFingerprints["AWS_SECRET_ACCESS_KEY"] != "bbbb" {
 		t.Fatalf("%+v", s.SecretFingerprints)
+	}
+}
+
+// Unit names join App, Destination and job with '-': App foo-bar / prod and
+// App foo / bar-prod collide. Install refuses to overwrite the other's unit.
+func TestInstallRefusesUnitOfAnotherApp(t *testing.T) {
+	bin, _ := writeBinary(t)
+	other := testJob()
+	other.App, other.Destination = "foo-bar", "prod"
+	mine := testJob()
+	mine.App, mine.Destination = "foo", "bar-prod"
+	if UnitName(other.App, other.Destination, other.Name) != UnitName(mine.App, mine.Destination, mine.Name) {
+		t.Fatal("fixture must collide")
+	}
+	spec, err := NewSpec(other)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, _ := json.Marshal(spec)
+	h := &fakeHost{respond: func(s string) (string, error) {
+		if strings.HasPrefix(s, "cat ") && strings.Contains(s, "foo-bar-prod-nightly.json") {
+			return string(b), nil
+		}
+		return "", nil
+	}}
+	_, err = Install(context.Background(), h, InstallOptions{Jobs: []Job{mine}, YohoBinaryLocalPath: bin, Mode: Mode{Sudo: true, User: "deploy"}})
+	var oe *release.OwnershipError
+	if !errors.As(err, &oe) {
+		t.Fatalf("want OwnershipError, got %v", err)
+	}
+	if len(h.files) != 0 || strings.Contains(h.scripts(), "daemon-reload") {
+		t.Fatal("install changed the Server")
+	}
+	// The owner may reinstall its own job.
+	h.respond = func(s string) (string, error) {
+		if strings.HasPrefix(s, "cat ") {
+			return string(b), nil
+		}
+		return "", nil
+	}
+	if err := checkSpecOwner(context.Background(), h, spec, true); err != nil {
+		t.Fatal(err)
 	}
 }

@@ -9,6 +9,7 @@ import (
 	"os"
 	"path"
 	"regexp"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -178,6 +179,19 @@ func compareStack(d *plan.Deploy, curYAML []byte, c *compiled, pending map[strin
 				if byName[name].Stateful {
 					ch.Action = plan.ActionReplace
 					ch.Downtime = true
+				}
+			}
+			// x-yoho is stripped from the stack file, so a changed
+			// release_command shows only in the plan. It does not restart
+			// the Service, but it must reach the rollout so the command runs.
+			if curPlan != nil {
+				for _, old := range curPlan.Services {
+					if old.Name == name && !slices.Equal(old.ReleaseCommand, byName[name].ReleaseCommand) {
+						ch.Reasons = append(ch.Reasons, "release_command changed")
+						if ch.Action == plan.ActionNoop {
+							ch.Action = plan.ActionUpdate
+						}
+					}
 				}
 			}
 			// Drift: the stack or a Service was removed or scaled out of band.

@@ -31,13 +31,15 @@ func imageIDScript(ref string) string {
 
 // pinImages makes a rolled-back Release run the exact images it ran before.
 // The compiled compose names images by tag, and tags move: the same Version
-// built for another Destination, or a rebuild, re-points
-// yoho/<app>-<service>:<version>. For Yoho-built images (tagged with the
-// Version) the tag is pointed back at the recorded ID; rollback fails if that
-// image is gone. On the containerd image store an overwritten multi-manifest
-// (buildx) image survives only as a dangling record with another ID, so the
-// re-tag can fail there; failing beats running another build. Other images (postgres:17) are not Yoho's to retag; a moved
-// tag is only a warning.
+// built again for the same Destination, or a rebuild, re-points
+// yoho/<app>-<destination>-<service>:<version> (Releases deployed before the
+// Destination joined the tag record yoho/<app>-<service>:<version>). For
+// Yoho-built images (tagged with the Version) the tag is pointed back at the
+// recorded ID; rollback fails if that image is gone. On the containerd image
+// store an overwritten multi-manifest (buildx) image survives only as a
+// dangling record with another ID, so the re-tag can fail there; failing
+// beats running another build. Other images (postgres:17) are not Yoho's to
+// retag; a moved tag is only a warning.
 func (r *runner) pinImages(ctx context.Context, images, ids map[string]string, version string) error {
 	for _, svc := range sortedKeys(ids) {
 		ref, id := images[svc], ids[svc]

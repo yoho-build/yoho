@@ -435,7 +435,8 @@ func listReleases(ctx context.Context, h remote.Host, app, dest string) ([]relea
 	return rels, nil
 }
 
-// prune keeps the newest RetainReleases Releases (always current) and the
+// prune keeps the newest RetainReleases successful Releases (always current,
+// plus the newest failed record; see RetainedReleases) and the
 // secrets generations and App files they use or that existing containers
 // still mount.
 func prune(ctx context.Context, r *runner, d *plan.Deploy, current string) error {
@@ -452,8 +453,9 @@ func prune(ctx context.Context, r *runner, d *plan.Deploy, current string) error
 	keepGen := map[string]bool{}
 	keepFiles := map[string]bool{}
 	var drop []string
-	for i, rel := range rels {
-		if i < retain || rel.Version == current {
+	retained := RetainedReleases(rels, retain, current)
+	for _, rel := range rels {
+		if retained[rel.Version] {
 			keepGen[rel.SecretsGeneration] = true
 			for _, f := range rel.Files {
 				keepFiles[f] = true

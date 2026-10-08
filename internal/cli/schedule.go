@@ -197,7 +197,7 @@ func (a *app) installJobs(ctx context.Context, hosts []plan.NamedHost, names []s
 		Jobs: jobs, YohoBinaryLocalPath: binary, Mode: mode, Out: step.Output(),
 	})
 	if err != nil {
-		step.Fail(err, "check that systemd runs on the Server; without sudo the user needs a systemd user session (loginctl)")
+		step.Fail(err, hintFor(err, "check that systemd runs on the Server; without sudo the user needs a systemd user session (loginctl)"))
 		return &silentError{err}
 	}
 	step.Done(strings.Join(res.Timers, ", "))

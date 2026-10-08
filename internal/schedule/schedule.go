@@ -290,6 +290,11 @@ func Install(ctx context.Context, h remote.Host, o InstallOptions) (*InstallResu
 	if err != nil {
 		return nil, fmt.Errorf("locate unit dir: %w", err)
 	}
+	for _, s := range specs {
+		if err := checkSpecOwner(ctx, h, s, m.Sudo); err != nil {
+			return nil, err
+		}
+	}
 
 	for _, s := range specs {
 		if err := h.Run(ctx, remote.Cmd{Script: "systemd-analyze calendar " + remote.Quote(s.Schedule) + " >/dev/null"}); err != nil {
@@ -364,6 +369,27 @@ func Install(ctx context.Context, h remote.Host, o InstallOptions) (*InstallResu
 		}
 	}
 	return res, nil
+}
+
+// checkSpecOwner refuses to overwrite the unit of another App Destination
+// job. Unit and spec names join App, Destination and job with '-', so App
+// foo-bar / Destination prod and App foo / Destination bar-prod collide.
+// Existing units keep their names (renaming would orphan installed timers);
+// the spec on the Server records who owns the name.
+func checkSpecOwner(ctx context.Context, h remote.Host, s Spec, sudo bool) error {
+	sp := SpecPath(s.App, s.Destination, s.Job)
+	out, err := h.Output(ctx, remote.Cmd{Script: "cat " + remote.Quote(sp) + " 2>/dev/null || true", Sudo: sudo})
+	if err != nil || strings.TrimSpace(out) == "" {
+		return nil
+	}
+	var cur Spec
+	if json.Unmarshal([]byte(out), &cur) != nil || cur.App == "" {
+		return nil
+	}
+	if cur.App != s.App || cur.Destination != s.Destination || cur.Job != s.Job {
+		return &release.OwnershipError{Msg: fmt.Sprintf("Scheduled Job unit %s already belongs to App %s Destination %s job %s; App %s Destination %s job %s would replace it. Rename the App, Destination or job", UnitName(s.App, s.Destination, s.Job), cur.App, cur.Destination, cur.Job, s.App, s.Destination, s.Job)}
+	}
+	return nil
 }
 
 // uploadBinary copies the yoho binary unless the same sha256 is present,

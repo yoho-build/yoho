@@ -45,7 +45,7 @@ Configuration is the desired state. `yoho plan` compares it with the Server and 
 
 ```
   ~   service web [prod]: update in-place (zero downtime)
-        image yoho/shop-web:f4e6 → yoho/shop-web:d459
+        image yoho/shop-production-web:f4e6 → yoho/shop-production-web:d459
   -/+ service db [prod]: replace (brief downtime)
         config changed: ports
   -   route shop-production-old: delete

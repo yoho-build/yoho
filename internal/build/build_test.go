@@ -98,13 +98,24 @@ func project(dir string) *types.Project {
 }
 
 func TestImageName(t *testing.T) {
-	if got := ImageName(nil, "Shop", "Web", "abc"); got != "yoho/shop-web:abc" {
+	if got := ImageName(nil, "Shop", "Prod", "Web", "abc"); got != "yoho/shop-prod-web:abc" {
 		t.Fatal(got)
 	}
-	if got := ImageName(&config.Registry{Server: "ghcr.io", Prefix: "ghcr.io/me/"}, "shop", "web", "v"); got != "ghcr.io/me/shop-web:v" {
+	if got := ImageName(&config.Registry{Server: "ghcr.io", Prefix: "ghcr.io/me/"}, "shop", "prod", "web", "v"); got != "ghcr.io/me/shop-prod-web:v" {
 		t.Fatal(got)
 	}
-	if got := ImageName(&config.Registry{Server: "reg.local:5000"}, "shop", "web", "v"); got != "reg.local:5000/shop-web:v" {
+	if got := ImageName(&config.Registry{Server: "reg.local:5000"}, "shop", "prod", "web", "v"); got != "reg.local:5000/shop-prod-web:v" {
+		t.Fatal(got)
+	}
+}
+
+func TestImageNameDestination(t *testing.T) {
+	a := ImageName(nil, "shop", "staging", "web", "v1")
+	b := ImageName(nil, "shop", "production", "web", "v1")
+	if a == b || a != "yoho/shop-staging-web:v1" || b != "yoho/shop-production-web:v1" {
+		t.Fatalf("destinations share an image tag: %q %q", a, b)
+	}
+	if got := ImageName(nil, "shop", "", "web", "v1"); got != "yoho/shop-web:v1" {
 		t.Fatal(got)
 	}
 }

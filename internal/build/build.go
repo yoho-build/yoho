@@ -103,9 +103,11 @@ type Image struct {
 	Engine string
 }
 
-// ImageName is <prefix>/<app>-<service>:<version>, lowercase. Prefix is
-// registry.prefix, else registry.server, else "yoho".
-func ImageName(reg *config.Registry, app, service, version string) string {
+// ImageName is <prefix>/<app>-<destination>-<service>:<version>, lowercase.
+// Prefix is registry.prefix, else registry.server, else "yoho". The
+// Destination is part of the name because one Version built for two
+// Destinations that share a Server must not share (and retag) one image.
+func ImageName(reg *config.Registry, app, destination, service, version string) string {
 	prefix := "yoho"
 	if reg != nil {
 		if reg.Prefix != "" {
@@ -114,7 +116,11 @@ func ImageName(reg *config.Registry, app, service, version string) string {
 			prefix = strings.TrimSuffix(reg.Server, "/")
 		}
 	}
-	return strings.ToLower(prefix + "/" + app + "-" + service + ":" + version)
+	name := app
+	if destination != "" {
+		name += "-" + destination
+	}
+	return strings.ToLower(prefix + "/" + name + "-" + service + ":" + version)
 }
 
 // Images builds every Service with a build section and returns Service ->
@@ -204,7 +210,7 @@ func Images(ctx context.Context, o Options) (_ map[string]Image, err error) {
 
 	for _, name := range names {
 		svc := o.Project.Services[name]
-		ref := ImageName(o.Registry, o.App, name, o.Version)
+		ref := ImageName(o.Registry, o.App, o.Destination, name, o.Version)
 		fmt.Fprintf(o.Out, "Building %s (%s) on %s builder\n", name, ref, loc)
 		var id string
 		var err error

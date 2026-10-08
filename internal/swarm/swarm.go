@@ -221,10 +221,18 @@ func (Runtime) Deploy(ctx context.Context, d *plan.Deploy) (_ *release.Release, 
 	if err := r.createSecrets(ctx, d, svcSecrets, key); err != nil {
 		return nil, err
 	}
+	// Redeploying the Version `current` points at reuses the Release
+	// directory. Keep the deployed record to restore if this attempt fails:
+	// Swarm's rollback leaves the tasks on the previous spec, and plan and
+	// rollback must keep comparing against what actually runs.
+	prevFiles := deploy.SnapshotRelease(ctx, h, relDir)
+	committed := false
 	if err := h.WriteFile(ctx, stackFile, c.YAML, 0o600, false); err != nil {
+		deploy.RestoreRelease(ctx, h, relDir, prevFiles, r.logf)
 		return nil, fmt.Errorf("write stack file: %w", err)
 	}
 	if err := deploy.WriteJSON(ctx, h, path.Join(relDir, "plan.json"), c.Plan); err != nil {
+		deploy.RestoreRelease(ctx, h, relDir, prevFiles, r.logf)
 		return nil, err
 	}
 
@@ -241,7 +249,11 @@ func (Runtime) Deploy(ctx context.Context, d *plan.Deploy) (_ *release.Release, 
 		}
 	}
 	defer func() {
-		if err != nil {
+		switch {
+		case err == nil || committed:
+		case prevFiles != nil:
+			deploy.RestoreRelease(ctx, h, relDir, prevFiles, r.logf)
+		default:
 			_ = deploy.WriteJSON(context.WithoutCancel(ctx), h, path.Join(relDir, "release.json"), rel)
 		}
 	}()
@@ -270,6 +282,7 @@ func (Runtime) Deploy(ctx context.Context, d *plan.Deploy) (_ *release.Release, 
 	if err := r.finish(ctx, d, rel); err != nil {
 		return nil, err
 	}
+	committed = true
 	secs := int(now().Sub(start).Round(time.Second) / time.Second)
 	if err := hook(ctx, d, "post-deploy", map[string]string{"YOHO_RUNTIME": strconv.Itoa(secs)}); err != nil {
 		return rel, err
@@ -838,7 +851,8 @@ func (r *runner) pruneImages(ctx context.Context, d *plan.Deploy) {
 	}
 }
 
-// prune keeps the newest RetainReleases Releases (always current), their
+// prune keeps the newest RetainReleases successful Releases (always current,
+// plus the newest failed record), their
 // secrets generations, and the Swarm secrets they reference; it removes the
 // rest. Swarm refuses to remove a secret still used by a service, which is
 // reported but not an error.
@@ -855,8 +869,9 @@ func (r *runner) prune(ctx context.Context, d *plan.Deploy, current string) erro
 	keepSecret := map[string]bool{}
 	secretsKnown := true
 	var drop []string
-	for i, rel := range rels {
-		if i < retain || rel.Version == current {
+	retained := deploy.RetainedReleases(rels, retain, current)
+	for _, rel := range rels {
+		if retained[rel.Version] {
 			keepGen[rel.SecretsGeneration] = true
 			p, err := readPlan(ctx, r.h, release.Dir(d.App, d.Destination, rel.Version))
 			if err != nil {
