@@ -38,7 +38,8 @@ on the Server itself, without the operator's machine. Install uploads a
 Linux yoho binary, the job spec and the Backup Target's secrets (0600 files
 under <root>/apps/<app>/<destination>/scheduled/) and enables one timer per
 job. Without sudo, user timers (systemctl --user) are used; they need
-linger (sudo loginctl enable-linger <user>) to run while logged out.`,
+linger to run while logged out; "yoho setup" enables it (or run
+sudo loginctl enable-linger <user>).`,
 	}
 	c.AddCommand(scheduleInstallCmd(g), scheduleStatusCmd(g), scheduleRemoveCmd(g), scheduleRunCmd(g))
 	return c

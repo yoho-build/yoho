@@ -109,7 +109,7 @@ func TestPlanAsRoot(t *testing.T) {
 		got[p.Step.ID] = p
 		ids = append(ids, p.Step.ID)
 	}
-	if strings.Join(ids, ",") != "docker,user,dirs,firewall,auto-updates,swap,timezone" {
+	if strings.Join(ids, ",") != "docker,user,linger,dirs,firewall,auto-updates,swap,timezone" {
 		t.Fatalf("steps %v", ids)
 	}
 	if !got["docker"].Needed || got["docker"].Blocked != "" {
@@ -419,5 +419,98 @@ func TestPlanInstallsRsyncForServerBuilder(t *testing.T) {
 	cfg.Setup.Packages = []string{"rsync"}
 	if p := find(); p.Step.Title != "Extra packages: rsync" {
 		t.Fatalf("dup: %s", p.Step.Title)
+	}
+}
+
+func lingerHost(state string) *fakeHost {
+	h := host(ubuntu, "root")
+	prev := h.respond
+	h.respond = func(s string) string {
+		if strings.Contains(s, "/var/lib/systemd/linger/") {
+			return state
+		}
+		return prev(s)
+	}
+	return h
+}
+
+func lingerPlan(t *testing.T, h *fakeHost) PlannedStep {
+	t.Helper()
+	plan, err := Plan(context.Background(), h, Config{AuthorizedKeys: []string{"ssh-ed25519 AAAAC3Nz op@laptop"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, p := range plan {
+		if p.Step.ID == "linger" {
+			return p
+		}
+	}
+	t.Fatal("no linger step")
+	return PlannedStep{}
+}
+
+func TestLingerStepStates(t *testing.T) {
+	for state, want := range map[string]bool{"off": true, "on": false, "n/a": false} {
+		h := lingerHost(state)
+		p := lingerPlan(t, h)
+		if p.Needed != want {
+			t.Errorf("%s: needed=%v detail=%q", state, p.Needed, p.Detail)
+		}
+		if p.Step.Title != "Linger for yoho (Scheduled Jobs run while logged out)" {
+			t.Errorf("title %q", p.Step.Title)
+		}
+		for _, c := range h.cmds {
+			if strings.Contains(c.Script, "/var/lib/systemd/linger/'yoho'") || strings.Contains(c.Script, "linger/") {
+				if c.Sudo || !strings.Contains(c.Script, "'/var/lib/systemd/linger/yoho'") || strings.Contains(c.Script, "loginctl show-user") {
+					t.Errorf("bad inspection: %+v", c)
+				}
+			}
+		}
+	}
+	if p := lingerPlan(t, lingerHost("n/a")); !strings.Contains(p.Detail, "not applicable") {
+		t.Errorf("detail %q", p.Detail)
+	}
+}
+
+func TestLingerApplyAndDependencySkip(t *testing.T) {
+	h := lingerHost("off")
+	plan, _ := Plan(context.Background(), h, Config{AuthorizedKeys: []string{"ssh-ed25519 AAAAC3Nz op@laptop"}})
+	h.cmds = nil
+	if err := Apply(context.Background(), h, plan, func(PlannedStep) bool { return true }, nil); err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, c := range h.cmds {
+		if strings.Contains(c.Script, "set -eu") && strings.Contains(c.Script, "loginctl enable-linger 'yoho'") && c.Sudo {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("enable-linger not run: %+v", h.cmds)
+	}
+
+	h = lingerHost("off")
+	plan, _ = Plan(context.Background(), h, Config{AuthorizedKeys: []string{"ssh-ed25519 AAAAC3Nz op@laptop"}})
+	h.cmds = nil
+	var out bytes.Buffer
+	var asked []string
+	if err := Apply(context.Background(), h, plan, func(p PlannedStep) bool {
+		asked = append(asked, p.Step.ID)
+		return p.Step.ID != "user"
+	}, &out); err != nil {
+		t.Fatal(err)
+	}
+	for _, id := range asked {
+		if id == "linger" {
+			t.Fatalf("prompted for linger after declined user: %v", asked)
+		}
+	}
+	if !strings.Contains(out.String(), "skip Linger for yoho (Scheduled Jobs run while logged out): needs Deploy user yoho") {
+		t.Fatalf("output:\n%s", out.String())
+	}
+	for _, c := range h.cmds {
+		if strings.Contains(c.Script, "enable-linger") {
+			t.Fatal("ran skipped linger step")
+		}
 	}
 }

@@ -200,10 +200,8 @@ func TestInstallUserWarnsWithoutLinger(t *testing.T) {
 			return "/home/cub", nil
 		case strings.HasPrefix(s, "sha256sum"):
 			return sum, nil // already present: no upload
-		case strings.HasPrefix(s, "loginctl"):
-			return "no", nil
-		case s == "id -un":
-			return "cub", nil
+		case strings.Contains(s, "/var/lib/systemd/linger/"):
+			return "off cub", nil
 		}
 		return "", nil
 	}}
@@ -225,7 +223,7 @@ func TestInstallUserWarnsWithoutLinger(t *testing.T) {
 			t.Fatal("user mode must not use sudo")
 		}
 	}
-	if len(res.Warnings) != 1 || !strings.Contains(res.Warnings[0], "sudo loginctl enable-linger cub") {
+	if len(res.Warnings) != 1 || !strings.Contains(res.Warnings[0], "sudo loginctl enable-linger cub") || !strings.Contains(res.Warnings[0], "yoho setup") {
 		t.Fatalf("warnings: %v", res.Warnings)
 	}
 }

@@ -327,10 +327,14 @@ func Install(ctx context.Context, h remote.Host, o InstallOptions) (*InstallResu
 	}
 
 	if !m.Sudo {
-		out, _ := h.Output(ctx, remote.Cmd{Script: `loginctl show-user "$(id -un)" -p Linger --value 2>/dev/null || true`})
-		if strings.TrimSpace(out) != "yes" {
-			u, _ := h.Output(ctx, remote.Cmd{Script: "id -un"})
-			w := fmt.Sprintf("linger is off for %s: user timers stop when the user logs out. Run on the Server: sudo loginctl enable-linger %s", u, u)
+		// The marker file works without a login session, unlike loginctl show-user.
+		out, _ := h.Output(ctx, remote.Cmd{Script: `u="$(id -un)"; if [ -e "/var/lib/systemd/linger/$u" ]; then echo "on $u"; else echo "off $u"; fi`})
+		if state, u, _ := strings.Cut(strings.TrimSpace(out), " "); state != "on" {
+			if u == "" {
+				u, _ = h.Output(ctx, remote.Cmd{Script: "id -un"})
+				u = strings.TrimSpace(u)
+			}
+			w := fmt.Sprintf("linger is off for %s: user timers stop when the user logs out. Run `yoho setup` (it enables linger), or on the Server: sudo loginctl enable-linger %s", u, u)
 			res.Warnings = append(res.Warnings, w)
 			logf("warning: %s", w)
 		}

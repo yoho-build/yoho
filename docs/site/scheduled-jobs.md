@@ -13,7 +13,7 @@ Without `JOB` they act on every Backup job of the Destination (install: those wi
 Jobs come from `backups.jobs.<name>.schedule` (systemd `OnCalendar`, e.g. `*-*-* 03:00:00`). Jobs without a schedule are on demand only.
 
 - Server-side jobs read secrets stored on the Server at install time, not your password manager.
-- With `servers.<name>.sudo: true` units are system-wide (User= the deploy user); otherwise `systemctl --user` is used (enable linger; `install` warns when it is off).
+- With `servers.<name>.sudo: true` units are system-wide (User= the deploy user); otherwise `systemctl --user` is used which need linger to run while logged out. `yoho setup` enables it for the deploy user; `install` warns when it is off (fix: `yoho setup`, or `sudo loginctl enable-linger <user>` on the Server).
 - Unit names: `yoho-<app>-<destination>-<job>`.
 
 ## Where the binary comes from

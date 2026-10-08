@@ -2,7 +2,7 @@
 
 `yoho setup` provisions a Debian or Ubuntu Server. It inspects the Server, shows each change, and asks before applying. Re-running only does what is still needed.
 
-Steps: Docker with compose and buildx plugins, deploy user and authorized keys, Yoho directories, ufw (SSH plus Proxy ports; none behind a Tunnel), unattended-upgrades, optional swap and timezone, optional Docker containerd image store (for `pussh`).
+Steps: Docker with compose and buildx plugins, deploy user and authorized keys, linger for the deploy user (systemd user timers for Scheduled Jobs and Backups keep running while logged out; skipped without systemd), Yoho directories, ufw (SSH plus Proxy ports; none behind a Tunnel), unattended-upgrades, optional swap and timezone, optional Docker containerd image store (for `pussh`).
 
 ```sh
 yoho setup                          # per step: y, N, or a (all)

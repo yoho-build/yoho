@@ -276,7 +276,7 @@ func Steps(ctx context.Context, h remote.Host, cfg Config, osi OSInfo, priv bool
 	if len(pkgs) > 0 {
 		steps = append(steps, packagesStep(pkgs))
 	}
-	steps = append(steps, userStep(user, cfg.AuthorizedKeys), dirsStep(user))
+	steps = append(steps, userStep(user, cfg.AuthorizedKeys), lingerStep(user), dirsStep(user))
 	if sc.Firewall == nil || *sc.Firewall {
 		ports := append([]int(nil), cfg.ProxyPorts...)
 		ports = append(ports, sc.AllowPorts...)
@@ -425,6 +425,38 @@ func userStep(user string, keys []string) *Step {
 			return n, d, nil
 		},
 		apply: func(ctx context.Context, h remote.Host) error { return run(ctx, h, applyScript) },
+	}
+}
+
+// lingerCheckScript prints n/a, on or off. It reads the linger marker file
+// instead of asking loginctl, which fails for users without a session.
+func lingerCheckScript(user string) string {
+	return "if [ ! -d /run/systemd/system ] || ! command -v loginctl >/dev/null 2>&1; then echo n/a\n" +
+		"elif [ -e " + remote.Quote("/var/lib/systemd/linger/"+user) + " ]; then echo on\n" +
+		"else echo off; fi\n"
+}
+
+// lingerStep keeps the deploy user's systemd user timers (Scheduled Jobs,
+// Backups) running while nobody is logged in.
+func lingerStep(user string) *Step {
+	return &Step{
+		ID: "linger", Needs: []string{"user"}, Title: "Linger for " + user + " (Scheduled Jobs run while logged out)",
+		check: func(ctx context.Context, h remote.Host) (bool, string, error) {
+			out, err := h.Output(ctx, remote.Cmd{Script: lingerCheckScript(user)})
+			if err != nil {
+				return false, "", err
+			}
+			switch strings.TrimSpace(out) {
+			case "off":
+				return true, "enable linger for " + user, nil
+			case "n/a":
+				return false, "not applicable (no systemd)", nil
+			}
+			return false, "ok", nil
+		},
+		apply: func(ctx context.Context, h remote.Host) error {
+			return run(ctx, h, "loginctl enable-linger "+remote.Quote(user))
+		},
 	}
 }
 
