@@ -6,7 +6,6 @@ import (
 	"strings"
 
 	"github.com/yoho-build/yoho/internal/build"
-	"github.com/yoho-build/yoho/internal/config"
 	"github.com/yoho-build/yoho/internal/remote"
 )
 
@@ -107,17 +106,27 @@ func (r *runner) pinImages(ctx context.Context, images, ids map[string]string, v
 	return nil
 }
 
-// yohoImage reports whether ref is the image Yoho built for svc at version:
-// build.ImageName with the configured Registry or the default yoho/ prefix,
-// in the per-Destination or the legacy yoho/<app>-<service>:<version> form.
-// A tag suffix alone is not enough: postgres:17 deployed as Version 17 is a
-// shared third-party tag.
+// yohoImage reports whether ref is an image Yoho built for svc at version,
+// whatever Registry or prefix it carried when the Release was deployed: the
+// last path component is the per-Destination or legacy <app>-<service> name
+// from build.ImageName and the tag is the Release Version. A tag alone is
+// not enough: postgres:17 deployed as Version 17 is a shared third-party tag.
 func (r *runner) yohoImage(ref, svc, version string) bool {
-	for _, reg := range []*config.Registry{r.registry, nil} {
-		for _, dest := range []string{r.dest, ""} {
-			if ref == build.ImageName(reg, r.app, dest, svc, version) {
-				return true
-			}
+	// Strip a digest, then split the tag off the last component.
+	if i := strings.Index(ref, "@"); i >= 0 {
+		return false
+	}
+	slash := strings.LastIndex(ref, "/")
+	colon := strings.LastIndex(ref, ":")
+	if colon <= slash || ref[colon+1:] != strings.ToLower(version) {
+		return false
+	}
+	repo := ref[slash+1 : colon]
+	for _, dest := range []string{r.dest, ""} {
+		want := build.ImageName(nil, r.app, dest, svc, version)
+		want = want[strings.LastIndex(want, "/")+1 : strings.LastIndex(want, ":")]
+		if repo == want {
+			return true
 		}
 	}
 	return false

@@ -278,7 +278,7 @@ func backupService(ctx context.Context, o RunOptions, staging, svc string, sb co
 			file := svc + "-" + v + ".tar.gz"
 			script := "set -eu; docker run --rm --network none -v " + remote.Quote(vols[v]+":/data:ro") +
 				" -v " + remote.Quote(staging+":/out") + " " + remote.Quote(HelperImage) +
-				" sh -c " + remote.Quote(`umask 077; tar -C /data -czf "/out/$1" --exclude './.yoho-restore-*' . && chown "$2:$3" "/out/$1"`) +
+				" sh -c " + remote.Quote(`umask 077; tar -C /data -czf "/out/$1" . && chown "$2:$3" "/out/$1"`) +
 				// The helper runs as root; hand the archive (still 0600) to the
 				// deploy user so native restic, which runs as that user, can read it.
 				" sh " + remote.Quote(file) + ` "$(id -u)" "$(id -g)"`

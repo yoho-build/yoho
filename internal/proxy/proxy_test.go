@@ -222,7 +222,7 @@ func TestBootRecreateIsLockedAndRechecked(t *testing.T) {
 	}
 	script := h.scripts[len(h.scripts)-1]
 	want := configHash(runArgs(config.ProxyConfig{}))
-	lock := strings.Index(script, "mkdir \"$lock\"")
+	lock := strings.Index(script, "flock -w 120 9")
 	restore := strings.Index(script, "docker rename yoho-proxy-old yoho-proxy")
 	recheck := strings.Index(script, "[ \"$cur\" = '"+want+"' ]")
 	rmOld := strings.Index(script, "docker rm -f yoho-proxy-old")
@@ -230,10 +230,72 @@ func TestBootRecreateIsLockedAndRechecked(t *testing.T) {
 	if !(lock >= 0 && lock < restore && restore < recheck && recheck < rmOld && rmOld < stop) {
 		t.Fatalf("bad lock/recheck order:\n%s", script)
 	}
-	if !strings.Contains(script, "trap 'rm -rf \"$lock\"' EXIT") {
-		t.Errorf("lock not released on exit:\n%s", script)
+	if !strings.Contains(script, "trap 'rmdir \"$lockd\"' EXIT") || strings.Contains(script, "mv ") {
+		t.Errorf("mkdir fallback not released on exit or reclaims:\n%s", script)
 	}
 	if out, err := exec.Command("sh", "-n", "-c", script).CombinedOutput(); err != nil {
 		t.Errorf("sh -n: %v %s", err, out)
+	}
+}
+
+// runLockSnippet runs the generated lock snippet followed by body in sh, with
+// PATH optionally restricted so flock is hidden (forcing the mkdir fallback).
+func runLockSnippet(t *testing.T, base, body string, hideFlock bool) (string, error) {
+	t.Helper()
+	script := "set -eu\n" + proxyLockScript(base) + body
+	if out, err := exec.Command("sh", "-n", "-c", script).CombinedOutput(); err != nil {
+		t.Fatalf("sh -n: %v %s", err, out)
+	}
+	cmd := exec.Command("sh", "-c", script)
+	if hideFlock {
+		// A shim dir with only the tools the snippet needs.
+		bin := t.TempDir()
+		for _, n := range []string{"mkdir", "rmdir", "dirname", "sleep", "sh"} {
+			p, err := exec.LookPath(n)
+			if err != nil {
+				t.Skipf("no %s", n)
+			}
+			if err := os.Symlink(p, bin+"/"+n); err != nil {
+				t.Fatal(err)
+			}
+		}
+		cmd.Env = []string{"PATH=" + bin}
+	}
+	out, err := cmd.CombinedOutput()
+	return string(out), err
+}
+
+func TestProxyLockMkdirFallback(t *testing.T) {
+	base := t.TempDir() + "/sub/proxy"
+	out, err := runLockSnippet(t, base, "echo held\n", true)
+	if err != nil || !strings.Contains(out, "held") {
+		t.Fatalf("lock run: %v %s", err, out)
+	}
+	if _, err := os.Stat(base + ".lock.d"); err == nil {
+		t.Error("lock dir not removed on exit")
+	}
+	// A lock dir left behind (even by a dead holder) is never reclaimed.
+	if err := os.Mkdir(base+".lock.d", 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cmd := "waited=119\n"
+	script := "set -eu\n" + strings.Replace(proxyLockScript(base), "waited=0\n", cmd, 1) + "echo acquired\n"
+	got, err := exec.Command("sh", "-c", script).CombinedOutput()
+	if err == nil || strings.Contains(string(got), "acquired") || !strings.Contains(string(got), "rmdir") {
+		t.Fatalf("stale lock must fail with guidance, got err=%v %s", err, got)
+	}
+	if _, err := os.Stat(base + ".lock.d"); err != nil {
+		t.Error("foreign lock dir must not be removed")
+	}
+}
+
+func TestProxyLockFlock(t *testing.T) {
+	if _, err := exec.LookPath("flock"); err != nil {
+		t.Skip("no flock")
+	}
+	base := t.TempDir() + "/proxy"
+	out, err := runLockSnippet(t, base, "echo held\n", false)
+	if err != nil || !strings.Contains(out, "held") {
+		t.Fatalf("flock run: %v %s", err, out)
 	}
 }

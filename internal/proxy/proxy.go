@@ -145,7 +145,7 @@ func BootWith(ctx context.Context, host remote.Host, cfg config.ProxyConfig, out
 	b.WriteString("set -eu\n")
 	// Pull first so an existing Proxy is only down for the swap itself.
 	b.WriteString("docker image inspect " + remote.Quote(image) + " >/dev/null 2>&1 || docker pull -q " + remote.Quote(image) + " >/dev/null\n")
-	b.WriteString(proxyLockScript(release.Root + "/proxy.lock"))
+	b.WriteString(proxyLockScript(release.Root + "/proxy"))
 	// Everything below runs under the Server-wide lock and re-checks the
 	// current state: another App may have recreated the Proxy since we looked.
 	old := ContainerName + "-old"
@@ -186,26 +186,30 @@ func BootWith(ctx context.Context, host remote.Host, cfg config.ProxyConfig, out
 	return nil
 }
 
-// proxyLockScript returns POSIX sh that takes a Server-wide lock (atomic mkdir
-// holding the shell's pid) and releases it when the script exits. A lock whose
-// holder is gone is reclaimed; otherwise it waits up to two minutes.
-func proxyLockScript(dir string) string {
-	q := remote.Quote(dir)
-	return "lock=" + q + "\n" +
-		"mkdir -p \"$(dirname \"$lock\")\"\n" +
-		"waited=0\n" +
-		"until mkdir \"$lock\" 2>/dev/null; do\n" +
-		"  pid=$(cat \"$lock/pid\" 2>/dev/null || true)\n" +
-		"  if [ -n \"$pid\" ] && ! kill -0 \"$pid\" 2>/dev/null; then\n" +
-		"    mv \"$lock\" \"$lock.stale.$$\" 2>/dev/null && rm -rf \"$lock.stale.$$\" || true\n" +
-		"    continue\n" +
-		"  fi\n" +
-		"  waited=$((waited + 1))\n" +
-		"  if [ \"$waited\" -ge 120 ]; then echo \"proxy lock $lock is held by another yoho run; remove it if stale\" >&2; exit 1; fi\n" +
-		"  sleep 1\n" +
-		"done\n" +
-		"trap 'rm -rf \"$lock\"' EXIT\n" +
-		"echo $$ > \"$lock/pid\"\n"
+// proxyLockScript returns POSIX sh that takes a Server-wide lock named by base
+// and holds it until the script exits. With flock(1) it locks the file
+// base.flock on fd 9; the kernel drops the lock on exit, so there is no stale
+// state. Without flock it falls back to an atomic mkdir of base.lock.d that is
+// never reclaimed automatically (reclaiming races); the operator removes it.
+// Either way it waits up to two minutes.
+func proxyLockScript(base string) string {
+	file := remote.Quote(base + ".flock")
+	dir := remote.Quote(base + ".lock.d")
+	return "lockf=" + file + "\n" +
+		"lockd=" + dir + "\n" +
+		"mkdir -p \"$(dirname \"$lockf\")\"\n" +
+		"if type flock >/dev/null 2>&1; then\n" +
+		"  exec 9>\"$lockf\"\n" +
+		"  flock -w 120 9 || { echo \"proxy lock $lockf is held by another yoho run\" >&2; exit 1; }\n" +
+		"else\n" +
+		"  waited=0\n" +
+		"  until mkdir \"$lockd\" 2>/dev/null; do\n" +
+		"    waited=$((waited + 1))\n" +
+		"    if [ \"$waited\" -ge 120 ]; then echo \"proxy lock $lockd is held; if no yoho run is active, remove it with: rmdir $lockd\" >&2; exit 1; fi\n" +
+		"    sleep 1\n" +
+		"  done\n" +
+		"  trap 'rmdir \"$lockd\"' EXIT\n" +
+		"fi\n"
 }
 
 // inspectProxy reads the Proxy container's config label and running state.

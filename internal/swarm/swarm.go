@@ -227,6 +227,14 @@ func (Runtime) Deploy(ctx context.Context, d *plan.Deploy) (_ *release.Release, 
 	// rolls back only the Services whose update failed; once the stack was
 	// touched, restoreStack puts the others back on the recorded spec too.
 	prevFiles := deploy.SnapshotRelease(ctx, h, relDir)
+	// What runs before this attempt is the current Release, which may not be
+	// the Version being (re)deployed.
+	liveDir := relDir
+	if out, cerr := h.Output(ctx, remote.Cmd{Script: "readlink " + remote.Quote(path.Join(r.dir, "current")) + " 2>/dev/null || true"}); cerr == nil {
+		if v := path.Base(strings.TrimSpace(out)); v != "" && v != "." && v != "/" {
+			liveDir = release.Dir(d.App, d.Destination, v)
+		}
+	}
 	committed, stackTouched := false, false
 	if err := h.WriteFile(ctx, stackFile, c.YAML, 0o600, false); err != nil {
 		deploy.RestoreRelease(ctx, h, relDir, prevFiles, r.logf)
@@ -255,7 +263,9 @@ func (Runtime) Deploy(ctx context.Context, d *plan.Deploy) (_ *release.Release, 
 		case prevFiles != nil:
 			restored := deploy.RestoreRelease(ctx, h, relDir, prevFiles, r.logf)
 			if stackTouched {
-				r.restoreStack(context.WithoutCancel(ctx), d, relDir, restored, c.Plan)
+				// Only the record of relDir was rewritten; another
+				// current Release's record is intact.
+				r.restoreStack(context.WithoutCancel(ctx), d, liveDir, restored || liveDir != relDir, c.Plan)
 			}
 		default:
 			_ = deploy.WriteJSON(context.WithoutCancel(ctx), h, path.Join(relDir, "release.json"), rel)
@@ -302,8 +312,8 @@ func (Runtime) Deploy(ctx context.Context, d *plan.Deploy) (_ *release.Release, 
 // changed; a successful deploy or rollback of the Version removes it.
 const partialMarker = "partial"
 
-// restoreStack re-deploys the restored record of relDir after a failed
-// same-Version redeploy touched the stack, so Services whose update already
+// restoreStack re-deploys the record of relDir (the current Release, which
+// is what ran before the attempt) after a failed redeploy touched the stack, so Services whose update already
 // converged do not keep a spec the record does not describe. Routes follow
 // the record and routes only the attempt added are removed. When the record
 // was not fully restored or the re-deploy fails, partialMarker is left

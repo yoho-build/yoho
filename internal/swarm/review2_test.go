@@ -273,3 +273,59 @@ func TestLegacyPlanKeepsGlobalRoute(t *testing.T) {
 		t.Errorf("plan.json %s", b)
 	}
 }
+
+// Deploy v1, then v2 (current). A failed retry of --version v1 must put back
+// what ran before the attempt, the stack of v2, not the retained v1 stack.
+func TestRedeployNonCurrentVersionFailureRestoresCurrentStack(t *testing.T) {
+	root := withRoot(t)
+	fastPolling(t)
+	ctx := context.Background()
+	sim := newSim()
+	h := newFake(sim)
+	if _, err := (Runtime{}).Deploy(ctx, testDeploy(t, h, nil)); err != nil {
+		t.Fatal(err)
+	}
+	d2 := testDeploy(t, h, nil)
+	d2.Version = "v2"
+	setWebImage(d2, "shop-web:v2")
+	if _, err := (Runtime{}).Deploy(ctx, d2); err != nil {
+		t.Fatal(err)
+	}
+	appDir := filepath.Join(root, "apps", "shop", "production")
+	v1Dir := filepath.Join(appDir, "releases", "v1")
+	v2Dir := filepath.Join(appDir, "releases", "v2")
+	v1Before, _ := os.ReadFile(filepath.Join(v1Dir, "compose.yaml"))
+	v2Stack, _ := os.ReadFile(filepath.Join(v2Dir, "compose.yaml"))
+	if bytes.Equal(v1Before, v2Stack) {
+		t.Fatal("test needs different stacks")
+	}
+	h.scripts = nil
+
+	sim.failOnce = true
+	d := testDeploy(t, h, nil)
+	setWebImage(d, "shop-web:retry")
+	if _, err := (Runtime{}).Deploy(ctx, d); err == nil {
+		t.Fatal("want error")
+	}
+	if b, _ := os.ReadFile(filepath.Join(v1Dir, "compose.yaml")); !bytes.Equal(b, v1Before) {
+		t.Error("v1 record not restored")
+	}
+	if link, _ := os.Readlink(filepath.Join(appDir, "current")); filepath.Base(link) != "v2" {
+		t.Errorf("current = %q", link)
+	}
+	// The last stack deploy is the restore and it uses v2's stack file.
+	var last string
+	for _, s := range h.scripts {
+		if strings.Contains(s, "stack deploy") {
+			last = s
+		}
+	}
+	if !strings.Contains(last, "releases/v2/compose.yaml") {
+		t.Errorf("restore did not redeploy v2's stack:\n%s", last)
+	}
+	for _, v := range []string{v1Dir, v2Dir} {
+		if _, err := os.Stat(filepath.Join(v, partialMarker)); !os.IsNotExist(err) {
+			t.Errorf("marker in %s: %v", v, err)
+		}
+	}
+}

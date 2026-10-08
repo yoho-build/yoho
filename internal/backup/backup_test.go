@@ -955,6 +955,9 @@ func TestRunHandsStagedArchivesToDeployUser(t *testing.T) {
 	if !strings.Contains(s, `chown "$2:$3"`) || !strings.Contains(s, `"$(id -u)" "$(id -g)"`) || !strings.Contains(s, "umask 077") {
 		t.Errorf("archive must stay 0600 and be chowned to the deploy user:\n%s", s)
 	}
+	if strings.Contains(s, "--exclude") {
+		t.Errorf("volume tar must not exclude anything (a leftover restore scratch holds the only copy):\n%s", s)
+	}
 }
 
 func TestRestoreVolumeScripts(t *testing.T) {

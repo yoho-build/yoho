@@ -34,11 +34,16 @@ func TestYohoImageOnlyMatchesYohoNames(t *testing.T) {
 		{r, "library/postgres:17", "db", false},
 		{r, "yoho/shop-production-web:16", "web", false},
 		{r, "yoho/shop-production-db:17", "web", false},
-		{r, "evil/shop-production-web:17", "web", false},
+		{r, "registry.old:5000/acme/shop-production-web:17", "web", true}, // Registry changed since the deploy
+		{r, "shop-production-web:17", "web", true},
+		{r, "evil/shop-production-api:17", "web", false},
+		{r, "yoho/shop-production-web@sha256:abc", "web", false},
 		{reg, "ghcr.io/acme/shop-production-web:17", "web", true},
 		{reg, "ghcr.io/acme/shop-web:17", "web", true},
 		{reg, "yoho/shop-production-web:17", "web", true}, // deployed before the registry
-		{reg, "ghcr.io/other/shop-production-web:17", "web", false},
+		{reg, "ghcr.io/other/shop-production-web:17", "web", true}, // any prefix: shape and tag decide
+		{reg, "ghcr.io/other/shop-production-web:16", "web", false},
+		{reg, "ghcr.io/acme/postgres:17", "db", false},
 	} {
 		if got := c.r.yohoImage(c.ref, c.svc, "17"); got != c.want {
 			t.Errorf("yohoImage(%q, %q) = %v, want %v", c.ref, c.svc, got, c.want)
