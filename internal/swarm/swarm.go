@@ -28,11 +28,11 @@ import (
 	"strings"
 	"time"
 
-	"github.com/yoho-dev/yoho/internal/deploy"
-	"github.com/yoho-dev/yoho/internal/plan"
-	"github.com/yoho-dev/yoho/internal/proxy"
-	"github.com/yoho-dev/yoho/internal/release"
-	"github.com/yoho-dev/yoho/internal/remote"
+	"github.com/yoho-build/yoho/internal/deploy"
+	"github.com/yoho-build/yoho/internal/plan"
+	"github.com/yoho-build/yoho/internal/proxy"
+	"github.com/yoho-build/yoho/internal/release"
+	"github.com/yoho-build/yoho/internal/remote"
 )
 
 // Runtime implements plan.Runtime with Docker Swarm.

@@ -13,12 +13,12 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/yoho-dev/yoho/internal/backup"
-	"github.com/yoho-dev/yoho/internal/config"
-	"github.com/yoho-dev/yoho/internal/deploy"
-	"github.com/yoho-dev/yoho/internal/release"
-	"github.com/yoho-dev/yoho/internal/remote"
-	"github.com/yoho-dev/yoho/internal/secrets"
+	"github.com/yoho-build/yoho/internal/backup"
+	"github.com/yoho-build/yoho/internal/config"
+	"github.com/yoho-build/yoho/internal/deploy"
+	"github.com/yoho-build/yoho/internal/release"
+	"github.com/yoho-build/yoho/internal/remote"
+	"github.com/yoho-build/yoho/internal/secrets"
 )
 
 func init() {

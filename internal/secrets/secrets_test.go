@@ -13,7 +13,7 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/yoho-dev/yoho/internal/config"
+	"github.com/yoho-build/yoho/internal/config"
 )
 
 // fakeRunner answers by joined argv; records calls.

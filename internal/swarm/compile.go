@@ -12,12 +12,12 @@ import (
 
 	"go.yaml.in/yaml/v3"
 
-	"github.com/yoho-dev/yoho/internal/config"
-	"github.com/yoho-dev/yoho/internal/deploy"
-	"github.com/yoho-dev/yoho/internal/plan"
-	"github.com/yoho-dev/yoho/internal/proxy"
-	"github.com/yoho-dev/yoho/internal/release"
-	"github.com/yoho-dev/yoho/internal/secrets"
+	"github.com/yoho-build/yoho/internal/config"
+	"github.com/yoho-build/yoho/internal/deploy"
+	"github.com/yoho-build/yoho/internal/plan"
+	"github.com/yoho-build/yoho/internal/proxy"
+	"github.com/yoho-build/yoho/internal/release"
+	"github.com/yoho-build/yoho/internal/secrets"
 )
 
 // Proxy defaults (x-yoho.proxy), same as the compose runtime.

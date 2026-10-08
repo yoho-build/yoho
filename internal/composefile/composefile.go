@@ -13,7 +13,7 @@ import (
 	"github.com/compose-spec/compose-go/v2/dotenv"
 	"github.com/compose-spec/compose-go/v2/types"
 
-	"github.com/yoho-dev/yoho/internal/config"
+	"github.com/yoho-build/yoho/internal/config"
 )
 
 // DefaultFiles are tried in order in dir only (no walking up to parents, so a

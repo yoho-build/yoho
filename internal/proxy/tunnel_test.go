@@ -8,8 +8,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/yoho-dev/yoho/internal/config"
-	"github.com/yoho-dev/yoho/internal/remote"
+	"github.com/yoho-build/yoho/internal/config"
+	"github.com/yoho-build/yoho/internal/remote"
 )
 
 const quickLogs = `2026-10-08T10:00:00Z INF Thank you for trying Cloudflare Tunnel.

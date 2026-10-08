@@ -11,8 +11,8 @@ import (
 	"github.com/spf13/cobra"
 	"golang.org/x/term"
 
-	"github.com/yoho-dev/yoho/internal/remote"
-	"github.com/yoho-dev/yoho/internal/setup"
+	"github.com/yoho-build/yoho/internal/remote"
+	"github.com/yoho-build/yoho/internal/setup"
 )
 
 func init() {

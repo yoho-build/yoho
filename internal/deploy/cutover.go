@@ -10,8 +10,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/yoho-dev/yoho/internal/proxy"
-	"github.com/yoho-dev/yoho/internal/remote"
+	"github.com/yoho-build/yoho/internal/proxy"
+	"github.com/yoho-build/yoho/internal/remote"
 )
 
 // composeCLI builds `docker compose` invocations for one compiled file.

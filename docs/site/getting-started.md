@@ -2,7 +2,7 @@
 
 ## Install
 
-Build from source with Go 1.26: `go install github.com/yoho-dev/yoho/cmd/yoho@latest`.
+Build from source with Go 1.26: `go install github.com/yoho-build/yoho/cmd/yoho@latest`.
 
 ## 60 seconds
 

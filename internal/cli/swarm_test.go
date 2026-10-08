@@ -4,7 +4,7 @@ import (
 	"reflect"
 	"testing"
 
-	"github.com/yoho-dev/yoho/internal/config"
+	"github.com/yoho-build/yoho/internal/config"
 )
 
 func TestAdvertiseAddr(t *testing.T) {

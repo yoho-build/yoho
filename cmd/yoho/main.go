@@ -4,7 +4,7 @@ package main
 import (
 	"os"
 
-	"github.com/yoho-dev/yoho/internal/cli"
+	"github.com/yoho-build/yoho/internal/cli"
 )
 
 func main() { os.Exit(cli.Execute()) }

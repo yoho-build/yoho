@@ -9,8 +9,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/yoho-dev/yoho/internal/release"
-	"github.com/yoho-dev/yoho/internal/remote"
+	"github.com/yoho-build/yoho/internal/release"
+	"github.com/yoho-build/yoho/internal/remote"
 )
 
 // LockInfo describes who holds the deploy/backup lock of an App Destination.

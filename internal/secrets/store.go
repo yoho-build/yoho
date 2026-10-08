@@ -12,7 +12,7 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/yoho-dev/yoho/internal/config"
+	"github.com/yoho-build/yoho/internal/config"
 )
 
 // Store holds resolved secret values for one Destination. Values exist only

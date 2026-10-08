@@ -7,7 +7,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/yoho-dev/yoho/internal/config"
+	"github.com/yoho-build/yoho/internal/config"
 )
 
 // providerResolver resolves one reference through a password-manager CLI.

@@ -10,7 +10,7 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/yoho-dev/yoho/skills"
+	"github.com/yoho-build/yoho/skills"
 )
 
 func init() {

@@ -11,11 +11,11 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/yoho-dev/yoho/internal/composefile"
-	"github.com/yoho-dev/yoho/internal/config"
-	"github.com/yoho-dev/yoho/internal/release"
-	"github.com/yoho-dev/yoho/internal/secrets"
-	"github.com/yoho-dev/yoho/internal/ui"
+	"github.com/yoho-build/yoho/internal/composefile"
+	"github.com/yoho-build/yoho/internal/config"
+	"github.com/yoho-build/yoho/internal/release"
+	"github.com/yoho-build/yoho/internal/secrets"
+	"github.com/yoho-build/yoho/internal/ui"
 )
 
 // Version is set at build time with -ldflags "-X .../cli.Version=...".

@@ -8,9 +8,9 @@ import (
 	"os"
 	"time"
 
-	"github.com/yoho-dev/yoho/internal/backup"
-	"github.com/yoho-dev/yoho/internal/release"
-	"github.com/yoho-dev/yoho/internal/remote"
+	"github.com/yoho-build/yoho/internal/backup"
+	"github.com/yoho-build/yoho/internal/release"
+	"github.com/yoho-build/yoho/internal/remote"
 )
 
 // RunJobOptions are optional collaborators of RunJob.

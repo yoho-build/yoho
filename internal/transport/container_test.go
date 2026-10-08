@@ -13,9 +13,9 @@ import (
 
 	"github.com/compose-spec/compose-go/v2/types"
 
-	"github.com/yoho-dev/yoho/internal/build"
-	"github.com/yoho-dev/yoho/internal/config"
-	"github.com/yoho-dev/yoho/internal/remote"
+	"github.com/yoho-build/yoho/internal/build"
+	"github.com/yoho-build/yoho/internal/config"
+	"github.com/yoho-build/yoho/internal/remote"
 )
 
 // ociArchive mimics `container image save --platform linux/amd64`: an

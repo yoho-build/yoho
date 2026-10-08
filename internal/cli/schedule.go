@@ -14,10 +14,10 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/yoho-dev/yoho/internal/build"
-	"github.com/yoho-dev/yoho/internal/deploy"
-	"github.com/yoho-dev/yoho/internal/remote"
-	"github.com/yoho-dev/yoho/internal/schedule"
+	"github.com/yoho-build/yoho/internal/build"
+	"github.com/yoho-build/yoho/internal/deploy"
+	"github.com/yoho-build/yoho/internal/remote"
+	"github.com/yoho-build/yoho/internal/schedule"
 )
 
 func init() {
@@ -203,7 +203,7 @@ func linuxBinary(ctx context.Context, explicit, platform string, out interface{ 
 	}
 	tmp := filepath.Join(os.TempDir(), fmt.Sprintf("yoho-%s-%s", osName, arch))
 	fmt.Fprintf(out, "cross-building %s from %s\n", platform, src)
-	c := exec.CommandContext(ctx, gobin, "build", "-trimpath", "-ldflags", "-s -w -X github.com/yoho-dev/yoho/internal/cli.Version="+Version, "-o", tmp, "./cmd/yoho")
+	c := exec.CommandContext(ctx, gobin, "build", "-trimpath", "-ldflags", "-s -w -X github.com/yoho-build/yoho/internal/cli.Version="+Version, "-o", tmp, "./cmd/yoho")
 	c.Dir = src
 	c.Env = append(os.Environ(), "GOOS=linux", "GOARCH="+arch, "CGO_ENABLED=0")
 	c.Stdout, c.Stderr = out, out
@@ -218,7 +218,7 @@ func linuxBinary(ctx context.Context, explicit, platform string, out interface{ 
 func yohoSourceDir() string {
 	isModule := func(dir string) bool {
 		b, err := os.ReadFile(filepath.Join(dir, "go.mod"))
-		return err == nil && strings.Contains(string(b), "module github.com/yoho-dev/yoho\n")
+		return err == nil && strings.Contains(string(b), "module github.com/yoho-build/yoho\n")
 	}
 	if d := os.Getenv("YOHO_SOURCE"); d != "" && isModule(d) {
 		return d

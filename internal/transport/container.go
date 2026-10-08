@@ -12,8 +12,8 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/yoho-dev/yoho/internal/build"
-	"github.com/yoho-dev/yoho/internal/remote"
+	"github.com/yoho-build/yoho/internal/build"
+	"github.com/yoho-build/yoho/internal/remote"
 )
 
 // Images built by Apple's container CLI live in its own store. They ship via

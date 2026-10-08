@@ -21,9 +21,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/yoho-dev/yoho/internal/config"
-	"github.com/yoho-dev/yoho/internal/release"
-	"github.com/yoho-dev/yoho/internal/remote"
+	"github.com/yoho-build/yoho/internal/config"
+	"github.com/yoho-build/yoho/internal/release"
+	"github.com/yoho-build/yoho/internal/remote"
 )
 
 // Helper images. Pinned so Backups are reproducible; override in tests or

@@ -1,4 +1,4 @@
-module github.com/yoho-dev/yoho
+module github.com/yoho-build/yoho
 
 go 1.26.0
 

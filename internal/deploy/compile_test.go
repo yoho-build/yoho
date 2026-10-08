@@ -6,8 +6,8 @@ import (
 
 	"go.yaml.in/yaml/v3"
 
-	"github.com/yoho-dev/yoho/internal/config"
-	"github.com/yoho-dev/yoho/internal/plan"
+	"github.com/yoho-build/yoho/internal/config"
+	"github.com/yoho-build/yoho/internal/plan"
 )
 
 func compileTest(t *testing.T, d *plan.Deploy) ([]byte, []servicePlan, map[string]map[string]string) {

@@ -15,8 +15,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/yoho-dev/yoho/internal/config"
-	"github.com/yoho-dev/yoho/internal/remote"
+	"github.com/yoho-build/yoho/internal/config"
+	"github.com/yoho-build/yoho/internal/remote"
 )
 
 const (

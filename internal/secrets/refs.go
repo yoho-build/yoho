@@ -8,7 +8,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/yoho-dev/yoho/internal/config"
+	"github.com/yoho-build/yoho/internal/config"
 )
 
 // ParseRefs decodes x-yoho.secrets from a generic decoded value: map form

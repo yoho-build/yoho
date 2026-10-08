@@ -21,8 +21,8 @@ import (
 	"github.com/spf13/cobra"
 	"golang.org/x/term"
 
-	"github.com/yoho-dev/yoho/internal/build"
-	"github.com/yoho-dev/yoho/internal/config"
+	"github.com/yoho-build/yoho/internal/build"
+	"github.com/yoho-build/yoho/internal/config"
 )
 
 // minContainerVersion is the oldest Apple container release `yoho builder

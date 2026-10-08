@@ -10,7 +10,7 @@ import (
 
 	"go.yaml.in/yaml/v3"
 
-	"github.com/yoho-dev/yoho/internal/config"
+	"github.com/yoho-build/yoho/internal/config"
 )
 
 var testKey = []byte("0123456789abcdef0123456789abcdef")

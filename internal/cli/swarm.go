@@ -9,11 +9,11 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/yoho-dev/yoho/internal/config"
-	"github.com/yoho-dev/yoho/internal/plan"
-	"github.com/yoho-dev/yoho/internal/release"
-	"github.com/yoho-dev/yoho/internal/remote"
-	"github.com/yoho-dev/yoho/internal/swarm"
+	"github.com/yoho-build/yoho/internal/config"
+	"github.com/yoho-build/yoho/internal/plan"
+	"github.com/yoho-build/yoho/internal/release"
+	"github.com/yoho-build/yoho/internal/remote"
+	"github.com/yoho-build/yoho/internal/swarm"
 )
 
 func init() {

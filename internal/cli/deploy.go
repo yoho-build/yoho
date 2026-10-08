@@ -16,18 +16,18 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/yoho-dev/yoho/internal/build"
-	"github.com/yoho-dev/yoho/internal/composefile"
-	"github.com/yoho-dev/yoho/internal/config"
-	"github.com/yoho-dev/yoho/internal/deploy"
-	"github.com/yoho-dev/yoho/internal/hooks"
-	"github.com/yoho-dev/yoho/internal/plan"
-	"github.com/yoho-dev/yoho/internal/proxy"
-	"github.com/yoho-dev/yoho/internal/release"
-	"github.com/yoho-dev/yoho/internal/remote"
-	"github.com/yoho-dev/yoho/internal/secrets"
-	"github.com/yoho-dev/yoho/internal/transport"
-	"github.com/yoho-dev/yoho/internal/version"
+	"github.com/yoho-build/yoho/internal/build"
+	"github.com/yoho-build/yoho/internal/composefile"
+	"github.com/yoho-build/yoho/internal/config"
+	"github.com/yoho-build/yoho/internal/deploy"
+	"github.com/yoho-build/yoho/internal/hooks"
+	"github.com/yoho-build/yoho/internal/plan"
+	"github.com/yoho-build/yoho/internal/proxy"
+	"github.com/yoho-build/yoho/internal/release"
+	"github.com/yoho-build/yoho/internal/remote"
+	"github.com/yoho-build/yoho/internal/secrets"
+	"github.com/yoho-build/yoho/internal/transport"
+	"github.com/yoho-build/yoho/internal/version"
 )
 
 func init() {

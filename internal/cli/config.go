@@ -11,9 +11,9 @@ import (
 	"github.com/spf13/cobra"
 	"golang.org/x/term"
 
-	"github.com/yoho-dev/yoho/internal/composefile"
-	"github.com/yoho-dev/yoho/internal/config"
-	"github.com/yoho-dev/yoho/internal/secrets"
+	"github.com/yoho-build/yoho/internal/composefile"
+	"github.com/yoho-build/yoho/internal/config"
+	"github.com/yoho-build/yoho/internal/secrets"
 )
 
 func configCmd(g *globals) *cobra.Command {

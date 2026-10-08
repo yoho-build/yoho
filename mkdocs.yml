@@ -1,6 +1,6 @@
 site_name: Yoho
 site_description: Deploy Docker Compose apps to your own servers with zero downtime.
-repo_url: https://github.com/yoho-dev/yoho
+repo_url: https://github.com/yoho-build/yoho
 docs_dir: docs/site
 theme:
   name: material

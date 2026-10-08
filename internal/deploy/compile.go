@@ -14,10 +14,10 @@ import (
 	"github.com/compose-spec/compose-go/v2/types"
 	"go.yaml.in/yaml/v3"
 
-	"github.com/yoho-dev/yoho/internal/config"
-	"github.com/yoho-dev/yoho/internal/plan"
-	"github.com/yoho-dev/yoho/internal/proxy"
-	"github.com/yoho-dev/yoho/internal/release"
+	"github.com/yoho-build/yoho/internal/config"
+	"github.com/yoho-build/yoho/internal/plan"
+	"github.com/yoho-build/yoho/internal/proxy"
+	"github.com/yoho-build/yoho/internal/release"
 )
 
 // ContainerEnvNames are injected into compiled Services (like Kamal's

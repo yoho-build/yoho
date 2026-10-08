@@ -15,7 +15,7 @@ import (
 	"slices"
 	"time"
 
-	"github.com/yoho-dev/yoho/internal/plan"
+	"github.com/yoho-build/yoho/internal/plan"
 )
 
 // DefaultDir is where Hooks live relative to the Yoho file.

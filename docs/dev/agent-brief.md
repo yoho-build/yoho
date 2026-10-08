@@ -1,6 +1,6 @@
 # Brief for parallel coding agents (batch 1)
 
-Yoho: open-source Go CLI, compose-native deploys over SSH, replacing Kamal + ONCE + Ansible. Module `github.com/yoho-dev/yoho`, Go 1.26.
+Yoho: open-source Go CLI, compose-native deploys over SSH, replacing Kamal + ONCE + Ansible. Module `github.com/yoho-build/yoho`, Go 1.26.
 
 Read first: `GLOSSARY.md`, `docs/decisions.md`, `docs/adr/*.md`. Use glossary terms in code and comments (App, Service, Server, Destination, Release, Proxy, Backup, Backup Target, Scheduled Job, Stateful Service, Hook, Builder).
 

@@ -3,8 +3,8 @@ package cli
 import (
 	"context"
 
-	"github.com/yoho-dev/yoho/internal/plan"
-	"github.com/yoho-dev/yoho/internal/secrets"
+	"github.com/yoho-build/yoho/internal/plan"
+	"github.com/yoho-build/yoho/internal/secrets"
 )
 
 // planSchedules returns the changes apply would make to Scheduled Jobs on the

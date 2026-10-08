@@ -12,8 +12,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/yoho-dev/yoho/internal/config"
-	"github.com/yoho-dev/yoho/internal/remote"
+	"github.com/yoho-build/yoho/internal/config"
+	"github.com/yoho-build/yoho/internal/remote"
 )
 
 // Env names carrying secrets into scripts. Values travel in remote.Cmd.Env
