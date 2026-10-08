@@ -9,7 +9,7 @@ Status: **alpha**. Expect breaking changes. License: MIT.
 ## Install
 
 ```sh
-curl -fsSL https://yoho.sh | sh
+curl -fsSL https://yohobuild.com | sh
 ```
 
 The installer downloads the binary for this OS and architecture from GitHub Releases, verifies the SHA-256 in `checksums.txt`, and installs to `/usr/local/bin` when that directory is writable, otherwise `~/.local/bin`. It does not use sudo. Pin a release with `YOHO_VERSION=v0.1.0` or choose a directory with `YOHO_INSTALL_DIR`. If the repository is private, set `GITHUB_TOKEN` or `GH_TOKEN` before running the installer.

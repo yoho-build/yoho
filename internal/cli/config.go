@@ -157,7 +157,7 @@ func secretsCmd(g *globals) *cobra.Command {
 	return c
 }
 
-const initYoho = `# yaml-language-server: $schema=https://yoho.sh/schema/yoho.schema.json
+const initYoho = `# yaml-language-server: $schema=https://yohobuild.com/schema/yoho.schema.json
 app: %s
 
 servers:

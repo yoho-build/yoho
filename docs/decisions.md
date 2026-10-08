@@ -21,7 +21,7 @@ Small decisions that don't warrant an ADR. ADRs live in `docs/adr/`.
 - Secrets as files (ADR 0006); env_file fallback; `${VAR}` secret interpolation rejected by `yoho config check`; audit via ref + HMAC; `--reveal` TTY only.
 - Backups (decided by Claude, user delegated): restic default (encrypted, dedup; S3/B2/SFTP/rclone); optional archive mode tar.gz / AES-256 zip / 7z, never ZipCrypto; passwords from password manager at schedule-install time, stored on Server.
 - `yoho setup` v1 (delegated): interactive, shows each change before applying: Docker + compose plugin, deploy user + SSH key, ufw (SSH + Proxy ports), unattended-upgrades, optional swap/timezone/Proxy.
-- License MIT (delegated). GitHub repo `yoho-build/yoho`; domains yohodev.com + yoho.sh available, user to register.
+- License MIT (delegated). GitHub repo `yoho-build/yoho`; domain **yohobuild.com** (installer `curl -fsSL https://yohobuild.com | sh`, schema at `/schema/yoho.schema.json`, docs site).
 - Generated secrets (Coolify-style): `x-yoho.generate`, created once on the Server, `yoho secrets backup` to password manager, included in encrypted Backups.
 - Each Service gets only secrets it declares in `x-yoho.secrets`, with aliasing (container name ← secrets key). Common `.yoho/secrets` + `.yoho/secrets.<destination>`.
 - Version = git SHA; a dirty tree appends `_uncommitted_<8 hex>` (content hash, with a warning); image tag = version; Release stores digests.

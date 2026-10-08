@@ -1,5 +1,5 @@
 #!/bin/sh
-# Install yoho from GitHub Releases (curl -fsSL https://yoho.sh | sh).
+# Install yoho from GitHub Releases (curl -fsSL https://yohobuild.com | sh).
 # YOHO_VERSION pins a tag (default: latest). YOHO_INSTALL_DIR chooses the
 # directory (/usr/local/bin when writable, else ~/.local/bin).
 # Private repos: set GITHUB_TOKEN or GH_TOKEN. Never uses sudo.

@@ -3,7 +3,7 @@
 ## Install
 
 ```sh
-curl -fsSL https://yoho.sh | sh
+curl -fsSL https://yohobuild.com | sh
 ```
 
 That downloads the binary for this machine from GitHub Releases, checks its SHA-256 against `checksums.txt`, and installs it to `/usr/local/bin` when that directory is writable, otherwise `~/.local/bin`. The script never runs sudo; if the destination is not writable it prints the command to run. Pin a version with `YOHO_VERSION=v0.1.0` or choose a directory with `YOHO_INSTALL_DIR`. If the repository is private, set `GITHUB_TOKEN` or `GH_TOKEN` before running the installer.
