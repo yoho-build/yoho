@@ -59,6 +59,11 @@ type servicePlan struct {
 	ReleaseCommand []string             `json:"release_command,omitempty"`
 }
 
+// proxied reports whether the Service is switched through the Proxy: it has
+// x-yoho.proxy and at least one replica. A proxied Service scaled to zero is
+// converged by `compose up` like any other and its route is removed.
+func (sp servicePlan) proxied() bool { return sp.Proxy != nil && sp.Replicas > 0 }
+
 // validate checks what the compose runtime cannot do.
 func validate(d *plan.Deploy) error {
 	if len(d.Servers) != 1 {
@@ -250,10 +255,9 @@ func compile(d *plan.Deploy, server, generationDir string, svcSecrets map[string
 		}
 		p.Services[name] = s
 
-		replicas := s.GetScale()
-		if replicas < 1 {
-			replicas = 1
-		}
+		// deploy.replicas: 0 (or scale: 0) means no containers, as in
+		// compose; a proxied Service then has no route.
+		replicas := max(s.GetScale(), 0)
 		plans = append(plans, servicePlan{
 			Name:           name,
 			Image:          s.Image,

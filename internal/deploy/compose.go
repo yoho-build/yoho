@@ -81,7 +81,7 @@ func hostsList(d *plan.Deploy) string {
 // proxied Services, or Services joining the yoho network themselves (e.g.
 // cloudflared targeting http://yoho-proxy:80).
 func needsProxy(plans []servicePlan) bool {
-	return slices.ContainsFunc(plans, func(sp servicePlan) bool { return sp.Proxy != nil || sp.ProxyNetwork })
+	return slices.ContainsFunc(plans, func(sp servicePlan) bool { return sp.proxied() || sp.ProxyNetwork })
 }
 
 // Deploy implements plan.Runtime.
@@ -127,6 +127,14 @@ func (c Compose) Deploy(ctx context.Context, d *plan.Deploy) (_ *release.Release
 	if err != nil {
 		return nil, err
 	}
+	for _, v := range generated {
+		r.secretVals = append(r.secretVals, v)
+	}
+	for _, m := range svcSecrets {
+		for _, v := range m {
+			r.secretVals = append(r.secretVals, v)
+		}
+	}
 
 	generation := start.Format("20060102T150405Z") + "-" + d.Version
 	genDir := release.SecretsDir(d.App, d.Destination, generation)
@@ -147,7 +155,16 @@ func (c Compose) Deploy(ctx context.Context, d *plan.Deploy) (_ *release.Release
 	if err != nil {
 		return nil, err
 	}
+	if err := checkOwnership(ctx, h, d.App, d.Destination, plans); err != nil {
+		return nil, err
+	}
+	// Redeploying an unchanged Version (e.g. after rotating secrets) reuses
+	// the Release directory. Keep the deployed record to restore if this
+	// attempt fails, so rollback and plan still see the working config.
+	prevFiles := snapshotRelease(ctx, h, relDir)
+	committed := false
 	if err := writeReleaseFiles(ctx, h, relDir, composeYAML, plans); err != nil {
+		restoreRelease(ctx, h, relDir, prevFiles, r.logf)
 		return nil, err
 	}
 
@@ -164,7 +181,11 @@ func (c Compose) Deploy(ctx context.Context, d *plan.Deploy) (_ *release.Release
 		}
 	}
 	defer func() {
-		if err != nil {
+		switch {
+		case err == nil || committed:
+		case prevFiles != nil:
+			restoreRelease(ctx, h, relDir, prevFiles, r.logf)
+		default:
 			// Best effort: keep a record of the failed attempt.
 			_ = writeJSON(context.WithoutCancel(ctx), h, path.Join(relDir, "release.json"), rel)
 		}
@@ -190,9 +211,11 @@ func (c Compose) Deploy(ctx context.Context, d *plan.Deploy) (_ *release.Release
 	r.removeStaleRoutes(ctx, plans)
 
 	rel.Status = "deployed"
+	rel.ImageIDs = imageIDs(ctx, h, rel.Images)
 	if err := c.finish(ctx, d, r, rel); err != nil {
 		return nil, err
 	}
+	committed = true
 	pruneImages(ctx, r, d)
 	runtime := int(now().Sub(start).Round(time.Second) / time.Second)
 	if err := c.hook(ctx, d, "post-deploy", map[string]string{"YOHO_RUNTIME": strconv.Itoa(runtime)}); err != nil {
@@ -225,6 +248,46 @@ func writeReleaseFiles(ctx context.Context, h remote.Host, relDir string, compos
 		return fmt.Errorf("write compose_sha256: %w", err)
 	}
 	return writeJSON(ctx, h, path.Join(relDir, "plan.json"), plans)
+}
+
+// releaseFiles are the files of a Release directory that a redeploy of the
+// same Version rewrites.
+var releaseFiles = []string{"compose.yaml", "compose_sha256", "plan.json", "release.json"}
+
+// snapshotRelease returns the files of relDir when it holds a Release that
+// is not a failed attempt, else nil.
+func snapshotRelease(ctx context.Context, h remote.Host, relDir string) map[string][]byte {
+	rel, err := readRelease(ctx, h, path.Join(relDir, "release.json"))
+	if err != nil || rel.Status == "failed" {
+		return nil
+	}
+	snap := map[string][]byte{}
+	for _, f := range releaseFiles {
+		if b, err := h.ReadFile(ctx, path.Join(relDir, f), false); err == nil {
+			snap[f] = b
+		}
+	}
+	return snap
+}
+
+// restoreRelease writes a snapshotRelease back after a failed redeploy.
+// Best effort: the deploy error is what the operator needs to see.
+func restoreRelease(ctx context.Context, h remote.Host, relDir string, snap map[string][]byte, logf func(string, ...any)) {
+	if snap == nil {
+		return
+	}
+	ctx = context.WithoutCancel(ctx)
+	for _, f := range releaseFiles {
+		b, ok := snap[f]
+		if !ok {
+			continue
+		}
+		if err := h.WriteFile(ctx, path.Join(relDir, f), b, 0o600, false); err != nil {
+			logf("warning: could not restore %s of Release %s: %v", f, path.Base(relDir), err)
+			return
+		}
+	}
+	logf("kept the previous record of Release %s", path.Base(relDir))
 }
 
 func writeJSON(ctx context.Context, h remote.Host, p string, v any) error {
@@ -298,7 +361,13 @@ func (c Compose) Rollback(ctx context.Context, d *plan.Deploy, version string) (
 	prev, _ := h.Output(ctx, remote.Cmd{Script: "readlink " + remote.Quote(path.Join(dir, "current")) + " 2>/dev/null || true"})
 	prevVersion := path.Base(strings.TrimSpace(prev))
 
+	if err := checkOwnership(ctx, h, d.App, d.Destination, plans); err != nil {
+		return nil, err
+	}
 	r.logf("rolling back to %s (volumes, data and migrations are not reverted)", version)
+	if err := r.pinImages(ctx, rel.Images, rel.ImageIDs, version); err != nil {
+		return nil, err
+	}
 	if needsProxy(plans) {
 		if err := proxy.Boot(ctx, h, d.Proxy, r.out); err != nil {
 			return nil, err
@@ -307,6 +376,7 @@ func (c Compose) Rollback(ctx context.Context, d *plan.Deploy, version string) (
 	if err := r.cutover(ctx, plans); err != nil {
 		return nil, err
 	}
+	r.removeStaleRoutes(ctx, plans)
 
 	if prevVersion != "" && prevVersion != "." && prevVersion != version {
 		prevPath := path.Join(release.Dir(d.App, d.Destination, prevVersion), "release.json")

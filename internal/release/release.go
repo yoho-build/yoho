@@ -72,6 +72,11 @@ type Release struct {
 	Performer   string    `json:"performer"`
 	// Service -> image reference actually deployed (tag@digest when known).
 	Images map[string]string `json:"images"`
+	// Service -> local image ID on the Server when the Release was
+	// deployed. Tags are mutable (one Version built per Destination shares
+	// a tag; upstream tags move), so rollback re-points Yoho-built tags at
+	// these IDs and image pruning keeps them.
+	ImageIDs map[string]string `json:"image_ids,omitempty"`
 	// Secrets generation directory name used by this Release.
 	SecretsGeneration string `json:"secrets_generation"`
 	// Secret name -> fingerprint (HMAC-SHA256 truncated, keyed per Destination)

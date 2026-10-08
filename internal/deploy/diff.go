@@ -231,6 +231,9 @@ func (c Compose) Diff(ctx context.Context, d *plan.Deploy) ([]plan.Change, error
 	if err != nil {
 		return nil, err
 	}
+	if err := checkOwnership(ctx, h, d.App, d.Destination, plans); err != nil {
+		return nil, err
+	}
 	want, err := serviceEntries(composeYAML)
 	if err != nil {
 		return nil, err
@@ -282,6 +285,21 @@ func (c Compose) Diff(ctx context.Context, d *plan.Deploy) ([]plan.Change, error
 	}
 	for _, sp := range plans {
 		cs := byService[sp.Name]
+		if sp.Replicas == 0 {
+			// Scaled to zero: compose removes its containers.
+			running := 0
+			for _, ct := range cs {
+				if ct.State.Running {
+					running++
+				}
+			}
+			if running > 0 {
+				add("service", sp.Name, plan.ActionUpdate, false, fmt.Sprintf("replicas %d → 0", running))
+			} else {
+				add("service", sp.Name, plan.ActionNoop, false)
+			}
+			continue
+		}
 		if len(cs) == 0 {
 			rs := []string{"not deployed"}
 			if sp.Image != "" {
@@ -351,7 +369,7 @@ func (c Compose) Diff(ctx context.Context, d *plan.Deploy) ([]plan.Change, error
 		switch {
 		case len(reasons) == 0:
 			add("service", sp.Name, plan.ActionNoop, false)
-		case sp.Proxy != nil:
+		case sp.proxied():
 			add("service", sp.Name, plan.ActionUpdate, false, reasons...)
 		default:
 			add("service", sp.Name, plan.ActionReplace, true, reasons...)
@@ -377,7 +395,7 @@ func (c Compose) Diff(ctx context.Context, d *plan.Deploy) ([]plan.Change, error
 	}
 	wantRoutes := map[string]bool{}
 	for _, sp := range plans {
-		if sp.Proxy == nil {
+		if !sp.proxied() {
 			continue
 		}
 		name := RouteName(d.App, d.Destination, sp.Name)
@@ -391,6 +409,9 @@ func (c Compose) Diff(ctx context.Context, d *plan.Deploy) ([]plan.Change, error
 		}
 	}
 	for _, r := range StaleRoutes(routes, d.App, d.Destination, wantRoutes) {
+		if _, foreign := routeOwner(ctx, h, r, d.App, d.Destination); foreign {
+			continue
+		}
 		add("route", r.Service, plan.ActionDelete, false, "no longer matches a proxied Service")
 	}
 	return changes, nil

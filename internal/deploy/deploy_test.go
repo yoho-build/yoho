@@ -56,6 +56,8 @@ func respond(proxyErr error) func(string) (string, error) {
 			return "old1", nil
 		case strings.Contains(s, "{{.Name}}"):
 			return "/yoho-shop-production-web-3", nil
+		case strings.Contains(s, `{{.Label "yoho.app"}}`):
+			return "shop|production\nshop|production", nil
 		case strings.Contains(s, "docker ps -a --filter"):
 			return "old1 web\nnew1 web\nw9 worker", nil
 		case strings.Contains(s, "kamal-proxy-config"), strings.Contains(s, "docker container inspect"):

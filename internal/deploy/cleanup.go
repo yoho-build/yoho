@@ -26,11 +26,15 @@ func (r *runner) removeStaleRoutes(ctx context.Context, plans []servicePlan) {
 	}
 	keep := map[string]bool{}
 	for _, sp := range plans {
-		if sp.Proxy != nil {
+		if sp.proxied() {
 			keep[RouteName(r.app, r.dest, sp.Name)] = true
 		}
 	}
 	for _, rt := range StaleRoutes(routes, r.app, r.dest, keep) {
+		if o, foreign := routeOwner(ctx, r.h, rt, r.app, r.dest); foreign {
+			r.logf("keeping proxy route %s: it routes to %s", rt.Service, o)
+			continue
+		}
 		r.logf("removing stale proxy route %s", rt.Service)
 		if err := proxy.Remove(ctx, r.h, rt.Service); err != nil {
 			r.logf("warning: %v", err)
@@ -148,6 +152,11 @@ func RetainedImageRefs(ctx context.Context, h remote.Host, app string) (map[stri
 		}
 		for _, im := range rel.Images {
 			keep[canonicalImageRef(im)] = true
+		}
+		// The tag may have moved since (see Release.ImageIDs); keep the
+		// image the Release ran so rollback can re-tag it.
+		for _, id := range rel.ImageIDs {
+			keep[id] = true
 		}
 	}
 	return keep, nil

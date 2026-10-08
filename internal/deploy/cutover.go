@@ -12,6 +12,7 @@ import (
 
 	"github.com/yoho-build/yoho/internal/proxy"
 	"github.com/yoho-build/yoho/internal/remote"
+	"github.com/yoho-build/yoho/internal/secrets"
 )
 
 // composeCLI builds `docker compose` invocations for one compiled file.
@@ -38,6 +39,21 @@ type runner struct {
 	server    string
 	app, dest string
 	cc        composeCLI
+	// secretVals are the resolved and generated secret values of this
+	// deploy, masked in remote output that joins an error.
+	secretVals []string
+}
+
+// redact masks secret values in s.
+func (r *runner) redact(s string) string {
+	if len(r.secretVals) == 0 || s == "" {
+		return s
+	}
+	var b bytes.Buffer
+	w := secrets.NewRedactor(&b, r.secretVals...)
+	_, _ = w.Write([]byte(s))
+	_ = w.Flush()
+	return b.String()
 }
 
 func (r *runner) logf(format string, a ...any) {
@@ -110,7 +126,9 @@ func (r *runner) releaseCommands(ctx context.Context, plans []servicePlan) error
 		// Output is kept and shown only on failure, so migrations don't flood the deploy log.
 		var buf bytes.Buffer
 		if err := r.h.Run(ctx, remote.Cmd{Script: r.cc.cmd(args...) + " 2>&1", Stdout: &buf}); err != nil {
-			return fmt.Errorf("release command for %s failed, aborting (the previous version keeps running): %w\n%s", sp.Name, err, tailLines(buf.String(), 20))
+			// The output joins the error, which the CLI prints outside the
+			// progress redactor; the command can see every mounted secret.
+			return fmt.Errorf("release command for %s failed, aborting (the previous version keeps running): %w\n%s", sp.Name, err, r.redact(tailLines(buf.String(), 20)))
 		}
 	}
 	return nil
@@ -123,7 +141,7 @@ func (r *runner) releaseCommands(ctx context.Context, plans []servicePlan) error
 func (r *runner) cutover(ctx context.Context, plans []servicePlan) error {
 	var plain []string
 	for _, sp := range plans {
-		if sp.Proxy == nil {
+		if !sp.proxied() {
 			plain = append(plain, sp.Name)
 		}
 	}
@@ -134,7 +152,7 @@ func (r *runner) cutover(ctx context.Context, plans []servicePlan) error {
 		}
 	}
 	for _, sp := range plans {
-		if sp.Proxy != nil {
+		if sp.proxied() {
 			if err := r.cutoverProxied(ctx, sp); err != nil {
 				return err
 			}
@@ -213,7 +231,7 @@ func (r *runner) cutoverProxied(ctx context.Context, sp servicePlan) error {
 		DrainTimeout:  time.Duration(sp.Proxy.DrainTimeout) * time.Second,
 	})
 	if err != nil {
-		return fail(err)
+		return r.proxySwitchFailed(ctx, sp.Name, route, targets, err, fail)
 	}
 	r.logf("switched proxy route %s", route)
 
@@ -225,6 +243,33 @@ func (r *runner) cutoverProxied(ctx context.Context, sp servicePlan) error {
 		}
 	}
 	return nil
+}
+
+// proxySwitchFailed handles a failed `kamal-proxy deploy`. When kamal-proxy
+// itself refused (target unhealthy), the route still points at the old
+// containers and the new ones are removed. But a cancelled deploy (Ctrl-C,
+// lost SSH) only stops waiting: kamal-proxy may have switched, or may still
+// switch, to the new containers. Removing them would leave the route pointing
+// at deleted containers, so they are kept unless the route is known to
+// target only the old ones after kamal-proxy finished.
+func (r *runner) proxySwitchFailed(ctx context.Context, svc, route string, targets []string, err error, fail func(error) error) error {
+	cctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+	defer cancel()
+	routes, lerr := proxy.List(cctx, r.h)
+	switched := false
+	for _, rt := range routes {
+		if rt.Service != route {
+			continue
+		}
+		for _, t := range strings.Split(rt.Target, ",") {
+			switched = switched || slices.Contains(targets, strings.TrimSpace(t))
+		}
+	}
+	if lerr == nil && !switched && ctx.Err() == nil {
+		return fail(err)
+	}
+	r.logf("warning: proxy route %s may already target the new %s container(s); old and new containers are left running", route, svc)
+	return fmt.Errorf("%w (the new %s containers were kept because the proxy route may use them; run the deploy again to finish)", err, svc)
 }
 
 // waitHealthyScript waits until each container runs and its healthcheck (if

@@ -34,3 +34,5 @@ yoho proxy logs
 ## Rollback
 
 `yoho releases` lists Releases (image digests and compiled compose). `yoho rollback VERSION` redeploys one with the same zero-downtime cutover. Volumes and migrations are not reverted. The last `retain_releases` (5) are kept.
+
+Each Release records the image IDs it ran. Image tags can move (the same Version built for another Destination on the same Server, or a rebuild), so rollback points a Yoho-built tag back at the recorded image before the cutover, and fails if that image is gone. Third-party tags such as `postgres:17` are not retagged; a moved one is a warning. Rollback also removes the routes of Services that the Release does not proxy.
