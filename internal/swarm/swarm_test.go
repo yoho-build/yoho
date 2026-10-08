@@ -425,3 +425,51 @@ func TestPruneKeepsRetainedSecrets(t *testing.T) {
 		t.Error("v1 release dir should be pruned with retain 1")
 	}
 }
+
+func TestWorkerNeverCreatesLocalNetwork(t *testing.T) {
+	withRoot(t)
+	fastPolling(t)
+	sim := newSim()
+	mgr := newFake(sim)
+	edge := &fakeHost{name: "edge", local: &remote.Local{}, respond: sim.respond}
+	d := testDeploy(t, mgr, nil)
+	d.Servers = append(d.Servers, plan.NamedHost{Name: "edge", Server: config.Server{SSH: "yoho@203.0.113.11"}, Host: edge})
+	if _, err := (Runtime{}).Deploy(context.Background(), d); err != nil {
+		t.Fatal(err)
+	}
+	for _, h := range []*fakeHost{mgr, edge} {
+		if indexOf(h, "docker network create yoho") >= 0 || indexOf(h, "docker network create "+"'yoho'") >= 0 {
+			t.Errorf("%s created a plain yoho network:\n%s", h.name, h.all())
+		}
+		if indexOf(h, "docker run -d", "yoho-proxy") < 0 {
+			t.Errorf("%s did not boot the proxy", h.name)
+		}
+	}
+}
+
+func TestStaleBridgeRemoval(t *testing.T) {
+	var out bytes.Buffer
+	r := &runner{out: &out}
+	edge := &fakeHost{name: "edge", local: &remote.Local{}, respond: func(string) (string, error) { return "bridge|local\n", nil }}
+	if err := r.removeStaleBridge(context.Background(), plan.NamedHost{Name: "edge", Host: edge}); err != nil {
+		t.Fatal(err)
+	}
+	all := edge.all()
+	for _, want := range []string{"docker rm -f yoho-proxy", "docker network rm yoho"} {
+		if !strings.Contains(all, want) {
+			t.Errorf("script missing %q:\n%s", want, all)
+		}
+	}
+	if !strings.Contains(out.String(), "warning: removed node-local docker network yoho (bridge|local)") {
+		t.Errorf("no warning: %q", out.String())
+	}
+
+	// Other containers attached: the script exits 3 and we explain the migration.
+	busy := &fakeHost{name: "edge", local: &remote.Local{}, respond: func(string) (string, error) {
+		return "bridge|local: web-1", &remote.ExitError{Code: 3}
+	}}
+	err := r.removeStaleBridge(context.Background(), plan.NamedHost{Name: "edge", Host: busy})
+	if err == nil || !strings.Contains(err.Error(), "needs downtime") || !strings.Contains(err.Error(), "web-1") {
+		t.Errorf("err = %v", err)
+	}
+}

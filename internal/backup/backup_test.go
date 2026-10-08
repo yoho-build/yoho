@@ -82,7 +82,7 @@ func dockerResponder(extra func(string) (string, error)) func(context.Context, s
 			return "cid123", nil
 		case strings.HasPrefix(s, "docker volume ls"):
 			return "yoho-shop-production_pgdata", nil
-		case strings.HasPrefix(s, "stat -c"):
+		case strings.HasPrefix(s, "wc -c <"):
 			return "4096", nil
 		}
 		if extra != nil {
@@ -354,6 +354,54 @@ func TestListArchivesRclone(t *testing.T) {
 	}
 }
 
+func TestListArchivesPOSIXScript(t *testing.T) {
+	dir := t.TempDir() + "/my backups"
+	if err := os.Mkdir(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for name, n := range map[string]int{
+		"yoho-shop-production-20261001T030000Z.tar.gz": 7,
+		"yoho-shop-production-20261008T030000Z.tar.gz": 12,
+		"unrelated.txt": 3,
+	} {
+		if err := os.WriteFile(dir+"/"+name, make([]byte, n), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var script string
+	rec := &recordingLocal{Local: remote.Local{HostName: "local"}, script: &script}
+	es, err := List(context.Background(), ListOptions{App: "shop", Destination: "production", Host: rec,
+		Target: config.BackupTarget{Type: "archive", Format: "tar.gz", Repository: dir}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(es) != 2 || es[0].Size != 12 || es[1].Size != 7 {
+		t.Fatalf("entries %+v", es)
+	}
+	for _, gnu := range []string{"-printf", "stat -c", "find "} {
+		if strings.Contains(script, gnu) {
+			t.Errorf("script uses %q:\n%s", gnu, script)
+		}
+	}
+	// Missing directory lists nothing.
+	es, err = List(context.Background(), ListOptions{App: "shop", Destination: "production", Host: rec,
+		Target: config.BackupTarget{Type: "archive", Format: "tar.gz", Repository: dir + "/missing"}})
+	if err != nil || len(es) != 0 {
+		t.Fatalf("missing dir: %v %+v", err, es)
+	}
+}
+
+// recordingLocal runs scripts locally and remembers the last one.
+type recordingLocal struct {
+	remote.Local
+	script *string
+}
+
+func (r *recordingLocal) Output(ctx context.Context, c remote.Cmd) (string, error) {
+	*r.script = c.Script
+	return r.Local.Output(ctx, c)
+}
+
 func TestRestoreRequiresConfirm(t *testing.T) {
 	h := &fakeHost{}
 	_, err := Restore(context.Background(), RestoreOptions{App: "shop", Destination: "production", Host: h, ID: "latest"})
@@ -405,7 +453,7 @@ func TestScriptsParse(t *testing.T) {
 			if strings.Contains(s, "r backup --json") {
 				return `{"message_type":"summary","snapshot_id":"abcdef0123"}`, nil
 			}
-			if strings.Contains(s, "lsf") || strings.Contains(s, "find '/srv/b'") {
+			if strings.Contains(s, "lsf") || strings.Contains(s, "for f in '/srv/b'/") {
 				return "yoho-shop-production-20261001T030000Z.7z 1\nyoho-shop-production-20261002T030000Z.7z 1\nyoho-shop-production-20261003T030000Z.7z 1\n" +
 					"yoho-shop-production-20261001T030000Z.tar.gz 1\nyoho-shop-production-20261002T030000Z.tar.gz 1\nyoho-shop-production-20261003T030000Z.tar.gz 1", nil
 			}

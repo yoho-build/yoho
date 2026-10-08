@@ -222,3 +222,58 @@ func TestInvalidInputsRejected(t *testing.T) {
 		}
 	}
 }
+
+func TestApplySkipsDependentOfDeclinedStep(t *testing.T) {
+	h := host(ubuntu, "root")
+	plan, err := Plan(context.Background(), h, Config{AuthorizedKeys: []string{"ssh-ed25519 AAAAC3Nz op@laptop"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	h.cmds = nil
+	var asked []string
+	var out bytes.Buffer
+	err = Apply(context.Background(), h, plan, func(p PlannedStep) bool {
+		asked = append(asked, p.Step.ID)
+		return p.Step.ID != "user"
+	}, &out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, id := range asked {
+		if id == "dirs" {
+			t.Fatalf("prompted for dirs after declined user: %v", asked)
+		}
+	}
+	if !strings.Contains(out.String(), "skip Yoho directories under /var/lib/yoho (owner yoho, 0700): needs Deploy user yoho") {
+		t.Fatalf("output:\n%s", out.String())
+	}
+	for _, c := range h.cmds {
+		if strings.Contains(c.Script, "install -d") || strings.Contains(c.Script, "useradd") {
+			t.Fatalf("ran skipped step: %s", c.Script)
+		}
+	}
+}
+
+func TestApplyAllRunsUserBeforeDirs(t *testing.T) {
+	h := host(ubuntu, "root")
+	plan, err := Plan(context.Background(), h, Config{AuthorizedKeys: []string{"ssh-ed25519 AAAAC3Nz op@laptop"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	h.cmds = nil
+	if err := Apply(context.Background(), h, plan, func(PlannedStep) bool { return true }, nil); err != nil {
+		t.Fatal(err)
+	}
+	u, d := -1, -1
+	for i, c := range h.cmds {
+		if strings.Contains(c.Script, "useradd") {
+			u = i
+		}
+		if strings.Contains(c.Script, "install -d -m 0700 -o 'yoho'") {
+			d = i
+		}
+	}
+	if u < 0 || d < 0 || u > d {
+		t.Fatalf("user at %d, dirs at %d", u, d)
+	}
+}

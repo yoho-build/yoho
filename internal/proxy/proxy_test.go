@@ -165,3 +165,17 @@ func TestNeedsBoot(t *testing.T) {
 		}
 	}
 }
+
+func TestBootWithSkipNetwork(t *testing.T) {
+	h := &fakeHost{}
+	if err := BootWith(context.Background(), h, config.ProxyConfig{}, nil, BootOptions{SkipNetwork: true}); err != nil {
+		t.Fatal(err)
+	}
+	all := strings.Join(h.scripts, "\n")
+	if strings.Contains(all, "docker network") {
+		t.Errorf("network must be left alone:\n%s", all)
+	}
+	if !strings.Contains(all, "docker run -d") {
+		t.Errorf("proxy not booted:\n%s", all)
+	}
+}

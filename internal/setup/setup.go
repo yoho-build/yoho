@@ -47,6 +47,9 @@ type OSInfo struct {
 type Step struct {
 	ID    string
 	Title string
+	// Needs lists step IDs that must be satisfied first: either not needed
+	// or applied. Apply skips the step when one was declined or skipped.
+	Needs []string
 	// checkSudo: Check itself needs privileges. Apply always does.
 	checkSudo bool
 	check     func(ctx context.Context, h remote.Host) (needed bool, detail string, err error)
@@ -201,17 +204,33 @@ func Apply(ctx context.Context, h remote.Host, steps []PlannedStep, confirm func
 		out = io.Discard
 	}
 	var blocked []string
+	// unmet: needed steps that were declined, blocked or skipped.
+	unmet := map[string]*Step{}
 	for _, ps := range steps {
 		if !ps.Needed {
+			continue
+		}
+		var missing *Step
+		for _, id := range ps.Step.Needs {
+			if m := unmet[id]; m != nil {
+				missing = m
+				break
+			}
+		}
+		if missing != nil {
+			unmet[ps.Step.ID] = ps.Step
+			fmt.Fprintf(out, "skip %s: needs %s\n", ps.Step.Title, missing.Title)
 			continue
 		}
 		if ps.Blocked != "" {
 			fmt.Fprintf(out, "skip %s: %s\n", ps.Step.Title, ps.Blocked)
 			blocked = append(blocked, ps.Step.ID)
+			unmet[ps.Step.ID] = ps.Step
 			continue
 		}
 		if confirm != nil && !confirm(ps) {
 			fmt.Fprintf(out, "skip %s\n", ps.Step.Title)
+			unmet[ps.Step.ID] = ps.Step
 			continue
 		}
 		fmt.Fprintf(out, "applying %s\n", ps.Step.Title)
@@ -405,7 +424,7 @@ func dirsStep(user string) *Step {
 	root := release.Root
 	dirs := []string{root, path.Join(root, "apps"), path.Join(root, "backups"), path.Join(root, "jobs")}
 	return &Step{
-		ID: "dirs", Title: "Yoho directories under " + root + " (owner " + user + ", 0700)",
+		ID: "dirs", Needs: []string{"user"}, Title: "Yoho directories under " + root + " (owner " + user + ", 0700)",
 		check: func(ctx context.Context, h remote.Host) (bool, string, error) {
 			out, err := h.Output(ctx, remote.Cmd{Script: "for d in " + remote.QuoteArgs(dirs...) + `; do s=$(stat -c '%U %a' "$d" 2>/dev/null || true); [ "$s" = ` +
 				remote.Quote(user+" 700") + ` ] || echo "create $d"; done`, Sudo: true})

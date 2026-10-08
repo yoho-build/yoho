@@ -75,6 +75,12 @@ func (a *app) runtime() plan.Runtime {
 	return deploy.Compose{}
 }
 
+// tunnelOptions: on Swarm the swarm runner owns the attachable overlay
+// network, so the tunnel path must not create a node-local `yoho` bridge.
+func (a *app) tunnelOptions() proxy.BootOptions {
+	return proxy.BootOptions{SkipNetwork: a.dest.Runtime == "swarm"}
+}
+
 // swarmRuntime is set by the swarm package wiring when available.
 var swarmRuntime func() plan.Runtime
 
@@ -361,7 +367,7 @@ func (a *app) reconcileTunnel(ctx context.Context, s *session) (string, error) {
 			token, _ = s.store.Get(t.TokenSecret)
 		}
 		step := u.Step(h.Name, "Cloudflare Tunnel")
-		st, terr := proxy.EnsureTunnel(ctx, h.Host, *t, token, step.Output())
+		st, terr := proxy.EnsureTunnelWith(ctx, h.Host, *t, token, step.Output(), a.tunnelOptions())
 		if terr != nil {
 			step.Fail(terr, "the App is deployed; fix the tunnel and run `yoho tunnel up`")
 			return urls, &silentError{terr}
@@ -544,22 +550,47 @@ func (a *app) resolveVersion(ctx context.Context, d *plan.Deploy, v string) (str
 	if err != nil {
 		return "", err
 	}
-	var match []string
-	for _, r := range rels {
-		if r.Version == v {
-			return v, nil
-		}
-		if strings.HasPrefix(r.Version, v) {
-			match = append(match, r.Version)
+	versions := make([]string, len(rels))
+	for i, r := range rels {
+		versions[i] = r.Version
+	}
+	got, err := matchVersion(versions, v)
+	if err != nil {
+		return "", fmt.Errorf("%w on %s; see `yoho releases`", err, a.destName)
+	}
+	return got, nil
+}
+
+// matchVersion resolves v against versions: exact full match, then exact
+// displayed short form, then unique prefix.
+func matchVersion(versions []string, v string) (string, error) {
+	for _, x := range versions {
+		if x == v {
+			return x, nil
 		}
 	}
-	switch len(match) {
-	case 1:
-		return match[0], nil
-	case 0:
-		return "", fmt.Errorf("no Release %q on %s; see `yoho releases`", v, a.destName)
+	var short, prefix []string
+	for _, x := range versions {
+		if shortVersion(x) == v {
+			short = append(short, x)
+		}
+		if strings.HasPrefix(x, v) {
+			prefix = append(prefix, x)
+		}
 	}
-	return "", fmt.Errorf("version prefix %q is ambiguous: %s", v, strings.Join(match, ", "))
+	for _, m := range [][]string{short, prefix} {
+		if len(m) == 1 {
+			return m[0], nil
+		}
+		if len(m) > 1 {
+			disp := make([]string, len(m))
+			for i, x := range m {
+				disp[i] = shortVersion(x)
+			}
+			return "", fmt.Errorf("version prefix %q is ambiguous: %s", v, strings.Join(disp, ", "))
+		}
+	}
+	return "", fmt.Errorf("no Release %q", v)
 }
 
 func releasesCmd(g *globals) *cobra.Command {

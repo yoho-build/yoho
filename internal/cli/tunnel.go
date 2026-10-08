@@ -65,7 +65,7 @@ func tunnelCmd(g *globals) *cobra.Command {
 			var urls []string
 			for _, h := range hosts {
 				step := a.ui.Step(h.Name, "Start %s (%s)", proxy.TunnelContainer, mode)
-				st, err := proxy.EnsureTunnel(ctx, h.Host, cfg, token, step.Output())
+				st, err := proxy.EnsureTunnelWith(ctx, h.Host, cfg, token, step.Output(), a.tunnelOptions())
 				if err != nil {
 					step.Fail(err, "check `yoho tunnel status`, outbound access to Cloudflare (port 7844) and that the token is valid")
 					return &silentError{err}

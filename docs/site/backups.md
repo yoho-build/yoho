@@ -35,17 +35,17 @@ backups:
 ```
 
 - `restic` (default): encrypted, deduplicated.
-- `archive`: files at a path or rclone remote in `tar.gz`, AES-256 `zip`, or `7z` (never ZipCrypto); `keep_last` trims old files.
+- `archive`: files at a path or rclone remote in `tar.gz` (default `format`), AES-256 `zip`, or `7z` (never ZipCrypto); set `format` to choose; `keep_last` trims old files.
 
 ## Commands
 
 ```sh
-yoho backup run [JOB]        # take a Backup now
-yoho backup list             # stored Backups, newest first
-yoho backup restore [ID]     # restore; confirmation required
+yoho backup run [JOB]                      # take a Backup now
+yoho backup list [JOB]                     # stored Backups, newest first
+yoho backup restore ID [--job JOB] [-y]    # restore; confirmation required unless -y
 ```
 
-Run `yoho backup <cmd> --help` for flags. Hooks `pre-backup`, `post-backup`, `pre-restore`, `post-restore` run on your machine. Generated secrets are included in encrypted Backups.
+`JOB` defaults to the Destination's only Backup job (several jobs: name one; `restore` takes `--job`). Pass `-d` to pick the Destination. `ID` is the id shown by `backup list`; `latest` selects the newest. Hooks `pre-backup`, `post-backup`, `pre-restore`, `post-restore` run on your machine and also get `YOHO_BACKUP_JOB`, `YOHO_BACKUP_TARGET` and (after the Backup, or for a restore) `YOHO_BACKUP_ID`.
 
 ## Swarm
 

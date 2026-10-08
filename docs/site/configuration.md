@@ -17,13 +17,13 @@ Validate with `yoho config check`; print the resolved file with `yoho config sho
 | `servers.<name>.sudo` | Use `sudo -n` for privileged steps (setup, schedule install). |
 | `servers.<name>.root` | State directory on the Server. Default `/var/lib/yoho`. |
 | `servers.<name>.private_address`, `labels` | Reserved for Roles / Swarm placement. |
-| `destinations.<name>.servers` | Required. Exactly one for the compose runtime; several for swarm. |
+| `destinations.<name>.servers` | Required. Exactly one for the compose runtime; several for swarm (first is the manager; all share one `root`). |
 | `destinations.<name>.runtime` | `compose` (default) or `swarm`. Switching causes downtime. |
 | `destinations.<name>.env` | Non-secret variables for compose interpolation (image tags, ports). |
 | `destinations.<name>.proxy` | Overrides the top-level `proxy` for this Destination. |
 | `builder.location` | `local` (default), `remote` (dedicated build Server), `server` (build on the Destination's Server). |
 | `builder.engine` | `auto` (Apple `container` on Apple silicon if installed, else Docker), `docker`, `container`. |
-| `builder.remote` | SSH target when `location: remote`. |
+| `builder.remote` | SSH target; required when `location: remote`. |
 | `builder.platforms` | e.g. `[linux/amd64]`. Default: the Server's architecture. |
 | `builder.secrets` | Keys passed to buildx as `--secret id=KEY,env=KEY`. |
 | `builder.exclude` | Paths excluded when syncing source for `location: server`. |
@@ -34,7 +34,7 @@ Validate with `yoho config check`; print the resolved file with `yoho config sho
 | `proxy.image` | kamal-proxy image, pinned by default. |
 | `proxy.http_port`, `https_port` | Published host ports; default 80/443; `0` disables publishing. |
 | `proxy.bind` | Bind address, e.g. `127.0.0.1`. |
-| `proxy.tunnel` | Managed Cloudflare Tunnel; see [Cloudflare Tunnel](cloudflare-tunnel.md). |
+| `proxy.tunnel` | Managed Cloudflare Tunnel: `token_secret` (empty or `tunnel: {}` = Quick Tunnel), `image`, `replicas` (default 1). See [Cloudflare Tunnel](cloudflare-tunnel.md). |
 | `backups.targets.<n>` | `type` (`restic` default, `archive`), `repository`, `format` (`tar.gz`, `zip`, `7z`), `password_secret`, `env_secrets`, `keep_last`. |
 | `backups.jobs.<n>` | `destination`, `services`, `target`, `schedule` (systemd `OnCalendar`; empty = on demand). |
 | `setup` | `user` (default `yoho`), `authorized_keys`, `packages`, `firewall`, `allow_ports`, `auto_updates`, `swap`, `timezone`. |
@@ -43,7 +43,7 @@ Validate with `yoho config check`; print the resolved file with `yoho config sho
 
 ## Destinations
 
-`production` is the default Destination. `-d` selects another; when `-d` is omitted, `YOHO_DESTINATION` is used.
+`production` is the default Destination. `-d` (or `--destination`) selects another; when `-d` is omitted, `YOHO_DESTINATION` is used.
 
 Resolution order:
 
@@ -53,7 +53,7 @@ Resolution order:
 4. the only Destination
 5. otherwise Yoho errors: several Destinations and `production` is not defined (`choose one with -d`)
 
-An optional overlay next to the Yoho file, `yoho.<destination>.<ext>` (`yml`, `yaml`, `toml`, `json`, or `jsonc`), is deep-merged over the base before decoding. Maps merge recursively; scalars and lists replace. More than one overlay for the same Destination is an error. `yoho config show` prints the selected Destination and overlay path to stderr.
+An optional overlay next to the Yoho file, `yoho.<destination>.<ext>` (`yml`, `yaml`, `toml`, `json`, or `jsonc`), is deep-merged over the base before decoding. Maps merge recursively; scalars and lists replace. More than one overlay for the same Destination is an error. `yoho config show` prints the selected Destination and overlay path to stderr. The secrets file `.yoho/secrets.<destination>` is layered over `.yoho/secrets` the same way.
 
 Compose files follow the same idea. After the base files are resolved, Yoho also loads `name.<destination>.ext` when it exists (`compose.yaml` and `compose.staging.yaml` for `-d staging`) and appends those overlays so they override.
 

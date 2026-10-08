@@ -14,7 +14,7 @@ Always run `yoho config check` after editing config. Use `--json` (NDJSON events
 | Kamal | Yoho |
 |---|---|
 | `config/deploy.yml` | `yoho.yml` (where/how) + `x-yoho` on each compose Service |
-| `deploy.<dest>.yml`, `-d dest` | `destinations:` in `yoho.yml`, `-d dest` |
+| `deploy.<dest>.yml`, `-d dest` | `destinations:` in `yoho.yml`, `-d dest` (or `YOHO_DESTINATION`; default `production`); optional overlays `yoho.<dest>.yml` and `compose.<dest>.yaml` |
 | roles | Not yet (Roles are planned); one Server per Destination, whole compose app |
 | accessories | Stateful Services: `x-yoho.stateful: true`, pinned to one Server |
 | `.kamal/secrets` | `.yoho/secrets` (+ `.yoho/secrets.<destination>`), same dotenv with `$(...)` |
@@ -50,19 +50,21 @@ yoho schema [--ext]               # JSON Schema
 yoho builder status | setup [-y]  # local Builder (Apple container on Apple silicon)
 yoho secrets list                 # keys, sources, lengths (no values)
 yoho secrets print KEY --reveal   # TTY only
-yoho setup                        # provision a Server (interactive)
-yoho deploy [--skip-build] [--version V]
+yoho setup [--plan] [-y] [--containerd-image-store]   # provision Servers (interactive)
+yoho plan [--version V] [--detailed-exitcode]   # read-only diff; exit 2 = changes
+yoho apply [--auto-approve] [--skip-build] [--version V]   # plan, confirm, deploy
+yoho deploy [--skip-build] [--version V]   # apply --auto-approve without the plan
 yoho releases ; yoho rollback VERSION
 yoho app ps | logs [SERVICE...] [-f] [-n N] | exec SERVICE -- CMD...
 yoho proxy boot | status | logs
 yoho tunnel up | status | down    # Cloudflare Tunnel (Quick Tunnel when no token)
-yoho backup run | list | restore
-yoho schedule install | status | remove
-yoho swarm init | join | status
-yoho skill install | print
+yoho backup run [JOB] | list [JOB] | restore ID [--job JOB] [-y]   # ID may be "latest"
+yoho schedule install [JOB...] [--binary PATH] | status | remove [JOB...]
+yoho swarm init [-y] | join [-y] | status
+yoho skill install [--dir DIR] [--agent claude|codex|all] | print
 ```
 
-Global flags: `-c/--config`, `-d/--destination`, `--json`, `-v/--verbose`. Check `yoho <cmd> --help` for flags of newer commands.
+Global flags: `-c/--config`, `-d/--destination` (default `$YOHO_DESTINATION`, then `production`, then the only Destination), `--json`, `-v/--verbose`. Check `yoho <cmd> --help` for all flags. `apply` refuses without a terminal unless `--auto-approve`; `--json` requires it.
 
 ## Safety rules
 
@@ -70,7 +72,7 @@ Global flags: `-c/--config`, `-d/--destination`, `--json`, `-v/--verbose`. Check
 - Never put secrets in compose `${VAR}` interpolation, in `environment:` values, in argv, or in the repo; `yoho config check` rejects `${VAR}` secrets. Declare them in `x-yoho.secrets` and keep values in `.yoho/secrets` refs (`$(op read ...)`) or `secrets.values`.
 - Do not print secret values; use `yoho secrets list`. `secrets print` needs `--reveal` and a terminal.
 - Rollback does not revert volumes or migrations. Take a `yoho backup run` before risky releases.
-- Run `yoho config check` before `yoho deploy`; deploy to staging first when a Destination exists.
+- Run `yoho config check` and `yoho plan` before `yoho deploy`; deploy to staging first when a Destination exists.
 - Parse output with `--json`, never by scraping human output.
 - Switching a Destination between `compose` and `swarm` runtime causes downtime.
 

@@ -148,6 +148,23 @@ func TestEnsureTunnelQuickCreates(t *testing.T) {
 	_ = st
 }
 
+func TestEnsureTunnelSkipNetwork(t *testing.T) {
+	fastPoll(t)
+	for _, skip := range []bool{false, true} {
+		h := &tunnelFake{logs: quickLogs, containers: map[string]string{}}
+		if _, err := EnsureTunnelWith(context.Background(), h, config.TunnelConfig{}, "", nil, BootOptions{SkipNetwork: skip}); err != nil {
+			t.Fatal(err)
+		}
+		all := strings.Join(h.scripts, "\n")
+		if got := strings.Contains(all, "docker network"); got == skip {
+			t.Errorf("SkipNetwork=%v: docker network used=%v\n%s", skip, got, all)
+		}
+		if !strings.Contains(all, "docker run -d") {
+			t.Errorf("connector not started:\n%s", all)
+		}
+	}
+}
+
 func TestEnsureTunnelQuickKeepsMatching(t *testing.T) {
 	fastPoll(t)
 	h := &tunnelFake{logs: quickLogs, containers: map[string]string{TunnelContainer: tunnelHash(DefaultTunnelImage, "")}}

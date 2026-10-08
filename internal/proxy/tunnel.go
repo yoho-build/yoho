@@ -221,6 +221,13 @@ func waitFor(ctx context.Context, host remote.Host, name string, limit time.Dura
 // a single Quick Tunnel is started and its URL returned in the status; the
 // container is kept while unchanged so the URL stays stable. Idempotent.
 func EnsureTunnel(ctx context.Context, host remote.Host, cfg config.TunnelConfig, token string, out io.Writer) (*TunnelStatus, error) {
+	return EnsureTunnelWith(ctx, host, cfg, token, out, BootOptions{})
+}
+
+// EnsureTunnelWith is EnsureTunnel with options. SkipNetwork is for Swarm:
+// the attachable overlay already exists cluster-wide, and creating `yoho`
+// on a worker would make a conflicting node-local bridge.
+func EnsureTunnelWith(ctx context.Context, host remote.Host, cfg config.TunnelConfig, token string, out io.Writer, opts BootOptions) (*TunnelStatus, error) {
 	if out == nil {
 		out = io.Discard
 	}
@@ -237,8 +244,10 @@ func EnsureTunnel(ctx context.Context, host remote.Host, cfg config.TunnelConfig
 	}
 	image := tunnelImage(cfg)
 	want := tunnelHash(image, token)
-	if err := EnsureNetwork(ctx, host); err != nil {
-		return nil, err
+	if !opts.SkipNetwork {
+		if err := EnsureNetwork(ctx, host); err != nil {
+			return nil, err
+		}
 	}
 	if !quick {
 		if err := host.WriteFile(ctx, TokenEnvPath(), []byte("TUNNEL_TOKEN="+token+"\n"), 0o600, false); err != nil {

@@ -176,3 +176,21 @@ func TestLoadForDestinationMultipleOverlays(t *testing.T) {
 		t.Fatalf("got %v", err)
 	}
 }
+
+func TestDestNameNoDestinations(t *testing.T) {
+	c := &Config{Servers: map[string]Server{"web2": {}, "web1": {}}}
+	_, err := c.DestName("")
+	want := "no Destinations defined: add destinations.production.servers: [web1, web2] to the Yoho file"
+	if err == nil || err.Error() != want {
+		t.Fatalf("err %v", err)
+	}
+	dir := t.TempDir()
+	p := filepath.Join(dir, "yoho.yaml")
+	if err := os.WriteFile(p, []byte("servers:\n  web1:\n    ssh: u@h\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	_, _, _, err = LoadForDestination(p, "")
+	if err == nil || !strings.Contains(err.Error(), "servers: [web1] to "+p) {
+		t.Fatalf("err %v", err)
+	}
+}

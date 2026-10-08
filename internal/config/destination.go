@@ -1,6 +1,7 @@
 package config
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -34,6 +35,10 @@ func LoadForDestination(path, destination string) (cfg *Config, dest string, ove
 	}
 	dest, err = base.DestName(destination)
 	if err != nil {
+		var nd *NoDestinationsError
+		if errors.As(err, &nd) {
+			nd.File = path
+		}
 		return nil, "", "", err
 	}
 	overlay, err = findDestinationOverlay(filepath.Dir(path), dest)

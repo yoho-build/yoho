@@ -102,7 +102,7 @@ See `examples/basic` for a fuller file.
 |---|---|
 | `init`, `config check\|show`, `schema [--ext]` | create and validate config |
 | `setup` | provision a Server |
-| `deploy`, `releases`, `rollback VERSION` | release lifecycle |
+| `plan`, `apply`, `deploy`, `releases`, `rollback VERSION` | review and release lifecycle |
 | `app ps\|logs\|exec` | inspect the running App |
 | `proxy boot\|status\|logs`, `tunnel up\|status\|down` | Proxy and Cloudflare Tunnel |
 | `secrets list\|print` | inspect secrets |
@@ -111,7 +111,7 @@ See `examples/basic` for a fuller file.
 | `builder status\|setup` | local Builder |
 | `skill install\|print` | agent skill |
 
-Global flags: `-c/--config`, `-d/--destination`, `--json`, `-v/--verbose`.
+Global flags: `-c/--config`, `-d/--destination` (default: `$YOHO_DESTINATION`, then `production`, then the only Destination), `--json`, `-v/--verbose`.
 
 ## Docs
 

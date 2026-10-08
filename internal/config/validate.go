@@ -156,6 +156,9 @@ func (c *Config) DestName(name string) (string, error) {
 			return "production", nil
 		}
 		keys := sortedKeys(c.Destinations)
+		if len(keys) == 0 {
+			return "", &NoDestinationsError{Servers: sortedKeys(c.Servers)}
+		}
 		if len(keys) == 1 {
 			return keys[0], nil
 		}
@@ -165,4 +168,23 @@ func (c *Config) DestName(name string) (string, error) {
 		return "", fmt.Errorf("unknown Destination %q (have: %s)", name, strings.Join(sortedKeys(c.Destinations), ", "))
 	}
 	return name, nil
+}
+
+// NoDestinationsError means the Yoho file defines no Destinations at all.
+// File is filled in by the loader when known.
+type NoDestinationsError struct {
+	Servers []string
+	File    string
+}
+
+func (e *NoDestinationsError) Error() string {
+	file := e.File
+	if file == "" {
+		file = "the Yoho file"
+	}
+	names := "<server names>"
+	if len(e.Servers) > 0 {
+		names = strings.Join(e.Servers, ", ")
+	}
+	return fmt.Sprintf("no Destinations defined: add destinations.production.servers: [%s] to %s", names, file)
 }

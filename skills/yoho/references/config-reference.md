@@ -9,14 +9,14 @@ The Yoho file (`yoho.yml`, `.yaml`, `.toml`, `.json`, `.jsonc`; format detected 
 | `app` | Required. `^[a-z0-9][a-z0-9-]*$`. Compose project is `yoho-<app>-<destination>`. |
 | `compose` | List of compose files relative to the Yoho file. Default `compose.yaml`, `compose.yml`, `docker-compose.yaml`, `docker-compose.yml`. |
 | `servers.<name>` | `ssh` (required, `[user@]host[:port]`, honors `~/.ssh/config`), `sudo` (bool, `sudo -n` for privileged steps), `root` (base dir, default `/var/lib/yoho`), `private_address`, `labels` (reserved). |
-| `destinations.<name>` | `servers` (list; exactly one for compose runtime), `runtime` (`compose` default, `swarm`), `env` (non-secret compose interpolation vars), `proxy` (override of `proxy`). |
-| `builder` | `location` (`local` default, `remote`, `server`), `engine` (`auto`, `docker`, `container`), `remote` (ssh target), `platforms` (e.g. `[linux/amd64]`), `secrets` (buildx `--secret id=K,env=K`), `exclude` (for `server` builds). |
+| `destinations.<name>` | `servers` (list; exactly one for compose runtime; several for swarm, first is the manager, all share one `root`), `runtime` (`compose` default, `swarm`), `env` (non-secret compose interpolation vars), `proxy` (override of `proxy`). |
+| `builder` | `location` (`local` default, `remote`, `server`), `engine` (`auto`, `docker`, `container`), `remote` (ssh target; required for `location: remote`), `platforms` (e.g. `[linux/amd64]`), `secrets` (buildx `--secret id=K,env=K`), `exclude` (for `server` builds). |
 | `transport.mode` | `auto` (pussh, then save/load, then registry), `pussh`, `load`, `registry`. |
 | `registry` | Optional: `server`, `username`, `password_secret`, `prefix`. |
 | `secrets.providers.<n>` | `type` (`op`, `bw`, `bws`, `command`), `command` (argv; ref appended), `account`. |
 | `secrets.values.<KEY>` | `provider`, `ref`, optional `destinations`. |
 | `proxy` | `image` (pinned kamal-proxy), `http_port`, `https_port` (0 disables publishing), `bind`, `tunnel`. |
-| `proxy.tunnel` | `token_secret` (empty = Quick Tunnel), `image`, `replicas`. |
+| `proxy.tunnel` | `token_secret` (empty or `tunnel: {}` = Quick Tunnel; leave `x-yoho.proxy.hosts` empty with it, one replica only), `image`, `replicas` (default 1). |
 | `backups.targets.<n>` | `type` (`restic` default, `archive`), `repository`, `format` (`tar.gz`, `zip`, `7z`; archive only), `password_secret`, `env_secrets`, `keep_last`. |
 | `backups.jobs.<n>` | `destination`, `services`, `target`, `schedule` (systemd OnCalendar; empty = on demand). |
 | `setup` | `user` (default `yoho`), `authorized_keys`, `packages`, `firewall`, `allow_ports`, `auto_updates`, `swap`, `timezone`. |

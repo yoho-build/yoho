@@ -249,7 +249,7 @@ func (t *target) storeArchive(ctx context.Context, h remote.Host, base, ts strin
 	if err := h.Run(ctx, remote.Cmd{Script: create, Env: t.env}); err != nil {
 		return nil, fmt.Errorf("create %s archive: %w", t.format, err)
 	}
-	size, err := h.Output(ctx, remote.Cmd{Script: "stat -c %s " + remote.Quote(local)})
+	size, err := h.Output(ctx, remote.Cmd{Script: "wc -c < " + remote.Quote(local) + " | tr -d ' '"})
 	if err != nil {
 		return nil, fmt.Errorf("stat archive: %w", err)
 	}
@@ -339,8 +339,10 @@ func (t *target) list(ctx context.Context, h remote.Host, base string) ([]Entry,
 		if t.isRclone() {
 			script = t.rclonePrelude() + "rc lsf --files-only --format ps --separator ' ' " + remote.Quote(t.cfg.Repository) + "\n"
 		} else {
-			script = "set -eu\n[ -d " + remote.Quote(t.cfg.Repository) + " ] || exit 0\nfind " + remote.Quote(t.cfg.Repository) +
-				" -maxdepth 1 -type f -printf '%f %s\\n'\n"
+			// POSIX only: find -printf is GNU-specific and absent on BusyBox.
+			dir := remote.Quote(strings.TrimRight(t.cfg.Repository, "/"))
+			script = "set -eu\n[ -d " + dir + " ] || exit 0\nfor f in " + dir + "/* " + dir + "/.[!.]*; do\n" +
+				"  [ -f \"$f\" ] || continue\n  printf '%s %s\\n' \"${f##*/}\" \"$(wc -c < \"$f\" | tr -d ' ')\"\ndone\n"
 		}
 		out, err := h.Output(ctx, remote.Cmd{Script: script, Env: t.env})
 		if err != nil {

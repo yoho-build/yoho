@@ -316,9 +316,52 @@ esac`
 		return fmt.Errorf("ensure overlay network %s: %w", proxy.Network, err)
 	}
 	for _, s := range d.Servers {
-		if err := proxy.Boot(ctx, s.Host, d.Proxy, r.out); err != nil {
+		if err := r.removeStaleBridge(ctx, s); err != nil {
+			return err
+		}
+		// Never let the proxy create `yoho` here: on a worker that would be a
+		// local bridge instead of the manager's overlay.
+		if err := proxy.BootWith(ctx, s.Host, d.Proxy, r.out, proxy.BootOptions{SkipNetwork: true}); err != nil {
 			return fmt.Errorf("boot proxy on %s: %w", s.Name, err)
 		}
+	}
+	return nil
+}
+
+// removeStaleBridge removes a node-local, non-overlay `yoho` network (left by
+// the compose runtime, or created by an older Yoho on a worker), which would
+// shadow the cluster overlay and reject Swarm tasks. Only the Proxy may be
+// attached; it is removed too and recreated by the proxy boot (its routes
+// live in the state volume). Other containers need the manual migration.
+func (r *runner) removeStaleBridge(ctx context.Context, s plan.NamedHost) error {
+	script := `set -eu
+s=$(docker network inspect -f '{{.Driver}}|{{.Scope}}' ` + proxy.Network + ` 2>/dev/null || true)
+case "$s" in
+  *"|local") ;;
+  *) exit 0 ;;
+esac
+names=$(docker network inspect -f '{{range .Containers}}{{.Name}} {{end}}' ` + proxy.Network + `)
+others=""
+proxy_attached=""
+for n in $names; do
+  if [ "$n" = ` + proxy.ContainerName + ` ]; then proxy_attached=1; else others="$others $n"; fi
+done
+if [ -n "$others" ]; then echo "$s:$others"; exit 3; fi
+if [ -n "$proxy_attached" ]; then docker rm -f ` + proxy.ContainerName + ` >/dev/null; fi
+docker network rm ` + proxy.Network + ` >/dev/null
+echo "$s"`
+	out, err := s.Host.Output(ctx, remote.Cmd{Script: script})
+	if err != nil {
+		var ee *remote.ExitError
+		if errors.As(err, &ee) && ee.Code == 3 {
+			return fmt.Errorf("%s has a node-local docker network %s (%s) that Swarm tasks cannot use, probably from the compose runtime; "+
+				"switching a Server to swarm needs downtime: remove the compose Apps' proxied containers and %s, run `docker network rm %s` on it, then deploy again (ADR 0007)",
+				s.Name, proxy.Network, strings.TrimSpace(out), proxy.ContainerName, proxy.Network)
+		}
+		return fmt.Errorf("check docker network %s on %s: %w", proxy.Network, s.Name, err)
+	}
+	if out = strings.TrimSpace(out); out != "" {
+		fmt.Fprintf(r.out, "[%s] warning: removed node-local docker network %s (%s) so the Swarm overlay is used; the proxy is recreated (brief proxy downtime)\n", s.Name, proxy.Network, out)
 	}
 	return nil
 }

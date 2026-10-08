@@ -3,10 +3,12 @@
 Nothing runs on the Server by default. `yoho schedule install` opts a Server in: one systemd timer per job runs the `yoho` binary and exits. No daemon, no sidecar.
 
 ```sh
-yoho schedule install   # upload binary, stored secrets, specs, and timers
-yoho schedule status    # timer state, next/last run, last result
-yoho schedule remove
+yoho schedule install [JOB...]   # upload binary, stored secrets, specs, and timers
+yoho schedule status             # timer state, next/last run, last result
+yoho schedule remove [JOB...]
 ```
+
+Without `JOB` they act on every Backup job of the Destination (install: those with a schedule). Timers are installed on the Destination's first Server, which is where Backups run. `install --binary PATH` supplies the Linux binary yourself.
 
 Jobs come from `backups.jobs.<name>.schedule` (systemd `OnCalendar`, e.g. `*-*-* 03:00:00`). Jobs without a schedule are on demand only.
 
@@ -18,7 +20,7 @@ Jobs come from `backups.jobs.<name>.schedule` (systemd `OnCalendar`, e.g. `*-*-*
 
 `yoho schedule install` and `yoho apply` put a Linux yoho binary on the Server. Resolution order:
 
-1. `--binary`, when you pass one.
+1. `--binary` (`yoho schedule install` only), when you pass one.
 2. This binary, when it already matches the Server.
 3. The GitHub Release for this version (`release v0.1.0`), except for a dev build.
 4. A cross-build from the Yoho source tree.

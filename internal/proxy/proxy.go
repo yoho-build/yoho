@@ -91,11 +91,27 @@ func EnsureNetwork(ctx context.Context, host remote.Host) error {
 // the configuration changed the container is recreated, which interrupts
 // traffic for a moment; routes survive in the state volume.
 func Boot(ctx context.Context, host remote.Host, cfg config.ProxyConfig, out io.Writer) error {
+	return BootWith(ctx, host, cfg, out, BootOptions{})
+}
+
+// BootOptions tunes BootWith.
+type BootOptions struct {
+	// SkipNetwork leaves the `yoho` network alone. Swarm sets it: the network
+	// is a cluster-wide attachable overlay created on a manager, and a worker
+	// cannot see it until something attaches, so creating it there would make
+	// a node-local bridge that shadows the overlay.
+	SkipNetwork bool
+}
+
+// BootWith is Boot with options.
+func BootWith(ctx context.Context, host remote.Host, cfg config.ProxyConfig, out io.Writer, opts BootOptions) error {
 	if out == nil {
 		out = io.Discard
 	}
-	if err := EnsureNetwork(ctx, host); err != nil {
-		return err
+	if !opts.SkipNetwork {
+		if err := EnsureNetwork(ctx, host); err != nil {
+			return err
+		}
 	}
 	args := runArgs(cfg)
 	want := configHash(args)

@@ -373,7 +373,7 @@ func backupRestoreCmd(g *globals) *cobra.Command {
 		Short: "Restore a Backup, replacing the Services' volume data",
 		Long: `Restore stops the Services in the Backup, replaces their volume contents,
 starts them, loads dumps with x-yoho.backup.restore_dump and runs post_restore.
-Current volume data is lost. Use "latest" as ID for the newest restic snapshot.`,
+Current volume data is lost. Use "latest" as ID for the newest Backup.`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) (err error) {
 			a, err := g.loadForJob(cmd, jobName)
