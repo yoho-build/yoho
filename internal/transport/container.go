@@ -65,18 +65,32 @@ func ContainerSaveArgv(platform, out string, imgs []string) []string {
 	return append(append(argv, "--output", out), imgs...)
 }
 
+// ArchiveIDs are the candidate image IDs of one ref in a saved archive: the
+// top-level manifest (or index) digest is the ID on Docker's containerd image
+// store, the config digest the ID on the classic overlay2 store.
+type ArchiveIDs struct {
+	Manifest string
+	Config   string
+}
+
 // ContainerLoadScript loads a docker archive from stdin and makes sure each
-// ref exists, tagging it from its config digest (the image ID in the
-// overlay2 store) if the loader named it differently.
-func ContainerLoadScript(configs map[string]string, refs []string) string {
+// ref exists, tagging it from the manifest digest (containerd store) or the
+// config digest (classic store) if the loader named it differently.
+func ContainerLoadScript(ids map[string]ArchiveIDs, refs []string) string {
 	s := "set -eu\ndocker load"
 	for _, ref := range refs {
-		id := configs[ref]
-		if id == "" {
+		id, ok := ids[ref]
+		if !ok || (id.Manifest == "" && id.Config == "") {
 			continue
 		}
 		q := remote.Quote(ref)
-		s += "\ndocker image inspect " + q + " >/dev/null 2>&1 || docker tag " + remote.Quote(id) + " " + q
+		s += "\ndocker image inspect " + q + " >/dev/null 2>&1"
+		for _, d := range []string{id.Manifest, id.Config} {
+			if d != "" {
+				s += " || docker tag " + remote.Quote(d) + " " + q + " >/dev/null 2>&1"
+			}
+		}
+		s += " || { echo " + remote.Quote("yoho: docker load did not create image "+ref+" (no image with the manifest or config digest to tag)") + " >&2; exit 1; }"
 	}
 	return s
 }
@@ -104,12 +118,12 @@ func (p *pusher) loadContainer(ctx context.Context, h remote.Host, imgs []string
 		return err
 	}
 	defer f.Close()
-	configs, extra, err := DockerArchiveManifest(f, p.o.Platform, imgs)
+	ids, extra, err := DockerArchiveManifest(f, p.o.Platform, imgs)
 	if err != nil {
 		return err
 	}
 	for _, img := range imgs {
-		if configs[img] == "" {
+		if _, ok := ids[img]; !ok {
 			return fmt.Errorf("image archive does not contain %s", img)
 		}
 	}
@@ -126,7 +140,7 @@ func (p *pusher) loadContainer(ctx context.Context, h remote.Host, imgs []string
 		pw.CloseWithError(err)
 		writeErr <- err
 	}()
-	runErr := h.Run(ctx, remote.Cmd{Script: ContainerLoadScript(configs, imgs), Stdin: pr, Stdout: p.out, Stderr: p.out})
+	runErr := h.Run(ctx, remote.Cmd{Script: ContainerLoadScript(ids, imgs), Stdin: pr, Stdout: p.out, Stderr: p.out})
 	pr.CloseWithError(errors.New("docker load ended"))
 	if runErr != nil {
 		cancel()
@@ -136,7 +150,8 @@ func (p *pusher) loadContainer(ctx context.Context, h remote.Host, imgs []string
 	return <-writeErr
 }
 
-// appendTar copies the tar in r to w, adding manifest.json when non-nil.
+// appendTar copies the tar in r to w, normalizing the image names in
+// index.json and adding manifest.json when non-nil.
 func appendTar(w io.Writer, r io.Reader, manifest []byte) error {
 	tr := tar.NewReader(r)
 	tw := tar.NewWriter(w)
@@ -147,6 +162,24 @@ func appendTar(w io.Writer, r io.Reader, manifest []byte) error {
 		}
 		if err != nil {
 			return fmt.Errorf("read image archive: %w", err)
+		}
+		if hdr.Typeflag == tar.TypeReg && strings.TrimPrefix(hdr.Name, "./") == "index.json" && hdr.Size <= 1<<20 {
+			b, err := io.ReadAll(tr)
+			if err != nil {
+				return err
+			}
+			if b, err = RewriteIndexNames(b); err != nil {
+				return err
+			}
+			h := *hdr
+			h.Size = int64(len(b))
+			if err := tw.WriteHeader(&h); err != nil {
+				return err
+			}
+			if _, err := tw.Write(b); err != nil {
+				return err
+			}
+			continue
 		}
 		if err := tw.WriteHeader(hdr); err != nil {
 			return err
@@ -165,6 +198,51 @@ func appendTar(w io.Writer, r io.Reader, manifest []byte) error {
 	}
 	return tw.Close()
 }
+
+// RewriteIndexNames sets every io.containerd.image.name annotation in an OCI
+// index.json to the fully qualified reference. Apple's container writes the
+// name as given (yoho/app:tag), which Docker's containerd store registers
+// literally and then cannot find. org.opencontainers.image.ref.name and all
+// other fields are left untouched.
+func RewriteIndexNames(b []byte) ([]byte, error) {
+	var idx map[string]json.RawMessage
+	if err := json.Unmarshal(b, &idx); err != nil {
+		return nil, fmt.Errorf("parse index.json: %w", err)
+	}
+	var ms []map[string]json.RawMessage
+	if err := json.Unmarshal(idx["manifests"], &ms); err != nil {
+		return nil, fmt.Errorf("parse index.json manifests: %w", err)
+	}
+	for _, m := range ms {
+		raw, ok := m["annotations"]
+		if !ok {
+			continue
+		}
+		var ann map[string]json.RawMessage
+		if err := json.Unmarshal(raw, &ann); err != nil {
+			return nil, fmt.Errorf("parse index.json annotations: %w", err)
+		}
+		var name string
+		if json.Unmarshal(ann[containerdNameKey], &name) != nil || name == "" {
+			continue
+		}
+		q, err := json.Marshal(qualifyRef(name))
+		if err != nil {
+			return nil, err
+		}
+		ann[containerdNameKey] = q
+		if m["annotations"], err = json.Marshal(ann); err != nil {
+			return nil, err
+		}
+	}
+	var err error
+	if idx["manifests"], err = json.Marshal(ms); err != nil {
+		return nil, err
+	}
+	return json.Marshal(idx)
+}
+
+const containerdNameKey = "io.containerd.image.name"
 
 type ociDescriptor struct {
 	MediaType   string            `json:"mediaType"`
@@ -191,9 +269,9 @@ type dockerManifestEntry struct {
 }
 
 // DockerArchiveManifest reads an OCI layout archive and returns ref ->
-// config digest for refs, plus the docker-archive manifest.json to append
+// image IDs for refs, plus the docker-archive manifest.json to append
 // (nil when the archive already has one).
-func DockerArchiveManifest(r io.Reader, platform string, refs []string) (map[string]string, []byte, error) {
+func DockerArchiveManifest(r io.Reader, platform string, refs []string) (map[string]ArchiveIDs, []byte, error) {
 	const maxMeta = 1 << 20
 	files := map[string][]byte{}
 	tr := tar.NewReader(r)
@@ -214,7 +292,7 @@ func DockerArchiveManifest(r io.Reader, platform string, refs []string) (map[str
 		}
 		files[strings.TrimPrefix(hdr.Name, "./")] = b
 	}
-	configs := map[string]string{}
+	configs := map[string]ArchiveIDs{}
 	if b, ok := files["manifest.json"]; ok {
 		var entries []dockerManifestEntry
 		if err := json.Unmarshal(b, &entries); err != nil {
@@ -222,7 +300,8 @@ func DockerArchiveManifest(r io.Reader, platform string, refs []string) (map[str
 		}
 		for _, e := range entries {
 			for _, t := range e.RepoTags {
-				configs[normalizeRef(t)] = "sha256:" + path0(e.Config)
+				cfg := "sha256:" + path0(e.Config)
+				configs[normalizeRef(t)] = ArchiveIDs{Manifest: cfg, Config: cfg}
 			}
 		}
 		return pick(configs, refs), nil, nil
@@ -244,7 +323,7 @@ func DockerArchiveManifest(r io.Reader, platform string, refs []string) (map[str
 	}
 	var entries []dockerManifestEntry
 	for _, d := range idx.Manifests {
-		name := d.Annotations["io.containerd.image.name"]
+		name := d.Annotations[containerdNameKey]
 		if name == "" {
 			name = d.Annotations["org.opencontainers.image.ref.name"]
 		}
@@ -260,7 +339,7 @@ func DockerArchiveManifest(r io.Reader, platform string, refs []string) (map[str
 			e.Layers = append(e.Layers, "blobs/"+strings.Replace(l.Digest, ":", "/", 1))
 		}
 		entries = append(entries, e)
-		configs[normalizeRef(name)] = m.Config.Digest
+		configs[normalizeRef(name)] = ArchiveIDs{Manifest: d.Digest, Config: m.Config.Digest}
 	}
 	if len(entries) == 0 {
 		return nil, nil, errors.New("image archive index.json names no images")
@@ -314,13 +393,28 @@ func normalizeRef(r string) string {
 	return strings.TrimPrefix(r, "docker.io/")
 }
 
+// qualifyRef is the fully qualified form Docker's containerd store registers:
+// docker.io/library/x:t, docker.io/ns/x:t, or the input when it names a
+// registry host (a first component with "." or ":", or localhost).
+func qualifyRef(r string) string {
+	r = normalizeRef(r)
+	first, _, found := strings.Cut(r, "/")
+	if found && (strings.ContainsAny(first, ".:") || first == "localhost") {
+		return r
+	}
+	if !found {
+		return "docker.io/library/" + r
+	}
+	return "docker.io/" + r
+}
+
 func path0(p string) string {
 	p = strings.TrimSuffix(filepath.Base(p), ".json")
 	return p
 }
 
-func pick(configs map[string]string, refs []string) map[string]string {
-	out := map[string]string{}
+func pick(configs map[string]ArchiveIDs, refs []string) map[string]ArchiveIDs {
+	out := map[string]ArchiveIDs{}
 	for _, r := range refs {
 		if c, ok := configs[normalizeRef(r)]; ok {
 			out[r] = c

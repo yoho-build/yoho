@@ -45,7 +45,7 @@ func TestDockerArchiveManifest(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if configs["yoho/app-web:v1"] != "sha256:cfg" {
+	if configs["yoho/app-web:v1"] != (ArchiveIDs{Manifest: "sha256:idx", Config: "sha256:cfg"}) {
 		t.Fatalf("configs %v", configs)
 	}
 	var got []dockerManifestEntry
@@ -115,7 +115,7 @@ func TestContainerEngineLoad(t *testing.T) {
 	if _, err := os.Stat(saveOut); !os.IsNotExist(err) {
 		t.Fatal("temp archive not removed")
 	}
-	want := "set -eu\ndocker load\ndocker image inspect 'yoho/app-web:v1' >/dev/null 2>&1 || docker tag 'sha256:cfg' 'yoho/app-web:v1'"
+	want := ContainerLoadScript(map[string]ArchiveIDs{img: {Manifest: "sha256:idx", Config: "sha256:cfg"}}, []string{img})
 	li := fresh.ran("set -eu\ndocker load")
 	if len(li) != 1 || fresh.scripts[li[0]] != want {
 		t.Fatalf("scripts %q", fresh.scripts)
@@ -129,6 +129,9 @@ func TestContainerEngineLoad(t *testing.T) {
 		}
 		b, _ := io.ReadAll(tr)
 		names[h.Name] = string(b)
+	}
+	if !strings.Contains(names["./index.json"], `"io.containerd.image.name":"docker.io/yoho/app-web:v1"`) {
+		t.Fatalf("index.json not normalized: %s", names["./index.json"])
 	}
 	if names["./blobs/sha256/layer1"] != "LAYER1" || !strings.Contains(names["manifest.json"], `"RepoTags":["yoho/app-web:v1"]`) {
 		t.Fatalf("streamed archive %v", names)
@@ -190,5 +193,54 @@ func TestE2EContainerPush(t *testing.T) {
 	res, err = Push(ctx, o)
 	if err != nil || res[0].Method != MethodSkip {
 		t.Fatalf("second push did not skip: %v %v", res, err)
+	}
+}
+
+func TestRewriteIndexNames(t *testing.T) {
+	cases := map[string]string{
+		"yoho/qa-notes-web:TAG":      "docker.io/yoho/qa-notes-web:TAG",
+		"nginx:1":                    "docker.io/library/nginx:1",
+		"docker.io/library/nginx:1":  "docker.io/library/nginx:1",
+		"docker.io/yoho/a:t":         "docker.io/yoho/a:t",
+		"ghcr.io/o/a:t":              "ghcr.io/o/a:t",
+		"localhost:5000/x:t":         "localhost:5000/x:t",
+		"localhost/x:t":              "localhost/x:t",
+		"reg.example.com:443/ns/x:t": "reg.example.com:443/ns/x:t",
+	}
+	for in, want := range cases {
+		idx := `{"schemaVersion":2,"manifests":[{"digest":"sha256:a","size":7,"annotations":{"io.containerd.image.name":"` + in + `","org.opencontainers.image.ref.name":"` + in + `"}},{"digest":"sha256:b"}]}`
+		out, err := RewriteIndexNames([]byte(idx))
+		if err != nil {
+			t.Fatal(err)
+		}
+		var got struct {
+			SchemaVersion int `json:"schemaVersion"`
+			Manifests     []struct {
+				Size        int               `json:"size"`
+				Annotations map[string]string `json:"annotations"`
+			} `json:"manifests"`
+		}
+		if err := json.Unmarshal(out, &got); err != nil {
+			t.Fatal(err)
+		}
+		a := got.Manifests[0].Annotations
+		if a["io.containerd.image.name"] != want || a["org.opencontainers.image.ref.name"] != in || got.SchemaVersion != 2 || got.Manifests[0].Size != 7 || len(got.Manifests) != 2 {
+			t.Fatalf("%s: got %s", in, out)
+		}
+	}
+}
+
+func TestContainerLoadScriptFallback(t *testing.T) {
+	s := ContainerLoadScript(map[string]ArchiveIDs{"a/b:1": {Manifest: "sha256:m", Config: "sha256:c"}}, []string{"a/b:1", "skipped:1"})
+	for _, want := range []string{
+		"docker image inspect 'a/b:1' >/dev/null 2>&1 || docker tag 'sha256:m' 'a/b:1' >/dev/null 2>&1 || docker tag 'sha256:c' 'a/b:1' >/dev/null 2>&1 || {",
+		"exit 1; }",
+	} {
+		if !strings.Contains(s, want) {
+			t.Fatalf("missing %q in %s", want, s)
+		}
+	}
+	if strings.Contains(s, "skipped") {
+		t.Fatal(s)
 	}
 }

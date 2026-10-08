@@ -105,7 +105,7 @@ func TestE2ELocalSwarm(t *testing.T) {
 				"web": {
 					Proxy:          &config.ServiceProxy{Port: 80, HealthPath: "/"},
 					Secrets:        config.SecretRefs{{Name: "API_KEY", Key: "API_KEY"}},
-					ReleaseCommand: []string{"sh", "-c", "nslookup redis >/dev/null && echo migrated"},
+					ReleaseCommand: []string{"sh", "-c", `for i in $(seq 1 30); do getent hosts redis >/dev/null && echo migrated && exit 0; sleep 1; done; exit 1`},
 				},
 				"redis": {Stateful: true, Generate: map[string]string{"REDIS_PASSWORD": "hex32"}},
 			},
