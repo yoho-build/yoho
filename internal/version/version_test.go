@@ -127,6 +127,49 @@ func TestDirtyContentHash(t *testing.T) {
 	}
 }
 
+func TestSubdirUntrackedAtRoot(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not installed")
+	}
+	root := t.TempDir()
+	sub := filepath.Join(root, "source")
+	if err := os.MkdirAll(sub, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	run(t, root, "init", "-q")
+	os.WriteFile(filepath.Join(sub, "yoho.yml"), []byte("x"), 0o644)
+	run(t, root, "add", ".")
+	run(t, root, "commit", "-q", "-m", "init")
+
+	os.WriteFile(filepath.Join(root, "notes.txt"), []byte("one"), 0o644)
+	v1, err := FromGit(sub)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const emptyHash = "e3b0c442"
+	if !IsUncommitted(v1) || strings.HasSuffix(v1, emptyHash) {
+		t.Fatalf("untracked file outside dir must count: %q", v1)
+	}
+	if fromRoot, err := FromGit(root); err != nil || fromRoot != v1 {
+		t.Fatalf("version differs by directory: root %q sub %q (%v)", fromRoot, v1, err)
+	}
+
+	os.WriteFile(filepath.Join(root, "notes.txt"), []byte("two"), 0o644)
+	v2, err := FromGit(sub)
+	if err != nil || v2 == v1 {
+		t.Fatalf("editing the untracked file should change version: %q -> %q (%v)", v1, v2, err)
+	}
+
+	os.WriteFile(filepath.Join(sub, "yoho.yml"), []byte("y"), 0o644)
+	v3, err := FromGit(sub)
+	if err != nil || v3 == v2 {
+		t.Fatalf("tracked edit should change version: %q -> %q (%v)", v2, v3, err)
+	}
+	if fromRoot, err := FromGit(root); err != nil || fromRoot != v3 {
+		t.Fatalf("version differs by directory: root %q sub %q (%v)", fromRoot, v3, err)
+	}
+}
+
 func TestFromGitNotARepo(t *testing.T) {
 	if _, err := FromGit(t.TempDir()); err == nil || !strings.Contains(err.Error(), "--version") {
 		t.Fatalf("got %v", err)

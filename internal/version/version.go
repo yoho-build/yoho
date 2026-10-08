@@ -64,8 +64,16 @@ func Valid(v string) bool {
 // uncommittedSuffix is the first 8 hex of SHA-256(diff || untracked files).
 // The diff is worktree vs HEAD, so staged and unstaged copies of the same
 // content hash the same. Untracked files are path, an executable bit, and bytes.
+//
+// Everything runs from the repository top level so the diff, the untracked
+// listing and the hashed paths are repo-wide and independent of which
+// subdirectory dir is (the Yoho file often lives below the repo root).
 func uncommittedSuffix(dir string) (string, error) {
-	diff, err := gitRaw(dir,
+	top, err := git(dir, "rev-parse", "--show-toplevel")
+	if err != nil {
+		return "", fmt.Errorf("git rev-parse --show-toplevel in %s: %w", dir, err)
+	}
+	diff, err := gitRaw(top,
 		"diff", "HEAD",
 		"--binary", "--no-color", "--no-ext-diff", "--no-textconv",
 		"--src-prefix=a/", "--dst-prefix=b/",
@@ -73,7 +81,7 @@ func uncommittedSuffix(dir string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("git diff in %s: %w", dir, err)
 	}
-	listed, err := gitRaw(dir, "ls-files", "--others", "--exclude-standard", "-z")
+	listed, err := gitRaw(top, "ls-files", "--others", "--exclude-standard", "-z")
 	if err != nil {
 		return "", fmt.Errorf("git ls-files in %s: %w", dir, err)
 	}
@@ -83,7 +91,7 @@ func uncommittedSuffix(dir string) (string, error) {
 	sum := sha256.New()
 	sum.Write(diff)
 	for _, p := range paths {
-		hashUntracked(sum, dir, p)
+		hashUntracked(sum, top, p)
 	}
 	return hex.EncodeToString(sum.Sum(nil)[:4]), nil
 }
