@@ -16,6 +16,7 @@ import (
 // Service is no longer proxied. Failures are warnings: traffic already
 // switched.
 func (r *runner) removeStaleRoutes(ctx context.Context, plans []servicePlan) {
+	r.logf("checking proxy routes")
 	routes, err := proxy.List(ctx, r.h)
 	if err != nil {
 		r.logf("warning: could not list proxy routes: %v", err)
@@ -39,6 +40,7 @@ func (r *runner) removeStaleRoutes(ctx context.Context, plans []servicePlan) {
 // no retained Release of any of its Destinations references and no container
 // uses. Never forced: docker refuses images in use. Errors are warnings.
 func pruneImages(ctx context.Context, r *runner, d *plan.Deploy) {
+	r.logf("checking unused images")
 	out, err := r.h.Output(ctx, remote.Cmd{Script: "docker image ls --filter " + remote.Quote("label=yoho.app="+d.App) + " --format '{{.Repository}}:{{.Tag}}'"})
 	if err != nil {
 		r.logf("warning: list images: %v", err)

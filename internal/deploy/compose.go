@@ -359,6 +359,7 @@ func listReleases(ctx context.Context, h remote.Host, app, dest string) ([]relea
 // prune keeps the newest RetainReleases Releases (always current) and the
 // secrets generations they use or that existing containers still mount.
 func prune(ctx context.Context, r *runner, d *plan.Deploy, current string) error {
+	r.logf("checking old releases")
 	retain := d.RetainReleases
 	if retain <= 0 {
 		retain = defaultRetain
@@ -392,7 +393,9 @@ func prune(ctx context.Context, r *runner, d *plan.Deploy, current string) error
 			keepGen[gen] = true
 		}
 	}
-	gens, err := r.h.Output(ctx, remote.Cmd{Script: "ls -1 " + remote.Quote(path.Join(dir, "secrets")) + " 2>/dev/null || true"})
+	// macOS ls colors names when CLICOLOR_FORCE is set, even if stdout is not
+	// a terminal. An empty assignment does not turn that off; unset it.
+	gens, err := r.h.Output(ctx, remote.Cmd{Script: "env -u CLICOLOR_FORCE -u CLICOLOR ls -1 " + remote.Quote(path.Join(dir, "secrets")) + " 2>/dev/null || true"})
 	if err != nil {
 		return err
 	}

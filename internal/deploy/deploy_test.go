@@ -164,6 +164,16 @@ func TestDeployEndToEnd(t *testing.T) {
 	if strings.Contains(out.String(), webSecret) || !strings.Contains(out.String(), "[primary] ") {
 		t.Errorf("progress output: %s", out.String())
 	}
+	// Time after the route switch must land on a labeled line, not the hook.
+	progress := out.String()
+	switching := strings.Index(progress, "switching proxy route")
+	switched := strings.Index(progress, "switched proxy route shop-production-web")
+	routes := strings.Index(progress, "checking proxy routes")
+	releases := strings.Index(progress, "checking old releases")
+	images := strings.Index(progress, "checking unused images")
+	if switching < 0 || switched < switching || routes < switched || releases < routes || images < releases {
+		t.Errorf("post-cutover progress order:\n%s", progress)
+	}
 
 	rels, err := Compose{}.Releases(ctx, d)
 	if err != nil || len(rels) != 1 || rels[0].Version != "v1" {
@@ -261,6 +271,7 @@ func TestFirstDeployNoOldContainers(t *testing.T) {
 }
 
 func TestRollbackAndPrune(t *testing.T) {
+	t.Setenv("CLICOLOR_FORCE", "1")
 	root := withRoot(t)
 	ctx := context.Background()
 	h := &dockerHost{local: &remote.Local{}, respond: respond(nil)}

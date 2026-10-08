@@ -215,6 +215,7 @@ func (r *runner) cutoverProxied(ctx context.Context, sp servicePlan) error {
 	if err != nil {
 		return fail(err)
 	}
+	r.logf("switched proxy route %s", route)
 
 	if len(old) > 0 {
 		// kamal-proxy has drained them; docker stop honors stop_grace_period.

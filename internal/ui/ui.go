@@ -25,14 +25,18 @@ const (
 
 // UI writes progress. Safe for concurrent use.
 type UI struct {
-	mu      sync.Mutex
-	w       io.Writer
-	mode    Mode
-	color   bool
-	Verbose bool
-	start   time.Time
-	depth   int
+	mu         sync.Mutex
+	w          io.Writer
+	mode       Mode
+	color      bool
+	Verbose    bool
+	start      time.Time
+	progressAt time.Time // last human line; shared by every Progress writer
+	depth      int
 }
+
+// nowFn is the clock for progress deltas. Tests replace it.
+var nowFn = time.Now
 
 // New returns a UI writing to w. Color is enabled when w is a terminal and
 // NO_COLOR is unset.
@@ -41,8 +45,13 @@ func New(w io.Writer, mode Mode, verbose bool) *UI {
 	if f, ok := w.(*os.File); ok && term.IsTerminal(int(f.Fd())) && os.Getenv("NO_COLOR") == "" && mode == Human {
 		color = true
 	}
-	return &UI{w: w, mode: mode, color: color, Verbose: verbose, start: time.Now()}
+	now := nowFn()
+	return &UI{w: w, mode: mode, color: color, Verbose: verbose, start: now, progressAt: now}
 }
+
+// stamp marks a human line so the next progress delta starts here.
+// Caller holds u.mu.
+func (u *UI) stamp() { u.progressAt = nowFn() }
 
 // Discard is a UI that prints nothing (tests).
 func Discard() *UI { return New(io.Discard, Human, false) }
@@ -84,6 +93,7 @@ func (u *UI) Title(format string, args ...any) {
 		return
 	}
 	fmt.Fprintln(u.w, u.paint(bold, msg))
+	u.stamp()
 }
 
 // Info prints a plain line.
@@ -96,6 +106,7 @@ func (u *UI) Info(format string, args ...any) {
 		return
 	}
 	fmt.Fprintln(u.w, u.indent()+msg)
+	u.stamp()
 }
 
 // Warn prints a warning.
@@ -108,6 +119,7 @@ func (u *UI) Warn(format string, args ...any) {
 		return
 	}
 	fmt.Fprintln(u.w, u.indent()+u.paint(yellow, "! "+msg))
+	u.stamp()
 }
 
 // Finding prints a check result (level error or warning).
@@ -127,6 +139,7 @@ func (u *UI) Finding(level, subject, msg string) {
 	} else {
 		fmt.Fprintln(u.w, u.indent()+"  "+u.paint(yellow, "! ")+where+msg)
 	}
+	u.stamp()
 }
 
 // Step is a timed unit of work.
@@ -149,6 +162,7 @@ func (u *UI) Step(host, format string, args ...any) *Step {
 		return s
 	}
 	fmt.Fprintln(u.w, u.indent()+u.paint(blue, "▸ ")+s.label())
+	u.stamp()
 	return s
 }
 
@@ -188,6 +202,7 @@ func (s *Step) Skip(reason string) {
 		return
 	}
 	fmt.Fprintln(u.w, u.indent()+u.paint(dim, "- "+s.name+" (skipped: "+reason+")"))
+	u.stamp()
 }
 
 func (s *Step) finish(err error, extra string) {
@@ -223,6 +238,7 @@ func (s *Step) finish(err error, extra string) {
 		if extra != "" {
 			fmt.Fprintln(u.w, u.indent()+"  "+u.paint(yellow, "hint: ")+extra)
 		}
+		u.stamp()
 		return
 	}
 	line := u.indent() + u.paint(green, "✓ ") + s.label()
@@ -230,6 +246,7 @@ func (s *Step) finish(err error, extra string) {
 		line += " " + u.paint(dim, "· "+extra)
 	}
 	fmt.Fprintln(u.w, line+" "+u.paint(dim, fmtDur(d)))
+	u.stamp()
 }
 
 // Finished prints Kamal's closing line with total time, or the failure.
@@ -247,12 +264,14 @@ func (u *UI) Finished(err error, summary string) {
 	}
 	if err != nil {
 		fmt.Fprintln(u.w, u.paint(red+bold, "Failed after "+fmtDur(d)))
+		u.stamp()
 		return
 	}
 	if summary != "" {
 		fmt.Fprintln(u.w, u.paint(bold, summary))
 	}
 	fmt.Fprintln(u.w, u.paint(dim, "Finished all in "+fmtDur(d)))
+	u.stamp()
 }
 
 // Table prints aligned rows (human) or one event per row (JSON).
@@ -299,6 +318,7 @@ func (u *UI) Table(header []string, rows [][]string) {
 	for _, r := range rows {
 		pr(r, "")
 	}
+	u.stamp()
 }
 
 func fmtDur(d time.Duration) string {
@@ -348,6 +368,7 @@ func (w *stepWriter) line(l string) {
 		prefix += u.paint(cyan, s.host) + " "
 	}
 	fmt.Fprintln(u.w, u.indent()+prefix+u.paint(dim, l))
+	u.stamp()
 }
 
 type tailBuffer struct {
@@ -373,12 +394,15 @@ func (t *tailBuffer) lines() []string {
 
 // Progress returns a writer that renders free-form progress lines from
 // runtimes ("[server] message") as sub-steps with elapsed time.
-func (u *UI) Progress() io.Writer { return &progressWriter{u: u, last: time.Now()} }
+//
+// The elapsed time is since the previous human line on this UI, shared by
+// every writer. A hook writer is created before the build, so a private
+// clock would print the whole build on the post-deploy line.
+func (u *UI) Progress() io.Writer { return &progressWriter{u: u} }
 
 type progressWriter struct {
-	u    *UI
-	buf  []byte
-	last time.Time
+	u   *UI
+	buf []byte
 }
 
 func (p *progressWriter) Write(b []byte) (int, error) {
@@ -401,8 +425,12 @@ func (p *progressWriter) line(l string) {
 	u := p.u
 	u.mu.Lock()
 	defer u.mu.Unlock()
-	d := time.Since(p.last)
-	p.last = time.Now()
+	now := nowFn()
+	if u.progressAt.IsZero() {
+		u.progressAt = u.start
+	}
+	d := now.Sub(u.progressAt)
+	u.progressAt = now
 	host, msg := "", l
 	if strings.HasPrefix(l, "[") {
 		if j := strings.Index(l, "] "); j > 0 {

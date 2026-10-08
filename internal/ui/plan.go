@@ -57,10 +57,12 @@ func (u *UI) Plan(changes []plan.Change) {
 			u.event("change", f)
 		}
 		u.event("plan_summary", map[string]any{"add": c.Add, "change": c.Change, "replace": c.Replace, "destroy": c.Destroy, "noop": c.Noop})
+		u.stamp()
 		return
 	}
 	if !HasChanges(changes) {
 		fmt.Fprintln(u.w, u.paint(green+bold, "No changes. Your Servers match the configuration."))
+		u.stamp()
 		return
 	}
 	for _, ch := range changes {
@@ -92,4 +94,5 @@ func (u *UI) Plan(changes []plan.Change) {
 	fmt.Fprintln(u.w)
 	line := fmt.Sprintf("Plan: %d to add, %d to change, %d to replace, %d to destroy.", c.Add, c.Change, c.Replace, c.Destroy)
 	fmt.Fprintln(u.w, u.paint(bold, line))
+	u.stamp()
 }
