@@ -6,7 +6,7 @@
 
 - `local` (default): your machine.
 - `remote`: a dedicated build Server (`builder.remote: user@host`).
-- `server`: sync source to the Destination's Server and build there (`builder.exclude` skips paths). Needs `rsync` on the Server; `yoho setup` installs it, and deploy fails with a hint if it is missing.
+- `server`: sync source to the Destination's Server and build there. It ships what git would (tracked plus untracked files that are not git-ignored), so `node_modules/` and `.env.local` stay local; outside a git work tree everything ships. `builder.exclude` skips more paths, and `.git` and `.yoho/secrets*` never ship. Needs `rsync` on the Server; `yoho setup` installs it, and deploy fails with a hint if it is missing.
 
 ## Local engine
 

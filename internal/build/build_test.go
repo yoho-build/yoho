@@ -4,8 +4,12 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"os"
+	"os/exec"
+	"path/filepath"
+	"sort"
 	"strings"
 	"testing"
 
@@ -321,5 +325,94 @@ func TestServerBuildMkdirFails(t *testing.T) {
 	}
 	if _, i := r.find("rsync"); i >= 0 {
 		t.Fatal("rsync must not run when mkdir fails")
+	}
+}
+
+func gitTestRepo(t *testing.T) string {
+	t.Helper()
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not installed")
+	}
+	dir := t.TempDir()
+	write := func(name, body string) {
+		p := filepath.Join(dir, name)
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write(".gitignore", "node_modules/\n.env.*\n")
+	write("app.go", "tracked")
+	write("untracked.txt", "untracked")
+	write("my file [1].txt", "untracked space")
+	write(".env.local", "SECRET")
+	write("node_modules/x/index.js", "x")
+	write("pkg/node_modules/y.js", "y")
+	write("pkg/.env.prod", "SECRET")
+	write("pkg/keep.txt", "keep")
+	write("pkg/[a] b/.env.x", "SECRET")
+	write("pkg/[a] b/ok.txt", "ok")
+	for _, args := range [][]string{{"init", "-q"}, {"add", "app.go", ".gitignore"}} {
+		c := exec.Command("git", append([]string{"-C", dir}, args...)...)
+		if out, err := c.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v %s", args, err, out)
+		}
+	}
+	return dir
+}
+
+func TestIgnoredExcludes(t *testing.T) {
+	dir := gitTestRepo(t)
+	got, err := IgnoredExcludes(context.Background(), dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sort.Strings(got)
+	want := []string{`/.env.local`, `/node_modules/`, `/pkg/.env.prod`, `/pkg/\[a\] b/.env.x`, `/pkg/node_modules/`}
+	if strings.Join(got, "|") != strings.Join(want, "|") {
+		t.Fatalf("got %q want %q", got, want)
+	}
+	if ex, err := IgnoredExcludes(context.Background(), t.TempDir()); err != nil || ex != nil {
+		t.Fatalf("non-git: %v %v", ex, err)
+	}
+}
+
+func TestSyncSourceSkipsGitIgnored(t *testing.T) {
+	if _, err := exec.LookPath("rsync"); err != nil {
+		t.Skip("rsync not installed")
+	}
+	dir := gitTestRepo(t)
+	dst := filepath.Join(t.TempDir(), "source")
+	// A stale ignored file from an earlier sync must be removed.
+	if err := os.MkdirAll(filepath.Join(dst, "node_modules"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dst, "node_modules", "stale.js"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	o := Options{
+		Dir: dir, Host: &remote.Local{HostName: "local"}, SourceDir: dst, Out: io.Discard,
+		Exec: func(ctx context.Context, c Command) error {
+			out, err := exec.CommandContext(ctx, c.Argv[0], c.Argv[1:]...).CombinedOutput()
+			if err != nil {
+				return fmt.Errorf("%w: %s", err, out)
+			}
+			return nil
+		},
+	}
+	if err := syncSource(context.Background(), o); err != nil {
+		t.Fatal(err)
+	}
+	for _, p := range []string{"app.go", ".gitignore", "untracked.txt", "my file [1].txt", "pkg/keep.txt", "pkg/[a] b/ok.txt"} {
+		if _, err := os.Stat(filepath.Join(dst, p)); err != nil {
+			t.Errorf("%s should be synced: %v", p, err)
+		}
+	}
+	for _, p := range []string{".env.local", "node_modules", "pkg/node_modules", "pkg/.env.prod", "pkg/[a] b/.env.x"} {
+		if _, err := os.Stat(filepath.Join(dst, p)); err == nil {
+			t.Errorf("%s should not be synced", p)
+		}
 	}
 }

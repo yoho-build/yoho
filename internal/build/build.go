@@ -51,7 +51,10 @@ type Exec func(ctx context.Context, c Command) error
 type Options struct {
 	// Dir is the directory of the Yoho file; relative build contexts resolve
 	// against Project.WorkingDir, falling back to Dir.
-	Dir         string
+	Dir string
+	// ExcludeFrom is a NUL-separated rsync exclude file (git-ignored paths)
+	// for location=server; set by syncSource.
+	ExcludeFrom string
 	App         string
 	Destination string // location=server: picks <AppDir>/source
 	Version     string
@@ -440,6 +443,10 @@ func RsyncArgv(o Options) ([]string, error) {
 	for _, e := range excl {
 		argv = append(argv, "--exclude="+e)
 	}
+	if o.ExcludeFrom != "" {
+		// NUL-separated, so names with spaces, newlines or leading # are safe.
+		argv = append(argv, "--from0", "--exclude-from="+o.ExcludeFrom, "--delete-excluded")
+	}
 	src := strings.TrimSuffix(o.Dir, "/") + "/"
 	dst := o.sourceDir() + "/"
 	switch h := o.Host.(type) {
@@ -472,6 +479,59 @@ func RsyncArgv(o Options) ([]string, error) {
 	return append(argv, "-e", rsh, src, host+":"+dst), nil
 }
 
+// rsyncEscape escapes rsync wildcard characters in a literal path.
+func rsyncEscape(p string) string {
+	return strings.NewReplacer(`\`, `\\`, "*", `\*`, "?", `\?`, "[", `\[`, "]", `\]`).Replace(p)
+}
+
+// IgnoredExcludes returns anchored rsync exclude patterns for everything git
+// ignores under dir (fully ignored directories collapse to "/dir/"). It
+// returns nil when dir is not inside a git work tree or git is unavailable.
+func IgnoredExcludes(ctx context.Context, dir string) ([]string, error) {
+	if _, err := exec.LookPath("git"); err != nil {
+		return nil, nil
+	}
+	inside := exec.CommandContext(ctx, "git", "-C", dir, "rev-parse", "--is-inside-work-tree")
+	if out, err := inside.Output(); err != nil || strings.TrimSpace(string(out)) != "true" {
+		return nil, nil
+	}
+	cmd := exec.CommandContext(ctx, "git", "-C", dir, "ls-files", "-z", "--others", "--ignored", "--exclude-standard", "--directory")
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	out, err := cmd.Output()
+	if err != nil {
+		return nil, fmt.Errorf("git ls-files: %w: %s", err, strings.TrimSpace(stderr.String()))
+	}
+	var excl []string
+	for _, p := range strings.Split(string(out), "\x00") {
+		if p != "" {
+			excl = append(excl, "/"+rsyncEscape(p))
+		}
+	}
+	return excl, nil
+}
+
+// writeExcludeFile writes NUL-separated patterns to a temp file; the caller
+// removes it. It returns "" when there is nothing to exclude.
+func writeExcludeFile(excl []string) (string, error) {
+	if len(excl) == 0 {
+		return "", nil
+	}
+	f, err := os.CreateTemp("", "yoho-rsync-exclude-*")
+	if err != nil {
+		return "", err
+	}
+	_, err = f.WriteString(strings.Join(excl, "\x00") + "\x00")
+	if cerr := f.Close(); err == nil {
+		err = cerr
+	}
+	if err != nil {
+		os.Remove(f.Name())
+		return "", err
+	}
+	return f.Name(), nil
+}
+
 // noRsync is the marker the Server probe prints when rsync is absent.
 const noRsync = "yoho-no-rsync"
 
@@ -483,6 +543,16 @@ func syncSource(ctx context.Context, o Options) error {
 	}
 	if strings.Contains(out, noRsync) {
 		return fmt.Errorf("rsync is missing on %s\nhint: run `yoho setup` or install rsync on the Server", o.Host.Name())
+	}
+	excl, err := IgnoredExcludes(ctx, o.Dir)
+	if err != nil {
+		return err
+	}
+	if o.ExcludeFrom, err = writeExcludeFile(excl); err != nil {
+		return err
+	}
+	if o.ExcludeFrom != "" {
+		defer os.Remove(o.ExcludeFrom)
 	}
 	argv, err := RsyncArgv(o)
 	if err != nil {
