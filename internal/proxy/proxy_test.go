@@ -139,6 +139,18 @@ func TestParseRoutesAndList(t *testing.T) {
 	}
 }
 
+func TestListMissingProxy(t *testing.T) {
+	// A missing container makes the script exit 0 with no output: no routes.
+	h := &fakeHost{output: func(string) string { return "" }}
+	rs, err := List(context.Background(), h)
+	if err != nil || rs != nil {
+		t.Errorf("missing proxy: %v %v", rs, err)
+	}
+	if !strings.Contains(h.scripts[0], "docker container inspect yoho-proxy >/dev/null 2>&1 || exit 0") {
+		t.Errorf("no existence guard: %q", h.scripts[0])
+	}
+}
+
 func TestNeedsBoot(t *testing.T) {
 	ctx := context.Background()
 	cfg := config.ProxyConfig{}

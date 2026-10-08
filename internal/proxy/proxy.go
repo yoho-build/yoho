@@ -214,10 +214,13 @@ func ParseRoutes(out string) ([]Route, error) {
 	return routes, nil
 }
 
-// List returns the Proxy's routes, sorted by Service. Read-only. An error
-// means the Proxy container is missing or not running.
+// List returns the Proxy's routes, sorted by Service. Read-only. A Server
+// that never ran the Proxy (no container) has no routes: nil, nil. An error
+// means the Proxy exists but could not be queried (for example not running).
 func List(ctx context.Context, host remote.Host) ([]Route, error) {
-	out, err := host.Output(ctx, remote.Cmd{Script: "docker exec " + ContainerName + " kamal-proxy list --json"})
+	script := "docker container inspect " + ContainerName + " >/dev/null 2>&1 || exit 0\n" +
+		"docker exec " + ContainerName + " kamal-proxy list --json"
+	out, err := host.Output(ctx, remote.Cmd{Script: script})
 	if err != nil {
 		return nil, fmt.Errorf("list proxy routes: %w", err)
 	}
