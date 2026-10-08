@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -10,14 +11,18 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/spf13/cobra"
 
 	"github.com/yoho-build/yoho/internal/build"
 	"github.com/yoho-build/yoho/internal/deploy"
+	"github.com/yoho-build/yoho/internal/dist"
+	"github.com/yoho-build/yoho/internal/plan"
 	"github.com/yoho-build/yoho/internal/remote"
 	"github.com/yoho-build/yoho/internal/schedule"
+	"github.com/yoho-build/yoho/internal/secrets"
 )
 
 func init() {
@@ -72,83 +77,149 @@ func scheduleInstallCmd(g *globals) *cobra.Command {
 				return err
 			}
 			u.Title("Installing Scheduled Jobs of %s (%s): %s", a.cfg.App, a.destName, strings.Join(names, ", "))
-			var jobs []schedule.Job
-			var loaded bool
-			for _, n := range names {
-				j, jerr := a.newBackupJob(n, a.cfg.Backups.Jobs[n])
-				if jerr == nil && !loaded {
-					step := u.Step("", "Load compose")
-					if jerr = a.resolveServices(ctx, j); jerr != nil {
-						step.Fail(jerr, "run `yoho config check`")
-						return &silentError{jerr}
-					}
-					step.Done()
-					loaded = true
-				} else if jerr == nil {
-					jerr = a.resolveServices(ctx, j)
-				}
-				if jerr == nil && (j.target.PasswordSecret != "" || len(j.target.EnvSecrets) > 0) {
-					step := u.Step("", "Resolve secrets of %s", j.targetName)
-					if jerr = a.resolveTargetSecrets(ctx, j); jerr != nil {
-						step.Fail(jerr, "check .yoho/secrets and that op / bw / bws are signed in")
-						return &silentError{jerr}
-					}
-					step.Done()
-				}
-				if jerr != nil {
-					return jerr
-				}
-				sec := map[string]string{}
-				if k := j.target.PasswordSecret; k != "" {
-					sec[k] = j.password
-				}
-				for k, v := range j.env {
-					sec[k] = v
-				}
-				jobs = append(jobs, schedule.Job{
-					App: a.cfg.App, Destination: a.destName, Name: n, Project: a.project(),
-					Services: j.services, TargetName: j.targetName, Target: j.target,
-					Schedule: j.cfg.Schedule, Secrets: sec,
-				})
-			}
-
 			hosts, closeHosts, err := a.connect(ctx)
 			if err != nil {
 				return err
 			}
 			defer closeHosts()
-			h := hosts[0]
-
-			step := u.Step(h.Name, "Prepare yoho binary")
-			platform, err := build.ServerPlatform(ctx, h.Host)
-			if err == nil {
-				binary, err = linuxBinary(ctx, binary, platform, step.Output())
+			if err := a.installJobs(ctx, hosts, names, binary, nil); err != nil {
+				return err
 			}
-			if err != nil {
-				step.Fail(err, "pass --binary with a yoho binary built for the Server (e.g. `make dist`)")
-				return &silentError{err}
-			}
-			step.Done(platform)
-
-			mode := a.scheduleMode()
-			step = u.Step(h.Name, "Install timers (%s)", map[bool]string{true: "system units, sudo", false: "user units"}[mode.Sudo])
-			res, err := schedule.Install(ctx, h.Host, schedule.InstallOptions{
-				Jobs: jobs, YohoBinaryLocalPath: binary, Mode: mode, Out: step.Output(),
-			})
-			if err != nil {
-				step.Fail(err, "check that systemd runs on the Server; without sudo the user needs a systemd user session (loginctl)")
-				return &silentError{err}
-			}
-			step.Done(strings.Join(res.Timers, ", "))
-			for _, w := range res.Warnings {
-				u.Warn("%s", w)
-			}
-			u.Finished(nil, fmt.Sprintf("Installed %d Scheduled Job(s); check them with `yoho schedule status`", len(res.Timers)))
+			u.Finished(nil, fmt.Sprintf("Installed %d Scheduled Job(s); check them with `yoho schedule status`", len(names)))
 			return nil
 		},
 	}
-	c.Flags().StringVar(&binary, "binary", "", "yoho binary for the Server's OS/arch (default: this binary, or a cross-build from source)")
+	c.Flags().StringVar(&binary, "binary", "", "yoho binary for the Server's OS/arch (default: this binary, a release download, or a cross-build from source)")
 	return c
+}
+
+// installJobs uploads the yoho binary and installs timers for names.
+// store supplies Backup Target secrets when non-nil; otherwise they are loaded.
+// It prints steps and does not print a title or a finished line.
+func (a *app) installJobs(ctx context.Context, hosts []plan.NamedHost, names []string, binaryFlag string, store *secrets.Store) error {
+	if len(names) == 0 {
+		return nil
+	}
+	if len(hosts) == 0 {
+		return errors.New("no Servers for Scheduled Jobs")
+	}
+	u := a.ui
+	var jobs []schedule.Job
+	var loaded bool
+	for _, n := range names {
+		jc, ok := a.cfg.Backups.Jobs[n]
+		if !ok {
+			return fmt.Errorf("no Backup job %q%s", n, jobList(a.cfg.Backups.Jobs))
+		}
+		j, jerr := a.newBackupJob(n, jc)
+		if jerr == nil && !loaded {
+			step := u.Step("", "Load compose")
+			if jerr = a.resolveServices(ctx, j); jerr != nil {
+				step.Fail(jerr, "run `yoho config check`")
+				return &silentError{jerr}
+			}
+			step.Done()
+			loaded = true
+		} else if jerr == nil {
+			jerr = a.resolveServices(ctx, j)
+		}
+		if jerr == nil && (j.target.PasswordSecret != "" || len(j.target.EnvSecrets) > 0) {
+			step := u.Step("", "Resolve secrets of %s", j.targetName)
+			if store != nil {
+				jerr = secretsFromStore(j, store)
+			} else {
+				jerr = a.resolveTargetSecrets(ctx, j)
+			}
+			if jerr != nil {
+				step.Fail(jerr, "check .yoho/secrets and that op / bw / bws are signed in")
+				return &silentError{jerr}
+			}
+			step.Done()
+		}
+		if jerr != nil {
+			return jerr
+		}
+		sec := map[string]string{}
+		if k := j.target.PasswordSecret; k != "" {
+			sec[k] = j.password
+		}
+		for k, v := range j.env {
+			sec[k] = v
+		}
+		jobs = append(jobs, schedule.Job{
+			App: a.cfg.App, Destination: a.destName, Name: n, Project: a.project(),
+			Services: j.services, TargetName: j.targetName, Target: j.target,
+			Schedule: j.cfg.Schedule, Secrets: sec,
+		})
+	}
+
+	h := hosts[0]
+	step := u.Step(h.Name, "Prepare yoho binary")
+	platform, err := build.ServerPlatform(ctx, h.Host)
+	var binary string
+	var detail string
+	if err == nil {
+		sw := &sourceWriter{w: step.Output()}
+		binary, err = linuxBinary(ctx, binaryFlag, platform, sw)
+		if ferr := sw.flush(); err == nil && ferr != nil {
+			err = ferr
+		}
+		detail = sw.detail
+	}
+	if err != nil {
+		step.Fail(err, "pass --binary with a yoho binary built for the Server (e.g. `make dist`)")
+		return &silentError{err}
+	}
+	if detail == "" {
+		detail = platform
+	}
+	step.Done(detail)
+
+	mode := a.scheduleMode()
+	step = u.Step(h.Name, "Install timers (%s)", map[bool]string{true: "system units, sudo", false: "user units"}[mode.Sudo])
+	res, err := schedule.Install(ctx, h.Host, schedule.InstallOptions{
+		Jobs: jobs, YohoBinaryLocalPath: binary, Mode: mode, Out: step.Output(),
+	})
+	if err != nil {
+		step.Fail(err, "check that systemd runs on the Server; without sudo the user needs a systemd user session (loginctl)")
+		return &silentError{err}
+	}
+	step.Done(strings.Join(res.Timers, ", "))
+	for _, w := range res.Warnings {
+		u.Warn("%s", w)
+	}
+	return nil
+}
+
+// secretsFromStore fills the Backup Target password and env from store.
+func secretsFromStore(j *backupJob, store *secrets.Store) error {
+	j.env = map[string]string{}
+	j.store = store
+	if j.target.PasswordSecret == "" && len(j.target.EnvSecrets) == 0 {
+		return nil
+	}
+	if store == nil {
+		return fmt.Errorf("secret store is required for Backup Target %s", j.targetName)
+	}
+	get := func(k string) (string, error) {
+		v, ok := store.Get(k)
+		if !ok {
+			return "", fmt.Errorf("secret %s for Backup Target %s is not defined in .yoho/secrets or secrets.values", k, j.targetName)
+		}
+		return v, nil
+	}
+	var err error
+	if k := j.target.PasswordSecret; k != "" {
+		if j.password, err = get(k); err != nil {
+			return err
+		}
+	}
+	for _, k := range j.target.EnvSecrets {
+		if j.env[k], err = get(k); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // scheduledJobNames returns the named jobs, or every job of the
@@ -182,27 +253,53 @@ func (a *app) scheduledJobNames(args []string) ([]string, error) {
 	return names, nil
 }
 
-// linuxBinary returns a yoho binary for platform (linux/<arch>): explicit,
-// the running binary when it matches, or a cross-build of the source this
-// binary was built from (development). Release downloads come later.
+// linuxBinary returns a yoho binary for platform (linux/<arch>). Order:
+// explicit --binary, the running binary when it matches, a release download
+// when Version is not "dev", then a cross-build from source.
+// It writes "yoho-binary-source <detail>" for the step detail.
 func linuxBinary(ctx context.Context, explicit, platform string, out interface{ Write([]byte) (int, error) }) (string, error) {
 	osName, arch, _ := strings.Cut(platform, "/")
 	if osName != "linux" {
 		return "", fmt.Errorf("Scheduled Jobs need a Linux Server, not %s", platform)
 	}
 	if explicit != "" {
+		noteBinarySource(out, explicit)
 		return explicit, nil
 	}
 	if runtime.GOOS == "linux" && runtime.GOARCH == arch {
-		return os.Executable()
+		exe, err := os.Executable()
+		if err != nil {
+			return "", err
+		}
+		noteBinarySource(out, "this binary")
+		return exe, nil
+	}
+	var dlErr error
+	if Version != "" && Version != "dev" {
+		fmt.Fprintf(out, "downloading release %s for %s\n", Version, platform)
+		p, err := dist.Download(ctx, Version, platform, "")
+		if err == nil {
+			noteBinarySource(out, "release "+Version)
+			return p, nil
+		}
+		dlErr = err
+		fmt.Fprintf(out, "release download failed: %v\n", err)
 	}
 	src := yohoSourceDir()
 	gobin, gerr := exec.LookPath("go")
 	if src == "" || gerr != nil {
-		return "", errors.New("this yoho is not built for " + platform + " and release downloads are not available yet; build one with `make dist` and pass --binary")
+		hint := "pass --binary with a yoho binary built for the Server (e.g. `make dist`)"
+		if dlErr != nil {
+			return "", fmt.Errorf("no yoho binary for %s: %w\nhint: %s", platform, dlErr, hint)
+		}
+		return "", fmt.Errorf("this yoho is not built for %s\nhint: %s", platform, hint)
 	}
 	tmp := filepath.Join(os.TempDir(), fmt.Sprintf("yoho-%s-%s", osName, arch))
-	fmt.Fprintf(out, "cross-building %s from %s\n", platform, src)
+	if dlErr != nil {
+		fmt.Fprintf(out, "cross-building %s from %s after release download failed\n", platform, src)
+	} else {
+		fmt.Fprintf(out, "cross-building %s from %s\n", platform, src)
+	}
 	c := exec.CommandContext(ctx, gobin, "build", "-trimpath", "-ldflags", "-s -w -X github.com/yoho-build/yoho/internal/cli.Version="+Version, "-o", tmp, "./cmd/yoho")
 	c.Dir = src
 	c.Env = append(os.Environ(), "GOOS=linux", "GOARCH="+arch, "CGO_ENABLED=0")
@@ -210,7 +307,66 @@ func linuxBinary(ctx context.Context, explicit, platform string, out interface{ 
 	if err := c.Run(); err != nil {
 		return "", fmt.Errorf("cross-build yoho for %s: %w", platform, err)
 	}
+	noteBinarySource(out, "cross-built from source")
 	return tmp, nil
+}
+
+func noteBinarySource(out interface{ Write([]byte) (int, error) }, detail string) {
+	if out == nil {
+		return
+	}
+	fmt.Fprintf(out, "yoho-binary-source %s\n", detail)
+}
+
+// sourceWriter records a yoho-binary-source line and forwards the rest.
+// go build writes stdout and stderr concurrently, so the buffer is locked.
+type sourceWriter struct {
+	mu     sync.Mutex
+	w      interface{ Write([]byte) (int, error) }
+	detail string
+	buf    []byte
+}
+
+func (s *sourceWriter) Write(p []byte) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.buf = append(s.buf, p...)
+	for {
+		i := bytes.IndexByte(s.buf, '\n')
+		if i < 0 {
+			break
+		}
+		line := string(s.buf[:i])
+		s.buf = s.buf[i+1:]
+		if err := s.emit(line); err != nil {
+			return 0, err
+		}
+	}
+	return len(p), nil
+}
+
+func (s *sourceWriter) flush() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if len(s.buf) == 0 {
+		return nil
+	}
+	line := string(s.buf)
+	s.buf = nil
+	return s.emit(line)
+}
+
+func (s *sourceWriter) emit(line string) error {
+	const pfx = "yoho-binary-source "
+	if rest, ok := strings.CutPrefix(line, pfx); ok {
+		s.detail = rest
+		return nil
+	}
+	if s.w == nil {
+		return nil
+	}
+	_, err := s.w.Write([]byte(line + "\n"))
+	return err
 }
 
 // yohoSourceDir finds the yoho module source: $YOHO_SOURCE, or the
@@ -309,22 +465,32 @@ func scheduleRemoveCmd(g *globals) *cobra.Command {
 				return err
 			}
 			defer closeHosts()
-			step := a.ui.Step(hosts[0].Name, "Remove Scheduled Jobs")
-			removed, err := schedule.Remove(ctx, hosts[0].Host, schedule.RemoveOptions{
-				App: a.cfg.App, Destination: a.destName, Jobs: args, Mode: a.scheduleMode(),
-			})
-			if err != nil {
-				step.Fail(err, "rerun with -v")
-				return &silentError{err}
-			}
-			if len(removed) == 0 {
-				step.Skip("none installed")
-				return nil
-			}
-			step.Done(strings.Join(removed, ", "))
-			return nil
+			return a.removeJobs(ctx, hosts, args)
 		},
 	}
+}
+
+// removeJobs disables and deletes Scheduled Jobs. Empty names removes every
+// job of the Destination. It prints a step and does not print a title.
+func (a *app) removeJobs(ctx context.Context, hosts []plan.NamedHost, names []string) error {
+	if len(hosts) == 0 {
+		return errors.New("no Servers for Scheduled Jobs")
+	}
+	h := hosts[0]
+	step := a.ui.Step(h.Name, "Remove Scheduled Jobs")
+	removed, err := schedule.Remove(ctx, h.Host, schedule.RemoveOptions{
+		App: a.cfg.App, Destination: a.destName, Jobs: names, Mode: a.scheduleMode(),
+	})
+	if err != nil {
+		step.Fail(err, "rerun with -v")
+		return &silentError{err}
+	}
+	if len(removed) == 0 {
+		step.Skip("none installed")
+		return nil
+	}
+	step.Done(strings.Join(removed, ", "))
+	return nil
 }
 
 // scheduleRunCmd is what the systemd service executes on the Server.

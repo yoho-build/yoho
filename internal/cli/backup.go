@@ -286,6 +286,7 @@ func backupRunCmd(g *globals) *cobra.Command {
 				App: a.cfg.App, Destination: a.destName, Project: a.project(),
 				Services: j.services, Target: j.target, Password: j.password, TargetEnv: j.env,
 				Host: h.Host, Out: out, Lock: a.backupLock(h.Host, "backup"), YohoVersion: Version,
+				Runtime: a.dest.Runtime,
 			})
 			flush()
 			if err != nil {
@@ -439,6 +440,7 @@ Current volume data is lost. Use "latest" as ID for the newest restic snapshot.`
 				App: a.cfg.App, Destination: a.destName, Project: a.project(),
 				Services: j.services, Target: j.target, Password: j.password, TargetEnv: j.env,
 				Host: h.Host, Out: out, Lock: a.backupLock(h.Host, "restore"), ID: found.ID, Confirm: true,
+				Runtime: a.dest.Runtime,
 			})
 			flush()
 			if err != nil {

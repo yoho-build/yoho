@@ -11,8 +11,9 @@
 //   - release_command runs as a one-off replicated-job service in a separate
 //     stack (<stack>-release) that joins the main stack's networks, volumes
 //     and secrets, so it sees exactly what the Service will;
-//   - the Proxy (kamal-proxy, a plain container on the manager) and every
-//     proxied Service share the attachable overlay network `yoho`.
+//   - the Proxy (kamal-proxy) runs on every node. The attachable overlay
+//     network `yoho` is cluster-wide; each node's `yoho-proxy` container
+//     joins it and routes to the service VIP, so DNS can point at any node.
 package swarm
 
 import (
@@ -22,6 +23,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"path"
 	"slices"
 	"strconv"
@@ -226,11 +228,12 @@ func (Runtime) Deploy(ctx context.Context, d *plan.Deploy) (_ *release.Release, 
 			return nil, err
 		}
 	}
-	if err := r.releaseCommands(ctx, c, relDir); err != nil {
+	auth := registryAuth(d, c.Plan)
+	if err := r.releaseCommands(ctx, c, relDir, auth); err != nil {
 		return nil, err
 	}
 	r.logf("deploying stack %s", r.stack)
-	if err := r.deployStack(ctx, stackFile, r.stack, true, registryAuth(c.Plan)); err != nil {
+	if err := r.deployStack(ctx, stackFile, r.stack, true, auth); err != nil {
 		return nil, err
 	}
 	if err := r.routes(ctx, d, c.Plan); err != nil {
@@ -292,9 +295,9 @@ func (r *runner) createSecrets(ctx context.Context, d *plan.Deploy, svcSecrets m
 	return nil
 }
 
-// bootProxy ensures the attachable overlay network `yoho` (so both the
-// kamal-proxy container and Swarm tasks can join it) and the Proxy on the
-// manager.
+// bootProxy ensures the attachable overlay network `yoho` (cluster-wide, so
+// both kamal-proxy containers and Swarm tasks can join it) and boots the
+// Proxy on every Server. DNS or a Cloudflare Tunnel can point at any node.
 func (r *runner) bootProxy(ctx context.Context, d *plan.Deploy) error {
 	script := `set -eu
 s=$(docker network inspect -f '{{.Driver}}|{{.Scope}}|{{.Attachable}}' ` + proxy.Network + ` 2>/dev/null || true)
@@ -312,13 +315,23 @@ esac`
 		}
 		return fmt.Errorf("ensure overlay network %s: %w", proxy.Network, err)
 	}
-	return proxy.Boot(ctx, r.h, d.Proxy, r.out)
+	for _, s := range d.Servers {
+		if err := proxy.Boot(ctx, s.Host, d.Proxy, r.out); err != nil {
+			return fmt.Errorf("boot proxy on %s: %w", s.Name, err)
+		}
+	}
+	return nil
 }
 
-// registryAuth reports whether images come from a registry (first path
-// component looks like a host), so nodes need credentials to pull them.
-// Images shipped by Yoho to each node use plain local names.
-func registryAuth(p stackPlan) bool {
+// registryAuth reports whether `docker stack deploy` should pass
+// --with-registry-auth: the Destination configures a registry, or an image
+// name's first path component looks like a registry host. Yoho ships images
+// to each node and does not run docker login; when nodes must pull, the
+// manager is expected to be logged in already.
+func registryAuth(d *plan.Deploy, p stackPlan) bool {
+	if d.Registry != nil {
+		return true
+	}
 	for _, sp := range p.Services {
 		first, _, ok := strings.Cut(sp.Image, "/")
 		if ok && (strings.ContainsAny(first, ".:") || first == "localhost") {
@@ -498,22 +511,76 @@ func (r *runner) routes(ctx context.Context, d *plan.Deploy, p stackPlan) error 
 		}
 		target += ":" + strconv.Itoa(sp.Proxy.Port)
 		route := deploy.RouteName(d.App, d.Destination, sp.Name)
-		r.logf("proxy route %s -> %s", route, target)
-		if err := proxy.Deploy(ctx, r.h, route, target, proxy.DeployOptions{
+		r.logf("proxy route %s -> %s on %d servers", route, target, len(d.Servers))
+		opts := proxy.DeployOptions{
 			Hosts: sp.Proxy.Hosts, HealthPath: sp.Proxy.HealthPath, TLS: sp.Proxy.TLS,
 			DeployTimeout: time.Duration(sp.Proxy.DeployTimeout) * time.Second,
 			DrainTimeout:  time.Duration(sp.Proxy.DrainTimeout) * time.Second,
-		}); err != nil {
-			return err
+		}
+		for _, s := range d.Servers {
+			if err := proxy.Deploy(ctx, s.Host, route, target, opts); err != nil {
+				return fmt.Errorf("proxy route %s on %s: %w", route, s.Name, err)
+			}
+		}
+	}
+	return r.removeStaleRoutes(ctx, d, p)
+}
+
+// removeStaleRoutes drops Proxy routes that the previous Release had and
+// this plan does not, on every node. kamal-proxy keeps a route until it is
+// removed; stack prune does not touch the Proxy.
+func (r *runner) removeStaleRoutes(ctx context.Context, d *plan.Deploy, p stackPlan) error {
+	prev, err := currentPlan(ctx, r.h, d.App, d.Destination)
+	if err != nil || prev == nil {
+		return err
+	}
+	keep := map[string]bool{}
+	for _, sp := range p.Services {
+		if sp.Proxy != nil {
+			keep[sp.Name] = true
+		}
+	}
+	for _, sp := range prev.Services {
+		if sp.Proxy == nil || keep[sp.Name] {
+			continue
+		}
+		route := deploy.RouteName(d.App, d.Destination, sp.Name)
+		r.logf("remove proxy route %s", route)
+		for _, s := range d.Servers {
+			if err := proxy.Remove(ctx, s.Host, route); err != nil {
+				return fmt.Errorf("remove proxy route %s on %s: %w", route, s.Name, err)
+			}
 		}
 	}
 	return nil
 }
 
+// currentPlan reads the current Release's plan.json. A missing current
+// Release is (nil, nil).
+func currentPlan(ctx context.Context, h remote.Host, app, dest string) (*stackPlan, error) {
+	dir := release.AppDir(app, dest)
+	out, err := h.Output(ctx, remote.Cmd{Script: "readlink " + remote.Quote(path.Join(dir, "current")) + " 2>/dev/null || true"})
+	if err != nil {
+		return nil, err
+	}
+	ver := path.Base(strings.TrimSpace(out))
+	if ver == "" || ver == "." {
+		return nil, nil
+	}
+	p, err := readPlan(ctx, h, release.Dir(app, dest, ver))
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	return p, nil
+}
+
 // releaseCommands runs each x-yoho.release_command before the stack update.
 // Dependencies (depends_on of those Services, and Stateful Services) that do
 // not exist yet are deployed first so migrations work on the first deploy.
-func (r *runner) releaseCommands(ctx context.Context, c *compiled, relDir string) error {
+func (r *runner) releaseCommands(ctx context.Context, c *compiled, relDir string, auth bool) error {
 	var jobs []servicePlan
 	var deps []string
 	for _, sp := range c.Plan.Services {
@@ -542,7 +609,6 @@ func (r *runner) releaseCommands(ctx context.Context, c *compiled, relDir string
 		}
 	}
 	slices.Sort(missing)
-	auth := registryAuth(c.Plan)
 	if len(missing) > 0 {
 		r.logf("starting dependencies %s", strings.Join(missing, ", "))
 		b, err := subset(c.Doc, missing)
@@ -838,7 +904,7 @@ func (Runtime) Rollback(ctx context.Context, d *plan.Deploy, version string) (_ 
 			return nil, err
 		}
 	}
-	if err := r.deployStack(ctx, stackFile, r.stack, true, registryAuth(*p)); err != nil {
+	if err := r.deployStack(ctx, stackFile, r.stack, true, registryAuth(d, *p)); err != nil {
 		return nil, err
 	}
 	if err := r.routes(ctx, d, *p); err != nil {

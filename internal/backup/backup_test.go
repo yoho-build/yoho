@@ -104,6 +104,96 @@ func baseOpts(h remote.Host) RunOptions {
 	}
 }
 
+func TestSwarmRunFindsTaskAndStackVolume(t *testing.T) {
+	h := &fakeHost{respond: dockerResponder(func(s string) (string, error) {
+		if strings.Contains(s, "volume ls") {
+			return "yoho-shop-production_other\nyoho-shop-production_pgdata\n", nil
+		}
+		return "", nil
+	})}
+	o := baseOpts(h)
+	o.Runtime = "swarm"
+	o.Target = config.BackupTarget{Type: "archive", Format: "tar.gz", Repository: "/srv/b", KeepLast: 1}
+	if _, err := Run(context.Background(), o); err != nil {
+		t.Fatal(err)
+	}
+	all := h.scripts()
+	if strings.Contains(all, "docker compose") {
+		t.Fatal("swarm backup used compose")
+	}
+	if !strings.Contains(all, "label=com.docker.swarm.service.name=yoho-shop-production_db") || !strings.Contains(all, "--filter status=running") {
+		t.Fatalf("task lookup:\n%s", all)
+	}
+	if !strings.Contains(all, "label=com.docker.stack.namespace=yoho-shop-production") {
+		t.Fatalf("volume lookup:\n%s", all)
+	}
+	if !strings.Contains(all, "yoho-shop-production_pgdata:/data:ro") {
+		t.Fatal("did not mount the stack volume")
+	}
+}
+
+func TestSwarmRestoreScalesService(t *testing.T) {
+	h := &fakeHost{}
+	h.respond = dockerResponder(func(s string) (string, error) {
+		if strings.Contains(s, "service inspect") {
+			return "1", nil
+		}
+		if strings.Contains(s, "volume ls") {
+			return "yoho-shop-production_pgdata\n", nil
+		}
+		return "", nil
+	})
+	data := "/var/lib/yoho/backups/shop/production/restore-20261008T030000Z/data"
+	m := Manifest{App: "shop", Destination: "production", Services: map[string]ManifestService{
+		"db": {Volumes: map[string]string{"pgdata": "db-pgdata.tar.gz"}},
+	}}
+	mj, _ := json.Marshal(m)
+	h.files = map[string][]byte{data + "/manifest.json": mj}
+	_, err := Restore(context.Background(), RestoreOptions{
+		App: "shop", Destination: "production", Host: h, Confirm: true, Runtime: "swarm",
+		ID:     "yoho-shop-production-20261001T030000Z.tar.gz",
+		Target: config.BackupTarget{Type: "archive", Repository: "/srv/b"},
+		Services: map[string]config.ServiceBackup{
+			"db": {Volumes: []string{"pgdata"}},
+		},
+		Now: func() time.Time { return time.Date(2026, 10, 8, 3, 0, 0, 0, time.UTC) },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	all := h.scripts()
+	if strings.Contains(all, "docker compose") {
+		t.Fatal("swarm restore used compose")
+	}
+	inspect := h.index("docker service inspect -f '{{.Spec.Mode.Replicated.Replicas}}' 'yoho-shop-production_db'")
+	down := h.index("docker service scale 'yoho-shop-production_db=0'")
+	wipe := h.index("find /data -mindepth 1 -delete")
+	up := h.index("docker service scale 'yoho-shop-production_db=1'")
+	if !(inspect >= 0 && inspect < down && down < wipe && wipe < up) {
+		t.Fatalf("bad order inspect=%d down=%d wipe=%d up=%d\n%s", inspect, down, wipe, up, all)
+	}
+	if !strings.Contains(all, "did not converge") {
+		t.Fatal("scale did not wait for convergence")
+	}
+	for _, c := range h.cmds {
+		if strings.HasPrefix(c.Script, "#") {
+			continue
+		}
+		if out, err := exec.Command("sh", "-n", "-c", c.Script).CombinedOutput(); err != nil {
+			t.Errorf("sh -n failed: %v %s\n%s", err, out, c.Script)
+		}
+	}
+}
+
+func TestUnknownRuntime(t *testing.T) {
+	h := &fakeHost{}
+	o := baseOpts(h)
+	o.Runtime = "nomad"
+	if _, err := Run(context.Background(), o); err == nil || !strings.Contains(err.Error(), "unknown runtime") {
+		t.Fatal(err)
+	}
+}
+
 func TestRunArchiveZipPasswordNeverInScript(t *testing.T) {
 	h := &fakeHost{respond: dockerResponder(nil)}
 	o := baseOpts(h)

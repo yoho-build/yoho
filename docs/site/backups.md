@@ -47,4 +47,8 @@ yoho backup restore [ID]     # restore; confirmation required
 
 Run `yoho backup <cmd> --help` for flags. Hooks `pre-backup`, `post-backup`, `pre-restore`, `post-restore` run on your machine. Generated secrets are included in encrypted Backups.
 
+## Swarm
+
+On a Destination with `runtime: swarm`, Backups run on the first Server. Stateful Services are pinned there, so that host has the task container and the volume. The container is the running task (`docker ps` filtered by `com.docker.swarm.service.name=<project>_<service>`). Stack volumes are named `<project>_<volume>` (label `com.docker.stack.namespace=<project>`). Restore scales the Service to 0, replaces the volume, then scales it back to the previous replica count and waits until that many tasks are running. Pause, dump, and `docker exec` use the task container, same as compose.
+
 To recover a lost Server: `yoho setup`, `yoho deploy`, `yoho backup restore`. Schedule recurring runs with [scheduled jobs](scheduled-jobs.md).

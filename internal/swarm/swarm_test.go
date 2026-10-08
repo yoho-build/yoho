@@ -13,6 +13,8 @@ import (
 
 	"github.com/compose-spec/compose-go/v2/types"
 
+	"github.com/yoho-build/yoho/internal/config"
+	"github.com/yoho-build/yoho/internal/plan"
 	"github.com/yoho-build/yoho/internal/release"
 	"github.com/yoho-build/yoho/internal/remote"
 )
@@ -42,6 +44,11 @@ func (s *swarmSim) respond(script string) (string, error) {
 			return "inactive|false|node-1", nil
 		}
 		return "active|true|node-1", nil
+	case strings.Contains(script, "{{.Swarm.LocalNodeState}}"):
+		if s.notSwarm {
+			return "inactive", nil
+		}
+		return "active", nil
 	case strings.Contains(script, "docker stack deploy"):
 		switch {
 		case strings.Contains(script, "dependencies.yaml"):
@@ -199,6 +206,58 @@ func TestDeploySequence(t *testing.T) {
 	cur, _ := os.Readlink(filepath.Join(release.AppDir("shop", "production"), "current"))
 	if cur != "releases/v1" {
 		t.Errorf("current -> %s", cur)
+	}
+}
+
+func TestProxyOnEveryNode(t *testing.T) {
+	withRoot(t)
+	fastPolling(t)
+	sim := newSim()
+	mgr := newFake(sim)
+	edge := &fakeHost{name: "edge", local: &remote.Local{}, respond: sim.respond}
+	d := testDeploy(t, mgr, nil)
+	d.Servers = append(d.Servers, plan.NamedHost{Name: "edge", Server: config.Server{SSH: "yoho@203.0.113.11"}, Host: edge})
+	if _, err := (Runtime{}).Deploy(context.Background(), d); err != nil {
+		t.Fatalf("%v\nmanager:\n%s\nedge:\n%s", err, mgr.all(), edge.all())
+	}
+	if indexOf(mgr, "docker network create -d overlay --attachable yoho") < 0 {
+		t.Fatal("manager did not create the overlay")
+	}
+	if indexOf(edge, "docker network create -d overlay") >= 0 {
+		t.Fatal("worker must not create the overlay")
+	}
+	for _, h := range []*fakeHost{mgr, edge} {
+		if indexOf(h, "kamal-proxy' 'deploy' 'shop-production-web'") < 0 || indexOf(h, "yoho-proxy") < 0 {
+			t.Fatalf("%s missing proxy boot or route\n%s", h.name, h.all())
+		}
+	}
+
+	d.Version = "v2"
+	web := d.Ext["web"]
+	web.Proxy = nil
+	d.Ext["web"] = web
+	mgr.scripts, edge.scripts = nil, nil
+	if _, err := (Runtime{}).Deploy(context.Background(), d); err != nil {
+		t.Fatalf("%v\n%s\n%s", err, mgr.all(), edge.all())
+	}
+	for _, h := range []*fakeHost{mgr, edge} {
+		if indexOf(h, "kamal-proxy' 'remove' 'shop-production-web'") < 0 {
+			t.Fatalf("%s did not remove the route\n%s", h.name, h.all())
+		}
+	}
+}
+
+func TestDeployWithRegistryAuth(t *testing.T) {
+	withRoot(t)
+	fastPolling(t)
+	h := newFake(newSim())
+	d := testDeploy(t, h, nil)
+	d.Registry = &config.Registry{Server: "ghcr.io", Username: "me"}
+	if _, err := (Runtime{}).Deploy(context.Background(), d); err != nil {
+		t.Fatal(err)
+	}
+	if indexOf(h, "docker stack deploy", "/compose.yaml", "--with-registry-auth") < 0 {
+		t.Fatalf("flag missing\n%s", h.all())
 	}
 }
 

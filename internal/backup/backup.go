@@ -57,6 +57,11 @@ type RunOptions struct {
 	YohoVersion string
 	// Now is overridable for tests.
 	Now func() time.Time
+	// Runtime is "compose" (default) or "swarm". On swarm, the Service's
+	// container is the running task on this host and volumes are stack
+	// volumes named <project>_<volume>. Stateful Services are pinned to the
+	// first Server, which is the host the CLI connects for Backups.
+	Runtime string
 }
 
 // Result describes a stored Backup.
@@ -191,6 +196,9 @@ func (o *RunOptions) validate() error {
 	if len(o.Services) == 0 {
 		return errors.New("backup: no Services with x-yoho.backup selected")
 	}
+	if _, err := normalizeRuntime(o.Runtime); err != nil {
+		return err
+	}
 	for svc, sb := range o.Services {
 		if !nameRe.MatchString(svc) {
 			return fmt.Errorf("backup: invalid Service name %q", svc)
@@ -210,7 +218,11 @@ func (o *RunOptions) validate() error {
 // backupService dumps, quiesces and copies the volumes of one Service.
 func backupService(ctx context.Context, o RunOptions, staging, svc string, sb config.ServiceBackup) (ManifestService, error) {
 	ms := ManifestService{Quiesce: "none"}
-	cid, err := containerID(ctx, o.Host, o.project(), svc)
+	rt, err := normalizeRuntime(o.Runtime)
+	if err != nil {
+		return ms, err
+	}
+	cid, err := containerID(ctx, o.Host, o.project(), svc, rt)
 	if err != nil {
 		return ms, err
 	}
@@ -227,7 +239,7 @@ func backupService(ctx context.Context, o RunOptions, staging, svc string, sb co
 	}
 	vols := map[string]string{} // compose key -> Docker volume name
 	for _, v := range sb.Volumes {
-		name, err := volumeName(ctx, o.Host, o.project(), v)
+		name, err := volumeName(ctx, o.Host, o.project(), v, rt)
 		if err != nil {
 			return ms, err
 		}
@@ -277,8 +289,27 @@ func withQuiesced(ctx context.Context, o RunOptions, cid string, preBackup []str
 	return fn()
 }
 
-func containerID(ctx context.Context, h remote.Host, project, svc string) (string, error) {
-	out, err := h.Output(ctx, remote.Cmd{Script: "docker compose -p " + remote.Quote(project) + " ps -q " + remote.Quote(svc)})
+func normalizeRuntime(runtime string) (string, error) {
+	switch runtime {
+	case "", "compose":
+		return "compose", nil
+	case "swarm":
+		return "swarm", nil
+	default:
+		return "", fmt.Errorf("backup: unknown runtime %q", runtime)
+	}
+}
+
+func containerID(ctx context.Context, h remote.Host, project, svc, runtime string) (string, error) {
+	var script string
+	if runtime == "swarm" {
+		// First running task of the Service on this node. Stateful Services
+		// are pinned to the host the CLI is connected to.
+		script = "docker ps -q --filter " + remote.Quote("label=com.docker.swarm.service.name="+project+"_"+svc) + " --filter status=running"
+	} else {
+		script = "docker compose -p " + remote.Quote(project) + " ps -q " + remote.Quote(svc)
+	}
+	out, err := h.Output(ctx, remote.Cmd{Script: script})
 	if err != nil {
 		return "", fmt.Errorf("find container: %w", err)
 	}
@@ -289,9 +320,27 @@ func containerID(ctx context.Context, h remote.Host, project, svc string) (strin
 	return strings.TrimSpace(id), nil
 }
 
-// volumeName resolves a compose volume key to the Docker volume name via
-// compose labels, so custom `name:` settings are honored.
-func volumeName(ctx context.Context, h remote.Host, project, vol string) (string, error) {
+// volumeName resolves a compose volume key to the Docker volume name.
+// Compose uses compose labels (custom `name:` is honored). Swarm stack
+// volumes are named <project>_<key> and labelled with the stack namespace.
+func volumeName(ctx context.Context, h remote.Host, project, vol, runtime string) (string, error) {
+	if runtime == "swarm" {
+		out, err := h.Output(ctx, remote.Cmd{Script: "docker volume ls -q --filter " + remote.Quote("label=com.docker.stack.namespace="+project)})
+		if err != nil {
+			return "", fmt.Errorf("resolve volume %s: %w", vol, err)
+		}
+		want := project + "_" + vol
+		var match []string
+		for _, n := range strings.Fields(out) {
+			if n == want {
+				match = append(match, n)
+			}
+		}
+		if len(match) != 1 {
+			return "", fmt.Errorf("volume %s of project %s: found %d Docker volumes named %s, want 1", vol, project, len(match), want)
+		}
+		return match[0], nil
+	}
 	out, err := h.Output(ctx, remote.Cmd{Script: "docker volume ls -q --filter " +
 		remote.Quote("label=com.docker.compose.project="+project) + " --filter " +
 		remote.Quote("label=com.docker.compose.volume="+vol)})

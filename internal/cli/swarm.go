@@ -114,6 +114,7 @@ func (a *app) swarmAdvice(warnPublic bool) {
 	u.Info("  7946/tcp+udp  node discovery")
 	u.Info("  4789/udp      overlay network traffic (VXLAN, unencrypted by default)")
 	u.Info("Run Swarm over Tailscale or a private network: set servers.<name>.private_address so --advertise-addr uses it.")
+	u.Info("kamal-proxy runs on every node (overlay network yoho). Point DNS or a Cloudflare Tunnel at any Server.")
 	if warnPublic {
 		u.Warn("no private_address configured: Swarm advertises the public address")
 	}

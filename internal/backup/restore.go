@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"path"
+	"strconv"
 	"strings"
 	"time"
 
@@ -58,6 +59,8 @@ type RestoreOptions struct {
 	ID      string
 	Confirm bool
 	Now     func() time.Time
+	// Runtime is "compose" (default) or "swarm".
+	Runtime string
 }
 
 // RestoreResult reports what was restored.
@@ -89,6 +92,10 @@ func Restore(ctx context.Context, o RestoreOptions) (res *RestoreResult, err err
 	}
 	if o.ID == "" {
 		return nil, errors.New("restore: Backup id required")
+	}
+	rt, err := normalizeRuntime(o.Runtime)
+	if err != nil {
+		return nil, err
 	}
 	project := o.Project
 	if project == "" {
@@ -195,7 +202,7 @@ func Restore(ctx context.Context, o RestoreOptions) (res *RestoreResult, err err
 			if !nameRe.MatchString(file) {
 				return nil, fmt.Errorf("manifest: invalid file name %q", file)
 			}
-			dn, err := volumeName(ctx, o.Host, project, key)
+			dn, err := volumeName(ctx, o.Host, project, key, rt)
 			if err != nil {
 				return nil, fmt.Errorf("%w (deploy the App before restoring)", err)
 			}
@@ -203,9 +210,11 @@ func Restore(ctx context.Context, o RestoreOptions) (res *RestoreResult, err err
 		}
 	}
 
+	var replicas map[string]int
 	if len(withVolumes) > 0 {
 		logf("stopping %s", strings.Join(withVolumes, ", "))
-		if err := o.Host.Run(ctx, remote.Cmd{Script: "set -eu; docker compose -p " + remote.Quote(project) + " stop " + remote.QuoteArgs(withVolumes...)}); err != nil {
+		replicas, err = stopServices(ctx, o.Host, project, rt, withVolumes)
+		if err != nil {
 			return nil, fmt.Errorf("stop Services: %w", err)
 		}
 		for _, v := range vols {
@@ -220,14 +229,14 @@ func Restore(ctx context.Context, o RestoreOptions) (res *RestoreResult, err err
 			res.Volumes = append(res.Volumes, v.svc+"/"+v.key)
 		}
 		logf("starting %s", strings.Join(withVolumes, ", "))
-		if err := o.Host.Run(ctx, remote.Cmd{Script: "set -eu; docker compose -p " + remote.Quote(project) + " start " + remote.QuoteArgs(withVolumes...)}); err != nil {
+		if err := startServices(ctx, o.Host, project, rt, withVolumes, replicas); err != nil {
 			return nil, fmt.Errorf("start Services: %w", err)
 		}
 	}
 	// Dumps load after volumes, into the started container, so a dump can
 	// overwrite (or complement) restored volume data.
 	for _, svc := range dumps {
-		cid, err := containerID(ctx, o.Host, project, svc)
+		cid, err := containerID(ctx, o.Host, project, svc, rt)
 		if err != nil {
 			return nil, err
 		}
@@ -248,7 +257,7 @@ func Restore(ctx context.Context, o RestoreOptions) (res *RestoreResult, err err
 		if len(post) == 0 {
 			continue
 		}
-		cid, err := containerID(ctx, o.Host, project, svc)
+		cid, err := containerID(ctx, o.Host, project, svc, rt)
 		if err != nil {
 			return nil, err
 		}
@@ -263,6 +272,75 @@ func Restore(ctx context.Context, o RestoreOptions) (res *RestoreResult, err err
 		logf("dumps without restore_dump are not loaded; restore them from: %s", strings.Join(res.DumpFiles, " "))
 	}
 	return res, nil
+}
+
+// scaleAttempts is how many seconds restore waits for a Swarm Service to
+// reach the requested number of running tasks.
+const scaleAttempts = 180
+
+// stopServices stops compose Services, or scales Swarm Services to 0 and
+// waits until no task is running. The returned map is the previous replica
+// count (swarm only).
+func stopServices(ctx context.Context, h remote.Host, project, runtime string, svcs []string) (map[string]int, error) {
+	if runtime != "swarm" {
+		script := "set -eu; docker compose -p " + remote.Quote(project) + " stop " + remote.QuoteArgs(svcs...)
+		if err := h.Run(ctx, remote.Cmd{Script: script}); err != nil {
+			return nil, err
+		}
+		return nil, nil
+	}
+	prev := map[string]int{}
+	for _, svc := range svcs {
+		name := project + "_" + svc
+		out, err := h.Output(ctx, remote.Cmd{Script: "docker service inspect -f '{{.Spec.Mode.Replicated.Replicas}}' " + remote.Quote(name)})
+		if err != nil {
+			return prev, fmt.Errorf("inspect replicas of %s: %w", name, err)
+		}
+		n, err := strconv.Atoi(strings.TrimSpace(out))
+		if err != nil {
+			return prev, fmt.Errorf("replicas of %s: %q", name, strings.TrimSpace(out))
+		}
+		prev[svc] = n
+		if err := scaleService(ctx, h, name, 0); err != nil {
+			return prev, err
+		}
+	}
+	return prev, nil
+}
+
+// startServices starts compose Services, or scales Swarm Services back and
+// waits until that many tasks are running.
+func startServices(ctx context.Context, h remote.Host, project, runtime string, svcs []string, replicas map[string]int) error {
+	if runtime != "swarm" {
+		return h.Run(ctx, remote.Cmd{Script: "set -eu; docker compose -p " + remote.Quote(project) + " start " + remote.QuoteArgs(svcs...)})
+	}
+	for _, svc := range svcs {
+		n := replicas[svc]
+		if n < 1 {
+			n = 1
+		}
+		if err := scaleService(ctx, h, project+"_"+svc, n); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func scaleService(ctx context.Context, h remote.Host, name string, replicas int) error {
+	script := fmt.Sprintf(`set -eu
+docker service scale %s >/dev/null
+i=0
+while :; do
+  n=$(docker ps -q --filter %s --filter status=running | wc -l | tr -d ' ')
+  if [ "$n" = %d ]; then exit 0; fi
+  i=$((i+1))
+  if [ "$i" -ge %d ]; then echo "service %s did not converge to %d running tasks (have $n)" >&2; exit 1; fi
+  sleep 1
+done`, remote.Quote(fmt.Sprintf("%s=%d", name, replicas)), remote.Quote("label=com.docker.swarm.service.name="+name), replicas, scaleAttempts, name, replicas)
+	if err := h.Run(ctx, remote.Cmd{Script: script}); err != nil {
+		return fmt.Errorf("scale %s to %d: %w", name, replicas, err)
+	}
+	return nil
 }
 
 // readyTimeout bounds waiting for a started container before loading a dump.
