@@ -49,6 +49,9 @@ type RunOptions struct {
 	Target   config.BackupTarget
 	// Resolved Target.PasswordSecret value; empty when none.
 	Password string
+	// TargetName is the Backup Target's name in the Yoho file. The
+	// unencrypted-target warning uses it. Empty falls back to the repository.
+	TargetName string
 	// Resolved Target.EnvSecrets values (name -> value).
 	TargetEnv   map[string]string
 	Host        remote.Host
@@ -83,6 +86,10 @@ type Manifest struct {
 	CreatedAt   time.Time                  `json:"created_at"`
 	YohoVersion string                     `json:"yoho_version,omitempty"`
 	Services    map[string]ManifestService `json:"services"`
+	// GeneratedSecrets are x-yoho.generate names included as
+	// yoho-generated/<NAME>. Set only when the target encrypts at rest.
+	// Never values.
+	GeneratedSecrets []string `json:"generated_secrets,omitempty"`
 }
 
 // ManifestService records what was captured for one Service.
@@ -157,6 +164,20 @@ func Run(ctx context.Context, o RunOptions) (res *Result, err error) {
 			return nil, fmt.Errorf("service %s: %w", svc, err)
 		}
 		m.Services[svc] = ms
+	}
+	names, err := ListGenerated(ctx, o.Host, o.App, o.Destination)
+	if err != nil {
+		return nil, fmt.Errorf("list generated secrets: %w", err)
+	}
+	if len(names) > 0 {
+		if t.encryptsAtRest() {
+			if err := stageGenerated(ctx, o.Host, o.App, o.Destination, staging, names); err != nil {
+				return nil, err
+			}
+			m.GeneratedSecrets = names
+		} else {
+			o.logf("generated secrets not included: target %s is not encrypted; set a password or use restic", o.targetLabel())
+		}
 	}
 	mj, _ := json.MarshalIndent(m, "", "  ")
 	if err := o.Host.WriteFile(ctx, path.Join(staging, "manifest.json"), mj, 0o600, false); err != nil {

@@ -19,6 +19,7 @@ import (
 	"github.com/yoho-build/yoho/internal/release"
 	"github.com/yoho-build/yoho/internal/remote"
 	"github.com/yoho-build/yoho/internal/secrets"
+	"github.com/yoho-build/yoho/internal/ui"
 )
 
 func init() {
@@ -288,7 +289,8 @@ func backupRunCmd(g *globals) *cobra.Command {
 			res, err := backup.Run(ctx, backup.RunOptions{
 				App: a.cfg.App, Destination: a.destName, Project: a.project(),
 				Services: j.services, Target: j.target, Password: j.password, TargetEnv: j.env,
-				Host: h.Host, Out: out, Lock: a.backupLock(h.Host, "backup"), YohoVersion: Version,
+				TargetName: j.targetName,
+				Host:       h.Host, Out: out, Lock: a.backupLock(h.Host, "backup"), YohoVersion: Version,
 				Runtime: a.dest.Runtime,
 			})
 			flush()
@@ -427,7 +429,7 @@ Current volume data is lost. Use "latest" as ID for the newest Backup.`,
 			step.Done(found.Time.Local().Format("2006-01-02 15:04:05"))
 
 			if !yes {
-				if err = confirmRestore(cmd, a, j, h.Name, found); err != nil {
+				if err = confirmRestore(cmd, a, j, h.Host, h.Name, found); err != nil {
 					return err
 				}
 			}
@@ -464,6 +466,7 @@ Current volume data is lost. Use "latest" as ID for the newest Backup.`,
 			if len(res.DumpFiles) > 0 {
 				u.Warn("dumps not loaded (no x-yoho.backup.restore_dump); they are on the Server: %s", strings.Join(res.DumpFiles, " "))
 			}
+			warnIfGeneratedChanged(u, res.GeneratedChanged)
 			if err = hook(ctx, "post-restore", hookEnv); err != nil {
 				return err
 			}
@@ -492,15 +495,37 @@ func restoreHint(err error) string {
 }
 
 // confirmRestore shows what a restore overwrites and asks on a TTY.
-func confirmRestore(cmd *cobra.Command, a *app, j *backupJob, server string, e *backup.Entry) error {
+func confirmRestore(cmd *cobra.Command, a *app, j *backupJob, h remote.Host, server string, e *backup.Entry) error {
 	if a.g.json || !stdinIsTTY() {
 		return errors.New("restore replaces volume data; pass --yes to confirm non-interactively")
 	}
+	n := 0
+	showGenerated := backup.TargetEncrypts(j.target, j.password)
+	if showGenerated {
+		names, err := backup.ListGenerated(cmd.Context(), h, a.cfg.App, a.destName)
+		if err != nil {
+			return fmt.Errorf("list generated secrets: %w", err)
+		}
+		n = len(names)
+	}
 	w := cmd.OutOrStdout()
+	writeRestoreSummary(w, a.cfg.App, a.destName, server, e, j.services, n, showGenerated)
+	ans, err := promptLine(w, "Restore? [y/N] ")
+	if err != nil {
+		return err
+	}
+	if ans != "y" && ans != "yes" {
+		return errors.New("restore cancelled")
+	}
+	return nil
+}
+
+// writeRestoreSummary prints the interactive restore checklist.
+func writeRestoreSummary(w io.Writer, appName, dest, server string, e *backup.Entry, services map[string]config.ServiceBackup, generated int, showGenerated bool) {
 	fmt.Fprintf(w, "\nRestore Backup %s (taken %s) into %s (%s) on %s.\nThis overwrites:\n",
-		e.ID, e.Time.Local().Format("2006-01-02 15:04:05"), a.cfg.App, a.destName, server)
-	for _, svc := range sortedKeys(j.services) {
-		sb := j.services[svc]
+		e.ID, e.Time.Local().Format("2006-01-02 15:04:05"), appName, dest, server)
+	for _, svc := range sortedKeys(services) {
+		sb := services[svc]
 		for _, v := range sb.Volumes {
 			fmt.Fprintf(w, "  - %s: volume %s (Service stopped during the restore)\n", svc, v)
 		}
@@ -512,15 +537,19 @@ func confirmRestore(cmd *cobra.Command, a *app, j *backupJob, server string, e *
 			}
 		}
 	}
+	if showGenerated {
+		fmt.Fprintf(w, "  - generated secrets: %d\n", generated)
+	}
 	fmt.Fprintln(w, "Data written since the Backup is lost.")
-	ans, err := promptLine(w, "Restore? [y/N] ")
-	if err != nil {
-		return err
+}
+
+// warnIfGeneratedChanged tells the operator that running Services still
+// read the previous release's secrets/<generation> copies.
+func warnIfGeneratedChanged(u *ui.UI, changed []string) {
+	if len(changed) == 0 {
+		return
 	}
-	if ans != "y" && ans != "yes" {
-		return errors.New("restore cancelled")
-	}
-	return nil
+	u.Warn("generated secrets %s changed; run `yoho deploy` so Services use the restored values", strings.Join(changed, ", "))
 }
 
 func humanBytes(n int64) string {

@@ -397,16 +397,47 @@ func (t *target) fetch(ctx context.Context, h remote.Host, base, dir, id string)
 	if err := h.Run(ctx, remote.Cmd{Script: get, Env: t.env}); err != nil {
 		return "", fmt.Errorf("fetch %s: %w", id, err)
 	}
-	var extract string
+	// Extractors run as root. p7zip creates -o directories with mkdir(..., 0700)
+	// and restores archived modes (0600 files, 0700 dirs) owned by root, so the
+	// deploy user cannot traverse them and [ -e manifest.json ] looks like a
+	// missing file. Hand the tree back, then fail if the manifest is still
+	// unreadable instead of reporting a later bare "file does not exist".
+	var inner string
+	var image string
+	var envFlags string
 	switch t.format {
 	case "tar.gz":
-		extract = "set -eu\ndocker run --rm --network none" + mountFlags([]string{dir + ":/s"}) + " " + remote.Quote(HelperImage) +
-			" sh -c " + remote.Quote(`mkdir -p /s/data && tar -C /s/data -xzf "/s/$1"`) + " sh " + remote.Quote(id)
+		image = HelperImage
+		inner = `set -eu; mkdir -p /s/data && tar -C /s/data -xzf "/s/$3" && ` + ownExtractedTree
 	default:
-		extract = t.sevenZip([]string{dir + ":/s"}, `"$z" x -bd -y`+t.passFlag()+" -o/s/data "+remote.Quote("/s/"+id))
+		image = SevenZipImage
+		envFlags = t.envFlags()
+		inner = `set -eu; z=$(command -v 7zz || command -v 7z || command -v 7za); "$z" x -bd -y` +
+			t.passFlag() + ` -o/s/data ` + remote.Quote("/s/"+id) + ` && ` + ownExtractedTree
+	}
+	extract := dockerSh(image, envFlags, []string{dir + ":/s"}, inner)
+	if t.format == "tar.gz" {
+		extract += " " + remote.Quote(id)
 	}
 	if err := h.Run(ctx, remote.Cmd{Script: extract, Env: t.env}); err != nil {
 		return "", fmt.Errorf("extract %s: %w", id, err)
 	}
+	manifest := path.Join(data, "manifest.json")
+	if _, err := h.ReadFile(ctx, manifest, false); err != nil {
+		return "", fmt.Errorf("extract %s: manifest.json missing or not readable in %s: %w", id, data, err)
+	}
 	return data, nil
+}
+
+// ownExtractedTree runs inside the extractor container. $1 and $2 are the
+// deploy user's uid and gid, passed as sh -c arguments.
+const ownExtractedTree = `chown -R "$1:$2" /s/data && chmod -R u+rwX,go-rwx /s/data`
+
+// dockerSh runs inner as root in image with the host dir mounted, then
+// passes the deploy user's uid and gid as $1 and $2. For tar.gz the archive
+// file name is appended by the caller and arrives as $3.
+func dockerSh(image, envFlags string, mounts []string, inner string) string {
+	return "set -eu\nuid=$(id -u); gid=$(id -g)\n" +
+		"docker run --rm --network none" + envFlags + mountFlags(mounts) + " --entrypoint sh " +
+		remote.Quote(image) + " -c " + remote.Quote(inner) + ` sh "$uid" "$gid"`
 }

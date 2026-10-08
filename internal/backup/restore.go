@@ -77,6 +77,12 @@ type RestoreResult struct {
 	DumpFiles []string
 	// Directory kept on the Server when DumpFiles is non-empty.
 	StagingDir string
+	// Generated secrets written back to the Server (names only).
+	Generated []string
+	// GeneratedChanged are generated secrets whose Server value differed
+	// and was replaced. Services keep reading secrets/<generation> until
+	// the next deploy.
+	GeneratedChanged []string
 }
 
 // Restore fetches a Backup, stops the Services, replaces their volume
@@ -228,6 +234,21 @@ func Restore(ctx context.Context, o RestoreOptions) (res *RestoreResult, err err
 			}
 			res.Volumes = append(res.Volumes, v.svc+"/"+v.key)
 		}
+	}
+	// Generated secrets go back after volumes and before Services start,
+	// so the data and the passwords it was created with land together.
+	// The next deploy keeps these files (ensureFileOnce never overwrites).
+	restored, changed, err := restoreGenerated(ctx, o.Host, o.App, o.Destination, data, m.GeneratedSecrets, logf)
+	if err != nil {
+		if len(withVolumes) > 0 {
+			keep = true
+			return nil, fmt.Errorf("restore generated secrets (Services left stopped, Backup kept at %s): %w", data, err)
+		}
+		return nil, fmt.Errorf("restore generated secrets: %w", err)
+	}
+	res.Generated = restored
+	res.GeneratedChanged = changed
+	if len(withVolumes) > 0 {
 		logf("starting %s", strings.Join(withVolumes, ", "))
 		if err := startServices(ctx, o.Host, project, rt, withVolumes, replicas); err != nil {
 			return nil, fmt.Errorf("start Services: %w", err)
