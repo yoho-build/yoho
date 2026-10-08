@@ -36,12 +36,13 @@ services:
   web:
     build: .
     healthcheck:
-      test: ["CMD", "curl", "-fsS", "http://localhost:3000/up"]
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:3000/up"]
+      interval: 5s
     x-yoho:
       proxy: { hosts: [shop.example.com], port: 3000 }
 ```
 
-A proxied Service needs a `/up` endpoint (configurable with `health_path`) that returns 2xx when ready.
+A proxied Service needs a `/up` endpoint (configurable with `health_path`) that returns 2xx when ready, and a compose `healthcheck` (an error under swarm, a warning under compose). The image needs wget or curl.
 
 ## After the first deploy
 

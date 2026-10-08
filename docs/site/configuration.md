@@ -80,3 +80,14 @@ Compose files follow the same idea. After the base files are resolved, Yoho also
 | `endpoint` | Reserved for Roles. |
 
 Stateful rule: a Service with volumes deployed to several Servers without `stateful: true` is an error.
+
+A proxied Service needs a compose `healthcheck` (an error under swarm, a warning under compose). The image needs wget or curl:
+
+```yaml
+services:
+  web:
+    image: shop
+    healthcheck: {test: ["CMD", "wget", "-qO-", "http://127.0.0.1:3000/up"], interval: 5s}
+    x-yoho:
+      proxy: { hosts: [shop.example.com], port: 3000 }
+```

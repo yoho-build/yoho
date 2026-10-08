@@ -79,6 +79,7 @@ backups:
 services:
   web:
     build: .
+    healthcheck: {test: ["CMD", "wget", "-qO-", "http://127.0.0.1:3000/up"], interval: 5s}
     x-yoho:
       proxy: { hosts: [shop.example.com], port: 3000 }
       secrets: [DATABASE_PASSWORD:POSTGRES_PASSWORD, SECRET_KEY_BASE]
@@ -93,6 +94,8 @@ services:
       backup: { dump: [pg_dump, -U, postgres, postgres], volumes: [pgdata] }
 volumes: { pgdata: {} }
 ```
+
+A proxied Service needs that compose `healthcheck` (an error under swarm, a warning under compose). The image needs wget or curl.
 
 See `examples/basic` for a fuller file.
 
