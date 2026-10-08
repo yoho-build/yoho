@@ -267,12 +267,15 @@ func backupService(ctx context.Context, o RunOptions, staging, svc string, sb co
 		vols[v] = name
 	}
 	ms.Volumes = map[string]string{}
-	err = withQuiesced(ctx, o, cid, sb.PreBackup, &ms, func() error {
+	err = withQuiesced(ctx, o, cid, vols, sb.PreBackup, &ms, func() error {
 		for _, v := range sb.Volumes {
 			file := svc + "-" + v + ".tar.gz"
 			script := "set -eu; docker run --rm --network none -v " + remote.Quote(vols[v]+":/data:ro") +
 				" -v " + remote.Quote(staging+":/out") + " " + remote.Quote(HelperImage) +
-				" sh -c " + remote.Quote(`umask 077; tar -C /data -czf "/out/$1" .`) + " sh " + remote.Quote(file)
+				" sh -c " + remote.Quote(`umask 077; tar -C /data -czf "/out/$1" . && chown "$2:$3" "/out/$1"`) +
+				// The helper runs as root; hand the archive (still 0600) to the
+				// deploy user so native restic, which runs as that user, can read it.
+				" sh " + remote.Quote(file) + ` "$(id -u)" "$(id -g)"`
 			if err := run(ctx, o.Host, remote.Cmd{Script: script}); err != nil {
 				return fmt.Errorf("copy volume %s: %w", v, err)
 			}
@@ -283,9 +286,12 @@ func backupService(ctx context.Context, o RunOptions, staging, svc string, sb co
 	return ms, err
 }
 
-// withQuiesced runs fn after the pre-backup command, or with the container
-// paused. Unpause always runs, with its own deadline, even if ctx is done.
-func withQuiesced(ctx context.Context, o RunOptions, cid string, preBackup []string, ms *ManifestService, fn func() error) (err error) {
+// withQuiesced runs fn after the pre-backup command, or with every container
+// that mounts one of vols paused (not only the Service's own: a second
+// container writing to the same named volume would make the copy
+// inconsistent). Unpause always runs, with its own deadline, even if ctx is
+// done.
+func withQuiesced(ctx context.Context, o RunOptions, cid string, vols map[string]string, preBackup []string, ms *ManifestService, fn func() error) (err error) {
 	if len(preBackup) > 0 {
 		ms.Quiesce = "pre_backup"
 		if err := run(ctx, o.Host, remote.Cmd{Script: "set -eu; docker exec " + remote.Quote(cid) + " " + remote.QuoteArgs(preBackup...)}); err != nil {
@@ -294,20 +300,49 @@ func withQuiesced(ctx context.Context, o RunOptions, cid string, preBackup []str
 		return fn()
 	}
 	ms.Quiesce = "pause"
+	cids := []string{cid}
+	for _, key := range sortedKeys(vols) {
+		out, err := o.Host.Output(ctx, remote.Cmd{Script: "docker ps -q --filter " + remote.Quote("volume="+vols[key])})
+		if err != nil {
+			return fmt.Errorf("find containers using volume %s: %w", key, err)
+		}
+		cids = appendUniqueIDs(cids, strings.Fields(out))
+	}
 	defer func() {
 		uctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), unpauseTimeout)
 		defer cancel()
 		// Unpause unconditionally: a cancelled pause may still have applied.
-		script := "docker unpause " + remote.Quote(cid) + " >/dev/null 2>&1 || true; " +
-			"test \"$(docker inspect -f '{{.State.Paused}}' " + remote.Quote(cid) + ")\" = false"
-		if uerr := run(uctx, o.Host, remote.Cmd{Script: script}); uerr != nil {
-			err = errors.Join(err, fmt.Errorf("unpause %s FAILED, container may still be paused: %w", cid, uerr))
+		for _, id := range cids {
+			script := "docker unpause " + remote.Quote(id) + " >/dev/null 2>&1 || true; " +
+				"test \"$(docker inspect -f '{{.State.Paused}}' " + remote.Quote(id) + ")\" = false"
+			if uerr := run(uctx, o.Host, remote.Cmd{Script: script}); uerr != nil {
+				err = errors.Join(err, fmt.Errorf("unpause %s FAILED, container may still be paused: %w", id, uerr))
+			}
 		}
 	}()
-	if err := run(ctx, o.Host, remote.Cmd{Script: "set -eu; docker pause " + remote.Quote(cid) + " >/dev/null"}); err != nil {
-		return fmt.Errorf("pause: %w", err)
+	for _, id := range cids {
+		if err := run(ctx, o.Host, remote.Cmd{Script: "set -eu; docker pause " + remote.Quote(id) + " >/dev/null"}); err != nil {
+			return fmt.Errorf("pause %s: %w", id, err)
+		}
 	}
 	return fn()
+}
+
+func appendUniqueIDs(ids, more []string) []string {
+	for _, m := range more {
+		dup := false
+		for _, id := range ids {
+			// ps -q prints 12-char short ids; cid may be a full id.
+			if strings.HasPrefix(id, m) || strings.HasPrefix(m, id) {
+				dup = true
+				break
+			}
+		}
+		if !dup {
+			ids = append(ids, m)
+		}
+	}
+	return ids
 }
 
 func normalizeRuntime(runtime string) (string, error) {

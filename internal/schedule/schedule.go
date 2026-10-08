@@ -62,24 +62,35 @@ type Job struct {
 	Secrets map[string]string
 	// Default 6h.
 	Timeout time.Duration
+	// Destination runtime: "compose" (default) or "swarm".
+	Runtime string
+	// Keyed fingerprints of Secrets (key -> fingerprint), stored in the spec
+	// so `yoho plan` can see a rotated credential without reading the secret
+	// files. Never the values.
+	SecretFingerprints map[string]string
 }
 
 // Spec is the job file read by `yoho schedule run --job`. It holds paths
 // to secret files, never secret values.
 type Spec struct {
-	Version     int                             `json:"version"`
-	App         string                          `json:"app"`
-	Destination string                          `json:"destination"`
-	Job         string                          `json:"job"`
-	Project     string                          `json:"project"`
-	Root        string                          `json:"root"`
-	Services    map[string]config.ServiceBackup `json:"services"`
-	TargetName  string                          `json:"target_name,omitempty"`
-	Target      config.BackupTarget             `json:"target"`
-	Schedule    string                          `json:"schedule"`
+	Version     int    `json:"version"`
+	App         string `json:"app"`
+	Destination string `json:"destination"`
+	Job         string `json:"job"`
+	Project     string `json:"project"`
+	// Runtime is the Destination runtime; empty in specs written before it
+	// existed, which means compose.
+	Runtime    string                          `json:"runtime,omitempty"`
+	Root       string                          `json:"root"`
+	Services   map[string]config.ServiceBackup `json:"services"`
+	TargetName string                          `json:"target_name,omitempty"`
+	Target     config.BackupTarget             `json:"target"`
+	Schedule   string                          `json:"schedule"`
 	// Secret key -> file path on the Server (0600).
 	SecretFiles map[string]string `json:"secret_files,omitempty"`
-	TimeoutSec  int               `json:"timeout_sec"`
+	// Secret key -> keyed fingerprint of the value in SecretFiles.
+	SecretFingerprints map[string]string `json:"secret_fingerprints,omitempty"`
+	TimeoutSec         int               `json:"timeout_sec"`
 }
 
 // Mode selects system or user systemd units.
@@ -176,6 +187,13 @@ func NewSpec(j Job) (Spec, error) {
 		TargetName: j.TargetName, Target: j.Target, Schedule: j.Schedule,
 		SecretFiles: map[string]string{}, TimeoutSec: int(defaultTimeout / time.Second),
 	}
+	switch j.Runtime {
+	case "", "compose":
+	case "swarm":
+		s.Runtime = "swarm"
+	default:
+		return Spec{}, fmt.Errorf("job %s: unknown runtime %q", j.Name, j.Runtime)
+	}
 	if s.Project == "" {
 		s.Project = release.ProjectName(j.App, j.Destination)
 	}
@@ -194,6 +212,12 @@ func NewSpec(j Job) (Spec, error) {
 			return Spec{}, fmt.Errorf("job %s: secret %s not resolved", j.Name, k)
 		}
 		s.SecretFiles[k] = path.Join(SecretDir(j.App, j.Destination), k)
+		if fp := j.SecretFingerprints[k]; fp != "" {
+			if s.SecretFingerprints == nil {
+				s.SecretFingerprints = map[string]string{}
+			}
+			s.SecretFingerprints[k] = fp
+		}
 	}
 	return s, nil
 }

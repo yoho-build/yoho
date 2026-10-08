@@ -14,6 +14,7 @@ package build
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
@@ -26,6 +27,7 @@ import (
 	"runtime"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/compose-spec/compose-go/v2/types"
 
@@ -77,6 +79,9 @@ type Options struct {
 	RsyncTarget string
 	// SourceDir overrides the Server source directory for location=server.
 	SourceDir string
+	// cacheDir is the shared seed copy of the source (location=server); the
+	// build itself runs in the private SourceDir.
+	cacheDir string
 	// Exec runs local commands. Default os/exec.
 	Exec Exec
 	// GOOS, GOARCH and LookPath feed ResolveEngine. Default: this machine
@@ -114,7 +119,7 @@ func ImageName(reg *config.Registry, app, service, version string) string {
 
 // Images builds every Service with a build section and returns Service ->
 // Image for all Services (unbuilt Services keep their compose image).
-func Images(ctx context.Context, o Options) (map[string]Image, error) {
+func Images(ctx context.Context, o Options) (_ map[string]Image, err error) {
 	if o.Project == nil {
 		return nil, errors.New("build: no compose project")
 	}
@@ -182,9 +187,17 @@ func Images(ctx context.Context, o Options) (map[string]Image, error) {
 		if o.Host == nil {
 			return nil, errors.New("builder.location=server needs a Server")
 		}
+		// A private source dir per invocation: deploys of the same Destination
+		// can overlap (the Destination lock is only taken after the build), and
+		// a shared dir would let one rsync --delete change what the other builds.
+		o.cacheDir = o.sourceDir()
+		o.SourceDir = o.cacheDir + ".run-" + newRunID()
+		done := false
+		defer func() { finishSource(o, done) }()
 		if err := syncSource(ctx, o); err != nil {
 			return nil, err
 		}
+		defer func() { done = err == nil }()
 	default:
 		return nil, fmt.Errorf("unknown builder.location %q", loc)
 	}
@@ -429,6 +442,31 @@ func SourceDir(app, destination string) string {
 	return path.Join(release.AppDir(app, destination), "source")
 }
 
+// newRunID names a private source dir; a variable so tests are deterministic.
+var newRunID = func() string {
+	b := make([]byte, 6)
+	_, _ = rand.Read(b)
+	return hex.EncodeToString(b)
+}
+
+// finishSource removes this invocation's source dir. After a successful build
+// it first becomes the seed copy for the next one (best effort: the seed only
+// speeds up rsync, which --delete makes exact anyway).
+func finishSource(o Options, ok bool) {
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+	run, cache := remote.Quote(o.SourceDir), remote.Quote(o.cacheDir)
+	script := "rm -rf " + run
+	if ok {
+		old := remote.Quote(o.SourceDir + ".old")
+		script = "rm -rf " + old + "; mv " + cache + " " + old + " 2>/dev/null || true; " +
+			"if [ ! -e " + cache + " ]; then mv " + run + " " + cache + " 2>/dev/null || rm -rf " + run + "; else rm -rf " + run + "; fi; rm -rf " + old
+	}
+	if err := o.Host.Run(ctx, remote.Cmd{Script: script}); err != nil {
+		fmt.Fprintf(o.Out, "warning: could not clean up %s on %s: %v\n", o.SourceDir, o.Host.Name(), err)
+	}
+}
+
 func (o Options) sourceDir() string {
 	if o.SourceDir != "" {
 		return o.SourceDir
@@ -537,7 +575,12 @@ const noRsync = "yoho-no-rsync"
 
 func syncSource(ctx context.Context, o Options) error {
 	// One round trip: create the source dir and probe for rsync.
-	out, err := o.Host.Output(ctx, remote.Cmd{Script: "set -eu\nmkdir -p -m 0700 " + remote.Quote(o.sourceDir()) + "\ncommand -v rsync >/dev/null 2>&1 || echo " + noRsync})
+	script := "set -eu\nmkdir -p -m 0700 " + remote.Quote(o.sourceDir()) + "\n"
+	if o.cacheDir != "" {
+		// Seed from the last build's source so rsync only transfers changes.
+		script += "if [ -d " + remote.Quote(o.cacheDir) + " ]; then cp -a " + remote.Quote(o.cacheDir) + "/. " + remote.Quote(o.sourceDir()) + "/ 2>/dev/null || true; fi\n"
+	}
+	out, err := o.Host.Output(ctx, remote.Cmd{Script: script + "command -v rsync >/dev/null 2>&1 || echo " + noRsync})
 	if err != nil {
 		return err
 	}

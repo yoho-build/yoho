@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"context"
 	"reflect"
 	"strings"
 	"testing"
@@ -37,5 +38,16 @@ func TestSplitRows(t *testing.T) {
 	got := splitRows("a|b|c\n\nd|e\n", 3)
 	if !reflect.DeepEqual(got, [][]string{{"a", "b", "c"}, {"d", "e", ""}}) {
 		t.Errorf("%v", got)
+	}
+}
+
+func TestSwarmTaskContainerUsesStackServiceLabel(t *testing.T) {
+	h := &tunnelHost{} // answers "" to everything
+	id, err := swarmTaskContainer(context.Background(), h, "yoho-shop-prod", "web")
+	if err != nil || id != "" {
+		t.Fatalf("%q %v", id, err)
+	}
+	if len(h.scripts) != 1 || !strings.Contains(h.scripts[0], "label=com.docker.swarm.service.name=yoho-shop-prod_web") || !strings.Contains(h.scripts[0], "status=running") {
+		t.Errorf("script %v", h.scripts)
 	}
 }

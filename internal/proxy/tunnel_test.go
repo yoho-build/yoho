@@ -51,7 +51,7 @@ func TestTunnelContainers(t *testing.T) {
 }
 
 func TestTunnelRunArgs(t *testing.T) {
-	q := strings.Join(tunnelRunArgs("yoho-tunnel", "img:1", "h", true), " ")
+	q := strings.Join(tunnelRunArgs("yoho-tunnel", "img:1", "h", "shop/prod", true), " ")
 	for _, w := range []string{"--network yoho", "--restart unless-stopped", "img:1 tunnel --no-autoupdate --url http://yoho-proxy:80", "yoho.tunnel.mode=quick"} {
 		if !strings.Contains(q, w) {
 			t.Errorf("quick missing %q: %s", w, q)
@@ -60,7 +60,7 @@ func TestTunnelRunArgs(t *testing.T) {
 	if strings.Contains(q, "env-file") {
 		t.Error("quick must not use env file")
 	}
-	tk := strings.Join(tunnelRunArgs("yoho-tunnel-1", "img:1", "h", false), " ")
+	tk := strings.Join(tunnelRunArgs("yoho-tunnel-1", "img:1", "h", "", false), " ")
 	if !strings.Contains(tk, "--env-file ") || !strings.HasSuffix(tk, "img:1 tunnel --no-autoupdate run") {
 		t.Errorf("token args: %s", tk)
 	}
@@ -72,6 +72,7 @@ type tunnelFake struct {
 	written    map[string][]byte
 	modes      map[string]os.FileMode
 	containers map[string]string // name -> hash label; presence = exists (running)
+	owners     map[string]string // name -> owner label
 	logs       string
 }
 
@@ -98,10 +99,17 @@ func (f *tunnelFake) Output(_ context.Context, c remote.Cmd) (string, error) {
 		for n := range f.containers {
 			names = append(names, n)
 		}
-		if strings.Contains(s, "Label") {
+		if strings.Contains(s, "{{.Image}}") {
 			var lines []string
 			for _, n := range names {
-				lines = append(lines, n+"|img|Up 1 minute|quick")
+				lines = append(lines, n+"|img|Up 1 minute|quick|"+f.containers[n]+"|"+f.owners[n])
+			}
+			return strings.Join(lines, "\n"), nil
+		}
+		if strings.Contains(s, "yoho.tunnel.owner") {
+			var lines []string
+			for _, n := range names {
+				lines = append(lines, n+"|"+f.owners[n])
 			}
 			return strings.Join(lines, "\n"), nil
 		}
@@ -247,5 +255,78 @@ func TestRemoveTunnel(t *testing.T) {
 	last := h.scripts[len(h.scripts)-1]
 	if !strings.Contains(last, "docker rm -f yoho-tunnel") || !strings.Contains(last, "token.env") {
 		t.Errorf("script: %s", last)
+	}
+}
+
+func TestTunnelRunArgsOwnerLabel(t *testing.T) {
+	q := strings.Join(tunnelRunArgs("yoho-tunnel", "img:1", "h", TunnelOwner("shop", "prod"), true), " ")
+	if !strings.Contains(q, "yoho.tunnel.owner=shop/prod") {
+		t.Errorf("owner label missing: %s", q)
+	}
+	if strings.Contains(strings.Join(tunnelRunArgs("yoho-tunnel", "img:1", "h", "", true), " "), "owner") {
+		t.Error("no owner label without owner")
+	}
+}
+
+func TestRemoveTunnelOwnedKeepsOtherAppsConnector(t *testing.T) {
+	for name, tc := range map[string]struct {
+		owners  map[string]string
+		removed bool
+	}{
+		"other app": {map[string]string{"yoho-tunnel": "shop/prod"}, false},
+		"legacy":    {map[string]string{}, false},
+		"mine":      {map[string]string{"yoho-tunnel": "blog/prod"}, true},
+	} {
+		h := &tunnelFake{containers: map[string]string{"yoho-tunnel": "x"}, owners: tc.owners}
+		got, err := RemoveTunnelOwned(context.Background(), h, TunnelOwner("blog", "prod"), nil)
+		if err != nil || got != tc.removed {
+			t.Fatalf("%s: removed=%v err=%v", name, got, err)
+		}
+		if rm := strings.Contains(strings.Join(h.scripts, "\n"), "docker rm -f"); rm != tc.removed {
+			t.Errorf("%s: docker rm executed=%v, want %v", name, rm, tc.removed)
+		}
+	}
+}
+
+func TestEnsureTunnelRefusesToReplaceOtherAppsConnector(t *testing.T) {
+	fastPoll(t)
+	h := &tunnelFake{
+		logs:       "INF Registered tunnel connection connIndex=0\n",
+		containers: map[string]string{"yoho-tunnel": "old"},
+		owners:     map[string]string{"yoho-tunnel": "shop/prod"},
+	}
+	_, err := EnsureTunnelWith(context.Background(), h, config.TunnelConfig{TokenSecret: "T"}, "tok", nil, BootOptions{Owner: "blog/prod"})
+	if err == nil || !strings.Contains(err.Error(), "managed by shop/prod") {
+		t.Fatalf("err = %v", err)
+	}
+	if s := strings.Join(h.scripts, "\n"); strings.Contains(s, "docker rm") || strings.Contains(s, "docker run") {
+		t.Errorf("must not touch the connector:\n%s", s)
+	}
+	// Same config as the owner's: nothing to change, no error.
+	h.containers["yoho-tunnel"] = tunnelHash(DefaultTunnelImage, "tok")
+	if _, err := EnsureTunnelWith(context.Background(), h, config.TunnelConfig{TokenSecret: "T"}, "tok", nil, BootOptions{Owner: "blog/prod"}); err != nil {
+		t.Errorf("identical config should be left alone: %v", err)
+	}
+}
+
+func TestEnsureTunnelEmptyTokenForManagedTunnelFails(t *testing.T) {
+	h := &tunnelFake{containers: map[string]string{"yoho-tunnel-1": "x"}}
+	_, err := EnsureTunnel(context.Background(), h, config.TunnelConfig{TokenSecret: "CF_TOKEN"}, "", nil)
+	if err == nil || !strings.Contains(err.Error(), "empty token") {
+		t.Fatalf("err = %v", err)
+	}
+	if len(h.scripts) != 0 {
+		t.Errorf("must not touch the Server: %v", h.scripts)
+	}
+}
+
+func TestTunnelStatusReportsHashAndOwner(t *testing.T) {
+	h := &tunnelFake{containers: map[string]string{"yoho-tunnel": "abc"}, owners: map[string]string{"yoho-tunnel": "shop/prod"}}
+	st, err := TunnelStatusOf(context.Background(), h)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.Owner != "shop/prod" || st.Containers[0].ConfigHash != "abc" || !st.OwnedBy("shop/prod") || st.OwnedBy("blog/prod") {
+		t.Errorf("%+v", st)
 	}
 }

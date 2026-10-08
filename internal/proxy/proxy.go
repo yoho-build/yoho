@@ -101,6 +101,9 @@ type BootOptions struct {
 	// cannot see it until something attaches, so creating it there would make
 	// a node-local bridge that shadows the overlay.
 	SkipNetwork bool
+	// Owner (TunnelOwner) labels Cloudflare Tunnel connectors and stops one
+	// App from changing or removing connectors another App manages.
+	Owner string
 }
 
 // BootWith is Boot with options.

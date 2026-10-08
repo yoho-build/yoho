@@ -42,13 +42,10 @@ func tunnelCmd(g *globals) *cobra.Command {
 				step := a.ui.Step("", "Resolve tunnel token")
 				store, err := a.loadSecrets(ctx)
 				if err == nil {
-					var ok bool
-					if token, ok = store.Get(cfg.TokenSecret); !ok {
-						err = fmt.Errorf("secret %s not found", cfg.TokenSecret)
-					}
+					token, err = tunnelToken(store, &cfg)
 				}
 				if err != nil {
-					step.Fail(err, "add "+cfg.TokenSecret+" to .yoho/secrets (the token from Cloudflare Zero Trust > Networks > Tunnels)")
+					step.Fail(err, "")
 					return &silentError{err}
 				}
 				step.Done()

@@ -2,14 +2,17 @@ package cli
 
 import (
 	"context"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"path"
 	"reflect"
 	"sort"
 	"strings"
 
 	"github.com/yoho-build/yoho/internal/config"
 	"github.com/yoho-build/yoho/internal/plan"
+	"github.com/yoho-build/yoho/internal/release"
 	"github.com/yoho-build/yoho/internal/schedule"
 	"github.com/yoho-build/yoho/internal/secrets"
 )
@@ -18,7 +21,7 @@ import (
 // Destination's Servers: jobs with a schedule in config but not installed
 // (create), installed with a different spec (update), installed but no longer
 // in config (delete). Read-only.
-func (a *app) planSchedules(ctx context.Context, hosts []plan.NamedHost) ([]plan.Change, error) {
+func (a *app) planSchedules(ctx context.Context, hosts []plan.NamedHost, store *secrets.Store) ([]plan.Change, error) {
 	if len(hosts) == 0 {
 		return nil, fmt.Errorf("no Servers")
 	}
@@ -43,6 +46,13 @@ func (a *app) planSchedules(ctx context.Context, hosts []plan.NamedHost) ([]plan
 			return nil, err
 		}
 		desired[n] = j
+	}
+	// Keyed fingerprints of the Backup Target credentials, so a rotated
+	// secret under the same key name still shows up as a change. Without the
+	// Destination key (never deployed) there is nothing to compare against.
+	var fpKey []byte
+	if store != nil {
+		fpKey = a.readFingerprintKey(ctx, h.Host)
 	}
 	mode := a.scheduleMode()
 	sts, err := schedule.Status(ctx, h.Host, a.cfg.App, a.destName, mode)
@@ -71,7 +81,15 @@ func (a *app) planSchedules(ctx context.Context, hosts []plan.NamedHost) ([]plan
 		if spec.Schedule == "" {
 			spec.Schedule = st.Schedule
 		}
-		reasons := jobDiff(spec, j)
+		reasons := jobDiff(spec, j, a.dest.Runtime)
+		if fpKey != nil {
+			if err := secretsFromStore(j, store); err != nil {
+				return nil, err
+			}
+			if r := secretDiff(spec, targetFingerprints(fpKey, j)); r != "" {
+				reasons = append(reasons, r)
+			}
+		}
 		ch := plan.Change{Kind: "job", Name: n, Server: h.Name, Action: plan.ActionNoop}
 		if len(reasons) > 0 {
 			ch.Action = plan.ActionUpdate
@@ -97,7 +115,7 @@ func (a *app) planSchedules(ctx context.Context, hosts []plan.NamedHost) ([]plan
 
 // applySchedules converges Scheduled Jobs to config (install/update/remove).
 func (a *app) applySchedules(ctx context.Context, hosts []plan.NamedHost, store *secrets.Store) error {
-	changes, err := a.planSchedules(ctx, hosts)
+	changes, err := a.planSchedules(ctx, hosts, store)
 	if err != nil {
 		return err
 	}
@@ -142,8 +160,11 @@ func (a *app) readInstalledSpec(ctx context.Context, h interface {
 }
 
 // jobDiff compares non-secret fields of an installed spec with the desired job.
-func jobDiff(spec schedule.Spec, j *backupJob) []string {
+func jobDiff(spec schedule.Spec, j *backupJob, runtime string) []string {
 	var reasons []string
+	if normRuntime(spec.Runtime) != normRuntime(runtime) {
+		reasons = append(reasons, fmt.Sprintf("runtime %s → %s", normRuntime(spec.Runtime), normRuntime(runtime)))
+	}
 	if spec.Schedule != j.cfg.Schedule {
 		reasons = append(reasons, fmt.Sprintf("schedule %q → %q", spec.Schedule, j.cfg.Schedule))
 	}
@@ -200,4 +221,62 @@ func nilIfEmpty(s []string) []string {
 		return nil
 	}
 	return s
+}
+
+// normRuntime treats the empty runtime (older specs, unset Destinations) as compose.
+func normRuntime(r string) string {
+	if r == "" {
+		return "compose"
+	}
+	return r
+}
+
+// readFingerprintKey returns the Destination's HMAC key without creating it,
+// or nil when the Server has none yet.
+func (a *app) readFingerprintKey(ctx context.Context, h interface {
+	ReadFile(context.Context, string, bool) ([]byte, error)
+}) []byte {
+	b, err := h.ReadFile(ctx, path.Join(release.AppDir(a.cfg.App, a.destName), "hmac.key"), false)
+	if err != nil {
+		return nil
+	}
+	key, err := hex.DecodeString(strings.TrimSpace(string(b)))
+	if err != nil || len(key) < 16 {
+		return nil
+	}
+	return key
+}
+
+// targetFingerprints fingerprints the resolved Backup Target secrets of j.
+func targetFingerprints(key []byte, j *backupJob) map[string]string {
+	out := map[string]string{}
+	if k := j.target.PasswordSecret; k != "" {
+		out[k] = secrets.Fingerprint(key, k+"\x00"+j.password)
+	}
+	for k, v := range j.env {
+		out[k] = secrets.Fingerprint(key, k+"\x00"+v)
+	}
+	return out
+}
+
+// secretDiff reports credentials whose value changed since the spec was
+// installed. A spec without fingerprints (installed by an older yoho) is
+// refreshed once so the comparison works from then on.
+func secretDiff(spec schedule.Spec, want map[string]string) string {
+	if len(want) == 0 {
+		return ""
+	}
+	if len(spec.SecretFingerprints) == 0 {
+		return "record credential fingerprints"
+	}
+	var changed []string
+	for _, k := range sortedKeys(want) {
+		if spec.SecretFingerprints[k] != want[k] {
+			changed = append(changed, k)
+		}
+	}
+	if len(changed) == 0 {
+		return ""
+	}
+	return "credential changed: " + strings.Join(changed, ", ")
 }

@@ -145,13 +145,18 @@ func (a *app) collectChanges(ctx context.Context, s *session) (changes []plan.Ch
 			}
 		}
 	}
-	tc, err := a.planTunnel(ctx, s.hosts)
+	token, err := tunnelToken(s.store, a.proxyConfig().Tunnel)
+	if err != nil {
+		step.Fail(err, "")
+		return nil, false, &silentError{err}
+	}
+	tc, err := a.planTunnel(ctx, s.hosts, token)
 	if err != nil {
 		step.Fail(err, "check that Docker is running on the Server")
 		return nil, false, &silentError{err}
 	}
 	changes = append(changes, tc...)
-	sc, err := a.planSchedules(ctx, s.hosts)
+	sc, err := a.planSchedules(ctx, s.hosts, s.store)
 	if err != nil {
 		step.Fail(err, "check the Scheduled Jobs on the Server")
 		return nil, false, &silentError{err}
@@ -162,8 +167,9 @@ func (a *app) collectChanges(ctx context.Context, s *session) (changes []plan.Ch
 }
 
 // planTunnel compares the Cloudflare Tunnel connector with config.
-func (a *app) planTunnel(ctx context.Context, hosts []plan.NamedHost) ([]plan.Change, error) {
+func (a *app) planTunnel(ctx context.Context, hosts []plan.NamedHost, token string) ([]plan.Change, error) {
 	cfg := a.proxyConfig().Tunnel
+	owner := proxy.TunnelOwner(a.cfg.App, a.destName)
 	var out []plan.Change
 	for _, h := range hosts {
 		st, err := proxy.TunnelStatusOf(ctx, h.Host)
@@ -172,10 +178,11 @@ func (a *app) planTunnel(ctx context.Context, hosts []plan.NamedHost) ([]plan.Ch
 		}
 		ch := plan.Change{Kind: "tunnel", Name: proxy.TunnelContainer, Server: h.Name}
 		switch {
-		case cfg == nil && st.Exists():
+		case cfg == nil && st.OwnedBy(owner):
 			ch.Action = plan.ActionDelete
 			ch.Reasons = []string{"no longer in config"}
 		case cfg == nil:
+			// Absent, or managed by another App on this Server: not ours to remove.
 			continue
 		case !st.Exists():
 			ch.Action = plan.ActionCreate
@@ -206,6 +213,15 @@ func (a *app) planTunnel(ctx context.Context, hosts []plan.NamedHost) ([]plan.Ch
 			}
 			if len(st.Containers) != want {
 				why = append(why, fmt.Sprintf("connectors %d → %d", len(st.Containers), want))
+			}
+			if wantHash := proxy.TunnelConfigHash(*cfg, token); st.Mode == wantMode && st.Containers[0].Image == image {
+				for _, c := range st.Containers {
+					// Same image and mode but another hash: the token rotated.
+					if c.ConfigHash != "" && c.ConfigHash != wantHash {
+						why = append(why, "token changed")
+						break
+					}
+				}
 			}
 			if !st.Healthy() {
 				why = append(why, "connector not running or not registered")
@@ -275,6 +291,13 @@ func (a *app) apply(ctx context.Context, o applyOptions) (err error) {
 		return err
 	}
 	defer s.close()
+
+	// Fail before building or changing anything when the managed Tunnel's
+	// token cannot be resolved.
+	if _, terr := tunnelToken(s.store, a.proxyConfig().Tunnel); terr != nil {
+		u.Step("", "Cloudflare Tunnel").Fail(terr, "")
+		return &silentError{terr}
+	}
 
 	deployNeeded := true
 	if o.ShowPlan {

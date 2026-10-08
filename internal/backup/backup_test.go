@@ -908,3 +908,47 @@ func TestListGeneratedAndNextDeployKeepsRestoredValue(t *testing.T) {
 		t.Fatalf("mode %o", fi.Mode().Perm())
 	}
 }
+
+func TestRunPausesEveryContainerMountingTheVolume(t *testing.T) {
+	base := dockerResponder(nil)
+	h := &fakeHost{respond: func(ctx context.Context, s string) (string, error) {
+		if strings.Contains(s, "docker ps -q --filter 'volume=") {
+			return "cid123\nother99\nworker77\n", nil
+		}
+		return base(ctx, s)
+	}}
+	o := baseOpts(h)
+	o.Target = config.BackupTarget{Type: "archive", Format: "zip", Repository: "/srv/backups", PasswordSecret: "PW"}
+	o.Password = secretPW
+	if _, err := Run(context.Background(), o); err != nil {
+		t.Fatal(err)
+	}
+	cp := h.index("tar -C /data -czf")
+	for _, id := range []string{"cid123", "other99", "worker77"} {
+		p, u := h.index("docker pause '"+id+"'"), h.index("docker unpause '"+id+"'")
+		if p < 0 || u < 0 || !(p < cp && cp < u) {
+			t.Errorf("%s: pause=%d copy=%d unpause=%d\n%s", id, p, cp, u, h.scripts())
+		}
+	}
+	if n := strings.Count(h.scripts(), "docker pause 'cid123'"); n != 1 {
+		t.Errorf("Service container paused %d times", n)
+	}
+}
+
+func TestRunHandsStagedArchivesToDeployUser(t *testing.T) {
+	h := &fakeHost{respond: dockerResponder(nil)}
+	o := baseOpts(h)
+	o.Target = config.BackupTarget{Type: "archive", Format: "zip", Repository: "/srv/backups", PasswordSecret: "PW"}
+	o.Password = secretPW
+	if _, err := Run(context.Background(), o); err != nil {
+		t.Fatal(err)
+	}
+	i := h.index("tar -C /data -czf")
+	if i < 0 {
+		t.Fatal("no copy")
+	}
+	s := h.cmds[i].Script
+	if !strings.Contains(s, `chown "$2:$3"`) || !strings.Contains(s, `"$(id -u)" "$(id -g)"`) || !strings.Contains(s, "umask 077") {
+		t.Errorf("archive must stay 0600 and be chowned to the deploy user:\n%s", s)
+	}
+}

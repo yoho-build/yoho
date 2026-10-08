@@ -287,3 +287,57 @@ func TestStatusParsesSystemd(t *testing.T) {
 		t.Fatalf("status %+v", st)
 	}
 }
+
+func TestRunJobUsesSpecRuntime(t *testing.T) {
+	for _, tc := range []struct{ runtime, want string }{
+		{"swarm", "com.docker.swarm.service.name"},
+		{"", "docker compose -p"}, // specs written before Runtime existed
+		{"compose", "docker compose -p"},
+	} {
+		j := testJob()
+		j.Runtime = tc.runtime
+		s, err := NewSpec(j)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if tc.runtime == "compose" && s.Runtime != "" {
+			t.Errorf("compose is the default and is not serialized: %q", s.Runtime)
+		}
+		sp := filepath.Join(t.TempDir(), "job.json")
+		b, _ := json.Marshal(s)
+		if err := os.WriteFile(sp, b, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		h := &fakeHost{files: map[string][]byte{
+			s.SecretFiles["BACKUP_PASSWORD"]:       []byte(pw),
+			s.SecretFiles["AWS_SECRET_ACCESS_KEY"]: []byte("aws-secret"),
+		}}
+		h.respond = func(sc string) (string, error) {
+			if strings.Contains(sc, " ps -q") || strings.Contains(sc, "docker ps -q") {
+				return "", errors.New("stop here")
+			}
+			return "", nil
+		}
+		_ = RunJob(context.Background(), sp, RunJobOptions{Host: h})
+		if !strings.Contains(h.scripts(), tc.want) {
+			t.Errorf("runtime %q: want %q in scripts:\n%s", tc.runtime, tc.want, h.scripts())
+		}
+	}
+	j := testJob()
+	j.Runtime = "nomad"
+	if _, err := NewSpec(j); err == nil {
+		t.Error("unknown runtime must be rejected")
+	}
+}
+
+func TestSpecCarriesSecretFingerprintsNotValues(t *testing.T) {
+	j := testJob()
+	j.SecretFingerprints = map[string]string{"BACKUP_PASSWORD": "aaaa", "AWS_SECRET_ACCESS_KEY": "bbbb", "UNRELATED": "cccc"}
+	s, err := NewSpec(j)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(s.SecretFingerprints) != 2 || s.SecretFingerprints["AWS_SECRET_ACCESS_KEY"] != "bbbb" {
+		t.Fatalf("%+v", s.SecretFingerprints)
+	}
+}

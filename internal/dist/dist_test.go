@@ -333,3 +333,39 @@ func TestInstallScriptSyntax(t *testing.T) {
 		t.Fatalf("sh -n: %v\n%s", err, out)
 	}
 }
+
+// is_writable_dir must accept a directory whose parents do not exist yet when
+// the nearest existing ancestor is writable (a fresh $HOME has no ~/.local),
+// and refuse one under a read-only ancestor.
+func TestInstallScriptWritableDirWalksToExistingAncestor(t *testing.T) {
+	_, file, _, _ := runtime.Caller(0)
+	script := filepath.Join(filepath.Dir(file), "..", "..", "scripts", "install.sh")
+	src, err := os.ReadFile(script)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(src)
+	start := strings.Index(text, "is_writable_dir() {")
+	end := strings.Index(text[start:], "\n}\n")
+	if start < 0 || end < 0 {
+		t.Fatal("is_writable_dir not found")
+	}
+	fn := text[start : start+end+3]
+	home := t.TempDir()
+	ro := filepath.Join(home, "ro")
+	if err := os.Mkdir(ro, 0o500); err != nil {
+		t.Fatal(err)
+	}
+	defer os.Chmod(ro, 0o700)
+	for dir, want := range map[string]bool{
+		filepath.Join(home, ".local", "bin"): true,
+		home:                                 true,
+		filepath.Join(ro, "a", "b"):          os.Getuid() == 0,
+		"/nonexistent-root-dir/x/y":          os.Getuid() == 0,
+	} {
+		err := exec.Command("sh", "-c", fn+"\nis_writable_dir \"$1\"", "sh", dir).Run()
+		if (err == nil) != want {
+			t.Errorf("is_writable_dir %s = %v, want %v", dir, err == nil, want)
+		}
+	}
+}

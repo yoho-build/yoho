@@ -84,7 +84,7 @@ func runSpec(ctx context.Context, h remote.Host, s Spec, o RunJobOptions) (*back
 	ro := backup.RunOptions{
 		App: s.App, Destination: s.Destination, Project: s.Project,
 		Services: s.Services, Target: s.Target, Host: h, Out: o.Out,
-		Lock: o.Lock, YohoVersion: o.YohoVersion, Now: o.Now,
+		Lock: o.Lock, YohoVersion: o.YohoVersion, Now: o.Now, Runtime: s.Runtime,
 		TargetEnv: map[string]string{},
 	}
 	if k := s.Target.PasswordSecret; k != "" {

@@ -29,6 +29,7 @@ const (
 
 	tunnelConfigLabel = "yoho.tunnel.config"
 	tunnelModeLabel   = "yoho.tunnel.mode"
+	tunnelOwnerLabel  = "yoho.tunnel.owner"
 	tunnelModeQuick   = "quick"
 	tunnelModeToken   = "token"
 )
@@ -98,7 +99,7 @@ func tunnelImage(cfg config.TunnelConfig) string {
 
 // tunnelRunArgs is the `docker run -d` argument list for one connector. The
 // token never appears here: it is read by docker from the env file.
-func tunnelRunArgs(name, image, hash string, quick bool) []string {
+func tunnelRunArgs(name, image, hash, owner string, quick bool) []string {
 	mode := tunnelModeToken
 	if quick {
 		mode = tunnelModeQuick
@@ -111,11 +112,24 @@ func tunnelRunArgs(name, image, hash string, quick bool) []string {
 		"--label", tunnelConfigLabel + "=" + hash,
 		"--label", tunnelModeLabel + "=" + mode,
 	}
+	if owner != "" {
+		args = append(args, "--label", tunnelOwnerLabel+"="+owner)
+	}
 	if quick {
 		return append(args, image, "tunnel", "--no-autoupdate", "--url", TunnelOrigin)
 	}
 	args = append(args, "--env-file", TokenEnvPath())
 	return append(args, image, "tunnel", "--no-autoupdate", "run")
+}
+
+// TunnelOwner identifies the App Destination that manages the connector, so
+// another App deployed to the same Server never removes or replaces it.
+func TunnelOwner(app, dest string) string { return app + "/" + dest }
+
+// TunnelConfigHash is the label value that identifies image and token. It is
+// a truncated one-way hash, safe to show in a plan and to store on the Server.
+func TunnelConfigHash(cfg config.TunnelConfig, token string) string {
+	return tunnelHash(tunnelImage(cfg), token)
 }
 
 // tunnelHash identifies image, mode and token so changes trigger a replace.
@@ -133,6 +147,8 @@ func runScript(image string, args []string) string {
 type TunnelContainerStatus struct {
 	Name        string
 	Image       string
+	ConfigHash  string // yoho.tunnel.config label: hash of image and token
+	Owner       string // yoho.tunnel.owner label; empty on connectors from older yoho
 	State       string // docker status text, e.g. "Up 3 minutes"
 	Running     bool
 	Connections int // distinct registered edge connections
@@ -141,6 +157,7 @@ type TunnelContainerStatus struct {
 // TunnelStatus describes the managed cloudflared connector on a Server.
 type TunnelStatus struct {
 	Host       string
+	Owner      string // App Destination that manages the connector(s); "" when unknown or mixed
 	Mode       string // "quick", "token" or "" when not deployed
 	URL        string // Quick Tunnel URL
 	Containers []TunnelContainerStatus
@@ -148,6 +165,11 @@ type TunnelStatus struct {
 
 // Exists reports whether any connector container exists.
 func (s *TunnelStatus) Exists() bool { return s != nil && len(s.Containers) > 0 }
+
+// OwnedBy reports whether every connector carries the owner label.
+func (s *TunnelStatus) OwnedBy(owner string) bool {
+	return s.Exists() && owner != "" && s.Owner == owner
+}
 
 // Healthy reports whether every connector is running and registered.
 func (s *TunnelStatus) Healthy() bool {
@@ -232,6 +254,10 @@ func EnsureTunnelWith(ctx context.Context, host remote.Host, cfg config.TunnelCo
 		out = io.Discard
 	}
 	quick := token == ""
+	if quick && cfg.TokenSecret != "" {
+		// A configured managed tunnel must never degrade to a public Quick Tunnel.
+		return nil, fmt.Errorf("tunnel: token secret %s resolved to an empty token", cfg.TokenSecret)
+	}
 	replicas := cfg.Replicas
 	if replicas < 1 {
 		replicas = 1
@@ -256,6 +282,18 @@ func EnsureTunnelWith(ctx context.Context, host remote.Host, cfg config.TunnelCo
 	}
 
 	names := TunnelContainers(replicas)
+	owners, err := tunnelOwners(ctx, host)
+	if err != nil {
+		return nil, err
+	}
+	// Connectors another App Destination manages are kept unless their config
+	// is exactly what we want; changing them would take that App's traffic down.
+	foreign := func(name string) error {
+		if o := owners[name]; o != "" && opts.Owner != "" && o != opts.Owner {
+			return fmt.Errorf("tunnel: %s is managed by %s on this Server; run `yoho tunnel down` there (or here) before this App can change it", name, o)
+		}
+		return nil
+	}
 	for _, name := range names {
 		state, err := host.Output(ctx, remote.Cmd{Script: "docker container inspect -f '{{index .Config.Labels \"" + tunnelConfigLabel + "\"}}|{{.State.Running}}' " + name + " 2>/dev/null || true"})
 		if err != nil {
@@ -272,6 +310,11 @@ func EnsureTunnelWith(ctx context.Context, host remote.Host, cfg config.TunnelCo
 				continue
 			}
 		} else {
+			if exists {
+				if err := foreign(name); err != nil {
+					return nil, err
+				}
+			}
 			var b strings.Builder
 			b.WriteString("set -eu\n")
 			if exists {
@@ -282,7 +325,7 @@ func EnsureTunnelWith(ctx context.Context, host remote.Host, cfg config.TunnelCo
 			} else {
 				fmt.Fprintf(out, "[%s] starting %s (%s)\n", host.Name(), name, image)
 			}
-			b.WriteString(runScript(image, tunnelRunArgs(name, image, want, quick)))
+			b.WriteString(runScript(image, tunnelRunArgs(name, image, want, opts.Owner, quick)))
 			if err := host.Run(ctx, remote.Cmd{Script: b.String()}); err != nil {
 				return nil, fmt.Errorf("start %s: %w", name, err)
 			}
@@ -299,6 +342,11 @@ func EnsureTunnelWith(ctx context.Context, host remote.Host, cfg config.TunnelCo
 	if stale, err := staleTunnelContainers(ctx, host, names); err != nil {
 		return nil, err
 	} else if len(stale) > 0 {
+		for _, n := range stale {
+			if err := foreign(n); err != nil {
+				return nil, err
+			}
+		}
 		fmt.Fprintf(out, "[%s] removing old connectors %s\n", host.Name(), strings.Join(stale, ", "))
 		if err := host.Run(ctx, remote.Cmd{Script: "docker rm -f " + strings.Join(stale, " ") + " >/dev/null"}); err != nil {
 			return nil, fmt.Errorf("remove old connectors: %w", err)
@@ -315,6 +363,21 @@ func EnsureTunnelWith(ctx context.Context, host remote.Host, cfg config.TunnelCo
 		fmt.Fprintf(out, "[%s] in the Cloudflare dashboard, point the tunnel's public hostname to %s\n", host.Name(), TunnelOrigin)
 	}
 	return TunnelStatusOf(ctx, host)
+}
+
+// tunnelOwners maps connector container names to their owner label.
+func tunnelOwners(ctx context.Context, host remote.Host) (map[string]string, error) {
+	out, err := host.Output(ctx, remote.Cmd{Script: "docker ps -a --filter 'name=^/" + TunnelContainer + "(-[0-9]+)?$' --format '{{.Names}}|{{.Label \"" + tunnelOwnerLabel + "\"}}'"})
+	if err != nil {
+		return nil, fmt.Errorf("list tunnel containers: %w", err)
+	}
+	m := map[string]string{}
+	for _, l := range strings.Split(out, "\n") {
+		if name, owner, ok := strings.Cut(strings.TrimSpace(l), "|"); ok && name != "" {
+			m[name] = owner
+		}
+	}
+	return m, nil
 }
 
 func staleTunnelContainers(ctx context.Context, host remote.Host, keep []string) ([]string, error) {
@@ -354,16 +417,19 @@ func tunnelContainerNames(ctx context.Context, host remote.Host) ([]string, erro
 // Tunnel) the URL from the Server. An absent tunnel yields an empty status.
 func TunnelStatusOf(ctx context.Context, host remote.Host) (*TunnelStatus, error) {
 	st := &TunnelStatus{Host: host.Name()}
-	out, err := host.Output(ctx, remote.Cmd{Script: "docker ps -a --filter 'name=^/" + TunnelContainer + "(-[0-9]+)?$' --format '{{.Names}}|{{.Image}}|{{.Status}}|{{.Label \"" + tunnelModeLabel + "\"}}'"})
+	out, err := host.Output(ctx, remote.Cmd{Script: "docker ps -a --filter 'name=^/" + TunnelContainer + "(-[0-9]+)?$' --format '{{.Names}}|{{.Image}}|{{.Status}}|{{.Label \"" + tunnelModeLabel + "\"}}|{{.Label \"" + tunnelConfigLabel + "\"}}|{{.Label \"" + tunnelOwnerLabel + "\"}}'"})
 	if err != nil {
 		return nil, fmt.Errorf("tunnel status: %w", err)
 	}
 	for _, l := range strings.Split(out, "\n") {
-		f := strings.SplitN(strings.TrimSpace(l), "|", 4)
+		f := strings.SplitN(strings.TrimSpace(l), "|", 6)
 		if len(f) < 4 {
 			continue
 		}
 		c := TunnelContainerStatus{Name: f[0], Image: f[1], State: f[2], Running: strings.HasPrefix(f[2], "Up")}
+		if len(f) == 6 {
+			c.ConfigHash, c.Owner = f[4], f[5]
+		}
 		st.Mode = f[3]
 		_, logs, err := containerLogs(ctx, host, c.Name)
 		if err != nil {
@@ -376,6 +442,13 @@ func TunnelStatusOf(ctx context.Context, host remote.Host) (*TunnelStatus, error
 		st.Containers = append(st.Containers, c)
 	}
 	sort.Slice(st.Containers, func(i, j int) bool { return st.Containers[i].Name < st.Containers[j].Name })
+	for i, c := range st.Containers {
+		if i == 0 {
+			st.Owner = c.Owner
+		} else if c.Owner != st.Owner {
+			st.Owner = ""
+		}
+	}
 	return st, nil
 }
 
@@ -398,4 +471,19 @@ func RemoveTunnel(ctx context.Context, host remote.Host, out io.Writer) error {
 		return fmt.Errorf("remove tunnel: %w", err)
 	}
 	return nil
+}
+
+// RemoveTunnelOwned is RemoveTunnel for a deploy that no longer configures a
+// tunnel: it only removes connectors labelled with owner. Connectors of
+// another App Destination, or from a yoho that did not label them, stay (use
+// `yoho tunnel down` to remove those). Reports whether it removed anything.
+func RemoveTunnelOwned(ctx context.Context, host remote.Host, owner string, out io.Writer) (bool, error) {
+	st, err := TunnelStatusOf(ctx, host)
+	if err != nil {
+		return false, err
+	}
+	if !st.OwnedBy(owner) {
+		return false, nil
+	}
+	return true, RemoveTunnel(ctx, host, out)
 }

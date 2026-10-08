@@ -114,8 +114,15 @@ is_writable_dir() {
 		if [ -w "$d" ]; then return 0; fi
 		return 1
 	fi
-	p=$(dirname "$d")
-	if [ -d "$p" ] && [ -w "$p" ]; then return 0; fi
+	# mkdir -p creates every missing level, so what matters is the nearest
+	# existing ancestor (e.g. $HOME when ~/.local does not exist yet).
+	p=$d
+	while [ ! -d "$p" ]; do
+		parent=$(dirname "$p")
+		if [ "$parent" = "$p" ]; then return 1; fi
+		p=$parent
+	done
+	if [ -w "$p" ]; then return 0; fi
 	return 1
 }
 

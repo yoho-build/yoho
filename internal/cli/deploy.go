@@ -78,7 +78,7 @@ func (a *app) runtime() plan.Runtime {
 // tunnelOptions: on Swarm the swarm runner owns the attachable overlay
 // network, so the tunnel path must not create a node-local `yoho` bridge.
 func (a *app) tunnelOptions() proxy.BootOptions {
-	return proxy.BootOptions{SkipNetwork: a.dest.Runtime == "swarm"}
+	return proxy.BootOptions{SkipNetwork: a.dest.Runtime == "swarm", Owner: proxy.TunnelOwner(a.cfg.App, a.destName)}
 }
 
 // swarmRuntime is set by the swarm package wiring when available.
@@ -271,6 +271,21 @@ func (a *app) buildAndShip(ctx context.Context, s *session, skipBuild bool) (map
 	sort.Strings(built)
 	step.Done(strings.Join(built, ", "))
 
+	if len(built) > 0 && a.cfg.Builder.Location == "server" && len(hosts) > 1 {
+		// The image exists only on hosts[0]; the other Servers (Swarm workers,
+		// extra compose Servers) need it too.
+		step = u.Step("", "Ship %d image(s) from %s to %d other Server(s)", len(built), hosts[0].Name, len(hosts)-1)
+		var others []remote.Host
+		for _, h := range hosts[1:] {
+			others = append(others, h.Host)
+		}
+		shipped, serr := build.ShipFromServer(ctx, hosts[0].Host, others, built, step.Output())
+		if serr != nil {
+			step.Fail(serr, "check Docker on the other Servers, or build with builder.location=local")
+			return nil, &silentError{serr}
+		}
+		step.Done(fmt.Sprintf("%d loaded, %d already present", len(shipped), len(others)-len(shipped)))
+	}
 	if len(built) > 0 && a.cfg.Builder.Location != "server" {
 		step = u.Step("", "Ship %d image(s)", len(built))
 		var regPW string
@@ -347,6 +362,7 @@ func (a *app) rollout(ctx context.Context, s *session, d *plan.Deploy) (*release
 func (a *app) reconcileTunnel(ctx context.Context, s *session) (string, error) {
 	u := a.ui
 	t := a.proxyConfig().Tunnel
+	owner := proxy.TunnelOwner(a.cfg.App, a.destName)
 	urls := ""
 	for _, h := range s.hosts {
 		if t == nil {
@@ -354,17 +370,24 @@ func (a *app) reconcileTunnel(ctx context.Context, s *session) (string, error) {
 			if err != nil || !st.Exists() {
 				continue
 			}
+			// The connector is per Server and shared by Apps: only remove one
+			// this App Destination deployed.
+			if !st.OwnedBy(owner) {
+				u.Info("  Cloudflare Tunnel on %s is not managed by %s; leaving it (remove with `yoho tunnel down`)", h.Name, owner)
+				continue
+			}
 			step := u.Step(h.Name, "Remove Cloudflare Tunnel (no longer in config)")
-			if err := proxy.RemoveTunnel(ctx, h.Host, step.Output()); err != nil {
+			if _, err := proxy.RemoveTunnelOwned(ctx, h.Host, owner, step.Output()); err != nil {
 				step.Fail(err, "run `yoho tunnel down`")
 				return urls, &silentError{err}
 			}
 			step.Done()
 			continue
 		}
-		token := ""
-		if t.TokenSecret != "" {
-			token, _ = s.store.Get(t.TokenSecret)
+		token, terr := tunnelToken(s.store, t)
+		if terr != nil {
+			// Leave the running connectors alone.
+			return urls, terr
 		}
 		step := u.Step(h.Name, "Cloudflare Tunnel")
 		st, terr := proxy.EnsureTunnelWith(ctx, h.Host, *t, token, step.Output(), a.tunnelOptions())
@@ -380,6 +403,28 @@ func (a *app) reconcileTunnel(ctx context.Context, s *session) (string, error) {
 		}
 	}
 	return urls, nil
+}
+
+// tunnelToken resolves proxy.tunnel.token_secret. A configured but missing or
+// empty secret is an error: an empty token would otherwise mean "Quick
+// Tunnel" and could replace a managed connector with a public URL.
+func tunnelToken(store *secrets.Store, t *config.TunnelConfig) (string, error) {
+	if t == nil || t.TokenSecret == "" {
+		return "", nil
+	}
+	var token string
+	var ok bool
+	if store != nil {
+		token, ok = store.Get(t.TokenSecret)
+	}
+	if !ok || strings.TrimSpace(token) == "" {
+		reason := "not found"
+		if ok {
+			reason = "is empty"
+		}
+		return "", fmt.Errorf("proxy.tunnel.token_secret %s %s\nhint: add %s to .yoho/secrets (the token from Cloudflare Zero Trust > Networks > Tunnels), or fix the secret name", t.TokenSecret, reason, t.TokenSecret)
+	}
+	return token, nil
 }
 
 // serviceSecrets resolves each Service's declared secrets from the store.
@@ -714,10 +759,50 @@ func appCmds(g *globals) *cobra.Command {
 			if err != nil {
 				return err
 			}
+			if a.dest.Runtime == "swarm" {
+				return a.swarmExec(cmd, args[0], args[1:])
+			}
 			return a.remoteRun(cmd, "docker compose -p "+remote.Quote(a.project())+" exec -T "+remote.QuoteArgs(args...))
 		},
 	})
 	return c
+}
+
+// swarmTaskContainer returns the id of a running task container of the stack
+// Service on h (the node h connects to), or "".
+func swarmTaskContainer(ctx context.Context, h remote.Host, project, svc string) (string, error) {
+	out, err := h.Output(ctx, remote.Cmd{Script: "docker ps -q --filter " + remote.Quote("label=com.docker.swarm.service.name="+project+"_"+svc) + " --filter status=running"})
+	if err != nil {
+		return "", fmt.Errorf("find %s task on %s: %w", svc, h.Name(), err)
+	}
+	id, _, _ := strings.Cut(strings.TrimSpace(out), "\n")
+	return strings.TrimSpace(id), nil
+}
+
+// swarmExec runs command in a running task container of Service. Swarm tasks
+// can run on any node, so the Destination's Servers are tried in order and
+// the command runs on the first node that has one.
+func (a *app) swarmExec(cmd *cobra.Command, svc string, command []string) error {
+	ctx := cmd.Context()
+	var tried []string
+	for _, name := range a.dest.Servers {
+		srv := a.cfg.Servers[name]
+		h, err := remote.NewSSH(name, srv.SSH, srv.Sudo, remote.SSHOptions{})
+		if err != nil {
+			return err
+		}
+		id, err := swarmTaskContainer(ctx, h, a.project(), svc)
+		if err == nil && id != "" {
+			defer h.Close()
+			return h.Run(ctx, remote.Cmd{Script: "docker exec " + remote.Quote(id) + " " + remote.QuoteArgs(command...), Stdout: cmd.OutOrStdout(), Stderr: cmd.ErrOrStderr()})
+		}
+		h.Close()
+		tried = append(tried, name)
+		if err != nil {
+			return err
+		}
+	}
+	return fmt.Errorf("no running task of Service %s on %s\nhint: check `yoho app ps`; a task on a node outside this Destination's Servers cannot be reached", svc, strings.Join(tried, ", "))
 }
 
 func remoteShow(g *globals, use, short, script string) *cobra.Command {

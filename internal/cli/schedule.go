@@ -20,6 +20,7 @@ import (
 	"github.com/yoho-build/yoho/internal/deploy"
 	"github.com/yoho-build/yoho/internal/dist"
 	"github.com/yoho-build/yoho/internal/plan"
+	"github.com/yoho-build/yoho/internal/release"
 	"github.com/yoho-build/yoho/internal/remote"
 	"github.com/yoho-build/yoho/internal/schedule"
 	"github.com/yoho-build/yoho/internal/secrets"
@@ -147,10 +148,21 @@ func (a *app) installJobs(ctx context.Context, hosts []plan.NamedHost, names []s
 		for k, v := range j.env {
 			sec[k] = v
 		}
+		var fps map[string]string
+		if len(sec) > 0 {
+			// Created on first use so even a never-deployed Destination records
+			// fingerprints; later plans compare against them.
+			key, kerr := deploy.EnsureHMACKey(ctx, hosts[0].Host, release.AppDir(a.cfg.App, a.destName))
+			if kerr != nil {
+				return fmt.Errorf("credential fingerprint key: %w", kerr)
+			}
+			fps = targetFingerprints(key, j)
+		}
 		jobs = append(jobs, schedule.Job{
 			App: a.cfg.App, Destination: a.destName, Name: n, Project: a.project(),
 			Services: j.services, TargetName: j.targetName, Target: j.target,
-			Schedule: j.cfg.Schedule, Secrets: sec,
+			Schedule: j.cfg.Schedule, Secrets: sec, Runtime: a.dest.Runtime,
+			SecretFingerprints: fps,
 		})
 	}
 

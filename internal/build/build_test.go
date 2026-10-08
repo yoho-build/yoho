@@ -173,7 +173,15 @@ func TestRemoteBuilder(t *testing.T) {
 	}
 }
 
+func fixedRunID(t *testing.T, ids ...string) {
+	old := newRunID
+	n := 0
+	newRunID = func() string { id := ids[n%len(ids)]; n++; return id }
+	t.Cleanup(func() { newRunID = old })
+}
+
 func TestServerBuild(t *testing.T) {
+	fixedRunID(t, "r1")
 	r := &recExec{}
 	h := &recHost{}
 	h.HostName = "web1"
@@ -188,15 +196,15 @@ func TestServerBuild(t *testing.T) {
 		t.Fatalf("%+v", imgs)
 	}
 	c, _ := r.find("rsync")
-	if got := strings.Join(c.Argv, " "); got != "rsync -az --delete --exclude=.git --exclude=/.yoho/secrets* --exclude=node_modules -e ssh -o BatchMode=yes /src/ deploy@web1:/srv/source/" {
+	if got := strings.Join(c.Argv, " "); got != "rsync -az --delete --exclude=.git --exclude=/.yoho/secrets* --exclude=node_modules -e ssh -o BatchMode=yes /src/ deploy@web1:/srv/source.run-r1/" {
 		t.Fatalf("rsync %s", got)
 	}
-	if h.cmds[0].Script != "set -eu\nmkdir -p -m 0700 '/srv/source'\ncommand -v rsync >/dev/null 2>&1 || echo yoho-no-rsync" {
+	if h.cmds[0].Script != "set -eu\nmkdir -p -m 0700 '/srv/source.run-r1'\nif [ -d '/srv/source' ]; then cp -a '/srv/source'/. '/srv/source.run-r1'/ 2>/dev/null || true; fi\ncommand -v rsync >/dev/null 2>&1 || echo yoho-no-rsync" {
 		t.Fatalf("mkdir %q", h.cmds[0].Script)
 	}
 	b := h.cmds[1]
-	if !strings.HasPrefix(b.Script, "set -eu\nDOCKER_BUILDKIT=1 docker build '--tag' 'yoho/shop-web:v1' '--file' '/srv/source/app/Dockerfile.prod'") ||
-		!strings.HasSuffix(b.Script, "'--secret' 'id=npm,env=NPM_TOKEN' '/srv/source/app'") {
+	if !strings.HasPrefix(b.Script, "set -eu\nDOCKER_BUILDKIT=1 docker build '--tag' 'yoho/shop-web:v1' '--file' '/srv/source.run-r1/app/Dockerfile.prod'") ||
+		!strings.HasSuffix(b.Script, "'--secret' 'id=npm,env=NPM_TOKEN' '/srv/source.run-r1/app'") {
 		t.Fatalf("script %s", b.Script)
 	}
 	if strings.Contains(b.Script, "npm_secret") || b.Env["NPM_TOKEN"] != "npm_secret" {
@@ -414,5 +422,50 @@ func TestSyncSourceSkipsGitIgnored(t *testing.T) {
 		if _, err := os.Stat(filepath.Join(dst, p)); err == nil {
 			t.Errorf("%s should not be synced", p)
 		}
+	}
+}
+
+func TestServerBuildUsesPrivateSourceDirPerInvocation(t *testing.T) {
+	fixedRunID(t, "aaa", "bbb")
+	var dirs []string
+	for i := 0; i < 2; i++ {
+		r := &recExec{}
+		h := &recHost{}
+		h.HostName = "web1"
+		o := Options{Dir: "/src", App: "shop", Destination: "prod", Version: "v1", Project: project("/src"),
+			Builder: config.Builder{Location: "server"}, Host: h, RsyncTarget: "deploy@web1", Exec: r.exec}
+		if _, err := Images(context.Background(), o); err != nil {
+			t.Fatal(err)
+		}
+		c, _ := r.find("rsync")
+		dirs = append(dirs, c.Argv[len(c.Argv)-1])
+		last := h.cmds[len(h.cmds)-1].Script
+		if !strings.Contains(last, "mv '/var/lib/yoho/apps/shop/prod/source.run-"+[]string{"aaa", "bbb"}[i]+"' '/var/lib/yoho/apps/shop/prod/source'") {
+			t.Errorf("successful build should refresh the seed copy, got %s", last)
+		}
+	}
+	if dirs[0] == dirs[1] || !strings.HasSuffix(dirs[0], "source.run-aaa/") || !strings.HasSuffix(dirs[1], "source.run-bbb/") {
+		t.Fatalf("overlapping deploys must not share a source dir: %v", dirs)
+	}
+}
+
+func TestServerBuildFailureRemovesPrivateSourceDir(t *testing.T) {
+	fixedRunID(t, "zzz")
+	r := &recExec{fail: func(a string) error {
+		if strings.HasPrefix(a, "rsync") {
+			return errors.New("boom")
+		}
+		return nil
+	}}
+	h := &recHost{}
+	h.HostName = "web1"
+	o := Options{Dir: "/src", App: "shop", Destination: "prod", Version: "v1", Project: project("/src"),
+		Builder: config.Builder{Location: "server"}, Host: h, RsyncTarget: "deploy@web1", Exec: r.exec}
+	if _, err := Images(context.Background(), o); err == nil {
+		t.Fatal("want rsync failure")
+	}
+	last := h.cmds[len(h.cmds)-1].Script
+	if last != "rm -rf '/var/lib/yoho/apps/shop/prod/source.run-zzz'" {
+		t.Errorf("cleanup %q", last)
 	}
 }
