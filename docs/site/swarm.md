@@ -16,6 +16,8 @@ yoho swarm join     # join the other Servers as workers (-y: no confirmation)
 yoho swarm status   # nodes and the App's services
 ```
 
+`yoho swarm init` and `yoho swarm join` error when the Destination's runtime is not `swarm` (they do not connect). Set `destinations.<name>.runtime: swarm` first. `yoho swarm status` warns and still connects.
+
 Docker advertises the manager on `servers.<name>.private_address`, else on the SSH host when that is an IP address; a hostname without `private_address` is an error. Open 2377/tcp, 7946/tcp+udp and 4789/udp between the Servers only, ideally over Tailscale or a private network. All Servers of a Destination must share the same `root`.
 
 - Images are built locally and shipped to each node over SSH in parallel. A registry is optional. When `registry:` is set, or an image name looks like a registry host (`ghcr.io/acme/shop:1`), `docker stack deploy` passes `--with-registry-auth` so nodes pull with the credentials stored on the manager. Run `docker login` on the manager yourself; Yoho does not log in.

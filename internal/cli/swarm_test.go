@@ -2,6 +2,7 @@ package cli
 
 import (
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/yoho-build/yoho/internal/config"
@@ -16,6 +17,19 @@ func TestAdvertiseAddr(t *testing.T) {
 	}
 	if _, err := advertiseAddr("s", config.Server{SSH: "u@example.com"}); err == nil {
 		t.Error("hostname must require private_address")
+	}
+}
+
+func TestSwarmRuntimeError(t *testing.T) {
+	if err := swarmRuntimeError("production", config.Destination{Runtime: "swarm"}); err != nil {
+		t.Fatal(err)
+	}
+	want := "destination production uses runtime compose; set destinations.production.runtime: swarm first (switching needs downtime, see docs/site/swarm.md)"
+	if err := swarmRuntimeError("production", config.Destination{}); err == nil || err.Error() != want {
+		t.Fatalf("empty runtime: %v", err)
+	}
+	if err := swarmRuntimeError("edge", config.Destination{Runtime: "compose"}); err == nil || !strings.Contains(err.Error(), "destination edge uses runtime compose; set destinations.edge.runtime: swarm first") {
+		t.Fatalf("compose runtime: %v", err)
 	}
 }
 

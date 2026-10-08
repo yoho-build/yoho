@@ -27,8 +27,8 @@ Global flags (every command): `-c, --config FILE`, `-d, --destination NAME` (def
 | `schedule install [JOB...] [--binary PATH]` | Install systemd timers for Backup jobs with a schedule (default: all of the Destination). |
 | `schedule status` | Installed Scheduled Jobs, timers, last runs. |
 | `schedule remove [JOB...]` | Disable and delete Scheduled Jobs (default: all of the Destination). |
-| `swarm init [-y]` | Initialize a Swarm on the first Server (the manager). |
-| `swarm join [-y]` | Join the other Servers as workers. |
+| `swarm init [-y]` | Initialize a Swarm on the first Server (the manager). Errors unless `runtime` is `swarm`. |
+| `swarm join [-y]` | Join the other Servers as workers. Errors unless `runtime` is `swarm`. |
 | `swarm status` | Swarm nodes and the App's services. |
 | `builder status` | Build engine in use and Apple `container` state. |
 | `builder setup [-y]` | Install/upgrade Apple container, Rosetta, builder VM; smoke test. |

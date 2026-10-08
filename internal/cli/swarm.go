@@ -28,7 +28,7 @@ func swarmCmd(g *globals) *cobra.Command {
 		Use:   "init",
 		Short: "Initialize a Swarm on the first Server (the manager)",
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			a, hosts, done, err := g.swarmHosts(cmd)
+			a, hosts, done, err := g.swarmHosts(cmd, true)
 			if err != nil {
 				return err
 			}
@@ -41,7 +41,7 @@ func swarmCmd(g *globals) *cobra.Command {
 		Use:   "join",
 		Short: "Join the other Servers to the manager's Swarm as workers",
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			a, hosts, done, err := g.swarmHosts(cmd)
+			a, hosts, done, err := g.swarmHosts(cmd, true)
 			if err != nil {
 				return err
 			}
@@ -54,7 +54,7 @@ func swarmCmd(g *globals) *cobra.Command {
 		Use:   "status",
 		Short: "Show Swarm nodes and the App's services",
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			a, hosts, done, err := g.swarmHosts(cmd)
+			a, hosts, done, err := g.swarmHosts(cmd, false)
 			if err != nil {
 				return err
 			}
@@ -65,13 +65,25 @@ func swarmCmd(g *globals) *cobra.Command {
 	return c
 }
 
-func (g *globals) swarmHosts(cmd *cobra.Command) (*app, []plan.NamedHost, func(), error) {
+// swarmRuntimeError is returned by swarm init and join when the Destination
+// is not runtime swarm. Status still warns with the same text and connects.
+func swarmRuntimeError(dest string, d config.Destination) error {
+	if d.Runtime == "swarm" {
+		return nil
+	}
+	return fmt.Errorf("destination %s uses runtime %s; set destinations.%s.runtime: swarm first (switching needs downtime, see docs/site/swarm.md)", dest, runtimeName(d), dest)
+}
+
+func (g *globals) swarmHosts(cmd *cobra.Command, strict bool) (*app, []plan.NamedHost, func(), error) {
 	a, err := g.load(cmd)
 	if err != nil {
 		return nil, nil, nil, err
 	}
-	if a.dest.Runtime != "swarm" {
-		a.ui.Warn("destination %s uses the %s runtime; set `runtime: swarm` to deploy with Swarm", a.destName, runtimeName(a.dest))
+	if err := swarmRuntimeError(a.destName, a.dest); err != nil {
+		if strict {
+			return nil, nil, nil, err
+		}
+		a.ui.Warn("%s", err.Error())
 	}
 	hosts, done, err := a.connect(cmd.Context())
 	if err != nil {
