@@ -71,3 +71,33 @@ type Runtime interface {
 	// Releases lists Releases on the (first) Server, newest first.
 	Releases(ctx context.Context, d *Deploy) ([]release.Release, error)
 }
+
+// Action is what apply would do to one resource (Terraform-style).
+type Action string
+
+const (
+	ActionCreate  Action = "create"
+	ActionUpdate  Action = "update"  // in place, zero-downtime (proxied) or no restart
+	ActionReplace Action = "replace" // stop then start (Stateful / non-proxied Services)
+	ActionDelete  Action = "delete"
+	ActionNoop    Action = "noop"
+)
+
+// Change is one planned change.
+type Change struct {
+	// Kind: service, route, proxy, tunnel, job, secret, network.
+	Kind    string   `json:"kind"`
+	Name    string   `json:"name"`
+	Server  string   `json:"server,omitempty"`
+	Action  Action   `json:"action"`
+	Reasons []string `json:"reasons,omitempty"` // e.g. "image yoho/web:f4e6 → d459", "secrets changed"
+	// Downtime is true when apply interrupts this resource (replace of a non-proxied Service).
+	Downtime bool `json:"downtime,omitempty"`
+}
+
+// Planner computes changes without modifying the Server (read-only).
+// Runtimes implement it; images are not built, Deploy.Project images are the
+// refs the Version would produce.
+type Planner interface {
+	Diff(ctx context.Context, d *Deploy) ([]Change, error)
+}

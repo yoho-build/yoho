@@ -1,0 +1,3 @@
+# Configuration first: plan and apply
+
+Yoho works like Terraform for Compose apps: the Yoho file plus compose files are the desired state, `yoho plan` diffs them against what runs on the Server (Releases, container labels, Proxy routes, Tunnel, Scheduled Jobs) and shows create / update / replace / delete with reasons, and `yoho apply` converges everything after confirmation. `yoho deploy` stays as Kamal-compatible `apply --auto-approve`. Imperative commands still exist for operations (logs, exec, backup run), but anything declared in config is reconciled by apply, including removing what was deleted from config.
