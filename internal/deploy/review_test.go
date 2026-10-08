@@ -113,14 +113,14 @@ func TestRollbackPinsRecordedImage(t *testing.T) {
 	h := &dockerHost{local: &remote.Local{}}
 	h.respond = func(s string) (string, error) {
 		switch {
-		case strings.Contains(s, "docker image inspect -f '{{.Id}}' 'shop-web:v1'"):
+		case strings.Contains(s, "docker image inspect -f '{{.Id}}' 'yoho/shop-production-web:v1'"):
 			return tagID, nil
 		case strings.Contains(s, "docker image inspect -f '{{.Id}}' 'postgres:17'"):
 			return "sha256:pg1", nil
 		}
 		return respond(nil)(s)
 	}
-	rel, err := (Compose{}).Deploy(ctx, testDeploy(t, h, nil))
+	rel, err := (Compose{}).Deploy(ctx, builtWeb(t, testDeploy(t, h, nil)))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -144,7 +144,7 @@ func TestRollbackPinsRecordedImage(t *testing.T) {
 		t.Fatal(err)
 	}
 	all := h.all()
-	retag := indexOf(t, h.scripts, "docker tag 'sha256:aaaa1111' 'shop-web:v1'")
+	retag := indexOf(t, h.scripts, "docker tag 'sha256:aaaa1111' 'yoho/shop-production-web:v1'")
 	if up := indexOf(t, h.scripts, "'--scale' 'web=2'"); up < retag {
 		t.Error("tag must be restored before cutover")
 	}
@@ -160,20 +160,20 @@ func TestRollbackFailsWhenRecordedImageIsGone(t *testing.T) {
 	h := &dockerHost{local: &remote.Local{}}
 	h.respond = func(s string) (string, error) {
 		switch {
-		case strings.Contains(s, "docker image inspect -f '{{.Id}}' 'shop-web:v1'"):
+		case strings.Contains(s, "docker image inspect -f '{{.Id}}' 'yoho/shop-production-web:v1'"):
 			return tagID, nil
 		case strings.Contains(s, "docker tag"):
 			return "", &remote.ExitError{Host: "s1", Code: 1, Stderr: "image gone"}
 		}
 		return respond(nil)(s)
 	}
-	if _, err := (Compose{}).Deploy(ctx, testDeploy(t, h, nil)); err != nil {
+	if _, err := (Compose{}).Deploy(ctx, builtWeb(t, testDeploy(t, h, nil))); err != nil {
 		t.Fatal(err)
 	}
 	tagID = "sha256:bbbb2222"
 	h.scripts = nil
 	_, err := (Compose{}).Rollback(ctx, testDeploy(t, h, nil), "v1")
-	if err == nil || !strings.Contains(err.Error(), "cannot restore image shop-web:v1") {
+	if err == nil || !strings.Contains(err.Error(), "cannot restore image yoho/shop-production-web:v1") {
 		t.Fatalf("err = %v", err)
 	}
 	if strings.Contains(h.all(), "--scale") {

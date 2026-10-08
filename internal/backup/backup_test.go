@@ -91,8 +91,10 @@ func dockerResponder(extra func(string) (string, error)) func(context.Context, s
 		switch {
 		case strings.Contains(s, " ps -q "):
 			return "cid123", nil
+		case strings.HasPrefix(s, "docker inspect -f") && strings.Contains(s, ".Mounts"):
+			return "yoho-shop-production_pgdata\n", nil
 		case strings.HasPrefix(s, "docker inspect -f") && strings.Contains(s, "Config.Labels"):
-			return "yoho-shop-production||true|false", nil
+			return "yoho-shop-production||||true|false", nil
 		case strings.HasPrefix(s, "docker volume ls"):
 			return "yoho-shop-production_pgdata", nil
 		case strings.HasPrefix(s, "wc -c <"):
@@ -1029,7 +1031,7 @@ func TestRunRefusesForeignContainerOnVolume(t *testing.T) {
 		case strings.Contains(s, "docker ps -q --filter 'volume="):
 			return "cid123\nstranger1\n", nil
 		case strings.HasPrefix(s, "docker inspect -f") && strings.Contains(s, "Config.Labels") && strings.Contains(s, "stranger1"):
-			return "other-app||true|false", nil
+			return "other-app||||true|false", nil
 		}
 		return base(ctx, s)
 	}}
@@ -1052,7 +1054,7 @@ func TestRunLeavesAlreadyPausedContainersAlone(t *testing.T) {
 		case strings.Contains(s, "docker ps -q --filter 'volume="):
 			return "cid123\nworker77\n", nil
 		case strings.HasPrefix(s, "docker inspect -f") && strings.Contains(s, "Config.Labels") && strings.Contains(s, "worker77"):
-			return "yoho-shop-production||true|true", nil
+			return "yoho-shop-production||||true|true", nil
 		}
 		return base(ctx, s)
 	}}
@@ -1067,5 +1069,139 @@ func TestRunLeavesAlreadyPausedContainersAlone(t *testing.T) {
 	}
 	if h.index("docker pause 'cid123'") < 0 || h.index("docker unpause 'cid123'") < 0 {
 		t.Fatalf("Service container not paused/unpaused:\n%s", h.scripts())
+	}
+}
+
+func TestRunRefusesForeignOwnerProject(t *testing.T) {
+	base := dockerResponder(nil)
+	h := &fakeHost{respond: func(ctx context.Context, s string) (string, error) {
+		if strings.HasPrefix(s, "docker ps -a --filter") {
+			return "shop|staging\n", nil
+		}
+		return base(ctx, s)
+	}}
+	o := baseOpts(h)
+	o.Target = config.BackupTarget{Type: "archive", Format: "zip", Repository: "/srv/backups", PasswordSecret: "PW"}
+	o.Password = secretPW
+	_, err := Run(context.Background(), o)
+	if err == nil || !strings.Contains(err.Error(), "Destination staging") {
+		t.Fatalf("want ownership refusal, got %v", err)
+	}
+	if h.index("docker pause") >= 0 || h.index("tar -C /data") >= 0 {
+		t.Fatalf("touched data:\n%s", h.scripts())
+	}
+}
+
+func TestRunRefusesForeignLabeledContainerOnVolume(t *testing.T) {
+	base := dockerResponder(nil)
+	h := &fakeHost{respond: func(ctx context.Context, s string) (string, error) {
+		switch {
+		case strings.Contains(s, "docker ps -q --filter 'volume="):
+			return "cid123\nother1\n", nil
+		case strings.HasPrefix(s, "docker inspect -f") && strings.Contains(s, "Config.Labels") && strings.Contains(s, "other1"):
+			return "yoho-shop-production||foo|bar|true|false", nil
+		}
+		return base(ctx, s)
+	}}
+	o := baseOpts(h)
+	o.Target = config.BackupTarget{Type: "archive", Format: "zip", Repository: "/srv/backups", PasswordSecret: "PW"}
+	o.Password = secretPW
+	_, err := Run(context.Background(), o)
+	if err == nil || !strings.Contains(err.Error(), "other1") {
+		t.Fatalf("want refusal naming the container, got %v", err)
+	}
+	if h.index("docker pause") >= 0 {
+		t.Fatalf("paused containers:\n%s", h.scripts())
+	}
+}
+
+func TestRunRefusesVolumeNotMountedByService(t *testing.T) {
+	base := dockerResponder(nil)
+	h := &fakeHost{respond: func(ctx context.Context, s string) (string, error) {
+		if strings.HasPrefix(s, "docker inspect -f") && strings.Contains(s, ".Mounts") {
+			return "someone-elses_volume\n", nil
+		}
+		return base(ctx, s)
+	}}
+	o := baseOpts(h)
+	o.Target = config.BackupTarget{Type: "archive", Format: "zip", Repository: "/srv/backups", PasswordSecret: "PW"}
+	o.Password = secretPW
+	_, err := Run(context.Background(), o)
+	if err == nil || !strings.Contains(err.Error(), "not mounted") {
+		t.Fatalf("want mount refusal, got %v", err)
+	}
+}
+
+func TestOwnerForeign(t *testing.T) {
+	if (owner{}).foreign("a", "b") || (owner{"a", "b"}).foreign("a", "b") {
+		t.Error("unlabeled or matching owner must not be foreign")
+	}
+	if !(owner{"a", "c"}).foreign("a", "b") || !(owner{"x", "b"}).foreign("a", "b") {
+		t.Error("mismatching owner must be foreign")
+	}
+}
+
+// TestRestoreVolumeShRuns executes the restore script against local
+// directories (the helper paths are rewritten) to check dotfiles, a
+// scratch-like directory name in the archive, and mv failure propagation.
+func TestRestoreVolumeShRuns(t *testing.T) {
+	if _, err := exec.LookPath("tar"); err != nil {
+		t.Skip("no tar")
+	}
+	root := t.TempDir()
+	src := filepath.Join(root, "src")
+	for _, d := range []string{"keep", ".yoho-restore-tmp", ".hidden-dir"} {
+		if err := os.MkdirAll(filepath.Join(src, d), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(src, d, "f"), []byte(d), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(src, ".dot"), []byte("dot"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	in := filepath.Join(root, "in")
+	data := filepath.Join(root, "data")
+	for _, d := range []string{in, data} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if out, err := exec.Command("tar", "-C", src, "-czf", filepath.Join(in, "a.tar.gz"), ".").CombinedOutput(); err != nil {
+		t.Fatalf("tar: %v %s", err, out)
+	}
+	if err := os.WriteFile(filepath.Join(data, "old"), []byte("old"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// Shim the GNU/root-only stat and chown so the script runs anywhere.
+	bin := filepath.Join(root, "bin")
+	if err := os.MkdirAll(bin, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	shim := "#!/bin/sh\ncase \"$2\" in %a) echo 755;; *) echo 1:1;; esac\n"
+	if err := os.WriteFile(filepath.Join(bin, "stat"), []byte(shim), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(bin, "chown"), []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	sh := strings.NewReplacer("/data", data, "/in/", in+"/").Replace(restoreVolumeSh)
+	cmd := exec.Command("sh", "-c", sh, "sh", "a.tar.gz")
+	cmd.Env = append(os.Environ(), "PATH="+bin+":"+os.Getenv("PATH"), "TMPDIR="+root)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("restore: %v %s", err, out)
+	}
+	for _, f := range []string{"keep/f", ".yoho-restore-tmp/f", ".hidden-dir/f", ".dot"} {
+		if _, err := os.Stat(filepath.Join(data, f)); err != nil {
+			t.Errorf("restored data missing %s: %v", f, err)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(data, "old")); err == nil {
+		t.Error("old data not removed")
+	}
+	left, _ := filepath.Glob(filepath.Join(data, ".yoho-restore-*-*"))
+	if len(left) != 0 {
+		t.Errorf("scratch left behind: %v", left)
 	}
 }

@@ -5,15 +5,26 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/yoho-build/yoho/internal/build"
+	"github.com/yoho-build/yoho/internal/config"
 	"github.com/yoho-build/yoho/internal/remote"
 )
 
-// imageIDs returns Service -> local image ID for images, as present on the
-// Server now. Images that cannot be inspected are left out (best effort:
-// the Release still records its refs).
-func imageIDs(ctx context.Context, h remote.Host, images map[string]string) map[string]string {
+// imageIDs returns Service -> local image ID for images, as the deployed
+// containers run them. Builds happen before the Destination lock, so a
+// concurrent build of the same Version can re-point the tag between cutover
+// and this read; the containers' .Image is what this Release actually runs.
+// Only Services without a container (none created) fall back to the tag.
+// IDs that cannot be read are left out (best effort: the Release still
+// records its refs).
+func imageIDs(ctx context.Context, h remote.Host, project string, images map[string]string) map[string]string {
+	running := containerImageIDs(ctx, h, project)
 	out := map[string]string{}
 	for _, svc := range sortedKeys(images) {
+		if id, ok := running[svc]; ok {
+			out[svc] = id
+			continue
+		}
 		id, err := h.Output(ctx, remote.Cmd{Script: imageIDScript(images[svc])})
 		if id = strings.TrimSpace(id); err == nil && strings.HasPrefix(id, "sha256:") {
 			out[svc] = id
@@ -25,6 +36,35 @@ func imageIDs(ctx context.Context, h remote.Host, images map[string]string) map[
 	return out
 }
 
+// containerImageIDs returns compose Service -> image ID of the project's
+// containers: a running container's when there is one, else the newest.
+func containerImageIDs(ctx context.Context, h remote.Host, project string) map[string]string {
+	script := "ids=$(docker ps -aq --filter " + remote.Quote("label=com.docker.compose.project="+project) + ")\n" +
+		`[ -z "$ids" ] || docker inspect -f '{{index .Config.Labels "com.docker.compose.service"}} {{.State.Running}} {{.Image}}' $ids`
+	out, err := h.Output(ctx, remote.Cmd{Script: script})
+	if err != nil {
+		return nil
+	}
+	ids := map[string]string{}
+	runningSeen := map[string]bool{}
+	// docker ps lists newest first and inspect keeps that order.
+	for line := range strings.Lines(out) {
+		f := strings.Fields(line)
+		if len(f) != 3 || !strings.HasPrefix(f[2], "sha256:") {
+			continue
+		}
+		svc, running, id := f[0], f[1] == "true", f[2]
+		if runningSeen[svc] {
+			continue
+		}
+		if _, ok := ids[svc]; !ok || running {
+			ids[svc] = id
+			runningSeen[svc] = running
+		}
+	}
+	return ids
+}
+
 func imageIDScript(ref string) string {
 	return "docker image inspect -f '{{.Id}}' " + remote.Quote(ref) + " 2>/dev/null || true"
 }
@@ -34,12 +74,12 @@ func imageIDScript(ref string) string {
 // built again for the same Destination, or a rebuild, re-points
 // yoho/<app>-<destination>-<service>:<version> (Releases deployed before the
 // Destination joined the tag record yoho/<app>-<service>:<version>). For
-// Yoho-built images (tagged with the Version) the tag is pointed back at the
-// recorded ID; rollback fails if that image is gone. On the containerd image
+// Yoho-built images (exactly those names, see yohoImage) the tag is pointed
+// back at the recorded ID; rollback fails if that image is gone. On the containerd image
 // store an overwritten multi-manifest (buildx) image survives only as a
 // dangling record with another ID, so the re-tag can fail there; failing
-// beats running another build. Other images (postgres:17) are not Yoho's to
-// retag; a moved tag is only a warning.
+// beats running another build. Other images (postgres:17, even deployed with
+// --version 17) are not Yoho's to retag; a moved tag is only a warning.
 func (r *runner) pinImages(ctx context.Context, images, ids map[string]string, version string) error {
 	for _, svc := range sortedKeys(ids) {
 		ref, id := images[svc], ids[svc]
@@ -53,7 +93,7 @@ func (r *runner) pinImages(ctx context.Context, images, ids map[string]string, v
 		if strings.TrimSpace(cur) == id {
 			continue
 		}
-		if !versioned(ref, version) {
+		if !r.yohoImage(ref, svc, version) {
 			r.logf("warning: %s now points at a different image than when %s was deployed; rolling back with the current one", ref, version)
 			continue
 		}
@@ -65,6 +105,22 @@ func (r *runner) pinImages(ctx context.Context, images, ids map[string]string, v
 		}
 	}
 	return nil
+}
+
+// yohoImage reports whether ref is the image Yoho built for svc at version:
+// build.ImageName with the configured Registry or the default yoho/ prefix,
+// in the per-Destination or the legacy yoho/<app>-<service>:<version> form.
+// A tag suffix alone is not enough: postgres:17 deployed as Version 17 is a
+// shared third-party tag.
+func (r *runner) yohoImage(ref, svc, version string) bool {
+	for _, reg := range []*config.Registry{r.registry, nil} {
+		for _, dest := range []string{r.dest, ""} {
+			if ref == build.ImageName(reg, r.app, dest, svc, version) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func shortID(id string) string {

@@ -28,6 +28,7 @@ type swarmSim struct {
 	updates   int
 	jobState  string
 	failMain  bool // main stack update rolls back
+	failOnce  bool // only the next main stack update rolls back
 	notSwarm  bool
 	secretsLs string
 }
@@ -58,6 +59,8 @@ func (s *swarmSim) respond(script string) (string, error) {
 		case strings.Contains(script, "release-web.yaml"):
 		default:
 			s.updates++
+			failing := s.failMain || s.failOnce
+			s.failOnce = false
 			for _, n := range []string{"web", "worker", "db", "cloudflared"} {
 				st := svcStatus{Replicas: "1/1"}
 				if n == "worker" {
@@ -66,7 +69,7 @@ func (s *swarmSim) respond(script string) (string, error) {
 				if old, ok := s.services[stack+"_"+n]; ok {
 					st.UpdateStarted = "t" + string(rune('0'+s.updates))
 					st.UpdateState = "completed"
-					if s.failMain && n == "web" {
+					if failing && n == "web" {
 						st.UpdateState = "rollback_completed"
 						st.UpdateMessage = "update rolled back due to failure"
 					}
@@ -570,9 +573,9 @@ func TestRoutesSkipZeroReplicaServicesAndRemoveTheirRoute(t *testing.T) {
 		t.Fatal(err)
 	}
 	next := stackPlan{Stack: "yoho-shop-production", Services: []servicePlan{
-		{Name: "web", Replicas: 0, Proxy: px},
-		{Name: "api", Replicas: 2, Proxy: px},
-		{Name: "edge", Global: true, Proxy: px},
+		{Name: "web", Mode: "replicated", Replicas: 0, Proxy: px},
+		{Name: "api", Mode: "replicated", Replicas: 2, Proxy: px},
+		{Name: "edge", Mode: "global", Proxy: px},
 	}}
 	var out bytes.Buffer
 	r := &runner{h: h, out: &out, app: "shop", dest: "production"}

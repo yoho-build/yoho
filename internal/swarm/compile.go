@@ -41,8 +41,10 @@ type servicePlan struct {
 	Stateful bool   `json:"stateful,omitempty"`
 	// Replicas; 0 for global mode.
 	Replicas int `json:"replicas"`
-	// Global is deploy.mode global (Replicas is 0 and not a count).
-	Global         bool                 `json:"global,omitempty"`
+	// Mode is deploy.mode ("replicated" when unset). Plans written before it
+	// was recorded (v0.1.0-rc.3 and earlier) have none: Replicas 0 there may
+	// be a global Service, so see proxied.
+	Mode           string               `json:"mode,omitempty"`
 	Proxy          *config.ServiceProxy `json:"proxy,omitempty"` // defaults applied
 	StrictDrain    bool                 `json:"strict_drain,omitempty"`
 	ProxyNetwork   bool                 `json:"proxy_network,omitempty"`
@@ -64,8 +66,15 @@ type stackPlan struct {
 // proxied reports whether the Service has a Proxy route: x-yoho.proxy and
 // at least one task. A replicated Service scaled to zero has no healthy
 // target, so its route is removed instead of health-gated; global mode runs
-// a task per node.
-func (sp servicePlan) proxied() bool { return sp.Proxy != nil && (sp.Global || sp.Replicas > 0) }
+// a task per node. A plan without Mode (an older Release, rolled back to)
+// recorded global Services as Replicas 0 and routed every x-yoho.proxy
+// Service; keep routing them so a running global Service keeps its route.
+func (sp servicePlan) proxied() bool {
+	return sp.Proxy != nil && (sp.Mode == "" || sp.global() || sp.Replicas > 0)
+}
+
+// global reports deploy.mode global (Replicas is 0 and not a count).
+func (sp servicePlan) global() bool { return sp.Mode == "global" }
 
 func (p stackPlan) needsProxy() bool {
 	return slices.ContainsFunc(p.Services, func(sp servicePlan) bool { return sp.Proxy != nil || sp.ProxyNetwork })
@@ -334,8 +343,10 @@ func compile(d *plan.Deploy, in compileInput) (*compiled, error) {
 		}
 		mode, _ := dep["mode"].(string)
 		replicas := 0
-		global := mode == "global"
-		if mode == "" || mode == "replicated" {
+		if mode == "" {
+			mode = "replicated"
+		}
+		if mode == "replicated" {
 			// GetScale is 1 when neither scale nor deploy.replicas is set, so
 			// an explicit 0 (parked Service) survives.
 			replicas = ps.GetScale()
@@ -482,7 +493,7 @@ func compile(d *plan.Deploy, in compileInput) (*compiled, error) {
 		}
 
 		c.Plan.Services = append(c.Plan.Services, servicePlan{
-			Name: name, Image: ps.Image, Stateful: ext.Stateful, Replicas: replicas, Global: global,
+			Name: name, Image: ps.Image, Stateful: ext.Stateful, Replicas: replicas, Mode: mode,
 			Proxy: proxyWithDefaults(ext.Proxy), StrictDrain: ext.StrictDrain && ext.Proxy != nil,
 			ProxyNetwork: onNet, DependsOn: sortedKeys(ps.DependsOn),
 			ReleaseCommand: slices.Clone(ext.ReleaseCommand),

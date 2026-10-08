@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/yoho-build/yoho/internal/config"
+	"github.com/yoho-build/yoho/internal/release"
 	"github.com/yoho-build/yoho/internal/remote"
 )
 
@@ -134,37 +135,77 @@ func BootWith(ctx context.Context, host remote.Host, cfg config.ProxyConfig, out
 		return nil
 	}
 
+	if exists {
+		fmt.Fprintf(out, "[%s] warning: proxy configuration changed, recreating %s (brief proxy downtime)\n", host.Name(), ContainerName)
+	} else {
+		fmt.Fprintf(out, "[%s] booting proxy %s (%s)\n", host.Name(), ContainerName, image)
+	}
+	run := "docker run -d --label " + remote.Quote(configLabel+"="+want) + " " + remote.QuoteArgs(args...) + " >/dev/null"
 	var b strings.Builder
 	b.WriteString("set -eu\n")
 	// Pull first so an existing Proxy is only down for the swap itself.
 	b.WriteString("docker image inspect " + remote.Quote(image) + " >/dev/null 2>&1 || docker pull -q " + remote.Quote(image) + " >/dev/null\n")
-	run := "docker run -d --label " + remote.Quote(configLabel+"="+want) + " " + remote.QuoteArgs(args...) + " >/dev/null"
-	if exists {
-		fmt.Fprintf(out, "[%s] warning: proxy configuration changed, recreating %s (brief proxy downtime)\n", host.Name(), ContainerName)
-		// Keep the old container (stopped, renamed) until the new one runs,
-		// so a failed start (port taken, bad option) restores the old Proxy.
-		// Routes live in the state volume, which both containers share.
-		old := ContainerName + "-old"
-		b.WriteString("docker rm -f " + old + " >/dev/null 2>&1 || true\n")
-		b.WriteString("docker stop " + ContainerName + " >/dev/null 2>&1 || true\n")
-		b.WriteString("docker rename " + ContainerName + " " + old + "\n")
-		b.WriteString("if " + run + "; then\n")
-		b.WriteString("  docker rm -f " + old + " >/dev/null\n")
-		b.WriteString("else\n")
-		b.WriteString("  docker rm -f " + ContainerName + " >/dev/null 2>&1 || true\n")
-		b.WriteString("  docker rename " + old + " " + ContainerName + "\n")
-		b.WriteString("  docker start " + ContainerName + " >/dev/null\n")
-		b.WriteString("  echo 'new proxy failed to start; the previous proxy was restored' >&2\n")
-		b.WriteString("  exit 1\n")
-		b.WriteString("fi\n")
-	} else {
-		fmt.Fprintf(out, "[%s] booting proxy %s (%s)\n", host.Name(), ContainerName, image)
-		b.WriteString(run + "\n")
-	}
+	b.WriteString(proxyLockScript(release.Root + "/proxy.lock"))
+	// Everything below runs under the Server-wide lock and re-checks the
+	// current state: another App may have recreated the Proxy since we looked.
+	old := ContainerName + "-old"
+	// A crashed swap can leave only the fallback: bring it back first.
+	b.WriteString("if ! docker container inspect " + ContainerName + " >/dev/null 2>&1 && docker container inspect " + old + " >/dev/null 2>&1; then\n")
+	b.WriteString("  docker rename " + old + " " + ContainerName + "\n")
+	b.WriteString("  docker start " + ContainerName + " >/dev/null 2>&1 || true\n")
+	b.WriteString("fi\n")
+	b.WriteString("if docker container inspect " + ContainerName + " >/dev/null 2>&1; then\n")
+	b.WriteString("  cur=$(docker container inspect -f '{{index .Config.Labels \"" + configLabel + "\"}}' " + ContainerName + " 2>/dev/null || true)\n")
+	b.WriteString("  if [ \"$cur\" = " + remote.Quote(want) + " ]; then\n")
+	b.WriteString("    docker start " + ContainerName + " >/dev/null 2>&1 || true\n")
+	b.WriteString("    exit 0\n")
+	b.WriteString("  fi\n")
+	// Keep the old container (stopped, renamed) until the new one runs,
+	// so a failed start (port taken, bad option) restores the old Proxy.
+	// Routes live in the state volume, which both containers share. The
+	// previous fallback is only removed here, where yoho-proxy exists and is
+	// the one being replaced.
+	b.WriteString("  docker rm -f " + old + " >/dev/null 2>&1 || true\n")
+	b.WriteString("  docker stop " + ContainerName + " >/dev/null 2>&1 || true\n")
+	b.WriteString("  docker rename " + ContainerName + " " + old + "\n")
+	b.WriteString("  if " + run + "; then\n")
+	b.WriteString("    docker rm -f " + old + " >/dev/null\n")
+	b.WriteString("  else\n")
+	b.WriteString("    docker rm -f " + ContainerName + " >/dev/null 2>&1 || true\n")
+	b.WriteString("    docker rename " + old + " " + ContainerName + "\n")
+	b.WriteString("    docker start " + ContainerName + " >/dev/null\n")
+	b.WriteString("    echo 'new proxy failed to start; the previous proxy was restored' >&2\n")
+	b.WriteString("    exit 1\n")
+	b.WriteString("  fi\n")
+	b.WriteString("else\n")
+	b.WriteString("  " + run + "\n")
+	b.WriteString("fi\n")
 	if err := host.Run(ctx, remote.Cmd{Script: b.String()}); err != nil {
 		return fmt.Errorf("boot proxy: %w", err)
 	}
 	return nil
+}
+
+// proxyLockScript returns POSIX sh that takes a Server-wide lock (atomic mkdir
+// holding the shell's pid) and releases it when the script exits. A lock whose
+// holder is gone is reclaimed; otherwise it waits up to two minutes.
+func proxyLockScript(dir string) string {
+	q := remote.Quote(dir)
+	return "lock=" + q + "\n" +
+		"mkdir -p \"$(dirname \"$lock\")\"\n" +
+		"waited=0\n" +
+		"until mkdir \"$lock\" 2>/dev/null; do\n" +
+		"  pid=$(cat \"$lock/pid\" 2>/dev/null || true)\n" +
+		"  if [ -n \"$pid\" ] && ! kill -0 \"$pid\" 2>/dev/null; then\n" +
+		"    mv \"$lock\" \"$lock.stale.$$\" 2>/dev/null && rm -rf \"$lock.stale.$$\" || true\n" +
+		"    continue\n" +
+		"  fi\n" +
+		"  waited=$((waited + 1))\n" +
+		"  if [ \"$waited\" -ge 120 ]; then echo \"proxy lock $lock is held by another yoho run; remove it if stale\" >&2; exit 1; fi\n" +
+		"  sleep 1\n" +
+		"done\n" +
+		"trap 'rm -rf \"$lock\"' EXIT\n" +
+		"echo $$ > \"$lock/pid\"\n"
 }
 
 // inspectProxy reads the Proxy container's config label and running state.

@@ -568,7 +568,7 @@ func rollbackCmd(g *globals) *cobra.Command {
 			}
 			defer closeHosts()
 			d := &plan.Deploy{App: a.cfg.App, Destination: a.destName, Performer: performer(), Servers: hosts,
-				Proxy: a.proxyConfig(), RetainReleases: a.cfg.RetainReleases, Out: a.ui.Progress()}
+				Proxy: a.proxyConfig(), Registry: a.cfg.Registry, RetainReleases: a.cfg.RetainReleases, Out: a.ui.Progress()}
 			target, err := a.resolveVersion(ctx, d, args[0])
 			if err != nil {
 				return err

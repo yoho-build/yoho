@@ -38,7 +38,7 @@ func newRunner(d *plan.Deploy, composeFile string) *runner {
 		out = io.Discard
 	}
 	return &runner{
-		h: s.Host, out: out, server: s.Name, app: d.App, dest: d.Destination,
+		h: s.Host, out: out, server: s.Name, app: d.App, dest: d.Destination, registry: d.Registry,
 		cc: composeCLI{project: release.ProjectName(d.App, d.Destination), dir: release.AppDir(d.App, d.Destination), file: composeFile},
 	}
 }
@@ -211,7 +211,7 @@ func (c Compose) Deploy(ctx context.Context, d *plan.Deploy) (_ *release.Release
 	r.removeStaleRoutes(ctx, plans)
 
 	rel.Status = "deployed"
-	rel.ImageIDs = imageIDs(ctx, h, rel.Images)
+	rel.ImageIDs = imageIDs(ctx, h, r.cc.project, rel.Images)
 	if err := c.finish(ctx, d, r, rel); err != nil {
 		return nil, err
 	}
@@ -271,10 +271,11 @@ func snapshotRelease(ctx context.Context, h remote.Host, relDir string) map[stri
 }
 
 // restoreRelease writes a snapshotRelease back after a failed redeploy.
-// Best effort: the deploy error is what the operator needs to see.
-func restoreRelease(ctx context.Context, h remote.Host, relDir string, snap map[string][]byte, logf func(string, ...any)) {
+// Best effort: the deploy error is what the operator needs to see. Reports
+// whether every snapshotted file was written back.
+func restoreRelease(ctx context.Context, h remote.Host, relDir string, snap map[string][]byte, logf func(string, ...any)) bool {
 	if snap == nil {
-		return
+		return false
 	}
 	ctx = context.WithoutCancel(ctx)
 	for _, f := range releaseFiles {
@@ -284,10 +285,11 @@ func restoreRelease(ctx context.Context, h remote.Host, relDir string, snap map[
 		}
 		if err := h.WriteFile(ctx, path.Join(relDir, f), b, 0o600, false); err != nil {
 			logf("warning: could not restore %s of Release %s: %v", f, path.Base(relDir), err)
-			return
+			return false
 		}
 	}
 	logf("kept the previous record of Release %s", path.Base(relDir))
+	return true
 }
 
 func writeJSON(ctx context.Context, h remote.Host, p string, v any) error {

@@ -330,3 +330,19 @@ func TestTunnelStatusReportsHashAndOwner(t *testing.T) {
 		t.Errorf("%+v", st)
 	}
 }
+
+func TestEnsureTunnelStaleForeignConnectorRefusesBeforeCreating(t *testing.T) {
+	fastPoll(t)
+	h := &tunnelFake{
+		logs:       "INF Registered tunnel connection connIndex=0\n",
+		containers: map[string]string{"yoho-tunnel": "old"},
+		owners:     map[string]string{"yoho-tunnel": "shop/prod"},
+	}
+	_, err := EnsureTunnelWith(context.Background(), h, config.TunnelConfig{TokenSecret: "T", Replicas: 2}, "tok", nil, BootOptions{Owner: "blog/prod"})
+	if err == nil || !strings.Contains(err.Error(), "managed by shop/prod") {
+		t.Fatalf("err = %v", err)
+	}
+	if s := strings.Join(h.scripts, "\n"); strings.Contains(s, "docker rm") || strings.Contains(s, "docker run") {
+		t.Errorf("a refusal must not create or remove anything:\n%s", s)
+	}
+}

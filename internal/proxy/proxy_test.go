@@ -65,7 +65,7 @@ func TestBootCreatesWhenMissing(t *testing.T) {
 	if !strings.Contains(all, "docker network create yoho") {
 		t.Error("network not ensured")
 	}
-	if !strings.Contains(all, "docker run -d --label 'yoho.proxy.config=") || strings.Contains(all, "docker rm -f") {
+	if !strings.Contains(all, "docker run -d --label 'yoho.proxy.config=") || strings.Contains(out.String(), "recreating") {
 		t.Errorf("unexpected boot script:\n%s", all)
 	}
 }
@@ -202,13 +202,36 @@ func TestBootRecreateRestoresOldProxyOnFailure(t *testing.T) {
 	stop := strings.Index(script, "docker stop yoho-proxy")
 	ren := strings.Index(script, "docker rename yoho-proxy yoho-proxy-old")
 	run := strings.Index(script, "if docker run -d")
-	undo := strings.Index(script, "docker rename yoho-proxy-old yoho-proxy")
-	start := strings.Index(script, "docker start yoho-proxy")
+	undo := strings.LastIndex(script, "docker rename yoho-proxy-old yoho-proxy")
+	start := strings.LastIndex(script, "docker start yoho-proxy")
 	if !(stop >= 0 && stop < ren && ren < run && run < undo && undo < start) {
 		t.Fatalf("bad recreate order:\n%s", script)
 	}
 	if i := strings.Index(script, "docker rm -f yoho-proxy >"); i >= 0 && i < run {
 		t.Errorf("old proxy removed before the new one runs:\n%s", script)
+	}
+	if out, err := exec.Command("sh", "-n", "-c", script).CombinedOutput(); err != nil {
+		t.Errorf("sh -n: %v %s", err, out)
+	}
+}
+
+func TestBootRecreateIsLockedAndRechecked(t *testing.T) {
+	h := &fakeHost{output: func(string) string { return "old|true" }}
+	if err := Boot(context.Background(), h, config.ProxyConfig{}, nil); err != nil {
+		t.Fatal(err)
+	}
+	script := h.scripts[len(h.scripts)-1]
+	want := configHash(runArgs(config.ProxyConfig{}))
+	lock := strings.Index(script, "mkdir \"$lock\"")
+	restore := strings.Index(script, "docker rename yoho-proxy-old yoho-proxy")
+	recheck := strings.Index(script, "[ \"$cur\" = '"+want+"' ]")
+	rmOld := strings.Index(script, "docker rm -f yoho-proxy-old")
+	stop := strings.Index(script, "docker stop yoho-proxy")
+	if !(lock >= 0 && lock < restore && restore < recheck && recheck < rmOld && rmOld < stop) {
+		t.Fatalf("bad lock/recheck order:\n%s", script)
+	}
+	if !strings.Contains(script, "trap 'rm -rf \"$lock\"' EXIT") {
+		t.Errorf("lock not released on exit:\n%s", script)
 	}
 	if out, err := exec.Command("sh", "-n", "-c", script).CombinedOutput(); err != nil {
 		t.Errorf("sh -n: %v %s", err, out)

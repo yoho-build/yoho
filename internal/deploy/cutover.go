@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/yoho-build/yoho/internal/config"
 	"github.com/yoho-build/yoho/internal/proxy"
 	"github.com/yoho-build/yoho/internal/remote"
 	"github.com/yoho-build/yoho/internal/secrets"
@@ -38,6 +39,7 @@ type runner struct {
 	out       io.Writer
 	server    string
 	app, dest string
+	registry  *config.Registry // names Yoho-built images (pinImages)
 	cc        composeCLI
 	// secretVals are the resolved and generated secret values of this
 	// deploy, masked in remote output that joins an error.

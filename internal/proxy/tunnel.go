@@ -294,6 +294,28 @@ func EnsureTunnelWith(ctx context.Context, host remote.Host, cfg config.TunnelCo
 		}
 		return nil
 	}
+	// Check every ownership conflict (connectors to replace and stale ones to
+	// drop) before creating anything, so a refusal changes nothing.
+	for _, name := range names {
+		state, err := host.Output(ctx, remote.Cmd{Script: "docker container inspect -f '{{index .Config.Labels \"" + tunnelConfigLabel + "\"}}|{{.State.Running}}' " + name + " 2>/dev/null || true"})
+		if err != nil {
+			return nil, fmt.Errorf("inspect %s: %w", name, err)
+		}
+		if label, _, exists := strings.Cut(strings.TrimSpace(state), "|"); exists && label != want {
+			if err := foreign(name); err != nil {
+				return nil, err
+			}
+		}
+	}
+	stale, err := staleTunnelContainers(ctx, host, names)
+	if err != nil {
+		return nil, err
+	}
+	for _, n := range stale {
+		if err := foreign(n); err != nil {
+			return nil, err
+		}
+	}
 	for _, name := range names {
 		state, err := host.Output(ctx, remote.Cmd{Script: "docker container inspect -f '{{index .Config.Labels \"" + tunnelConfigLabel + "\"}}|{{.State.Running}}' " + name + " 2>/dev/null || true"})
 		if err != nil {
@@ -339,14 +361,7 @@ func EnsureTunnelWith(ctx context.Context, host remote.Host, cfg config.TunnelCo
 	}
 
 	// Drop connectors from a previous replica layout.
-	if stale, err := staleTunnelContainers(ctx, host, names); err != nil {
-		return nil, err
-	} else if len(stale) > 0 {
-		for _, n := range stale {
-			if err := foreign(n); err != nil {
-				return nil, err
-			}
-		}
+	if len(stale) > 0 {
 		fmt.Fprintf(out, "[%s] removing old connectors %s\n", host.Name(), strings.Join(stale, ", "))
 		if err := host.Run(ctx, remote.Cmd{Script: "docker rm -f " + strings.Join(stale, " ") + " >/dev/null"}); err != nil {
 			return nil, fmt.Errorf("remove old connectors: %w", err)

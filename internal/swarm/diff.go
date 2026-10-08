@@ -78,7 +78,33 @@ func (Runtime) Diff(ctx context.Context, d *plan.Deploy) ([]plan.Change, error) 
 	if err != nil {
 		return nil, err
 	}
-	return compareStack(d, curYAML, c, pending, curPlan, live)
+	changes, err := compareStack(d, curYAML, c, pending, curPlan, live)
+	if err != nil {
+		return nil, err
+	}
+	// A failed redeploy could not put the stack back on the record (see
+	// partialMarker): the record says nothing reliable about any Service.
+	if _, partial, err := readOptional(ctx, h, path.Join(dir, "current", partialMarker)); err != nil {
+		return nil, err
+	} else if partial {
+		markPartial(changes)
+	}
+	return changes, nil
+}
+
+// markPartial makes every Service an update when the live stack may not
+// match the current Release record.
+func markPartial(changes []plan.Change) {
+	for i := range changes {
+		ch := &changes[i]
+		if ch.Kind != "service" || ch.Action == plan.ActionDelete {
+			continue
+		}
+		ch.Reasons = append(ch.Reasons, "a failed redeploy left the stack partly updated")
+		if ch.Action == plan.ActionNoop {
+			ch.Action = plan.ActionUpdate
+		}
+	}
 }
 
 // compileDesired compiles the stack the way Deploy would, using secret
@@ -254,7 +280,7 @@ func liveDrift(live map[string]svcStatus, stack string, sp servicePlan) (missing
 	if !ok {
 		return true, "missing from the Swarm"
 	}
-	if sp.Global {
+	if sp.global() {
 		return false, ""
 	}
 	_, want, ok := strings.Cut(strings.Fields(st.Replicas + " ")[0], "/")

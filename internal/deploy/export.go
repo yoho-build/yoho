@@ -71,7 +71,8 @@ func SnapshotRelease(ctx context.Context, h remote.Host, relDir string) map[stri
 	return snapshotRelease(ctx, h, relDir)
 }
 
-// RestoreRelease writes a SnapshotRelease back (best effort).
-func RestoreRelease(ctx context.Context, h remote.Host, relDir string, snap map[string][]byte, logf func(string, ...any)) {
-	restoreRelease(ctx, h, relDir, snap, logf)
+// RestoreRelease writes a SnapshotRelease back (best effort) and reports
+// whether all of it was written.
+func RestoreRelease(ctx context.Context, h remote.Host, relDir string, snap map[string][]byte, logf func(string, ...any)) bool {
+	return restoreRelease(ctx, h, relDir, snap, logf)
 }

@@ -230,7 +230,7 @@ func TestCompileExplicitZeroReplicas(t *testing.T) {
 		t.Errorf("worker replicas = %v", got)
 	}
 	for _, sp := range c.Plan.Services {
-		if sp.Name == "worker" && (sp.Replicas != 0 || sp.Global) {
+		if sp.Name == "worker" && (sp.Replicas != 0 || sp.Mode != "replicated") {
 			t.Errorf("plan %+v", sp)
 		}
 		if sp.Name == "web" && sp.Replicas != 1 {

@@ -216,6 +216,10 @@ func Restore(ctx context.Context, o RestoreOptions) (res *RestoreResult, err err
 		}
 	}
 
+	if err := checkProjectOwnership(ctx, o.Host, project, o.App, o.Destination, rt); err != nil {
+		return nil, err
+	}
+
 	// Check every archive before anything is stopped or wiped, so a
 	// truncated or corrupt one fails the restore with the App still running.
 	for _, v := range vols {
@@ -309,14 +313,22 @@ const (
 	// entry sets the scratch directory's owner and mode, which are copied to
 	// the volume root.
 	restoreVolumeSh = `set -eu
-t=/data/.yoho-restore-tmp
-trap 'rm -rf "$t"' EXIT
+n=.yoho-restore-$$-$(date +%s)
+t=/data/$n
+l=/tmp/yoho-list-$$
+trap 'rm -f "$l"; rm -rf "$t"' EXIT
+tar -tzf "/in/$1" >"$l"
+if grep -qE "^(\./)?$n(/|$)" "$l"; then echo "archive contains the scratch name $n" >&2; exit 1; fi
 rm -rf "$t"; mkdir "$t"
-tar -tzf "/in/$1" >/dev/null
 tar -C "$t" -xzf "/in/$1"
 own=$(stat -c %u:%g "$t"); mode=$(stat -c %a "$t")
-find /data -mindepth 1 -maxdepth 1 ! -name .yoho-restore-tmp -exec rm -rf {} +
-find "$t" -mindepth 1 -maxdepth 1 -exec mv {} /data/ \;
+find /data -mindepth 1 -maxdepth 1 ! -name "$n" -exec rm -rf {} +
+# From here the scratch directory holds the only copy: keep it if a move fails.
+trap 'rm -f "$l"' EXIT
+for f in "$t"/* "$t"/.[!.]* "$t"/..?*; do
+  if [ -e "$f" ] || [ -L "$f" ]; then mv "$f" /data/; fi
+done
+rmdir "$t"
 chown "$own" /data; chmod "$mode" /data`
 )
 

@@ -222,11 +222,12 @@ func (Runtime) Deploy(ctx context.Context, d *plan.Deploy) (_ *release.Release, 
 		return nil, err
 	}
 	// Redeploying the Version `current` points at reuses the Release
-	// directory. Keep the deployed record to restore if this attempt fails:
-	// Swarm's rollback leaves the tasks on the previous spec, and plan and
-	// rollback must keep comparing against what actually runs.
+	// directory. Keep the deployed record to restore if this attempt fails,
+	// so plan and rollback keep comparing against what actually runs. Swarm
+	// rolls back only the Services whose update failed; once the stack was
+	// touched, restoreStack puts the others back on the recorded spec too.
 	prevFiles := deploy.SnapshotRelease(ctx, h, relDir)
-	committed := false
+	committed, stackTouched := false, false
 	if err := h.WriteFile(ctx, stackFile, c.YAML, 0o600, false); err != nil {
 		deploy.RestoreRelease(ctx, h, relDir, prevFiles, r.logf)
 		return nil, fmt.Errorf("write stack file: %w", err)
@@ -252,7 +253,10 @@ func (Runtime) Deploy(ctx context.Context, d *plan.Deploy) (_ *release.Release, 
 		switch {
 		case err == nil || committed:
 		case prevFiles != nil:
-			deploy.RestoreRelease(ctx, h, relDir, prevFiles, r.logf)
+			restored := deploy.RestoreRelease(ctx, h, relDir, prevFiles, r.logf)
+			if stackTouched {
+				r.restoreStack(context.WithoutCancel(ctx), d, relDir, restored, c.Plan)
+			}
 		default:
 			_ = deploy.WriteJSON(context.WithoutCancel(ctx), h, path.Join(relDir, "release.json"), rel)
 		}
@@ -267,6 +271,7 @@ func (Runtime) Deploy(ctx context.Context, d *plan.Deploy) (_ *release.Release, 
 		}
 	}
 	auth := registryAuth(d, c.Plan)
+	stackTouched = true // release_command may deploy dependencies first
 	if err := r.releaseCommands(ctx, c, relDir, auth); err != nil {
 		return nil, err
 	}
@@ -289,6 +294,49 @@ func (Runtime) Deploy(ctx context.Context, d *plan.Deploy) (_ *release.Release, 
 	}
 	r.logf("deployed %s in %ds", d.Version, secs)
 	return rel, nil
+}
+
+// partialMarker in a Release directory says the live stack may not match
+// the Release's record: a failed redeploy of that Version updated some
+// Services and putting them back failed. Plan then treats every Service as
+// changed; a successful deploy or rollback of the Version removes it.
+const partialMarker = "partial"
+
+// restoreStack re-deploys the restored record of relDir after a failed
+// same-Version redeploy touched the stack, so Services whose update already
+// converged do not keep a spec the record does not describe. Routes follow
+// the record and routes only the attempt added are removed. When the record
+// was not fully restored or the re-deploy fails, partialMarker is left
+// instead of claiming a state the stack is not in.
+func (r *runner) restoreStack(ctx context.Context, d *plan.Deploy, relDir string, restored bool, attempted stackPlan) {
+	marker := path.Join(relDir, partialMarker)
+	err := errors.New("the previous record could not be restored")
+	if restored {
+		err = func() error {
+			p, err := readPlan(ctx, r.h, relDir)
+			if err != nil {
+				return err
+			}
+			r.logf("restoring the stack to the record of Release %s", path.Base(relDir))
+			if err := r.deployStack(ctx, path.Join(relDir, "compose.yaml"), r.stack, true, registryAuth(d, *p)); err != nil {
+				return err
+			}
+			if err := r.routes(ctx, d, *p); err != nil {
+				return err
+			}
+			return r.removeRoutes(ctx, d, attempted, *p)
+		}()
+	}
+	if err == nil {
+		if rerr := r.h.Run(ctx, remote.Cmd{Script: "rm -f " + remote.Quote(marker)}); rerr != nil {
+			r.logf("warning: could not clear %s: %v", marker, rerr)
+		}
+		return
+	}
+	r.logf("warning: the stack may not match the record of Release %s (%v); the next plan treats every Service as changed", path.Base(relDir), err)
+	if werr := r.h.WriteFile(ctx, marker, []byte("a failed redeploy left the stack partly updated\n"), 0o600, false); werr != nil {
+		r.logf("warning: could not write %s: %v", marker, werr)
+	}
 }
 
 // writeEnvFiles writes <generation>/<service>.env (0600) for Services with
@@ -621,6 +669,12 @@ func (r *runner) removeStaleRoutes(ctx context.Context, d *plan.Deploy, p stackP
 	if err != nil || prev == nil {
 		return err
 	}
+	return r.removeRoutes(ctx, d, *prev, p)
+}
+
+// removeRoutes drops the routes of prev's x-yoho.proxy Services that p does
+// not route.
+func (r *runner) removeRoutes(ctx context.Context, d *plan.Deploy, prev, p stackPlan) error {
 	keep := map[string]bool{}
 	for _, sp := range p.Services {
 		if sp.proxied() {
@@ -818,8 +872,13 @@ func (r *runner) runJob(ctx context.Context, c *compiled, relDir string, sp serv
 
 // finish records the Release, points `current` at it and prunes.
 func (r *runner) finish(ctx context.Context, d *plan.Deploy, rel *release.Release) error {
-	if err := deploy.WriteJSON(ctx, r.h, path.Join(release.Dir(d.App, d.Destination, rel.Version), "release.json"), rel); err != nil {
+	relDir := release.Dir(d.App, d.Destination, rel.Version)
+	if err := deploy.WriteJSON(ctx, r.h, path.Join(relDir, "release.json"), rel); err != nil {
 		return err
+	}
+	// The whole stack now runs this record (see partialMarker).
+	if err := r.h.Run(ctx, remote.Cmd{Script: "rm -f " + remote.Quote(path.Join(relDir, partialMarker))}); err != nil {
+		return fmt.Errorf("clear %s: %w", partialMarker, err)
 	}
 	if err := r.h.Run(ctx, remote.Cmd{Script: "ln -sfn " + remote.Quote("releases/"+rel.Version) + " " + remote.Quote(path.Join(r.dir, "current"))}); err != nil {
 		return fmt.Errorf("update current release: %w", err)

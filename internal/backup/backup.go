@@ -243,6 +243,9 @@ func backupService(ctx context.Context, o RunOptions, staging, svc string, sb co
 	if err != nil {
 		return ms, err
 	}
+	if err := checkProjectOwnership(ctx, o.Host, o.project(), o.App, o.Destination, rt); err != nil {
+		return ms, err
+	}
 	cid, err := containerID(ctx, o.Host, o.project(), svc, rt)
 	if err != nil {
 		return ms, err
@@ -266,13 +269,16 @@ func backupService(ctx context.Context, o RunOptions, staging, svc string, sb co
 		}
 		vols[v] = name
 	}
+	if err := checkVolumesMounted(ctx, o.Host, cid, svc, vols); err != nil {
+		return ms, err
+	}
 	ms.Volumes = map[string]string{}
 	err = withQuiesced(ctx, o, cid, vols, sb.PreBackup, &ms, func() error {
 		for _, v := range sb.Volumes {
 			file := svc + "-" + v + ".tar.gz"
 			script := "set -eu; docker run --rm --network none -v " + remote.Quote(vols[v]+":/data:ro") +
 				" -v " + remote.Quote(staging+":/out") + " " + remote.Quote(HelperImage) +
-				" sh -c " + remote.Quote(`umask 077; tar -C /data -czf "/out/$1" . && chown "$2:$3" "/out/$1"`) +
+				" sh -c " + remote.Quote(`umask 077; tar -C /data -czf "/out/$1" --exclude './.yoho-restore-*' . && chown "$2:$3" "/out/$1"`) +
 				// The helper runs as root; hand the archive (still 0600) to the
 				// deploy user so native restic, which runs as that user, can read it.
 				" sh " + remote.Quote(file) + ` "$(id -u)" "$(id -g)"`
@@ -315,19 +321,22 @@ func withQuiesced(ctx context.Context, o RunOptions, cid string, vols map[string
 	var toPause []string
 	for _, id := range cids {
 		out, err := o.Host.Output(ctx, remote.Cmd{Script: "docker inspect -f " +
-			remote.Quote(`{{index .Config.Labels "com.docker.compose.project"}}|{{index .Config.Labels "com.docker.stack.namespace"}}|{{.State.Running}}|{{.State.Paused}}`) +
+			remote.Quote(`{{index .Config.Labels "com.docker.compose.project"}}|{{index .Config.Labels "com.docker.stack.namespace"}}|{{index .Config.Labels "yoho.app"}}|{{index .Config.Labels "yoho.destination"}}|{{.State.Running}}|{{.State.Paused}}`) +
 			" " + remote.Quote(id)})
 		if err != nil {
 			return fmt.Errorf("inspect container %s: %w", id, err)
 		}
 		f := strings.Split(strings.TrimSpace(out), "|")
-		if len(f) != 4 {
+		if len(f) != 6 {
 			return fmt.Errorf("inspect container %s: unexpected output %q", id, strings.TrimSpace(out))
 		}
 		if f[0] != project && f[1] != project {
 			return fmt.Errorf("container %s outside project %s mounts the backed-up volume; Yoho will not pause it. Stop it or define backup.pre_backup for the Service", id, project)
 		}
-		if f[2] == "true" && f[3] != "true" {
+		if own := (owner{f[2], f[3]}); own.foreign(o.App, o.Destination) {
+			return fmt.Errorf("container %s mounting the backed-up volume belongs to %s, not App %s Destination %s; Yoho will not pause it", id, own, o.App, o.Destination)
+		}
+		if f[4] == "true" && f[5] != "true" {
 			toPause = append(toPause, id)
 		}
 	}
@@ -352,6 +361,59 @@ func withQuiesced(ctx context.Context, o RunOptions, cid string, vols map[string
 		}
 	}
 	return fn()
+}
+
+// owner is the yoho.app and yoho.destination labels of one container.
+type owner struct{ app, dest string }
+
+func (o owner) String() string { return "App " + o.app + " Destination " + o.dest }
+
+// foreign reports whether o is labeled for another App Destination.
+// Containers without the labels (older Yoho versions) are not foreign.
+func (o owner) foreign(app, dest string) bool {
+	return o.app != "" && (o.app != app || o.dest != dest)
+}
+
+// checkProjectOwnership refuses to work in a compose project or stack
+// namespace whose containers are labeled for another App Destination.
+// Project names join App and Destination with '-', so App foo-bar /
+// Destination prod and App foo / Destination bar-prod share a project.
+func checkProjectOwnership(ctx context.Context, h remote.Host, project, app, dest, runtime string) error {
+	label := "com.docker.compose.project"
+	if runtime == "swarm" {
+		label = "com.docker.stack.namespace"
+	}
+	out, err := h.Output(ctx, remote.Cmd{Script: "docker ps -a --filter " + remote.Quote("label="+label+"="+project) +
+		` --format '{{.Label "yoho.app"}}|{{.Label "yoho.destination"}}'`})
+	if err != nil {
+		return fmt.Errorf("list project containers: %w", err)
+	}
+	for _, l := range strings.Split(out, "\n") {
+		a, d, _ := strings.Cut(strings.TrimSpace(l), "|")
+		if o := (owner{a, d}); o.foreign(app, dest) {
+			return fmt.Errorf("project %s runs containers of %s; App %s Destination %s will not back up or restore them. Rename the App or Destination", project, o, app, dest)
+		}
+	}
+	return nil
+}
+
+// checkVolumesMounted refuses a volume the Service's container does not
+// mount: a volume found by project name alone may belong to another App.
+func checkVolumesMounted(ctx context.Context, h remote.Host, cid, svc string, vols map[string]string) error {
+	out, err := h.Output(ctx, remote.Cmd{Script: "docker inspect -f " + remote.Quote(`{{range .Mounts}}{{.Name}}{{"\n"}}{{end}}`) + " " + remote.Quote(cid)})
+	if err != nil {
+		return fmt.Errorf("inspect mounts of %s: %w", cid, err)
+	}
+	mounted := map[string]bool{}
+	for _, n := range strings.Fields(out) {
+		mounted[n] = true
+	}
+	for _, key := range sortedKeys(vols) {
+		if !mounted[vols[key]] {
+			return fmt.Errorf("volume %s (%s) is not mounted by Service %s; refusing to back up a volume that may belong to another App", key, vols[key], svc)
+		}
+	}
+	return nil
 }
 
 func appendUniqueIDs(ids, more []string) []string {

@@ -3,11 +3,14 @@ package swarm
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/yoho-build/yoho/internal/config"
 	"github.com/yoho-build/yoho/internal/plan"
 )
 
@@ -116,5 +119,157 @@ func TestPruneKeepsGoodReleasesAfterFailures(t *testing.T) {
 		if (err == nil) != want {
 			t.Errorf("release %s present=%v, want %v", v, err == nil, want)
 		}
+	}
+}
+
+// stackDeploys counts main stack deploys of the v1 stack file.
+func stackDeploys(h *fakeHost) int {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	n := 0
+	for _, s := range h.scripts {
+		if strings.Contains(s, "docker stack deploy") && strings.Contains(s, "releases/v1/compose.yaml") {
+			n++
+		}
+	}
+	return n
+}
+
+func serviceActions(t *testing.T, d *plan.Deploy) map[string]plan.Action {
+	t.Helper()
+	changes, err := Runtime{}.Diff(context.Background(), d)
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := map[string]plan.Action{}
+	for _, c := range changes {
+		if c.Kind == "service" {
+			out[c.Name] = c.Action
+		}
+	}
+	return out
+}
+
+// Swarm rolls back only the Services whose update failed. A failed
+// same-Version redeploy re-deploys the restored stack file so the converged
+// Services do not keep a spec the restored record does not describe.
+func TestRedeploySameVersionFailureRestoresStack(t *testing.T) {
+	root := withRoot(t)
+	fastPolling(t)
+	ctx := context.Background()
+	sim := newSim()
+	h := newFake(sim)
+	if _, err := (Runtime{}).Deploy(ctx, testDeploy(t, h, nil)); err != nil {
+		t.Fatal(err)
+	}
+	relDir := filepath.Join(root, "apps", "shop", "production", "releases", "v1")
+	before, _ := os.ReadFile(filepath.Join(relDir, "compose.yaml"))
+	h.scripts = nil
+
+	sim.failOnce = true
+	d := testDeploy(t, h, nil)
+	setWebImage(d, "shop-web:other")
+	if _, err := (Runtime{}).Deploy(ctx, d); err == nil {
+		t.Fatal("want error")
+	}
+	if n := stackDeploys(h); n != 2 {
+		t.Fatalf("want the attempt and the restore, got %d stack deploys:\n%s", n, h.all())
+	}
+	if b, _ := os.ReadFile(filepath.Join(relDir, "compose.yaml")); !bytes.Equal(b, before) {
+		t.Error("stack file not restored")
+	}
+	if _, err := os.Stat(filepath.Join(relDir, partialMarker)); !os.IsNotExist(err) {
+		t.Errorf("marker after a successful restore: %v", err)
+	}
+	for svc, a := range serviceActions(t, testDeploy(t, h, nil)) {
+		if a != plan.ActionNoop {
+			t.Errorf("%s %s, want noop: the stack runs the record", svc, a)
+		}
+	}
+}
+
+// When the restore fails too, the record cannot be trusted: a marker makes
+// the next plan update every Service, and a successful deploy clears it.
+func TestRedeploySameVersionFailedRestoreMarksPartial(t *testing.T) {
+	root := withRoot(t)
+	fastPolling(t)
+	ctx := context.Background()
+	sim := newSim()
+	h := newFake(sim)
+	if _, err := (Runtime{}).Deploy(ctx, testDeploy(t, h, nil)); err != nil {
+		t.Fatal(err)
+	}
+	relDir := filepath.Join(root, "apps", "shop", "production", "releases", "v1")
+	h.scripts = nil
+
+	sim.failMain = true
+	d := testDeploy(t, h, nil)
+	setWebImage(d, "shop-web:other")
+	if _, err := (Runtime{}).Deploy(ctx, d); err == nil {
+		t.Fatal("want error")
+	}
+	if n := stackDeploys(h); n != 2 {
+		t.Fatalf("want the attempt and the restore, got %d stack deploys", n)
+	}
+	if _, err := os.Stat(filepath.Join(relDir, partialMarker)); err != nil {
+		t.Fatalf("no marker: %v", err)
+	}
+	// Same config as the record: still every Service is an update.
+	for _, svc := range []string{"cloudflared", "db", "web", "worker"} {
+		if a := serviceActions(t, testDeploy(t, h, nil))[svc]; a != plan.ActionUpdate && a != plan.ActionReplace {
+			t.Errorf("%s %s, want update", svc, a)
+		}
+	}
+
+	sim.failMain = false
+	if _, err := (Runtime{}).Deploy(ctx, testDeploy(t, h, nil)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(relDir, partialMarker)); !os.IsNotExist(err) {
+		t.Errorf("marker survived a successful deploy: %v", err)
+	}
+	for svc, a := range serviceActions(t, testDeploy(t, h, nil)) {
+		if a != plan.ActionNoop {
+			t.Errorf("%s %s after a good deploy", svc, a)
+		}
+	}
+}
+
+// plan.json of v0.1.0-rc.3 and earlier has no mode; a global Service was
+// recorded with replicas 0 and was routed. Rolling back to such a Release
+// keeps its route.
+func TestLegacyPlanKeepsGlobalRoute(t *testing.T) {
+	const legacy = `{"stack":"yoho-shop-production","services":[
+		{"name":"edge","replicas":0,"proxy":{"hosts":["shop.example.com"],"port":80}},
+		{"name":"web","replicas":2,"proxy":{"hosts":["web.example.com"],"port":3000}},
+		{"name":"worker","replicas":0}]}`
+	var p stackPlan
+	if err := json.Unmarshal([]byte(legacy), &p); err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]bool{"edge": true, "web": true, "worker": false}
+	for _, sp := range p.Services {
+		if sp.proxied() != want[sp.Name] {
+			t.Errorf("%s proxied = %v", sp.Name, sp.proxied())
+		}
+	}
+	// New plans record the mode, so a parked replicated Service is told apart.
+	px := &config.ServiceProxy{Port: 80}
+	for _, c := range []struct {
+		sp   servicePlan
+		want bool
+	}{
+		{servicePlan{Mode: "replicated", Replicas: 0, Proxy: px}, false},
+		{servicePlan{Mode: "replicated", Replicas: 1, Proxy: px}, true},
+		{servicePlan{Mode: "global", Proxy: px}, true},
+		{servicePlan{Mode: "global"}, false},
+	} {
+		if got := c.sp.proxied(); got != c.want {
+			t.Errorf("%+v proxied = %v", c.sp, got)
+		}
+	}
+	b, _ := json.Marshal(servicePlan{Name: "edge", Mode: "global"})
+	if !strings.Contains(string(b), `"mode":"global"`) {
+		t.Errorf("plan.json %s", b)
 	}
 }
