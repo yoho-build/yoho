@@ -33,7 +33,7 @@ func msgs(fs []Finding, level string) string {
 
 func TestLoadGood(t *testing.T) {
 	dir := fixtureDir(t, "compose.yaml")
-	r, err := Load(context.Background(), dir, nil, map[string]string{"TAG": "v2"}, "")
+	r, err := Load(context.Background(), dir, nil, map[string]string{"TAG": "v2"}, "", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -66,7 +66,7 @@ func TestLoadGood(t *testing.T) {
 func TestEnvFile(t *testing.T) {
 	dir := fixtureDir(t, "compose.yaml")
 	os.WriteFile(filepath.Join(dir, ".env"), []byte("TAG=fromdotenv\nDB_PASSWORD=x\n"), 0o600)
-	r, err := Load(context.Background(), dir, nil, nil, "")
+	r, err := Load(context.Background(), dir, nil, nil, "", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -83,7 +83,7 @@ func TestEnvFile(t *testing.T) {
 
 func TestCheckBad(t *testing.T) {
 	dir := fixtureDir(t, "bad.yaml")
-	r, err := Load(context.Background(), dir, nil, map[string]string{"DB_PASSWORD": "x"}, "bad")
+	r, err := Load(context.Background(), dir, nil, map[string]string{"DB_PASSWORD": "x"}, "bad", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -128,7 +128,7 @@ services:
     healthcheck: {test: ["CMD", "true"]}
     x-yoho: {stateful: true, proxy: {}}
 `), 0o644)
-	r, err := Load(context.Background(), dir, nil, nil, "")
+	r, err := Load(context.Background(), dir, nil, nil, "", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -139,7 +139,7 @@ services:
 
 func TestUnknownExtKey(t *testing.T) {
 	dir := fixtureDir(t, "unknown.yaml")
-	_, err := Load(context.Background(), dir, nil, nil, "")
+	_, err := Load(context.Background(), dir, nil, nil, "", "")
 	if err == nil || !strings.Contains(err.Error(), `service "web"`) || !strings.Contains(err.Error(), "prxy") {
 		t.Errorf("got %v", err)
 	}
@@ -152,9 +152,37 @@ func TestInterpolatedVars(t *testing.T) {
 	}
 }
 
+func TestDestinationOverlay(t *testing.T) {
+	dir := t.TempDir()
+	base := "services:\n  web:\n    image: app:base\n"
+	if err := os.WriteFile(filepath.Join(dir, "compose.yaml"), []byte(base), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "compose.staging.yaml"), []byte("services:\n  web:\n    image: app:staging\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	r, err := Load(context.Background(), dir, nil, nil, "shop", "staging")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r.Project.Services["web"].Image != "app:staging" {
+		t.Errorf("image %q", r.Project.Services["web"].Image)
+	}
+	if len(r.Overlays) != 1 || filepath.Base(r.Overlays[0]) != "compose.staging.yaml" {
+		t.Errorf("overlays %#v", r.Overlays)
+	}
+	plain, err := Load(context.Background(), dir, nil, nil, "shop", "production")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if plain.Project.Services["web"].Image != "app:base" || len(plain.Overlays) != 0 {
+		t.Errorf("absent overlay image %q overlays %#v", plain.Project.Services["web"].Image, plain.Overlays)
+	}
+}
+
 func TestStripBuild(t *testing.T) {
 	dir := fixtureDir(t, "compose.yaml")
-	r, err := Load(context.Background(), dir, nil, nil, "")
+	r, err := Load(context.Background(), dir, nil, nil, "", "")
 	if err != nil {
 		t.Fatal(err)
 	}

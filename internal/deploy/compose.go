@@ -183,11 +183,13 @@ func (c Compose) Deploy(ctx context.Context, d *plan.Deploy) (_ *release.Release
 	if err := r.cutover(ctx, plans); err != nil {
 		return nil, err
 	}
+	r.removeStaleRoutes(ctx, plans)
 
 	rel.Status = "deployed"
 	if err := c.finish(ctx, d, r, rel); err != nil {
 		return nil, err
 	}
+	pruneImages(ctx, r, d)
 	runtime := int(now().Sub(start).Round(time.Second) / time.Second)
 	if err := c.hook(ctx, d, "post-deploy", map[string]string{"YOHO_RUNTIME": strconv.Itoa(runtime)}); err != nil {
 		return rel, err

@@ -116,3 +116,52 @@ func TestDeployArgs(t *testing.T) {
 		t.Errorf("remove: %v %v", err, h.scripts)
 	}
 }
+
+func TestParseRoutesAndList(t *testing.T) {
+	out := `{"b-web":{"hosts":["*"],"targets":["c-1:3000","c-2:3000"],"state":"running","tls":true},"a-web":{"hosts":["a.example.com"],"targets":["c-3:80"],"state":"stopped"}}`
+	rs, err := ParseRoutes(out)
+	if err != nil || len(rs) != 2 {
+		t.Fatalf("%v %v", rs, err)
+	}
+	if rs[0].Service != "a-web" || rs[0].State != "stopped" || rs[1].Target != "c-1:3000,c-2:3000" || !rs[1].TLS {
+		t.Errorf("%+v", rs)
+	}
+	if rs, err := ParseRoutes("  \n"); err != nil || rs != nil {
+		t.Errorf("empty: %v %v", rs, err)
+	}
+	if _, err := ParseRoutes("not json"); err == nil {
+		t.Error("want parse error")
+	}
+	h := &fakeHost{output: func(string) string { return out }}
+	rs, err = List(context.Background(), h)
+	if err != nil || len(rs) != 2 || !strings.Contains(h.scripts[0], "docker exec yoho-proxy kamal-proxy list --json") {
+		t.Errorf("%v %v %v", rs, err, h.scripts)
+	}
+}
+
+func TestNeedsBoot(t *testing.T) {
+	ctx := context.Background()
+	cfg := config.ProxyConfig{}
+	want := configHash(runArgs(cfg))
+	for _, tc := range []struct {
+		state string
+		need  bool
+		why   string
+	}{
+		{"", true, "missing"},
+		{"deadbeef|true", true, "configuration changed"},
+		{want + "|false", true, "stopped"},
+		{want + "|true", false, ""},
+	} {
+		h := &fakeHost{output: func(string) string { return tc.state }}
+		need, why, err := NeedsBoot(ctx, h, cfg)
+		if err != nil || need != tc.need || !strings.Contains(why, tc.why) {
+			t.Errorf("%q: %v %q %v", tc.state, need, why, err)
+		}
+		for _, s := range h.scripts {
+			if strings.Contains(s, "docker run") || strings.Contains(s, "docker rm") {
+				t.Errorf("NeedsBoot must be read-only: %s", s)
+			}
+		}
+	}
+}

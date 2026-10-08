@@ -6,6 +6,16 @@ Yoho is one static Go binary. Your `compose.yaml` stays the source of truth; Yoh
 
 Status: **alpha**. Expect breaking changes. License: MIT.
 
+## Install
+
+```sh
+curl -fsSL https://yoho.sh | sh
+```
+
+The installer downloads the binary for this OS and architecture from GitHub Releases, verifies the SHA-256 in `checksums.txt`, and installs to `/usr/local/bin` when that directory is writable, otherwise `~/.local/bin`. It does not use sudo. Pin a release with `YOHO_VERSION=v0.1.0` or choose a directory with `YOHO_INSTALL_DIR`.
+
+From source (Go 1.26): `go install github.com/yoho-build/yoho/cmd/yoho@latest`.
+
 ## 60-second quickstart
 
 ```sh
@@ -13,7 +23,8 @@ yoho init                 # yoho.yml, .yoho/secrets, sample hooks
 $EDITOR yoho.yml compose.yaml
 yoho config check         # validate config, compose and secret refs
 yoho setup                # interactive: Docker, deploy user, firewall (Debian/Ubuntu)
-yoho deploy               # build, ship, health-gated zero-downtime cutover
+yoho plan                 # show what would change on the Server (read-only)
+yoho apply                # confirm, then build, ship, health-gated zero-downtime cutover
 ```
 
 Then `yoho app logs -f`, `yoho releases`, `yoho rollback <version>`.

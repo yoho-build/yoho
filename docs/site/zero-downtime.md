@@ -2,6 +2,10 @@
 
 Every Service with `x-yoho.proxy` sits behind one shared kamal-proxy per Server (`yoho-proxy` container on the `yoho` network).
 
+## Plan before you deploy
+
+`yoho plan` shows, read-only, which Services would be updated without downtime (proxied), replaced with a brief stop (non-proxied or Stateful), created or deleted, plus Proxy routes and the Proxy container itself. `yoho apply` shows the same plan, asks for `yes` (or `--auto-approve`), and runs the flow below. `yoho deploy` is `apply --auto-approve`.
+
 ## Deploy flow
 
 1. Hooks `pre-connect`, `pre-build`, `pre-deploy`.
@@ -9,7 +13,7 @@ Every Service with `x-yoho.proxy` sits behind one shared kamal-proxy per Server 
 3. Run `release_command` in a one-off container from the new image. Failure aborts.
 4. Start the new container next to the old one (`--scale <svc>=2 --no-recreate`).
 5. kamal-proxy health-checks the new container (`health_path`, up to `deploy_timeout`), switches traffic, and drains the old one (`drain_timeout`).
-6. Remove the old container; hook `post-deploy`.
+6. Remove the old container, stale Proxy routes of Services that are no longer proxied, and local images of the App that no retained Release or container uses; hook `post-deploy`.
 
 Stateful Services are recreated stop-first, never scaled. Volumes are never removed.
 

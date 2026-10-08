@@ -8,9 +8,11 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -99,14 +101,12 @@ func Boot(ctx context.Context, host remote.Host, cfg config.ProxyConfig, out io.
 	want := configHash(args)
 	image := args[len(args)-3]
 
-	// Prints "<label>|<running>" or nothing when the container is missing.
-	state, err := host.Output(ctx, remote.Cmd{Script: "docker container inspect -f '{{index .Config.Labels \"" + configLabel + "\"}}|{{.State.Running}}' " + ContainerName + " 2>/dev/null || true"})
+	label, running, exists, err := inspectProxy(ctx, host)
 	if err != nil {
-		return fmt.Errorf("inspect proxy: %w", err)
+		return err
 	}
-	label, running, exists := strings.Cut(strings.TrimSpace(state), "|")
 	if exists && label == want {
-		if running != "true" {
+		if !running {
 			fmt.Fprintf(out, "[%s] starting proxy %s\n", host.Name(), ContainerName)
 			if err := host.Run(ctx, remote.Cmd{Script: "docker start " + ContainerName + " >/dev/null"}); err != nil {
 				return fmt.Errorf("start proxy: %w", err)
@@ -130,6 +130,82 @@ func Boot(ctx context.Context, host remote.Host, cfg config.ProxyConfig, out io.
 		return fmt.Errorf("boot proxy: %w", err)
 	}
 	return nil
+}
+
+// inspectProxy reads the Proxy container's config label and running state.
+func inspectProxy(ctx context.Context, host remote.Host) (label string, running, exists bool, err error) {
+	// Prints "<label>|<running>" or nothing when the container is missing.
+	state, err := host.Output(ctx, remote.Cmd{Script: "docker container inspect -f '{{index .Config.Labels \"" + configLabel + "\"}}|{{.State.Running}}' " + ContainerName + " 2>/dev/null || true"})
+	if err != nil {
+		return "", false, false, fmt.Errorf("inspect proxy: %w", err)
+	}
+	label, r, exists := strings.Cut(strings.TrimSpace(state), "|")
+	return label, r == "true", exists, nil
+}
+
+// NeedsBoot reports, read-only, whether Boot would create, recreate or start
+// the Proxy for cfg, and why.
+func NeedsBoot(ctx context.Context, host remote.Host, cfg config.ProxyConfig) (bool, string, error) {
+	label, running, exists, err := inspectProxy(ctx, host)
+	if err != nil {
+		return false, "", err
+	}
+	switch {
+	case !exists:
+		return true, "proxy container " + ContainerName + " is missing", nil
+	case label != configHash(runArgs(cfg)):
+		return true, "proxy configuration changed (recreated, brief proxy downtime)", nil
+	case !running:
+		return true, "proxy container is stopped", nil
+	}
+	return false, "", nil
+}
+
+// Route is one kamal-proxy route.
+type Route struct {
+	Service string   `json:"service"`
+	Hosts   []string `json:"hosts,omitempty"`
+	Target  string   `json:"target"` // comma-separated host:port list
+	State   string   `json:"state"`
+	TLS     bool     `json:"tls,omitempty"`
+}
+
+// ParseRoutes parses `kamal-proxy list --json`.
+func ParseRoutes(out string) ([]Route, error) {
+	out = strings.TrimSpace(out)
+	if out == "" || out == "null" {
+		return nil, nil
+	}
+	var m map[string]struct {
+		Hosts   []string `json:"hosts"`
+		Targets []string `json:"targets"`
+		State   string   `json:"state"`
+		TLS     bool     `json:"tls"`
+	}
+	if err := json.Unmarshal([]byte(out), &m); err != nil {
+		return nil, fmt.Errorf("parse kamal-proxy list: %w", err)
+	}
+	names := make([]string, 0, len(m))
+	for n := range m {
+		names = append(names, n)
+	}
+	sort.Strings(names)
+	routes := make([]Route, 0, len(names))
+	for _, n := range names {
+		r := m[n]
+		routes = append(routes, Route{Service: n, Hosts: r.Hosts, Target: strings.Join(r.Targets, ","), State: r.State, TLS: r.TLS})
+	}
+	return routes, nil
+}
+
+// List returns the Proxy's routes, sorted by Service. Read-only. An error
+// means the Proxy container is missing or not running.
+func List(ctx context.Context, host remote.Host) ([]Route, error) {
+	out, err := host.Output(ctx, remote.Cmd{Script: "docker exec " + ContainerName + " kamal-proxy list --json"})
+	if err != nil {
+		return nil, fmt.Errorf("list proxy routes: %w", err)
+	}
+	return ParseRoutes(out)
 }
 
 // DeployOptions configure one route.

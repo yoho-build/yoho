@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 
 	"github.com/spf13/cobra"
 
@@ -42,7 +43,7 @@ kamal-proxy, keeps secrets in your password manager, and backs up volumes.`,
 	}
 	pf := root.PersistentFlags()
 	pf.StringVarP(&g.configPath, "config", "c", "", "Yoho file (default: yoho.{yml,yaml,toml,json,jsonc} in the current directory)")
-	pf.StringVarP(&g.destination, "destination", "d", "", "Destination (default: the only one)")
+	pf.StringVarP(&g.destination, "destination", "d", "", "Destination (default: $YOHO_DESTINATION, then production, then the only one)")
 	pf.BoolVar(&g.json, "json", false, "Emit NDJSON events instead of human output")
 	pf.BoolVarP(&g.verbose, "verbose", "v", false, "Stream remote command output")
 
@@ -99,6 +100,7 @@ type app struct {
 	g        *globals
 	dir      string
 	path     string
+	overlay  string
 	cfg      *config.Config
 	destName string
 	dest     config.Destination
@@ -116,22 +118,25 @@ func (g *globals) load(cmd *cobra.Command) (*app, error) {
 			return nil, fmt.Errorf("%w\nhint: run `yoho init` to create a Yoho file", err)
 		}
 	}
-	cfg, err := config.Load(path)
+	selected := g.destination
+	if selected == "" {
+		selected = os.Getenv("YOHO_DESTINATION")
+	}
+	cfg, name, overlay, err := config.LoadForDestination(path, selected)
 	if err != nil {
+		if destSelectErr(err) {
+			return nil, fmt.Errorf("%w\nhint: pass -d <destination>", err)
+		}
 		return nil, err
 	}
 	if errs := config.Validate(cfg); len(errs) > 0 {
 		return nil, fmt.Errorf("invalid %s:\n  %w", filepath.Base(path), errors.Join(errs...))
 	}
-	name, err := cfg.DestName(g.destination)
-	if err != nil {
-		return nil, fmt.Errorf("%w\nhint: pass -d <destination>", err)
-	}
 	dest, err := cfg.Dest(name)
 	if err != nil {
 		return nil, err
 	}
-	a := &app{g: g, dir: filepath.Dir(path), path: path, cfg: cfg, destName: name, dest: dest, ui: g.ui(cmd)}
+	a := &app{g: g, dir: filepath.Dir(path), path: path, overlay: overlay, cfg: cfg, destName: name, dest: dest, ui: g.ui(cmd)}
 	release.Root = a.root()
 	return a, nil
 }
@@ -148,7 +153,12 @@ func (a *app) root() string {
 func (a *app) project() string { return release.ProjectName(a.cfg.App, a.destName) }
 
 func (a *app) compose(ctx context.Context) (*composefile.Result, error) {
-	return composefile.Load(ctx, a.dir, a.cfg.Compose, a.dest.Env, a.project())
+	return composefile.Load(ctx, a.dir, a.cfg.Compose, a.dest.Env, a.project(), a.destName)
+}
+
+func destSelectErr(err error) bool {
+	s := err.Error()
+	return strings.Contains(s, "unknown Destination") || strings.Contains(s, "choose one with -d")
 }
 
 // secretKeys lists every key a Service may reference: file keys, provider

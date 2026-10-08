@@ -70,6 +70,11 @@ func configCmd(g *globals) *cobra.Command {
 			if err != nil {
 				return err
 			}
+			overlay := a.overlay
+			if overlay == "" {
+				overlay = "-"
+			}
+			fmt.Fprintf(cmd.ErrOrStderr(), "# destination: %s (overlay: %s)\n", a.destName, overlay)
 			enc := json.NewEncoder(cmd.OutOrStdout())
 			enc.SetIndent("", "  ")
 			return enc.Encode(a.cfg)
@@ -163,6 +168,9 @@ servers:
 destinations:
   production:
     servers: [primary]
+  # staging:
+  #   servers: [primary]
+  # Optional overlay yoho.staging.yml is deep-merged over this file for that Destination.
 
 builder:
   location: local               # local | remote | server

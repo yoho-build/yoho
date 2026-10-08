@@ -23,6 +23,22 @@ The Yoho file (`yoho.yml`, `.yaml`, `.toml`, `.json`, `.jsonc`; format detected 
 | `hooks.path` | Default `.yoho/hooks`. |
 | `retain_releases` | Releases kept per Server, default 5. |
 
+## Destinations
+
+`production` is the default Destination. `-d` selects another; when `-d` is omitted, `YOHO_DESTINATION` is used.
+
+Resolution order:
+
+1. `-d`
+2. `YOHO_DESTINATION`
+3. `production`, when that Destination is defined
+4. the only Destination
+5. otherwise Yoho errors: several Destinations and `production` is not defined (`choose one with -d`)
+
+An optional overlay next to the Yoho file, `yoho.<destination>.<ext>` (`yml`, `yaml`, `toml`, `json`, or `jsonc`), is deep-merged over the base before decoding. Maps merge recursively; scalars and lists replace. More than one overlay for the same Destination is an error. `yoho config show` prints the selected Destination and overlay path to stderr.
+
+Compose files follow the same idea. After the base files are resolved, Yoho also loads `name.<destination>.ext` when it exists (`compose.yaml` and `compose.staging.yaml` for `-d staging`) and appends those overlays so they override.
+
 ## x-yoho (per compose Service)
 
 | Key | Notes |

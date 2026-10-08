@@ -9,7 +9,9 @@ Global flags (every command): `-c, --config FILE`, `-d, --destination NAME` (def
 | `config show` | Print the resolved Yoho file with defaults as JSON. |
 | `schema [--ext]` | JSON Schema of the Yoho file, or of `x-yoho` with `--ext`. |
 | `setup` | Provision a Server (interactive). See [Server setup](setup.md). |
-| `deploy [--skip-build] [--version V]` | Build, ship, deploy with zero downtime. Version defaults to the git SHA. |
+| `plan [--version V] [--detailed-exitcode]` | Read-only diff of the configuration against the Server: containers, Proxy routes, Proxy, Tunnel, Scheduled Jobs. Nothing is built or changed. With `--detailed-exitcode`: exit 0 no changes, 1 error, 2 changes. |
+| `apply [--auto-approve] [--version V] [--skip-build]` | Show the plan, ask `yes`, then build, ship, deploy, converge Tunnel and Scheduled Jobs, and remove what was deleted from config. Refuses without a terminal unless `--auto-approve`; `--json` requires `--auto-approve`. |
+| `deploy [--skip-build] [--version V]` | Kamal-compatible `apply --auto-approve` without printing the plan. Version defaults to the git SHA. |
 | `releases` | List Releases on the Server, newest first. |
 | `rollback VERSION` | Redeploy a previous Release. Volumes and migrations are not reverted. |
 | `app ps` | List the App's containers. |
@@ -30,3 +32,21 @@ Global flags (every command): `-c, --config FILE`, `-d, --destination NAME` (def
 | `completion` | Shell completion script. |
 
 Commands added recently (`backup`, `schedule`, `setup`, `swarm`, `tunnel`) have their own flags; see `yoho <command> --help`.
+
+## Plan and apply
+
+Configuration is the desired state. `yoho plan` compares it with the Server and prints Terraform-style changes:
+
+```
+  ~   service web [prod]: update in-place (zero downtime)
+        image yoho/shop-web:f4e6 → yoho/shop-web:d459
+  -/+ service db [prod]: replace (brief downtime)
+        config changed: ports
+  -   route shop-production-old: delete
+
+Plan: 0 to add, 1 to change, 1 to replace, 1 to destroy.
+```
+
+`+` create, `~` update in place, `-/+` replace (stop then start: non-proxied and Stateful Services), `-` delete. Unchanged resources are hidden; with none changing it prints `No changes. Your Servers match the configuration.` With `--json`, plan emits one `change` event per change and a `plan_summary` event.
+
+Image references in the plan are the ones the Version would build; uncommitted work gets a new Version each run, so pass `--version` to compare repeatedly.

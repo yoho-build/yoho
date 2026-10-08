@@ -12,8 +12,8 @@ import (
 	"runtime"
 	"sort"
 	"strings"
-	"time"
 
+	"github.com/compose-spec/compose-go/v2/types"
 	"github.com/spf13/cobra"
 
 	"github.com/yoho-build/yoho/internal/build"
@@ -117,29 +117,54 @@ func deployCmd(g *globals) *cobra.Command {
 	return c
 }
 
-func (a *app) deploy(ctx context.Context, ver string, skipBuild bool) (err error) {
-	u := a.ui
-	start := time.Now()
-	defer func() {
-		if err != nil {
-			u.Finished(err, "")
-		}
-	}()
-	if ver == "" {
-		if ver, err = version.FromGit(a.dir); err != nil {
-			return fmt.Errorf("%w\nhint: commit your work or pass --version", err)
-		}
-	}
-	if version.IsUncommitted(ver) {
-		u.Warn("deploying uncommitted changes as %s", ver)
-	}
-	u.Title("Deploying %s@%s to %s", a.cfg.App, shortVersion(ver), a.destName)
+// deploy is `yoho deploy`: apply --auto-approve without printing the plan.
+func (a *app) deploy(ctx context.Context, ver string, skipBuild bool) error {
+	return a.apply(ctx, applyOptions{Version: ver, SkipBuild: skipBuild, AutoApprove: true})
+}
 
+// session is everything one deploy or plan run needs: the loaded compose
+// project, resolved secrets and open Servers.
+type session struct {
+	a          *app
+	ver        string
+	r          *composefile.Result
+	store      *secrets.Store
+	hosts      []plan.NamedHost
+	hook       plan.HookFunc
+	closeHosts func()
+	red        interface{ Flush() error }
+}
+
+func (s *session) close() {
+	if s.closeHosts != nil {
+		s.closeHosts()
+	}
+	if s.red != nil {
+		s.red.Flush()
+	}
+}
+
+// resolveDeployVersion returns ver, or the git version of the App directory.
+func (a *app) resolveDeployVersion(ver string) (string, error) {
+	if ver != "" {
+		return ver, nil
+	}
+	v, err := version.FromGit(a.dir)
+	if err != nil {
+		return "", fmt.Errorf("%w\nhint: commit your work or pass --version", err)
+	}
+	return v, nil
+}
+
+// openSession loads compose, resolves secrets and connects. readOnly skips
+// the pre-connect Hook (plan must not run user scripts that deploy).
+func (a *app) openSession(ctx context.Context, ver string, readOnly bool) (_ *session, err error) {
+	u := a.ui
 	step := u.Step("", "Load compose")
 	r, err := a.compose(ctx)
 	if err != nil {
 		step.Fail(err, "run `yoho config check`")
-		return &silentError{err}
+		return nil, &silentError{err}
 	}
 	keys, _ := a.secretKeys(r)
 	findings := composefile.Check(r, a.dest.Runtime, keys)
@@ -149,7 +174,7 @@ func (a *app) deploy(ctx context.Context, ver string, skipBuild bool) (err error
 	if composefile.HasErrors(findings) {
 		err = errors.New("compose check failed")
 		step.Fail(err, "fix the errors above, then `yoho config check`")
-		return &silentError{err}
+		return nil, &silentError{err}
 	}
 	step.Done(fmt.Sprintf("%d services", len(r.Project.Services)))
 
@@ -157,147 +182,198 @@ func (a *app) deploy(ctx context.Context, ver string, skipBuild bool) (err error
 	store, err := a.loadSecrets(ctx)
 	if err != nil {
 		step.Fail(err, "check .yoho/secrets and that op / bw / bws are signed in")
-		return &silentError{err}
+		return nil, &silentError{err}
 	}
 	step.Done(fmt.Sprintf("%d keys", len(store.Keys())))
-	red := store.Redactor(os.Stdout)
-	defer red.Flush()
+	s := &session{a: a, ver: ver, r: r, store: store, red: store.Redactor(os.Stdout)}
 
-	hook := a.hookFunc(ver, "deploy", nil)
-	if err = hook(ctx, "pre-connect", nil); err != nil {
-		return err
+	if !readOnly {
+		if err = a.hookFunc(ver, "deploy", nil)(ctx, "pre-connect", nil); err != nil {
+			s.close()
+			return nil, err
+		}
 	}
 	hosts, closeHosts, err := a.connect(ctx)
 	if err != nil {
-		return err
+		s.close()
+		return nil, err
 	}
-	defer closeHosts()
-	hook = a.hookFunc(ver, "deploy", hosts)
+	s.hosts, s.closeHosts = hosts, closeHosts
+	if !readOnly {
+		s.hook = a.hookFunc(ver, "deploy", hosts)
+	}
+	return s, nil
+}
 
+// buildAndShip builds (unless skipBuild) and ships images, returning
+// Service -> image reference for Services with a build section.
+func (a *app) buildAndShip(ctx context.Context, s *session, skipBuild bool) (map[string]string, error) {
+	u := a.ui
 	images := map[string]string{}
+	if skipBuild {
+		for name, svc := range s.r.Project.Services {
+			if svc.Build != nil {
+				images[name] = build.ImageName(a.cfg.Registry, a.cfg.App, name, s.ver)
+			}
+		}
+		return images, nil
+	}
+	hosts, store, r, ver, hook := s.hosts, s.store, s.r, s.ver, s.hook
 	var built []string
 	engine := ""
-	if !skipBuild {
-		platform := ""
-		if len(a.cfg.Builder.Platforms) == 0 {
-			if platform, err = build.ServerPlatform(ctx, hosts[0].Host); err != nil {
-				return err
-			}
-		} else {
-			platform = a.cfg.Builder.Platforms[0]
-		}
-		if err = hook(ctx, "pre-build", nil); err != nil {
-			return err
-		}
-		bargs, benv, berr := store.BuildxArgs(a.cfg.Builder.Secrets)
-		if berr != nil {
-			return berr
-		}
-		step = u.Step("", "Build images for %s", platform)
-		if eng, why := build.ResolveEngine(a.cfg.Builder, runtime.GOOS, runtime.GOARCH, exec.LookPath, nil); a.cfg.Builder.Location == "" || a.cfg.Builder.Location == "local" {
-			u.Info("  engine: %s (%s)", eng, why)
-		}
-		platforms := a.cfg.Builder.Platforms
-		if len(platforms) == 0 {
-			platforms = []string{platform}
-		}
-		imgs, berr := build.Images(ctx, build.Options{
-			Dir: a.dir, App: a.cfg.App, Destination: a.destName, Version: ver,
-			Project: r.Project, Builder: a.cfg.Builder, Registry: a.cfg.Registry,
-			Platforms: platforms, BuildEnv: benv, BuildSecretArgs: bargs,
-			Out: store.Redactor(step.Output()), Host: hosts[0].Host,
-		})
-		if berr != nil {
-			step.Fail(berr, "rerun with -v to see the full build output")
-			return &silentError{berr}
-		}
-		for svc, im := range imgs {
-			images[svc] = im.Ref
-			if im.Built {
-				built = append(built, im.Ref)
-				engine = im.Engine
-			}
-		}
-		sort.Strings(built)
-		step.Done(strings.Join(built, ", "))
-
-		if len(built) > 0 && a.cfg.Builder.Location != "server" {
-			step = u.Step("", "Ship %d image(s)", len(built))
-			var regPW string
-			if a.cfg.Registry != nil && a.cfg.Registry.PasswordSecret != "" {
-				regPW, _ = store.Get(a.cfg.Registry.PasswordSecret)
-			}
-			var hs []remote.Host
-			for _, h := range hosts {
-				hs = append(hs, h.Host)
-			}
-			res, perr := transport.Push(ctx, transport.PushOptions{
-				Images: built, Hosts: hs, Mode: a.cfg.Transport.Mode, Registry: a.cfg.Registry,
-				RegistryPassword: regPW, Out: step.Output(), Platform: platform, Engine: engine,
-			})
-			if perr != nil {
-				step.Fail(perr, "try `transport: {mode: load}` or configure a registry")
-				return &silentError{perr}
-			}
-			var methods []string
-			for _, r := range res {
-				methods = append(methods, r.Host+" via "+r.Method)
-			}
-			step.Done(strings.Join(methods, ", "))
+	platform := ""
+	var err error
+	if len(a.cfg.Builder.Platforms) == 0 {
+		if platform, err = build.ServerPlatform(ctx, hosts[0].Host); err != nil {
+			return nil, err
 		}
 	} else {
-		for name, svc := range r.Project.Services {
-			if svc.Build != nil {
-				images[name] = build.ImageName(a.cfg.Registry, a.cfg.App, name, ver)
-			}
+		platform = a.cfg.Builder.Platforms[0]
+	}
+	if err = hook(ctx, "pre-build", nil); err != nil {
+		return nil, err
+	}
+	bargs, benv, berr := store.BuildxArgs(a.cfg.Builder.Secrets)
+	if berr != nil {
+		return nil, berr
+	}
+	step := u.Step("", "Build images for %s", platform)
+	if eng, why := build.ResolveEngine(a.cfg.Builder, runtime.GOOS, runtime.GOARCH, exec.LookPath, nil); a.cfg.Builder.Location == "" || a.cfg.Builder.Location == "local" {
+		u.Info("  engine: %s (%s)", eng, why)
+	}
+	platforms := a.cfg.Builder.Platforms
+	if len(platforms) == 0 {
+		platforms = []string{platform}
+	}
+	imgs, berr := build.Images(ctx, build.Options{
+		Dir: a.dir, App: a.cfg.App, Destination: a.destName, Version: ver,
+		Project: r.Project, Builder: a.cfg.Builder, Registry: a.cfg.Registry,
+		Platforms: platforms, BuildEnv: benv, BuildSecretArgs: bargs,
+		Out: store.Redactor(step.Output()), Host: hosts[0].Host,
+	})
+	if berr != nil {
+		step.Fail(berr, "rerun with -v to see the full build output")
+		return nil, &silentError{berr}
+	}
+	for svc, im := range imgs {
+		images[svc] = im.Ref
+		if im.Built {
+			built = append(built, im.Ref)
+			engine = im.Engine
 		}
 	}
-	composefile.StripBuild(r.Project, images)
+	sort.Strings(built)
+	step.Done(strings.Join(built, ", "))
 
-	svcSecrets, refs, err := serviceSecrets(store, r)
+	if len(built) > 0 && a.cfg.Builder.Location != "server" {
+		step = u.Step("", "Ship %d image(s)", len(built))
+		var regPW string
+		if a.cfg.Registry != nil && a.cfg.Registry.PasswordSecret != "" {
+			regPW, _ = store.Get(a.cfg.Registry.PasswordSecret)
+		}
+		var hs []remote.Host
+		for _, h := range hosts {
+			hs = append(hs, h.Host)
+		}
+		res, perr := transport.Push(ctx, transport.PushOptions{
+			Images: built, Hosts: hs, Mode: a.cfg.Transport.Mode, Registry: a.cfg.Registry,
+			RegistryPassword: regPW, Out: step.Output(), Platform: platform, Engine: engine,
+		})
+		if perr != nil {
+			step.Fail(perr, "try `transport: {mode: load}` or configure a registry")
+			return nil, &silentError{perr}
+		}
+		var methods []string
+		for _, r := range res {
+			methods = append(methods, r.Host+" via "+r.Method)
+		}
+		step.Done(strings.Join(methods, ", "))
+	}
+	return images, nil
+}
+
+// newDeploy builds the plan.Deploy for the session. forPlan works on a copy
+// of the project (images set, build sections removed) and discards output, so
+// the session's project can still be built afterwards.
+func (a *app) newDeploy(s *session, images map[string]string, forPlan bool) (*plan.Deploy, error) {
+	proj := s.r.Project
+	var out io.Writer = io.Discard
+	if forPlan {
+		var err error
+		if proj, err = proj.WithServicesTransform(func(_ string, sc types.ServiceConfig) (types.ServiceConfig, error) { return sc, nil }); err != nil {
+			return nil, err
+		}
+	} else {
+		out = s.store.Redactor(a.ui.Progress())
+	}
+	composefile.StripBuild(proj, images)
+	svcSecrets, refs, err := serviceSecrets(s.store, s.r)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	d := &plan.Deploy{
-		App: a.cfg.App, Destination: a.destName, Version: ver, Performer: performer(),
-		Servers: hosts, Project: r.Project, Ext: r.Ext,
+	return &plan.Deploy{
+		App: a.cfg.App, Destination: a.destName, Version: s.ver, Performer: performer(),
+		Servers: s.hosts, Project: proj, Ext: s.r.Ext,
 		ServiceSecrets: svcSecrets, SecretRefs: refs, Env: a.dest.Env, Registry: a.cfg.Registry,
-		Proxy: a.proxyConfig(), RetainReleases: a.cfg.RetainReleases, Hook: hook,
-		Out: store.Redactor(u.Progress()),
-	}
-	step = u.Step(hosts[0].Name, "Deploy %s (%s runtime)", shortVersion(ver), runtimeName(a.dest))
+		Proxy: a.proxyConfig(), RetainReleases: a.cfg.RetainReleases, Hook: s.hook,
+		Out: out,
+	}, nil
+}
+
+// rollout runs the runtime's Deploy for d.
+func (a *app) rollout(ctx context.Context, s *session, d *plan.Deploy) (*release.Release, error) {
+	step := a.ui.Step(s.hosts[0].Name, "Deploy %s (%s runtime)", shortVersion(s.ver), runtimeName(a.dest))
 	rel, err := a.runtime().Deploy(ctx, d)
 	if f, ok := d.Out.(interface{ Flush() error }); ok {
 		f.Flush()
 	}
 	if err != nil {
 		step.Fail(err, "previous Release keeps serving; see `yoho releases` and rerun with -v")
-		return &silentError{err}
+		return nil, &silentError{err}
 	}
 	step.Done()
-	urls := a.urls(r, hosts)
-	if t := a.proxyConfig().Tunnel; t != nil {
+	return rel, nil
+}
+
+// reconcileTunnel converges the Cloudflare Tunnel to config: ensure when
+// configured, remove a leftover connector when it no longer is. Returns URL
+// hints.
+func (a *app) reconcileTunnel(ctx context.Context, s *session) (string, error) {
+	u := a.ui
+	t := a.proxyConfig().Tunnel
+	urls := ""
+	for _, h := range s.hosts {
+		if t == nil {
+			st, err := proxy.TunnelStatusOf(ctx, h.Host)
+			if err != nil || !st.Exists() {
+				continue
+			}
+			step := u.Step(h.Name, "Remove Cloudflare Tunnel (no longer in config)")
+			if err := proxy.RemoveTunnel(ctx, h.Host, step.Output()); err != nil {
+				step.Fail(err, "run `yoho tunnel down`")
+				return urls, &silentError{err}
+			}
+			step.Done()
+			continue
+		}
 		token := ""
 		if t.TokenSecret != "" {
-			token, _ = store.Get(t.TokenSecret)
+			token, _ = s.store.Get(t.TokenSecret)
 		}
-		for _, h := range hosts {
-			step = u.Step(h.Name, "Cloudflare Tunnel")
-			st, terr := proxy.EnsureTunnel(ctx, h.Host, *t, token, step.Output())
-			if terr != nil {
-				step.Fail(terr, "the App is deployed; fix the tunnel and run `yoho tunnel up`")
-				return &silentError{terr}
-			}
-			if st.URL != "" {
-				step.Done(st.URL)
-				urls += "\n  → " + st.URL + " (Quick Tunnel)"
-			} else {
-				step.Done("token tunnel → " + proxy.TunnelOrigin)
-			}
+		step := u.Step(h.Name, "Cloudflare Tunnel")
+		st, terr := proxy.EnsureTunnel(ctx, h.Host, *t, token, step.Output())
+		if terr != nil {
+			step.Fail(terr, "the App is deployed; fix the tunnel and run `yoho tunnel up`")
+			return urls, &silentError{terr}
+		}
+		if st.URL != "" {
+			step.Done(st.URL)
+			urls += "\n  → " + st.URL + " (Quick Tunnel)"
+		} else {
+			step.Done("token tunnel → " + proxy.TunnelOrigin)
 		}
 	}
-	u.Finished(nil, fmt.Sprintf("Deployed %s@%s to %s in %s%s", a.cfg.App, shortVersion(rel.Version), a.destName, time.Since(start).Round(100*time.Millisecond), urls))
-	return nil
+	return urls, nil
 }
 
 // serviceSecrets resolves each Service's declared secrets from the store.

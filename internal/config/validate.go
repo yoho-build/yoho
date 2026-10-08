@@ -136,31 +136,33 @@ func Validate(c *Config) []error {
 	return errs
 }
 
-// Dest returns a Destination by name. An empty name selects the only
-// Destination, and is an error when there are several.
+// Dest returns a Destination by name. An empty name selects production when
+// that Destination is defined, otherwise the only Destination.
 func (c *Config) Dest(name string) (Destination, error) {
-	if name == "" {
-		if len(c.Destinations) == 1 {
-			for _, d := range c.Destinations {
-				return d, nil
-			}
-		}
-		return Destination{}, fmt.Errorf("several Destinations, choose one: %s", strings.Join(sortedKeys(c.Destinations), ", "))
+	n, err := c.DestName(name)
+	if err != nil {
+		return Destination{}, err
 	}
-	d, ok := c.Destinations[name]
-	if !ok {
-		return Destination{}, fmt.Errorf("unknown Destination %q (have: %s)", name, strings.Join(sortedKeys(c.Destinations), ", "))
-	}
-	return d, nil
+	return c.Destinations[n], nil
 }
 
-// DestName resolves name like Dest but returns the resolved name.
+// DestName resolves name to a Destination name. An empty name selects
+// production when it is defined, otherwise the only Destination. Callers
+// apply YOHO_DESTINATION before calling with an empty name; this method does
+// not read the environment.
 func (c *Config) DestName(name string) (string, error) {
-	if name == "" && len(c.Destinations) == 1 {
-		return sortedKeys(c.Destinations)[0], nil
+	if name == "" {
+		if _, ok := c.Destinations["production"]; ok {
+			return "production", nil
+		}
+		keys := sortedKeys(c.Destinations)
+		if len(keys) == 1 {
+			return keys[0], nil
+		}
+		return "", fmt.Errorf("several Destinations (production not defined), choose one with -d: %s", strings.Join(keys, ", "))
 	}
-	if _, err := c.Dest(name); err != nil {
-		return "", err
+	if _, ok := c.Destinations[name]; !ok {
+		return "", fmt.Errorf("unknown Destination %q (have: %s)", name, strings.Join(sortedKeys(c.Destinations), ", "))
 	}
 	return name, nil
 }
