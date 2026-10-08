@@ -1,0 +1,43 @@
+services:
+  web:
+    build: .
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:3000/up"]
+      interval: 5s
+    x-yoho:
+      proxy:
+        hosts: [shop.example.com]
+        port: 3000
+      secrets:
+        - DATABASE_PASSWORD:POSTGRES_PASSWORD   # alias: container name <- secret key
+        - SECRET_KEY_BASE
+      release_command: ["bin/rails", "db:migrate"]
+
+  db:
+    image: postgres:17
+    environment:
+      POSTGRES_PASSWORD_FILE: /run/secrets/POSTGRES_PASSWORD
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    x-yoho:
+      stateful: true
+      generate:
+        POSTGRES_PASSWORD: password32
+      backup:
+        dump: ["pg_dump", "-U", "postgres", "postgres"]
+        volumes: [pgdata]
+
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    command: tunnel --no-autoupdate run   # ingress -> http://yoho-proxy:80
+    networks: [default, yoho]
+    x-yoho:
+      secrets: [TUNNEL_TOKEN]
+      secrets_as_env: true
+
+volumes:
+  pgdata:
+
+networks:
+  yoho:
+    external: true   # shared with the Server's Proxy

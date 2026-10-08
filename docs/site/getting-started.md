@@ -1,0 +1,49 @@
+# Getting started
+
+## Install
+
+Build from source with Go 1.26: `go install github.com/yoho-dev/yoho/cmd/yoho@latest`.
+
+## 60 seconds
+
+```sh
+yoho init            # yoho.yml, .yoho/secrets, sample hooks
+yoho config check    # validate config, compose files, secret references
+yoho setup           # provision a fresh Debian/Ubuntu Server (interactive)
+yoho deploy          # build, ship, cut over
+```
+
+## Minimal files
+
+```yaml
+# yoho.yml
+app: shop
+servers:
+  primary: { ssh: yoho@203.0.113.10 }
+destinations:
+  production: { servers: [primary] }
+```
+
+```yaml
+# compose.yaml
+services:
+  web:
+    build: .
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:3000/up"]
+    x-yoho:
+      proxy: { hosts: [shop.example.com], port: 3000 }
+```
+
+A proxied Service needs a `/up` endpoint (configurable with `health_path`) that returns 2xx when ready.
+
+## After the first deploy
+
+```sh
+yoho app ps
+yoho app logs -f
+yoho releases
+yoho rollback <version>
+```
+
+With several Destinations pass `-d production`. Add `--json` for NDJSON events.

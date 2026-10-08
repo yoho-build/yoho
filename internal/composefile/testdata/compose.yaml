@@ -1,0 +1,25 @@
+name: shop
+services:
+  web:
+    build: .
+    image: shop-web
+    healthcheck:
+      test: ["CMD", "true"]
+    environment:
+      TAG: ${TAG:-dev}
+    x-yoho:
+      proxy: {hosts: [shop.example.com], port: 3000}
+      secrets: {SECRET_KEY_BASE: RAILS_KEY, DB_PASSWORD: DB_PASSWORD}
+      release_command: ["bin/rails", "db:migrate"]
+  db:
+    image: postgres:17
+    volumes:
+      - dbdata:/var/lib/postgresql/data
+    x-yoho:
+      stateful: true
+      secrets: ["DB_PASSWORD", "POSTGRES_PASSWORD:DB_PASSWORD"]
+      generate: {PEPPER: hex32}
+      backup:
+        volumes: [dbdata]
+volumes:
+  dbdata:

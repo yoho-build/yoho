@@ -1,0 +1,40 @@
+# yaml-language-server: $schema=../../schema/yoho.schema.json
+app: shop
+
+servers:
+  primary:
+    ssh: yoho@203.0.113.10
+
+destinations:
+  production:
+    servers: [primary]
+  staging:
+    servers: [primary]
+
+builder:
+  location: local          # local | remote | server
+  secrets: [NPM_TOKEN]     # buildx --secret id=NPM_TOKEN,env=NPM_TOKEN
+
+proxy:
+  http_port: 8080          # Server already uses 80/443; cloudflared targets http://yoho-proxy:80
+  https_port: 0
+
+secrets:
+  providers:
+    vault: { type: op }
+  values:
+    BACKUP_PASSWORD: { provider: vault, ref: "op://Production/shop-backups/password" }
+
+backups:
+  targets:
+    offsite:
+      type: restic
+      repository: "rclone:onedrive:backups/shop"
+      password_secret: BACKUP_PASSWORD
+      env_secrets: [RCLONE_CONFIG_ONEDRIVE_TOKEN]
+      keep_last: 14
+  jobs:
+    nightly:
+      destination: production
+      target: offsite
+      schedule: "*-*-* 03:00:00"

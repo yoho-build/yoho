@@ -1,0 +1,3 @@
+# Compose by default, Swarm optional
+
+Each Destination runs on the compose runtime by default; `runtime: swarm` deploys with `docker stack deploy` and is required for multiple Servers. Both share config, builds, image transport, secret resolution and Backups. Compose stays default because existing Apps rely on keys Swarm ignores (`build`, `devices`, `privileged`, `network_mode`); Swarm brings encrypted secrets, rolling updates and placement. Switching a Destination between runtimes is a migration with downtime. On Swarm, Swarm's start-first rolling update owns cutover and the Proxy targets the service VIP; `strict_drain` routes the Proxy to tasks instead.

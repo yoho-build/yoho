@@ -1,0 +1,36 @@
+site_name: Yoho
+site_description: Deploy Docker Compose apps to your own servers with zero downtime.
+repo_url: https://github.com/yoho-dev/yoho
+docs_dir: docs/site
+theme:
+  name: material
+  features:
+    - navigation.sections
+    - content.code.copy
+    - search.suggest
+markdown_extensions:
+  - admonition
+  - tables
+  - toc:
+      permalink: true
+  - pymdownx.highlight
+  - pymdownx.superfences
+nav:
+  - Home: index.md
+  - Getting started: getting-started.md
+  - Configuration: configuration.md
+  - Secrets: secrets.md
+  - Zero-downtime & proxy: zero-downtime.md
+  - Cloudflare Tunnel: cloudflare-tunnel.md
+  - Builds & image transport: builds.md
+  - Backups & restore: backups.md
+  - Scheduled jobs: scheduled-jobs.md
+  - Server setup: setup.md
+  - Swarm: swarm.md
+  - Hooks & env vars: hooks.md
+  - CLI reference: cli.md
+  - Migrating:
+      - From Kamal: migrating-from-kamal.md
+      - From Coolify: migrating-from-coolify.md
+      - From Dokploy: migrating-from-dokploy.md
+  - FAQ: faq.md

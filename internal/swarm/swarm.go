@@ -1,0 +1,888 @@
+// Package swarm is the Swarm Runtime (ADR 0007): it deploys an App as a
+// `docker stack deploy` stack from the manager (the Destination's first
+// Server). Swarm's start-first rolling update owns the cutover; the Proxy
+// routes to the stable service VIP (or to tasks with x-yoho.strict_drain).
+//
+// Differences from the compose runtime:
+//   - secrets are Swarm secrets named <stack>_<NAME>_<hash8> (immutable,
+//     content-addressed), mounted at /run/secrets/<NAME> with <NAME>_FILE;
+//   - Stateful Services update stop-first and are pinned with a
+//     node.hostname placement constraint to the first Server;
+//   - release_command runs as a one-off replicated-job service in a separate
+//     stack (<stack>-release) that joins the main stack's networks, volumes
+//     and secrets, so it sees exactly what the Service will;
+//   - the Proxy (kamal-proxy, a plain container on the manager) and every
+//     proxied Service share the attachable overlay network `yoho`.
+package swarm
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"path"
+	"slices"
+	"strconv"
+	"strings"
+	"time"
+
+	"github.com/yoho-dev/yoho/internal/deploy"
+	"github.com/yoho-dev/yoho/internal/plan"
+	"github.com/yoho-dev/yoho/internal/proxy"
+	"github.com/yoho-dev/yoho/internal/release"
+	"github.com/yoho-dev/yoho/internal/remote"
+)
+
+// Runtime implements plan.Runtime with Docker Swarm.
+type Runtime struct{}
+
+var _ plan.Runtime = Runtime{}
+
+const defaultRetain = 5
+
+// Replaceable in tests.
+var (
+	now             = func() time.Time { return time.Now().UTC() }
+	pollInterval    = 2 * time.Second
+	convergeTimeout = 15 * time.Minute
+	releaseTimeout  = 30 * time.Minute
+)
+
+// stackLabel is set by docker stack deploy on every object of a stack.
+const stackLabel = "com.docker.stack.namespace"
+
+// ReleaseStack is the stack running release_command jobs of stack.
+func ReleaseStack(stack string) string { return stack + "-release" }
+
+type runner struct {
+	h         remote.Host
+	out       io.Writer
+	server    string
+	app, dest string
+	stack     string
+	dir       string // App Destination dir on the manager
+}
+
+func newRunner(d *plan.Deploy) *runner {
+	out := d.Out
+	if out == nil {
+		out = io.Discard
+	}
+	return &runner{
+		h: d.Servers[0].Host, out: out, server: d.Servers[0].Name, app: d.App, dest: d.Destination,
+		stack: release.ProjectName(d.App, d.Destination), dir: release.AppDir(d.App, d.Destination),
+	}
+}
+
+func (r *runner) logf(format string, a ...any) {
+	fmt.Fprintf(r.out, "["+r.server+"] "+format+"\n", a...)
+}
+
+func hook(ctx context.Context, d *plan.Deploy, name string, extra map[string]string) error {
+	if d.Hook == nil {
+		return nil
+	}
+	var hs []string
+	for _, s := range d.Servers {
+		_, h, _, err := remote.ParseTarget(s.Server.SSH)
+		if err != nil || h == "" {
+			h = s.Name
+		}
+		hs = append(hs, h)
+	}
+	env := map[string]string{
+		"YOHO_APP":             d.App,
+		"YOHO_DESTINATION":     d.Destination,
+		"YOHO_VERSION":         d.Version,
+		"YOHO_SERVICE_VERSION": d.App + "@" + d.Version,
+		"YOHO_PERFORMER":       d.Performer,
+		"YOHO_HOSTS":           strings.Join(hs, ","),
+	}
+	for k, v := range extra {
+		env[k] = v
+	}
+	return d.Hook(ctx, name, env)
+}
+
+// checkSwarm verifies the first Server is a Swarm manager and the others are
+// Swarm nodes; it returns the manager's node hostname.
+func checkSwarm(ctx context.Context, d *plan.Deploy) (string, error) {
+	mgr := d.Servers[0]
+	out, err := mgr.Host.Output(ctx, remote.Cmd{Script: "docker info -f '{{.Swarm.LocalNodeState}}|{{.Swarm.ControlAvailable}}|{{.Name}}'"})
+	if err != nil {
+		return "", fmt.Errorf("docker info on %s: %w", mgr.Name, err)
+	}
+	f := strings.Split(strings.TrimSpace(out), "|")
+	if len(f) != 3 || f[0] != "active" || f[1] != "true" {
+		return "", fmt.Errorf("server %s is not a Swarm manager (state %q); run `yoho swarm init` first", mgr.Name, strings.TrimSpace(out))
+	}
+	for _, s := range d.Servers[1:] {
+		st, err := s.Host.Output(ctx, remote.Cmd{Script: "docker info -f '{{.Swarm.LocalNodeState}}'"})
+		if err != nil {
+			return "", fmt.Errorf("docker info on %s: %w", s.Name, err)
+		}
+		if strings.TrimSpace(st) != "active" {
+			return "", fmt.Errorf("server %s has not joined the Swarm (state %q); run `yoho swarm join`", s.Name, strings.TrimSpace(st))
+		}
+	}
+	return f[2], nil
+}
+
+// Deploy implements plan.Runtime.
+func (Runtime) Deploy(ctx context.Context, d *plan.Deploy) (_ *release.Release, err error) {
+	if err := validate(d); err != nil {
+		return nil, err
+	}
+	start := now()
+	mgr := d.Servers[0]
+	h := mgr.Host
+	r := newRunner(d)
+	relDir := release.Dir(d.App, d.Destination, d.Version)
+	stackFile := path.Join(relDir, "compose.yaml")
+
+	unlock, err := deploy.AcquireLock(ctx, h, d.App, d.Destination, deploy.LockInfo{Performer: d.Performer, Version: d.Version, Command: "deploy", Time: start})
+	if err != nil {
+		return nil, err
+	}
+	defer func() {
+		if uerr := unlock(ctx); uerr != nil && err == nil {
+			err = uerr
+		}
+	}()
+
+	pinHost, err := checkSwarm(ctx, d)
+	if err != nil {
+		return nil, err
+	}
+
+	r.logf("preparing release %s", d.Version)
+	if err := h.Run(ctx, remote.Cmd{Script: "set -eu\numask 077\nmkdir -p " + remote.QuoteArgs(r.dir, path.Join(r.dir, "releases"), path.Join(r.dir, "secrets"), path.Join(r.dir, "generated"), relDir)}); err != nil {
+		return nil, fmt.Errorf("prepare %s: %w", r.dir, err)
+	}
+	key, err := deploy.EnsureHMACKey(ctx, h, r.dir)
+	if err != nil {
+		return nil, err
+	}
+	kinds, err := deploy.GeneratedDecls(d)
+	if err != nil {
+		return nil, err
+	}
+	generated, err := deploy.EnsureGenerated(ctx, h, r.dir, kinds)
+	if err != nil {
+		return nil, err
+	}
+	svcSecrets, err := deploy.ServiceSecrets(d, generated, r.logf)
+	if err != nil {
+		return nil, err
+	}
+	generation := start.Format("20060102T150405Z") + "-" + d.Version
+	genDir := release.SecretsDir(d.App, d.Destination, generation)
+
+	c, err := compile(d, compileInput{PinHost: pinHost, GenerationDir: genDir, SvcSecrets: svcSecrets, HMACKey: key})
+	if err != nil {
+		return nil, err
+	}
+	for _, w := range c.Warnings {
+		r.logf("warning: %s", w)
+	}
+	if err := r.writeEnvFiles(ctx, d, genDir, svcSecrets); err != nil {
+		return nil, err
+	}
+	if err := r.createSecrets(ctx, d, svcSecrets, key); err != nil {
+		return nil, err
+	}
+	if err := h.WriteFile(ctx, stackFile, c.YAML, 0o600, false); err != nil {
+		return nil, fmt.Errorf("write stack file: %w", err)
+	}
+	if err := deploy.WriteJSON(ctx, h, path.Join(relDir, "plan.json"), c.Plan); err != nil {
+		return nil, err
+	}
+
+	rel := &release.Release{
+		App: d.App, Destination: d.Destination, Server: mgr.Name, Version: d.Version,
+		Runtime: "swarm", Role: "all", DeployedAt: start, Performer: d.Performer,
+		Images: map[string]string{}, SecretsGeneration: generation,
+		Secrets:       deploy.SecretAudit(d, svcSecrets, generated, key),
+		ComposeSHA256: deploy.SHA256Hex(c.YAML), Status: "failed",
+	}
+	for _, sp := range c.Plan.Services {
+		if sp.Image != "" {
+			rel.Images[sp.Name] = sp.Image
+		}
+	}
+	defer func() {
+		if err != nil {
+			_ = deploy.WriteJSON(context.WithoutCancel(ctx), h, path.Join(relDir, "release.json"), rel)
+		}
+	}()
+
+	if err := hook(ctx, d, "pre-deploy", nil); err != nil {
+		return nil, err
+	}
+	if c.Plan.needsProxy() {
+		if err := r.bootProxy(ctx, d); err != nil {
+			return nil, err
+		}
+	}
+	if err := r.releaseCommands(ctx, c, relDir); err != nil {
+		return nil, err
+	}
+	r.logf("deploying stack %s", r.stack)
+	if err := r.deployStack(ctx, stackFile, r.stack, true, registryAuth(c.Plan)); err != nil {
+		return nil, err
+	}
+	if err := r.routes(ctx, d, c.Plan); err != nil {
+		return nil, err
+	}
+
+	rel.Status = "deployed"
+	if err := r.finish(ctx, d, rel); err != nil {
+		return nil, err
+	}
+	secs := int(now().Sub(start).Round(time.Second) / time.Second)
+	if err := hook(ctx, d, "post-deploy", map[string]string{"YOHO_RUNTIME": strconv.Itoa(secs)}); err != nil {
+		return rel, err
+	}
+	r.logf("deployed %s in %ds", d.Version, secs)
+	return rel, nil
+}
+
+// writeEnvFiles writes <generation>/<service>.env (0600) for Services with
+// x-yoho.secrets_as_env. docker stack deploy reads them on the manager and
+// puts the values into the service spec (visible to `docker service
+// inspect`), like env_file does with compose.
+func (r *runner) writeEnvFiles(ctx context.Context, d *plan.Deploy, genDir string, svcSecrets map[string]map[string]string) error {
+	for _, svc := range sortedKeys(svcSecrets) {
+		if !d.Ext[svc].SecretsAsEnv {
+			continue
+		}
+		if err := r.h.WriteFile(ctx, path.Join(genDir, svc+".env"), deploy.EnvFile(svcSecrets[svc]), 0o600, false); err != nil {
+			return fmt.Errorf("write secrets for %s: %w", svc, err)
+		}
+	}
+	return nil
+}
+
+// createSecrets creates the Swarm secrets the stack references (values on
+// stdin). Existing ones are kept: names are content-addressed.
+func (r *runner) createSecrets(ctx context.Context, d *plan.Deploy, svcSecrets map[string]map[string]string, key []byte) error {
+	done := map[string]bool{}
+	for _, svc := range sortedKeys(svcSecrets) {
+		if d.Ext[svc].SecretsAsEnv {
+			continue
+		}
+		m := svcSecrets[svc]
+		for _, name := range sortedKeys(m) {
+			sn := SecretName(r.stack, name, m[name], key)
+			if done[sn] {
+				continue
+			}
+			done[sn] = true
+			q := remote.Quote(sn)
+			script := "set -eu\nif ! docker secret inspect " + q + " >/dev/null 2>&1; then\n  docker secret create " +
+				remote.QuoteArgs("--label", deploy.LabelApp+"="+d.App, "--label", deploy.LabelDestination+"="+d.Destination, sn, "-") +
+				" >/dev/null\nfi"
+			if err := r.h.Run(ctx, remote.Cmd{Script: script, Stdin: strings.NewReader(m[name])}); err != nil {
+				return fmt.Errorf("create swarm secret %s: %w", sn, err)
+			}
+		}
+	}
+	return nil
+}
+
+// bootProxy ensures the attachable overlay network `yoho` (so both the
+// kamal-proxy container and Swarm tasks can join it) and the Proxy on the
+// manager.
+func (r *runner) bootProxy(ctx context.Context, d *plan.Deploy) error {
+	script := `set -eu
+s=$(docker network inspect -f '{{.Driver}}|{{.Scope}}|{{.Attachable}}' ` + proxy.Network + ` 2>/dev/null || true)
+case "$s" in
+  "") docker network create -d overlay --attachable ` + proxy.Network + ` >/dev/null ;;
+  "overlay|swarm|true") ;;
+  *) echo "$s"; exit 3 ;;
+esac`
+	if out, err := r.h.Output(ctx, remote.Cmd{Script: script}); err != nil {
+		var ee *remote.ExitError
+		if errors.As(err, &ee) && ee.Code == 3 {
+			return fmt.Errorf("docker network %s exists but is not an attachable overlay (driver|scope|attachable = %s), probably from the compose runtime; "+
+				"switching a Server to swarm needs downtime: remove the compose Apps' proxied containers and %s, run `docker network rm %s`, then deploy again (ADR 0007)",
+				proxy.Network, strings.TrimSpace(out), proxy.ContainerName, proxy.Network)
+		}
+		return fmt.Errorf("ensure overlay network %s: %w", proxy.Network, err)
+	}
+	return proxy.Boot(ctx, r.h, d.Proxy, r.out)
+}
+
+// registryAuth reports whether images come from a registry (first path
+// component looks like a host), so nodes need credentials to pull them.
+// Images shipped by Yoho to each node use plain local names.
+func registryAuth(p stackPlan) bool {
+	for _, sp := range p.Services {
+		first, _, ok := strings.Cut(sp.Image, "/")
+		if ok && (strings.ContainsAny(first, ".:") || first == "localhost") {
+			return true
+		}
+	}
+	return false
+}
+
+func stackDeployCmd(dir, file, stack string, prune, auth, wait bool) string {
+	args := []string{"--compose-file", file, "--resolve-image", "never"}
+	if prune {
+		args = append(args, "--prune")
+	}
+	if auth {
+		args = append(args, "--with-registry-auth")
+	}
+	args = append(args, "--detach="+strconv.FormatBool(!wait), stack)
+	return "cd " + remote.Quote(dir) + " && docker stack deploy " + remote.QuoteArgs(args...)
+}
+
+// deployStack runs docker stack deploy (waiting for convergence) and then
+// verifies every Service it touched converged without a rollback.
+func (r *runner) deployStack(ctx context.Context, file, stack string, prune, auth bool) error {
+	before, err := r.serviceStatus(ctx, stack)
+	if err != nil {
+		return err
+	}
+	dctx, cancel := context.WithTimeout(ctx, convergeTimeout)
+	defer cancel()
+	var buf bytes.Buffer
+	if err := r.h.Run(dctx, remote.Cmd{Script: stackDeployCmd(r.dir, file, stack, prune, auth, true) + " 2>&1", Stdout: &buf}); err != nil {
+		return fmt.Errorf("docker stack deploy %s: %w\n%s%s", stack, err, tailLines(buf.String(), 15), r.diagnose(context.WithoutCancel(ctx), stack, nil))
+	}
+	return r.waitConverged(ctx, stack, before)
+}
+
+// svcStatus is one Service's state as seen by `docker service inspect/ls`.
+type svcStatus struct {
+	UpdateStarted string // UpdateStatus.StartedAt, identifies an update
+	UpdateState   string
+	UpdateMessage string
+	Replicas      string // e.g. "2/2", "0/1 (1/1 completed)"
+}
+
+func (r *runner) serviceStatus(ctx context.Context, stack string) (map[string]svcStatus, error) {
+	f := remote.Quote("label=" + stackLabel + "=" + stack)
+	script := "ids=$(docker service ls -q --filter " + f + ")\n" +
+		`[ -z "$ids" ] || docker service inspect --format 'S|{{.Spec.Name}}|{{with .UpdateStatus}}{{.StartedAt}}|{{.State}}|{{.Message}}{{end}}' $ids` + "\n" +
+		"docker service ls --filter " + f + " --format 'R|{{.Name}}|{{.Replicas}}'"
+	out, err := r.h.Output(ctx, remote.Cmd{Script: script})
+	if err != nil {
+		return nil, fmt.Errorf("inspect services of %s: %w", stack, err)
+	}
+	return parseStatus(out), nil
+}
+
+func parseStatus(out string) map[string]svcStatus {
+	m := map[string]svcStatus{}
+	for _, l := range lines(out) {
+		f := strings.Split(l, "|")
+		switch {
+		case f[0] == "S" && len(f) >= 2:
+			s := m[f[1]]
+			if len(f) >= 5 {
+				s.UpdateStarted, s.UpdateState, s.UpdateMessage = f[2], f[3], strings.Join(f[4:], "|")
+			}
+			m[f[1]] = s
+		case f[0] == "R" && len(f) == 3:
+			s := m[f[1]]
+			s.Replicas = f[2]
+			m[f[1]] = s
+		}
+	}
+	return m
+}
+
+// replicasReady parses `docker service ls` replicas: "running/desired",
+// optionally followed by "(... completed)" for jobs.
+func replicasReady(s string) bool {
+	if strings.Contains(s, "completed") {
+		return true
+	}
+	head, _, _ := strings.Cut(s, " ")
+	run, want, ok := strings.Cut(head, "/")
+	return ok && run == want
+}
+
+// converged classifies Services against the snapshot taken before the
+// deploy: only Services this deploy created or updated are checked, so a
+// stale rollback status from an earlier failed deploy is not blamed on it.
+func converged(before, after map[string]svcStatus) (pending, failed []string) {
+	for _, name := range sortedKeys(after) {
+		a := after[name]
+		b, existed := before[name]
+		updated := a.UpdateStarted != "" && (!existed || a.UpdateStarted != b.UpdateStarted)
+		if existed && !updated {
+			continue // spec unchanged: Swarm did not touch its tasks
+		}
+		switch a.UpdateState {
+		case "rollback_started", "rollback_paused", "rollback_completed", "paused":
+			if updated {
+				failed = append(failed, name)
+				continue
+			}
+		case "updating":
+			pending = append(pending, name)
+			continue
+		}
+		if !replicasReady(a.Replicas) {
+			pending = append(pending, name)
+		}
+	}
+	return pending, failed
+}
+
+func (r *runner) waitConverged(ctx context.Context, stack string, before map[string]svcStatus) error {
+	deadline := now().Add(convergeTimeout)
+	for {
+		after, err := r.serviceStatus(ctx, stack)
+		if err != nil {
+			return err
+		}
+		pending, failed := converged(before, after)
+		if len(failed) > 0 {
+			var msgs []string
+			for _, n := range failed {
+				msgs = append(msgs, n+": "+after[n].UpdateState+" "+after[n].UpdateMessage)
+			}
+			return fmt.Errorf("update failed and Swarm rolled back (the previous version keeps serving):\n%s%s", strings.Join(msgs, "\n"), r.diagnose(ctx, stack, failed))
+		}
+		if len(pending) == 0 {
+			return nil
+		}
+		if now().After(deadline) {
+			return fmt.Errorf("services did not converge within %s: %s%s", convergeTimeout, strings.Join(pending, ", "), r.diagnose(ctx, stack, pending))
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(pollInterval):
+		}
+	}
+}
+
+// diagnose returns recent task errors (`docker service ps --no-trunc`) for
+// services (all of the stack when empty). Best effort.
+func (r *runner) diagnose(ctx context.Context, stack string, services []string) string {
+	sel := remote.QuoteArgs(services...)
+	if len(services) == 0 {
+		sel = "$(docker service ls -q --filter " + remote.Quote("label="+stackLabel+"="+stack) + ")"
+	}
+	out, err := r.h.Output(ctx, remote.Cmd{Script: "for s in " + sel + "; do docker service ps --no-trunc --format '{{.Name}} on {{.Node}}: {{.CurrentState}} {{.Error}}' \"$s\" 2>/dev/null | head -n 5; done; true"})
+	if err != nil || strings.TrimSpace(out) == "" {
+		return ""
+	}
+	return "\ntasks (docker service ps --no-trunc):\n" + out
+}
+
+// routes points each proxied Service's Proxy route at its stable Swarm name
+// (VIP, or tasks.<name> with strict_drain). kamal-proxy deploy is
+// idempotent and health-gated; the rolling update already did the cutover.
+//
+// VIP mode may still route a few requests to a stopping task (moby#38841),
+// so Apps should drain on SIGTERM. strict_drain uses endpoint_mode dnsrr:
+// kamal-proxy resolves tasks.<service> per new connection, so a removed task
+// stops receiving new connections at once; keep-alive connections to it
+// last until the task closes them, and DNS results may be cached briefly.
+func (r *runner) routes(ctx context.Context, d *plan.Deploy, p stackPlan) error {
+	for _, sp := range p.Services {
+		if sp.Proxy == nil {
+			continue
+		}
+		target := p.Stack + "_" + sp.Name
+		if sp.StrictDrain {
+			target = "tasks." + target
+		}
+		target += ":" + strconv.Itoa(sp.Proxy.Port)
+		route := deploy.RouteName(d.App, d.Destination, sp.Name)
+		r.logf("proxy route %s -> %s", route, target)
+		if err := proxy.Deploy(ctx, r.h, route, target, proxy.DeployOptions{
+			Hosts: sp.Proxy.Hosts, HealthPath: sp.Proxy.HealthPath, TLS: sp.Proxy.TLS,
+			DeployTimeout: time.Duration(sp.Proxy.DeployTimeout) * time.Second,
+			DrainTimeout:  time.Duration(sp.Proxy.DrainTimeout) * time.Second,
+		}); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// releaseCommands runs each x-yoho.release_command before the stack update.
+// Dependencies (depends_on of those Services, and Stateful Services) that do
+// not exist yet are deployed first so migrations work on the first deploy.
+func (r *runner) releaseCommands(ctx context.Context, c *compiled, relDir string) error {
+	var jobs []servicePlan
+	var deps []string
+	for _, sp := range c.Plan.Services {
+		if len(sp.ReleaseCommand) > 0 {
+			jobs = append(jobs, sp)
+			deps = append(deps, sp.DependsOn...)
+		}
+	}
+	if len(jobs) == 0 {
+		return nil
+	}
+	for _, sp := range c.Plan.Services {
+		if sp.Stateful {
+			deps = append(deps, sp.Name)
+		}
+	}
+	existing, err := r.serviceStatus(ctx, r.stack)
+	if err != nil {
+		return err
+	}
+	var missing []string
+	for _, dep := range deps {
+		isJob := slices.ContainsFunc(jobs, func(sp servicePlan) bool { return sp.Name == dep })
+		if _, ok := existing[r.stack+"_"+dep]; !ok && !isJob && !slices.Contains(missing, dep) {
+			missing = append(missing, dep)
+		}
+	}
+	slices.Sort(missing)
+	auth := registryAuth(c.Plan)
+	if len(missing) > 0 {
+		r.logf("starting dependencies %s", strings.Join(missing, ", "))
+		b, err := subset(c.Doc, missing)
+		if err != nil {
+			return err
+		}
+		f := path.Join(relDir, "dependencies.yaml")
+		if err := r.h.WriteFile(ctx, f, b, 0o600, false); err != nil {
+			return fmt.Errorf("write dependencies stack file: %w", err)
+		}
+		if err := r.deployStack(ctx, f, r.stack, false, auth); err != nil {
+			return fmt.Errorf("start dependencies: %w", err)
+		}
+	}
+	for _, sp := range jobs {
+		if err := r.runJob(ctx, c, relDir, sp, auth); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// ensureStackNetworks creates the main stack's own networks a release job
+// joins before the stack exists, labelled so docker stack deploy adopts
+// them as its own.
+func (r *runner) ensureStackNetworks(ctx context.Context, doc map[string]any, svc string) error {
+	s, _ := mapOf(doc, "services")[svc].(map[string]any)
+	nets := mapOf(s, "networks")
+	if len(nets) == 0 {
+		nets = map[string]any{"default": nil}
+	}
+	var b strings.Builder
+	b.WriteString("set -eu\n")
+	for _, n := range sortedKeys(nets) {
+		def, _ := mapOf(doc, "networks")[n].(map[string]any)
+		if def != nil && def["external"] == true {
+			continue
+		}
+		args := []string{"docker", "network", "create", "--label", stackLabel + "=" + r.stack}
+		driver, _ := def["driver"].(string)
+		if driver == "" {
+			driver = "overlay"
+		}
+		args = append(args, "--driver", driver)
+		if def["attachable"] == true {
+			args = append(args, "--attachable")
+		}
+		if def["internal"] == true {
+			args = append(args, "--internal")
+		}
+		for _, k := range sortedKeys(mapOf(def, "labels")) {
+			args = append(args, "--label", fmt.Sprintf("%s=%v", k, mapOf(def, "labels")[k]))
+		}
+		name := realName(doc, "networks", n, r.stack)
+		args = append(args, name)
+		b.WriteString("docker network inspect " + remote.Quote(name) + " >/dev/null 2>&1 || " + remote.QuoteArgs(args...) + " >/dev/null\n")
+	}
+	if err := r.h.Run(ctx, remote.Cmd{Script: b.String()}); err != nil {
+		return fmt.Errorf("create networks for release command: %w", err)
+	}
+	return nil
+}
+
+// runJob runs one release_command as a replicated-job in the release stack,
+// waits for its single task to finish, and removes the stack again. Output
+// is shown only on failure.
+func (r *runner) runJob(ctx context.Context, c *compiled, relDir string, sp servicePlan, auth bool) error {
+	r.logf("release command for %s: %s", sp.Name, strings.Join(sp.ReleaseCommand, " "))
+	b, err := releaseJobStack(c.Doc, r.stack, sp.Name, sp.ReleaseCommand)
+	if err != nil {
+		return err
+	}
+	f := path.Join(relDir, "release-"+sp.Name+".yaml")
+	if err := r.h.WriteFile(ctx, f, b, 0o600, false); err != nil {
+		return fmt.Errorf("write release command stack file: %w", err)
+	}
+	if err := r.ensureStackNetworks(ctx, c.Doc, sp.Name); err != nil {
+		return err
+	}
+	rs := ReleaseStack(r.stack)
+	svc := rs + "_" + sp.Name
+	rm := "docker stack rm " + remote.Quote(rs) + " >/dev/null 2>&1 || true"
+	if err := r.h.Run(ctx, remote.Cmd{Script: rm}); err != nil {
+		return err
+	}
+	defer func() { _ = r.h.Run(context.WithoutCancel(ctx), remote.Cmd{Script: rm}) }()
+
+	fail := func(err error) error {
+		logs, _ := r.h.Output(context.WithoutCancel(ctx), remote.Cmd{Script: "docker service logs --raw " + remote.Quote(svc) + " 2>&1 | tail -n 30"})
+		return fmt.Errorf("release command for %s failed, aborting (the previous version keeps running): %w\n%s", sp.Name, err, logs)
+	}
+	if err := r.h.Run(ctx, remote.Cmd{Script: stackDeployCmd(r.dir, f, rs, false, auth, false) + " >/dev/null"}); err != nil {
+		return fail(err)
+	}
+	deadline := now().Add(releaseTimeout)
+	script := "t=$(docker service ps -q " + remote.Quote(svc) + " | head -n 1)\n" +
+		`[ -z "$t" ] || docker inspect -f '{{.Status.State}}|{{with .Status.ContainerStatus}}{{.ExitCode}}{{end}}|{{.Status.Err}}' "$t"`
+	for {
+		out, err := r.h.Output(ctx, remote.Cmd{Script: script})
+		if err != nil {
+			return fail(err)
+		}
+		state, rest, _ := strings.Cut(strings.TrimSpace(out), "|")
+		switch state {
+		case "complete":
+			return nil
+		case "failed", "rejected", "shutdown", "orphaned", "remove":
+			return fail(fmt.Errorf("task %s (exit code|error: %s)", state, rest))
+		}
+		if now().After(deadline) {
+			return fail(fmt.Errorf("timed out after %s (task state %q)", releaseTimeout, state))
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(pollInterval):
+		}
+	}
+}
+
+// finish records the Release, points `current` at it and prunes.
+func (r *runner) finish(ctx context.Context, d *plan.Deploy, rel *release.Release) error {
+	if err := deploy.WriteJSON(ctx, r.h, path.Join(release.Dir(d.App, d.Destination, rel.Version), "release.json"), rel); err != nil {
+		return err
+	}
+	if err := r.h.Run(ctx, remote.Cmd{Script: "ln -sfn " + remote.Quote("releases/"+rel.Version) + " " + remote.Quote(path.Join(r.dir, "current"))}); err != nil {
+		return fmt.Errorf("update current release: %w", err)
+	}
+	if err := r.prune(ctx, d, rel.Version); err != nil {
+		r.logf("warning: pruning old releases failed: %v", err)
+	}
+	return nil
+}
+
+// prune keeps the newest RetainReleases Releases (always current), their
+// secrets generations, and the Swarm secrets they reference; it removes the
+// rest. Swarm refuses to remove a secret still used by a service, which is
+// reported but not an error.
+func (r *runner) prune(ctx context.Context, d *plan.Deploy, current string) error {
+	retain := d.RetainReleases
+	if retain <= 0 {
+		retain = defaultRetain
+	}
+	rels, err := deploy.ListReleases(ctx, r.h, d.App, d.Destination)
+	if err != nil {
+		return err
+	}
+	keepGen := map[string]bool{}
+	keepSecret := map[string]bool{}
+	secretsKnown := true
+	var drop []string
+	for i, rel := range rels {
+		if i < retain || rel.Version == current {
+			keepGen[rel.SecretsGeneration] = true
+			p, err := readPlan(ctx, r.h, release.Dir(d.App, d.Destination, rel.Version))
+			if err != nil {
+				secretsKnown = false
+				continue
+			}
+			for _, s := range p.Secrets {
+				keepSecret[s] = true
+			}
+			continue
+		}
+		drop = append(drop, path.Join(r.dir, "releases", rel.Version))
+	}
+	gens, err := r.h.Output(ctx, remote.Cmd{Script: "ls -1 " + remote.Quote(path.Join(r.dir, "secrets")) + " 2>/dev/null || true"})
+	if err != nil {
+		return err
+	}
+	for _, g := range lines(gens) {
+		if !keepGen[g] {
+			drop = append(drop, path.Join(r.dir, "secrets", g))
+		}
+	}
+	if len(drop) > 0 {
+		r.logf("pruning %d old release/secrets director(ies)", len(drop))
+		if err := r.h.Run(ctx, remote.Cmd{Script: "rm -rf " + remote.QuoteArgs(drop...)}); err != nil {
+			return err
+		}
+	}
+	if !secretsKnown {
+		r.logf("warning: a retained Release has no readable plan.json; keeping all Swarm secrets")
+		return nil
+	}
+	out, err := r.h.Output(ctx, remote.Cmd{Script: "docker secret ls " + remote.QuoteArgs("--filter", "label="+deploy.LabelApp+"="+d.App, "--filter", "label="+deploy.LabelDestination+"="+d.Destination) + " --format '{{.Name}}'"})
+	if err != nil {
+		return fmt.Errorf("list swarm secrets: %w", err)
+	}
+	unused := unusedSecrets(lines(out), keepSecret)
+	if len(unused) == 0 {
+		return nil
+	}
+	r.logf("removing %d unused Swarm secret(s)", len(unused))
+	inUse, err := r.h.Output(ctx, remote.Cmd{Script: "for s in " + remote.QuoteArgs(unused...) + "; do docker secret rm \"$s\" >/dev/null 2>&1 || echo \"$s\"; done"})
+	if err != nil {
+		return err
+	}
+	if l := lines(inUse); len(l) > 0 {
+		r.logf("kept %d Swarm secret(s) still in use: %s", len(l), strings.Join(l, ", "))
+	}
+	return nil
+}
+
+// unusedSecrets returns the existing secret names not referenced by any
+// retained Release.
+func unusedSecrets(existing []string, keep map[string]bool) []string {
+	var out []string
+	for _, s := range existing {
+		if !keep[s] {
+			out = append(out, s)
+		}
+	}
+	slices.Sort(out)
+	return out
+}
+
+func readPlan(ctx context.Context, h remote.Host, relDir string) (*stackPlan, error) {
+	b, err := h.ReadFile(ctx, path.Join(relDir, "plan.json"), false)
+	if err != nil {
+		return nil, err
+	}
+	var p stackPlan
+	if err := json.Unmarshal(b, &p); err != nil {
+		return nil, fmt.Errorf("parse %s/plan.json: %w", relDir, err)
+	}
+	return &p, nil
+}
+
+// Rollback implements plan.Runtime: it redeploys a retained Release's stack
+// file, which still references that Release's Swarm secrets. No build, no
+// release_command; volumes and migrations are not reverted.
+func (Runtime) Rollback(ctx context.Context, d *plan.Deploy, version string) (_ *release.Release, err error) {
+	if len(d.Servers) == 0 || slices.ContainsFunc(d.Servers, func(s plan.NamedHost) bool { return s.Host == nil }) {
+		return nil, errors.New("swarm rollback needs open connections to the Destination's Servers")
+	}
+	if !deploy.ValidVersion(version) {
+		return nil, fmt.Errorf("invalid version %q", version)
+	}
+	start := now()
+	h := d.Servers[0].Host
+	r := newRunner(d)
+	relDir := release.Dir(d.App, d.Destination, version)
+	stackFile := path.Join(relDir, "compose.yaml")
+
+	unlock, err := deploy.AcquireLock(ctx, h, d.App, d.Destination, deploy.LockInfo{Performer: d.Performer, Version: version, Command: "rollback", Time: start})
+	if err != nil {
+		return nil, err
+	}
+	defer func() {
+		if uerr := unlock(ctx); uerr != nil && err == nil {
+			err = uerr
+		}
+	}()
+	if _, err := checkSwarm(ctx, d); err != nil {
+		return nil, err
+	}
+
+	rel, err := deploy.ReadRelease(ctx, h, path.Join(relDir, "release.json"))
+	if err != nil {
+		return nil, fmt.Errorf("release %s not found on %s: %w", version, d.Servers[0].Name, err)
+	}
+	if rel.Runtime != "swarm" {
+		return nil, fmt.Errorf("release %s was deployed with the %s runtime; switching runtimes is a migration (ADR 0007)", version, rel.Runtime)
+	}
+	stackYAML, err := h.ReadFile(ctx, stackFile, false)
+	if err != nil {
+		return nil, fmt.Errorf("release %s has no stack file: %w", version, err)
+	}
+	if rel.ComposeSHA256 != "" && deploy.SHA256Hex(stackYAML) != rel.ComposeSHA256 {
+		return nil, fmt.Errorf("release %s: stack file does not match its recorded sha256", version)
+	}
+	p, err := readPlan(ctx, h, relDir)
+	if err != nil {
+		return nil, fmt.Errorf("release %s: %w", version, err)
+	}
+	if len(p.Secrets) > 0 {
+		if err := h.Run(ctx, remote.Cmd{Script: "docker secret inspect " + remote.QuoteArgs(p.Secrets...) + " >/dev/null"}); err != nil {
+			return nil, fmt.Errorf("release %s: its Swarm secrets are gone (pruned?): %w", version, err)
+		}
+	}
+	if p.EnvFiles && rel.SecretsGeneration != "" {
+		if err := h.Run(ctx, remote.Cmd{Script: "test -d " + remote.Quote(release.SecretsDir(d.App, d.Destination, rel.SecretsGeneration))}); err != nil {
+			return nil, fmt.Errorf("release %s: secrets generation %s is gone", version, rel.SecretsGeneration)
+		}
+	}
+	prev, _ := h.Output(ctx, remote.Cmd{Script: "readlink " + remote.Quote(path.Join(r.dir, "current")) + " 2>/dev/null || true"})
+	prevVersion := path.Base(strings.TrimSpace(prev))
+
+	r.logf("rolling back to %s (volumes, data and migrations are not reverted)", version)
+	if p.needsProxy() {
+		if err := r.bootProxy(ctx, d); err != nil {
+			return nil, err
+		}
+	}
+	if err := r.deployStack(ctx, stackFile, r.stack, true, registryAuth(*p)); err != nil {
+		return nil, err
+	}
+	if err := r.routes(ctx, d, *p); err != nil {
+		return nil, err
+	}
+	if prevVersion != "" && prevVersion != "." && prevVersion != version {
+		prevPath := path.Join(release.Dir(d.App, d.Destination, prevVersion), "release.json")
+		if pr, err := deploy.ReadRelease(ctx, h, prevPath); err == nil {
+			pr.Status = "rolled_back"
+			_ = deploy.WriteJSON(ctx, h, prevPath, pr)
+		}
+	}
+	rel.Status = "deployed"
+	rel.DeployedAt = start
+	rel.Performer = d.Performer
+	if err := r.finish(ctx, d, rel); err != nil {
+		return nil, err
+	}
+	r.logf("rolled back to %s", version)
+	return rel, nil
+}
+
+// Releases implements plan.Runtime: Releases on the manager, newest first.
+func (Runtime) Releases(ctx context.Context, d *plan.Deploy) ([]release.Release, error) {
+	if len(d.Servers) == 0 || d.Servers[0].Host == nil {
+		return nil, errors.New("no Server")
+	}
+	return deploy.ListReleases(ctx, d.Servers[0].Host, d.App, d.Destination)
+}
+
+func lines(s string) []string {
+	var out []string
+	for _, l := range strings.Split(s, "\n") {
+		if l = strings.TrimSpace(l); l != "" {
+			out = append(out, l)
+		}
+	}
+	return out
+}
+
+func tailLines(s string, n int) string {
+	ls := lines(s)
+	if len(ls) > n {
+		ls = ls[len(ls)-n:]
+	}
+	return strings.Join(ls, "\n")
+}

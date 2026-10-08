@@ -1,0 +1,23 @@
+services:
+  web:
+    image: x
+    container_name: web
+    ports: ["80:80"]
+    privileged: true
+    volumes_from: [db]
+    depends_on: [db]
+    environment:
+      PW: ${DB_PASSWORD}
+      OK: $$DB_PASSWORD
+    x-yoho:
+      proxy: {}
+      secrets: [NOPE]
+      generate: {A: rot13}
+      release_command: [""]
+  db:
+    image: postgres
+    volumes: [dbdata:/data]
+    x-yoho:
+      backup: {volumes: [other]}
+volumes:
+  dbdata:
