@@ -1,3 +1,5 @@
+<p align="center"><img src="docs/assets/logo.svg" alt="Yoho" width="120"></p>
+
 # Yoho
 
 **Deploy Docker Compose apps to your own servers the way Kamal deploys one container: one command, zero downtime, no platform to run.**

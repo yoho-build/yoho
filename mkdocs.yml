@@ -4,6 +4,8 @@ repo_url: https://github.com/yoho-build/yoho
 docs_dir: docs/site
 theme:
   name: material
+  logo: assets/logo.svg
+  favicon: assets/logo.svg
   features:
     - navigation.sections
     - content.code.copy
