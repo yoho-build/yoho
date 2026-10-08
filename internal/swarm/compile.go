@@ -40,7 +40,9 @@ type servicePlan struct {
 	Image    string `json:"image,omitempty"`
 	Stateful bool   `json:"stateful,omitempty"`
 	// Replicas; 0 for global mode.
-	Replicas       int                  `json:"replicas"`
+	Replicas int `json:"replicas"`
+	// Global is deploy.mode global (Replicas is 0 and not a count).
+	Global         bool                 `json:"global,omitempty"`
 	Proxy          *config.ServiceProxy `json:"proxy,omitempty"` // defaults applied
 	StrictDrain    bool                 `json:"strict_drain,omitempty"`
 	ProxyNetwork   bool                 `json:"proxy_network,omitempty"`
@@ -326,9 +328,12 @@ func compile(d *plan.Deploy, in compileInput) (*compiled, error) {
 		}
 		mode, _ := dep["mode"].(string)
 		replicas := 0
+		global := mode == "global"
 		if mode == "" || mode == "replicated" {
+			// GetScale is 1 when neither scale nor deploy.replicas is set, so
+			// an explicit 0 (parked Service) survives.
 			replicas = ps.GetScale()
-			if replicas < 1 {
+			if replicas < 0 {
 				replicas = 1
 			}
 			if ext.Stateful {
@@ -370,6 +375,11 @@ func compile(d *plan.Deploy, in compileInput) (*compiled, error) {
 				files, _ := s["env_file"].([]any)
 				s["env_file"] = append(files, in.GenerationDir+"/"+name+".env")
 				c.Plan.EnvFiles = true
+				// The env_file path is generation-dependent and the planner
+				// ignores it; a keyed digest of the values makes rotation a
+				// visible change and rolls the Service (same as the Compose
+				// runtime's yoho.secrets label).
+				ensureMap(s, "labels")[deploy.LabelSecrets] = secretSetFingerprint(in.HMACKey, m)
 			} else {
 				existing, _ := s["secrets"].([]any)
 				for _, sec := range sortedKeys(m) {
@@ -403,13 +413,28 @@ func compile(d *plan.Deploy, in compileInput) (*compiled, error) {
 			}
 			up["order"] = "stop-first"
 			rb["order"] = "stop-first"
-			pl := ensureMap(dep, "placement")
-			if cs, _ := pl["constraints"].([]any); len(cs) == 0 {
-				if in.PinHost == "" {
-					return nil, fmt.Errorf("service %s: stateful service needs a Server to pin to", name)
-				}
-				pl["constraints"] = []any{"node.hostname == " + in.PinHost}
+			// Always pinned to the first Server (ADR 0005): user constraints
+			// narrow further but never replace the pin.
+			if in.PinHost == "" {
+				return nil, fmt.Errorf("service %s: stateful service needs a Server to pin to", name)
 			}
+			pl := ensureMap(dep, "placement")
+			cs, _ := pl["constraints"].([]any)
+			pinned := false
+			for _, e := range cs {
+				host, ok := hostnameConstraint(e)
+				if !ok {
+					continue
+				}
+				if host != in.PinHost {
+					return nil, fmt.Errorf("service %s: placement constraint %q contradicts the Stateful pin to %s (the first Server); remove it", name, e, in.PinHost)
+				}
+				pinned = true
+			}
+			if !pinned {
+				cs = append(cs, "node.hostname == "+in.PinHost)
+			}
+			pl["constraints"] = cs
 		} else {
 			setDefault(up, "order", "start-first")
 			setDefault(rb, "order", "start-first")
@@ -451,7 +476,7 @@ func compile(d *plan.Deploy, in compileInput) (*compiled, error) {
 		}
 
 		c.Plan.Services = append(c.Plan.Services, servicePlan{
-			Name: name, Image: ps.Image, Stateful: ext.Stateful, Replicas: replicas,
+			Name: name, Image: ps.Image, Stateful: ext.Stateful, Replicas: replicas, Global: global,
 			Proxy: proxyWithDefaults(ext.Proxy), StrictDrain: ext.StrictDrain && ext.Proxy != nil,
 			ProxyNetwork: onNet, DependsOn: sortedKeys(ps.DependsOn),
 			ReleaseCommand: slices.Clone(ext.ReleaseCommand),
@@ -602,6 +627,34 @@ func releaseJobStack(doc map[string]any, stack, svc string, command []string) ([
 	if len(secs) > 0 {
 		out["secrets"] = secs
 	}
+	// Top-level configs the Service references. External ones are shared;
+	// others get a copy of the definition (without the main stack's fixed
+	// name) so the release stack owns its own and can run on a first deploy.
+	cfgs := map[string]any{}
+	if cs, ok := s["configs"].([]any); ok {
+		for _, cv := range cs {
+			src := secretSource(cv)
+			def, ok := mapOf(doc, "configs")[src]
+			if !ok {
+				continue
+			}
+			m, _ := def.(map[string]any)
+			if m == nil || m["external"] == true {
+				cfgs[src] = def
+				continue
+			}
+			cp := map[string]any{}
+			for k, v := range m {
+				if k != "name" {
+					cp[k] = v
+				}
+			}
+			cfgs[src] = cp
+		}
+	}
+	if len(cfgs) > 0 {
+		out["configs"] = cfgs
+	}
 	return encode(out)
 }
 
@@ -613,6 +666,29 @@ func realName(doc map[string]any, kind, key, stack string) string {
 		}
 	}
 	return stack + "_" + key
+}
+
+// hostnameConstraint parses `node.hostname == X` (the only form that
+// selects one node); other constraints report false.
+func hostnameConstraint(v any) (string, bool) {
+	c, _ := v.(string)
+	l, r, ok := strings.Cut(c, "==")
+	if !ok || strings.TrimSpace(l) != "node.hostname" {
+		return "", false
+	}
+	return strings.TrimSpace(r), true
+}
+
+// secretSetFingerprint is a keyed digest of one Service's secret set.
+func secretSetFingerprint(key []byte, m map[string]string) string {
+	var b strings.Builder
+	for _, k := range sortedKeys(m) {
+		b.WriteString(k)
+		b.WriteByte(0)
+		b.WriteString(m[k])
+		b.WriteByte(0)
+	}
+	return secrets.Fingerprint(key, b.String())
 }
 
 func fixEnvFiles(s map[string]any) {

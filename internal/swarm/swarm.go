@@ -35,6 +35,7 @@ import (
 	"github.com/yoho-build/yoho/internal/proxy"
 	"github.com/yoho-build/yoho/internal/release"
 	"github.com/yoho-build/yoho/internal/remote"
+	"github.com/yoho-build/yoho/internal/secrets"
 )
 
 // Runtime implements plan.Runtime with Docker Swarm.
@@ -65,6 +66,30 @@ type runner struct {
 	app, dest string
 	stack     string
 	dir       string // App Destination dir on the manager
+	// secretVals are the secret values of this run; command output and task
+	// errors embedded in returned errors are redacted with them (d.Out is
+	// already redacted, errors are not).
+	secretVals []string
+}
+
+func (r *runner) setSecrets(svcSecrets map[string]map[string]string) {
+	for _, m := range svcSecrets {
+		for _, v := range m {
+			r.secretVals = append(r.secretVals, v)
+		}
+	}
+}
+
+// redact masks secret values in remote output before it joins an error.
+func (r *runner) redact(s string) string {
+	if len(r.secretVals) == 0 || s == "" {
+		return s
+	}
+	var b bytes.Buffer
+	w := secrets.NewRedactor(&b, r.secretVals...)
+	_, _ = w.Write([]byte(s))
+	_ = w.Flush()
+	return b.String()
 }
 
 func newRunner(d *plan.Deploy) *runner {
@@ -179,6 +204,7 @@ func (Runtime) Deploy(ctx context.Context, d *plan.Deploy) (_ *release.Release, 
 	if err != nil {
 		return nil, err
 	}
+	r.setSecrets(svcSecrets)
 	generation := start.Format("20060102T150405Z") + "-" + d.Version
 	genDir := release.SecretsDir(d.App, d.Destination, generation)
 
@@ -407,7 +433,7 @@ func (r *runner) deployStack(ctx context.Context, file, stack string, prune, aut
 	defer cancel()
 	var buf bytes.Buffer
 	if err := r.h.Run(dctx, remote.Cmd{Script: stackDeployCmd(r.dir, file, stack, prune, auth, true) + " 2>&1", Stdout: &buf}); err != nil {
-		return fmt.Errorf("docker stack deploy %s: %w\n%s%s", stack, err, tailLines(buf.String(), 15), r.diagnose(context.WithoutCancel(ctx), stack, nil))
+		return fmt.Errorf("docker stack deploy %s: %w\n%s%s", stack, err, r.redact(tailLines(buf.String(), 15)), r.diagnose(context.WithoutCancel(ctx), stack, nil))
 	}
 	return r.waitConverged(ctx, stack, before)
 }
@@ -502,7 +528,7 @@ func (r *runner) waitConverged(ctx context.Context, stack string, before map[str
 		if len(failed) > 0 {
 			var msgs []string
 			for _, n := range failed {
-				msgs = append(msgs, n+": "+after[n].UpdateState+" "+after[n].UpdateMessage)
+				msgs = append(msgs, r.redact(n+": "+after[n].UpdateState+" "+after[n].UpdateMessage))
 			}
 			return fmt.Errorf("update failed and Swarm rolled back (the previous version keeps serving):\n%s%s", strings.Join(msgs, "\n"), r.diagnose(ctx, stack, failed))
 		}
@@ -531,7 +557,7 @@ func (r *runner) diagnose(ctx context.Context, stack string, services []string) 
 	if err != nil || strings.TrimSpace(out) == "" {
 		return ""
 	}
-	return "\ntasks (docker service ps --no-trunc):\n" + out
+	return "\ntasks (docker service ps --no-trunc):\n" + r.redact(out)
 }
 
 // routes points each proxied Service's Proxy route at its stable Swarm name
@@ -741,7 +767,7 @@ func (r *runner) runJob(ctx context.Context, c *compiled, relDir string, sp serv
 
 	fail := func(err error) error {
 		logs, _ := r.h.Output(context.WithoutCancel(ctx), remote.Cmd{Script: "docker service logs --raw " + remote.Quote(svc) + " 2>&1 | tail -n 30"})
-		return fmt.Errorf("release command for %s failed, aborting (the previous version keeps running): %w\n%s", sp.Name, err, logs)
+		return fmt.Errorf("release command for %s failed, aborting (the previous version keeps running): %w\n%s", sp.Name, err, r.redact(logs))
 	}
 	if err := r.h.Run(ctx, remote.Cmd{Script: stackDeployCmd(r.dir, f, rs, false, auth, false) + " >/dev/null"}); err != nil {
 		return fail(err)
@@ -915,6 +941,7 @@ func (Runtime) Rollback(ctx context.Context, d *plan.Deploy, version string) (_ 
 	start := now()
 	h := d.Servers[0].Host
 	r := newRunner(d)
+	r.setSecrets(d.ServiceSecrets)
 	relDir := release.Dir(d.App, d.Destination, version)
 	stackFile := path.Join(relDir, "compose.yaml")
 

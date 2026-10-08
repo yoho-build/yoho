@@ -39,7 +39,8 @@ func TestDiffFirstDeploy(t *testing.T) {
 
 func TestDiffComparesCurrent(t *testing.T) {
 	withRoot(t)
-	h := newFake(newSim())
+	sim := newSim()
+	h := newFake(sim)
 	d := testDeploy(t, h, nil)
 	key := bytesKey()
 	writeHMAC(t, key)
@@ -57,6 +58,7 @@ func TestDiffComparesCurrent(t *testing.T) {
 		t.Fatal(err)
 	}
 	putCurrent(t, c.YAML)
+	liveAll(sim)
 
 	ctx := context.Background()
 	changes, err := Runtime{}.Diff(ctx, d)

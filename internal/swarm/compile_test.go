@@ -193,8 +193,8 @@ func TestCompileKeepsUserPlacement(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(c.YAML), "node.labels.db == true") || strings.Contains(string(c.YAML), "node-1") {
-		t.Errorf("user placement must win:\n%s", c.YAML)
+	if !strings.Contains(string(c.YAML), "node.labels.db == true") || !strings.Contains(string(c.YAML), "node.hostname == node-1") {
+		t.Errorf("user constraint is kept and the Stateful pin is added:\n%s", c.YAML)
 	}
 }
 

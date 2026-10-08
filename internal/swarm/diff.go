@@ -3,16 +3,19 @@ package swarm
 import (
 	"context"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
 	"path"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 
 	"go.yaml.in/yaml/v3"
 
+	"github.com/yoho-build/yoho/internal/config"
 	"github.com/yoho-build/yoho/internal/deploy"
 	"github.com/yoho-build/yoho/internal/plan"
 	"github.com/yoho-build/yoho/internal/proxy"
@@ -65,7 +68,16 @@ func (Runtime) Diff(ctx context.Context, d *plan.Deploy) ([]plan.Change, error) 
 	if curYAML == nil {
 		return firstChanges(d, pending), nil
 	}
-	return compareStack(d, curYAML, c, pending)
+	curPlan, err := currentPlan(ctx, h, d.App, d.Destination)
+	if err != nil {
+		return nil, err
+	}
+	// One remote call: the live Services of the stack.
+	live, err := newRunner(d).serviceStatus(ctx, c.Plan.Stack)
+	if err != nil {
+		return nil, err
+	}
+	return compareStack(d, curYAML, c, pending, curPlan, live)
 }
 
 // compileDesired compiles the stack the way Deploy would, using secret
@@ -109,7 +121,10 @@ func firstChanges(d *plan.Deploy, pending map[string][]string) []plan.Change {
 	return out
 }
 
-func compareStack(d *plan.Deploy, curYAML []byte, c *compiled, pending map[string][]string) ([]plan.Change, error) {
+// compareStack compares the retained Release (stack file and plan) and the
+// live Swarm Services with the desired stack. live is keyed by Swarm service
+// name (<stack>_<service>); nil skips the live check.
+func compareStack(d *plan.Deploy, curYAML []byte, c *compiled, pending map[string][]string, curPlan *stackPlan, live map[string]svcStatus) ([]plan.Change, error) {
 	var curDoc map[string]any
 	if err := yaml.Unmarshal(curYAML, &curDoc); err != nil {
 		return nil, fmt.Errorf("parse current stack: %w", err)
@@ -165,6 +180,18 @@ func compareStack(d *plan.Deploy, curYAML []byte, c *compiled, pending map[strin
 					ch.Downtime = true
 				}
 			}
+			// Drift: the stack or a Service was removed or scaled out of band.
+			if live != nil {
+				if missing, reason := liveDrift(live, c.Plan.Stack, byName[name]); reason != "" {
+					ch.Reasons = append(ch.Reasons, reason)
+					switch {
+					case missing && len(reasons) == 0:
+						ch.Action = plan.ActionCreate
+					case ch.Action == plan.ActionNoop:
+						ch.Action = plan.ActionUpdate
+					}
+				}
+			}
 			out = append(out, ch)
 		}
 		if inC && onProxyNet(curS) {
@@ -188,9 +215,78 @@ func compareStack(d *plan.Deploy, curYAML []byte, c *compiled, pending map[strin
 			out = append(out, plan.Change{Kind: "route", Name: route, Action: plan.ActionCreate})
 		case curRoute[name] && !desRoute[name]:
 			out = append(out, plan.Change{Kind: "route", Name: route, Action: plan.ActionDelete})
+		default:
+			// Same route on both sides: compare the retained options.
+			if curPlan == nil {
+				continue
+			}
+			for _, sp := range curPlan.Services {
+				if sp.Name != name || sp.Proxy == nil {
+					continue
+				}
+				if rs := proxyDiff(sp.Proxy, byName[name].Proxy); len(rs) > 0 {
+					out = append(out, plan.Change{Kind: "route", Name: route, Action: plan.ActionUpdate, Reasons: rs})
+				}
+			}
 		}
 	}
 	return out, nil
+}
+
+// liveDrift reports a Service that is gone from the Swarm or scaled away
+// from its planned replica count. Running-but-unhealthy tasks are not drift.
+func liveDrift(live map[string]svcStatus, stack string, sp servicePlan) (missing bool, reason string) {
+	st, ok := live[stack+"_"+sp.Name]
+	if !ok {
+		return true, "missing from the Swarm"
+	}
+	if sp.Global {
+		return false, ""
+	}
+	_, want, ok := strings.Cut(strings.Fields(st.Replicas + " ")[0], "/")
+	if !ok {
+		return false, ""
+	}
+	if n, err := strconv.Atoi(want); err == nil && n != sp.Replicas {
+		return false, fmt.Sprintf("replicas %d in the Swarm, want %d", n, sp.Replicas)
+	}
+	return false, ""
+}
+
+// proxyDiff lists the x-yoho.proxy options that differ (defaults applied).
+func proxyDiff(old, des *config.ServiceProxy) []string {
+	if des == nil {
+		return nil
+	}
+	if old == nil {
+		old = &config.ServiceProxy{}
+	}
+	a, b := proxyMap(old), proxyMap(des)
+	var out []string
+	for _, k := range sortedKeys(unionKeys(a, b)) {
+		if canon(a[k]) != canon(b[k]) {
+			out = append(out, fmt.Sprintf("proxy %s %s → %s", k, asString(a[k]), asString(b[k])))
+		}
+	}
+	return out
+}
+
+func proxyMap(p *config.ServiceProxy) map[string]any {
+	b, _ := json.Marshal(p)
+	m := map[string]any{}
+	_ = json.Unmarshal(b, &m)
+	return m
+}
+
+func unionKeys(a, b map[string]any) map[string]bool {
+	out := map[string]bool{}
+	for k := range a {
+		out[k] = true
+	}
+	for k := range b {
+		out[k] = true
+	}
+	return out
 }
 
 // asDeployed returns the Service as `docker stack deploy` would read it
@@ -229,6 +325,10 @@ func diffReasons(cur, des map[string]any) ([]string, error) {
 	}
 	var reasons, cfg []string
 	secretsChanged := false
+	// The secrets_as_env fingerprint label is how a rotation shows up.
+	if la, lb := dropSecretsLabel(a), dropSecretsLabel(b); la != lb {
+		secretsChanged = true
+	}
 	for _, k := range sortedKeys(keys) {
 		if canon(a[k]) == canon(b[k]) {
 			continue
@@ -249,6 +349,15 @@ func diffReasons(cur, des map[string]any) ([]string, error) {
 		reasons = append(reasons, "config changed: "+strings.Join(cfg, ", "))
 	}
 	return reasons, nil
+}
+
+// dropSecretsLabel removes the secrets fingerprint label from a Service map
+// and returns its value.
+func dropSecretsLabel(s map[string]any) string {
+	l := mapOf(s, "labels")
+	v, _ := l[deploy.LabelSecrets].(string)
+	delete(l, deploy.LabelSecrets)
+	return v
 }
 
 func normService(s map[string]any) (map[string]any, error) {
