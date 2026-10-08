@@ -85,6 +85,10 @@ type Release struct {
 	// a tag; upstream tags move), so rollback re-points Yoho-built tags at
 	// these IDs and image pruning keeps them.
 	ImageIDs map[string]string `json:"image_ids,omitempty"`
+	// Services whose image Yoho built for this Release (possibly none: an
+	// empty list, not absent). Only those are re-tagged on rollback. Absent
+	// in records from before this field; rollback then goes by image name.
+	Built []string `json:"built"`
 	// Secrets generation directory name used by this Release.
 	SecretsGeneration string `json:"secrets_generation"`
 	// Secret name -> fingerprint (HMAC-SHA256 truncated, keyed per Destination)

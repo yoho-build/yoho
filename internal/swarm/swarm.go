@@ -188,6 +188,13 @@ func (Runtime) Deploy(ctx context.Context, d *plan.Deploy) (_ *release.Release, 
 	if err := h.Run(ctx, remote.Cmd{Script: "set -eu\numask 077\nmkdir -p " + remote.QuoteArgs(r.dir, path.Join(r.dir, "releases"), path.Join(r.dir, "secrets"), path.Join(r.dir, "generated"), relDir)}); err != nil {
 		return nil, fmt.Errorf("prepare %s: %w", r.dir, err)
 	}
+	// Recovery after a failed attempt restores the current Release, so
+	// learn it now, before anything changes: guessing wrong after a
+	// transient SSH failure would redeploy the wrong Release.
+	liveVersion, err := currentVersion(ctx, h, r.dir)
+	if err != nil {
+		return nil, fmt.Errorf("cannot tell which Release is current on %s (nothing was changed): %w", mgr.Name, err)
+	}
 	key, err := deploy.EnsureHMACKey(ctx, h, r.dir)
 	if err != nil {
 		return nil, err
@@ -230,10 +237,8 @@ func (Runtime) Deploy(ctx context.Context, d *plan.Deploy) (_ *release.Release, 
 	// What runs before this attempt is the current Release, which may not be
 	// the Version being (re)deployed.
 	liveDir := relDir
-	if out, cerr := h.Output(ctx, remote.Cmd{Script: "readlink " + remote.Quote(path.Join(r.dir, "current")) + " 2>/dev/null || true"}); cerr == nil {
-		if v := path.Base(strings.TrimSpace(out)); v != "" && v != "." && v != "/" {
-			liveDir = release.Dir(d.App, d.Destination, v)
-		}
+	if liveVersion != "" {
+		liveDir = release.Dir(d.App, d.Destination, liveVersion)
 	}
 	committed, stackTouched := false, false
 	if err := h.WriteFile(ctx, stackFile, c.YAML, 0o600, false); err != nil {
@@ -257,10 +262,12 @@ func (Runtime) Deploy(ctx context.Context, d *plan.Deploy) (_ *release.Release, 
 			rel.Images[sp.Name] = sp.Image
 		}
 	}
+	rel.Built = deploy.BuiltServices(d.Built, rel.Images)
 	defer func() {
 		switch {
 		case err == nil || committed:
 		case prevFiles != nil:
+			r.resetCurrent(context.WithoutCancel(ctx), liveVersion, d.Version)
 			restored := deploy.RestoreRelease(ctx, h, relDir, prevFiles, r.logf)
 			if stackTouched {
 				// Only the record of relDir was rewritten; another
@@ -268,6 +275,7 @@ func (Runtime) Deploy(ctx context.Context, d *plan.Deploy) (_ *release.Release, 
 				r.restoreStack(context.WithoutCancel(ctx), d, liveDir, restored || liveDir != relDir, c.Plan)
 			}
 		default:
+			r.resetCurrent(context.WithoutCancel(ctx), liveVersion, d.Version)
 			_ = deploy.WriteJSON(context.WithoutCancel(ctx), h, path.Join(relDir, "release.json"), rel)
 		}
 	}()
@@ -304,6 +312,42 @@ func (Runtime) Deploy(ctx context.Context, d *plan.Deploy) (_ *release.Release, 
 	}
 	r.logf("deployed %s in %ds", d.Version, secs)
 	return rel, nil
+}
+
+// currentVersion returns the Version `current` points at, or "" when there
+// is no current Release yet. Only a failed lookup is an error.
+func currentVersion(ctx context.Context, h remote.Host, dir string) (string, error) {
+	cur := remote.Quote(path.Join(dir, "current"))
+	out, err := h.Output(ctx, remote.Cmd{Script: "if [ -L " + cur + " ]; then readlink " + cur + "; fi"})
+	if err != nil {
+		return "", err
+	}
+	v := path.Base(strings.TrimSpace(out))
+	if v == "." || v == "/" {
+		return "", nil
+	}
+	return v, nil
+}
+
+// resetCurrent undoes a `current` switch that finish may have made before a
+// failure (or a dropped connection that hid its success): current goes back
+// to the Release that was current, or is removed when there was none. It
+// only touches a link that points at the failed Version.
+func (r *runner) resetCurrent(ctx context.Context, prev, failed string) {
+	if prev == failed {
+		return
+	}
+	cur := remote.Quote(path.Join(r.dir, "current"))
+	script := "set -eu\nif [ \"$(readlink " + cur + " 2>/dev/null || true)\" = " + remote.Quote("releases/"+failed) + " ]; then\n"
+	if prev != "" {
+		script += "  ln -sfn " + remote.Quote("releases/"+prev) + " " + cur + "\n"
+	} else {
+		script += "  rm -f " + cur + "\n"
+	}
+	script += "fi"
+	if err := r.h.Run(ctx, remote.Cmd{Script: script}); err != nil {
+		r.logf("warning: could not reset the current Release to %q: %v", prev, err)
+	}
 }
 
 // partialMarker in a Release directory says the live stack may not match

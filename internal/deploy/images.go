@@ -3,6 +3,7 @@ package deploy
 import (
 	"context"
 	"fmt"
+	"slices"
 	"strings"
 
 	"github.com/yoho-build/yoho/internal/build"
@@ -79,7 +80,7 @@ func imageIDScript(ref string) string {
 // dangling record with another ID, so the re-tag can fail there; failing
 // beats running another build. Other images (postgres:17, even deployed with
 // --version 17) are not Yoho's to retag; a moved tag is only a warning.
-func (r *runner) pinImages(ctx context.Context, images, ids map[string]string, version string) error {
+func (r *runner) pinImages(ctx context.Context, images, ids map[string]string, built []string, version string) error {
 	for _, svc := range sortedKeys(ids) {
 		ref, id := images[svc], ids[svc]
 		if ref == "" || strings.Contains(ref, "@") {
@@ -92,7 +93,8 @@ func (r *runner) pinImages(ctx context.Context, images, ids map[string]string, v
 		if strings.TrimSpace(cur) == id {
 			continue
 		}
-		if !r.yohoImage(ref, svc, version) {
+		// built == nil is a record from before Release.Built: name shape only.
+		if (built != nil && !slices.Contains(built, svc)) || !r.yohoImage(ref, svc, version) {
 			r.logf("warning: %s now points at a different image than when %s was deployed; rolling back with the current one", ref, version)
 			continue
 		}
@@ -138,4 +140,18 @@ func shortID(id string) string {
 		id = id[:12]
 	}
 	return id
+}
+
+// BuiltServices returns the Services of built that have a deployed image,
+// sorted and never nil (an empty list means "built nothing", unlike the
+// absent field of older Release records).
+func BuiltServices(built []string, images map[string]string) []string {
+	out := []string{}
+	for _, s := range built {
+		if images[s] != "" {
+			out = append(out, s)
+		}
+	}
+	slices.Sort(out)
+	return out
 }

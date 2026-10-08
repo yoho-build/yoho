@@ -34,6 +34,9 @@ type Deploy struct {
 	Project *types.Project
 	// x-yoho per Service name.
 	Ext map[string]config.ServiceExt
+	// Services Yoho built (or would build) an image for in this Release;
+	// the others run pulled images. Recorded in Release.Built.
+	Built []string
 
 	// Resolved secret values per Service: Service -> container name -> value.
 	// Only what each Service declared in x-yoho.secrets.

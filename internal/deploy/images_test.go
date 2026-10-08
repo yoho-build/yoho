@@ -16,6 +16,7 @@ func builtWeb(t *testing.T, d *plan.Deploy) *plan.Deploy {
 	s := d.Project.Services["web"]
 	s.Image = "yoho/shop-production-web:" + d.Version
 	d.Project.Services["web"] = s
+	d.Built = []string{"web"}
 	return d
 }
 
@@ -40,7 +41,7 @@ func TestYohoImageOnlyMatchesYohoNames(t *testing.T) {
 		{r, "yoho/shop-production-web@sha256:abc", "web", false},
 		{reg, "ghcr.io/acme/shop-production-web:17", "web", true},
 		{reg, "ghcr.io/acme/shop-web:17", "web", true},
-		{reg, "yoho/shop-production-web:17", "web", true}, // deployed before the registry
+		{reg, "yoho/shop-production-web:17", "web", true},          // deployed before the registry
 		{reg, "ghcr.io/other/shop-production-web:17", "web", true}, // any prefix: shape and tag decide
 		{reg, "ghcr.io/other/shop-production-web:16", "web", false},
 		{reg, "ghcr.io/acme/postgres:17", "db", false},
@@ -60,7 +61,7 @@ func TestPinImagesLeavesThirdPartyTag(t *testing.T) {
 		return "", nil
 	}}
 	r := &runner{h: h, app: "shop", dest: "production", out: &strings.Builder{}}
-	err := r.pinImages(context.Background(), map[string]string{"db": "postgres:17"}, map[string]string{"db": "sha256:pg1"}, "17")
+	err := r.pinImages(context.Background(), map[string]string{"db": "postgres:17"}, map[string]string{"db": "sha256:pg1"}, nil, "17")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -100,5 +101,35 @@ func TestImageIDsPreferContainers(t *testing.T) {
 	}
 	if strings.Contains(h.all(), "'yoho/shop-production-web:v1'") {
 		t.Error("tag inspected although a container runs the Service")
+	}
+}
+
+// A Service Yoho did not build is never re-tagged, even when its image is
+// named like a built one (vendor/shop-web:v1 for App shop, Service web).
+func TestPinImagesSkipsUnbuiltLookalike(t *testing.T) {
+	h := &dockerHost{local: &remote.Local{}, respond: func(s string) (string, error) {
+		if strings.Contains(s, "docker image inspect -f '{{.Id}}'") {
+			return "sha256:moved", nil
+		}
+		return "", nil
+	}}
+	r := &runner{h: h, app: "shop", dest: "production", out: &strings.Builder{}}
+	images, ids := map[string]string{"web": "vendor/shop-web:v1"}, map[string]string{"web": "sha256:old"}
+	if err := r.pinImages(context.Background(), images, ids, []string{}, "v1"); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(h.all(), "docker tag") {
+		t.Fatalf("third-party image retagged:\n%s", h.all())
+	}
+	// Built by Yoho: retagged. Unknown (older record): name shape decides.
+	for _, built := range [][]string{{"web"}, nil} {
+		h2 := &dockerHost{local: &remote.Local{}, respond: h.respond}
+		r.h = h2
+		if err := r.pinImages(context.Background(), images, ids, built, "v1"); err != nil {
+			t.Fatal(err)
+		}
+		if built != nil && !strings.Contains(h2.all(), "docker tag") {
+			t.Fatalf("built image not retagged: %v", built)
+		}
 	}
 }

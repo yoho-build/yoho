@@ -180,6 +180,7 @@ func (c Compose) Deploy(ctx context.Context, d *plan.Deploy) (_ *release.Release
 			rel.Images[sp.Name] = sp.Image
 		}
 	}
+	rel.Built = BuiltServices(d.Built, rel.Images)
 	defer func() {
 		switch {
 		case err == nil || committed:
@@ -367,7 +368,7 @@ func (c Compose) Rollback(ctx context.Context, d *plan.Deploy, version string) (
 		return nil, err
 	}
 	r.logf("rolling back to %s (volumes, data and migrations are not reverted)", version)
-	if err := r.pinImages(ctx, rel.Images, rel.ImageIDs, version); err != nil {
+	if err := r.pinImages(ctx, rel.Images, rel.ImageIDs, rel.Built, version); err != nil {
 		return nil, err
 	}
 	if needsProxy(plans) {

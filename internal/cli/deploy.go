@@ -328,13 +328,17 @@ func (a *app) newDeploy(s *session, images map[string]string, forPlan bool) (*pl
 		out = s.store.Redactor(a.ui.Progress())
 	}
 	composefile.StripBuild(proj, images)
+	built := sortedKeys(images)
+	if built == nil {
+		built = []string{}
+	}
 	svcSecrets, refs, err := serviceSecrets(s.store, s.r)
 	if err != nil {
 		return nil, err
 	}
 	return &plan.Deploy{
 		App: a.cfg.App, Destination: a.destName, Version: s.ver, Performer: performer(),
-		Servers: s.hosts, Project: proj, Ext: s.r.Ext,
+		Servers: s.hosts, Project: proj, Ext: s.r.Ext, Built: built,
 		ServiceSecrets: svcSecrets, SecretRefs: refs, Env: a.dest.Env, Registry: a.cfg.Registry,
 		Proxy: a.proxyConfig(), RetainReleases: a.cfg.RetainReleases, Hook: s.hook,
 		Out: out,
