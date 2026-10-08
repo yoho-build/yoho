@@ -479,12 +479,17 @@ func parseStatus(out string) map[string]svcStatus {
 }
 
 // replicasReady parses `docker service ls` replicas: "running/desired",
-// optionally followed by "(... completed)" for jobs.
+// optionally followed by "(done/total completed)" for jobs. A job is ready
+// only when every task has completed ("0/1 (0/1 completed)" is still
+// running, or failed).
 func replicasReady(s string) bool {
-	if strings.Contains(s, "completed") {
-		return true
+	head, rest, _ := strings.Cut(s, " ")
+	if strings.Contains(rest, "completed") {
+		inner := strings.TrimSpace(strings.TrimSuffix(strings.TrimPrefix(strings.TrimSpace(rest), "("), ")"))
+		inner = strings.TrimSpace(strings.TrimSuffix(inner, "completed"))
+		done, total, ok := strings.Cut(inner, "/")
+		return ok && done == total && total != "" && total != "0"
 	}
-	head, _, _ := strings.Cut(s, " ")
 	run, want, ok := strings.Cut(head, "/")
 	return ok && run == want
 }

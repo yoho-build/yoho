@@ -138,13 +138,29 @@ func BootWith(ctx context.Context, host remote.Host, cfg config.ProxyConfig, out
 	b.WriteString("set -eu\n")
 	// Pull first so an existing Proxy is only down for the swap itself.
 	b.WriteString("docker image inspect " + remote.Quote(image) + " >/dev/null 2>&1 || docker pull -q " + remote.Quote(image) + " >/dev/null\n")
+	run := "docker run -d --label " + remote.Quote(configLabel+"="+want) + " " + remote.QuoteArgs(args...) + " >/dev/null"
 	if exists {
 		fmt.Fprintf(out, "[%s] warning: proxy configuration changed, recreating %s (brief proxy downtime)\n", host.Name(), ContainerName)
-		b.WriteString("docker rm -f " + ContainerName + " >/dev/null\n")
+		// Keep the old container (stopped, renamed) until the new one runs,
+		// so a failed start (port taken, bad option) restores the old Proxy.
+		// Routes live in the state volume, which both containers share.
+		old := ContainerName + "-old"
+		b.WriteString("docker rm -f " + old + " >/dev/null 2>&1 || true\n")
+		b.WriteString("docker stop " + ContainerName + " >/dev/null 2>&1 || true\n")
+		b.WriteString("docker rename " + ContainerName + " " + old + "\n")
+		b.WriteString("if " + run + "; then\n")
+		b.WriteString("  docker rm -f " + old + " >/dev/null\n")
+		b.WriteString("else\n")
+		b.WriteString("  docker rm -f " + ContainerName + " >/dev/null 2>&1 || true\n")
+		b.WriteString("  docker rename " + old + " " + ContainerName + "\n")
+		b.WriteString("  docker start " + ContainerName + " >/dev/null\n")
+		b.WriteString("  echo 'new proxy failed to start; the previous proxy was restored' >&2\n")
+		b.WriteString("  exit 1\n")
+		b.WriteString("fi\n")
 	} else {
 		fmt.Fprintf(out, "[%s] booting proxy %s (%s)\n", host.Name(), ContainerName, image)
+		b.WriteString(run + "\n")
 	}
-	b.WriteString("docker run -d --label " + remote.Quote(configLabel+"="+want) + " " + remote.QuoteArgs(args...) + " >/dev/null\n")
 	if err := host.Run(ctx, remote.Cmd{Script: b.String()}); err != nil {
 		return fmt.Errorf("boot proxy: %w", err)
 	}

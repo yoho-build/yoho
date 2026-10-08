@@ -178,7 +178,7 @@ func TestSwarmRestoreScalesService(t *testing.T) {
 	}
 	inspect := h.index("docker service inspect -f '{{.Spec.Mode.Replicated.Replicas}}' 'yoho-shop-production_db'")
 	down := h.index("docker service scale 'yoho-shop-production_db=0'")
-	wipe := h.index("find /data -mindepth 1 -delete")
+	wipe := h.index("-exec rm -rf {} +")
 	up := h.index("docker service scale 'yoho-shop-production_db=1'")
 	if !(inspect >= 0 && inspect < down && down < wipe && wipe < up) {
 		t.Fatalf("bad order inspect=%d down=%d wipe=%d up=%d\n%s", inspect, down, wipe, up, all)
@@ -441,14 +441,14 @@ func TestRestoreArchive(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	stop, wipe, start, post := h.index(" stop 'db'"), h.index("find /data -mindepth 1 -delete"), h.index(" start 'db'"), h.index("/hooks/post-restore")
+	stop, wipe, start, post := h.index(" stop 'db'"), h.index("-exec rm -rf {} +"), h.index(" start 'db'"), h.index("/hooks/post-restore")
 	if !(stop >= 0 && stop < wipe && wipe < start && start < post) {
 		t.Fatalf("bad order\n%s", h.scripts())
 	}
 	if strings.Contains(h.scripts(), secretPW) {
 		t.Fatal("password in script")
 	}
-	if len(res.DumpFiles) != 1 || res.StagingDir == "" || h.index("rm -rf ") >= 0 {
+	if len(res.DumpFiles) != 1 || res.StagingDir == "" || h.index("rm -rf '/var/lib") >= 0 {
 		t.Fatalf("dumps must be kept: %+v", res)
 	}
 }
@@ -709,7 +709,7 @@ func TestRestoreWritesGeneratedSecretsBeforeStart(t *testing.T) {
 	if strings.Contains(out.String(), "backup-secret-value") || strings.Contains(out.String(), "old-server-value") || strings.Contains(h.scripts(), "backup-secret-value") {
 		t.Fatal("secret value was logged")
 	}
-	wipe := h.index("find /data -mindepth 1 -delete")
+	wipe := h.index("-exec rm -rf {} +")
 	write := h.index("#writefile " + dst)
 	start := h.index(" start 'db'")
 	if !(wipe >= 0 && wipe < write && write < start) {
@@ -950,5 +950,72 @@ func TestRunHandsStagedArchivesToDeployUser(t *testing.T) {
 	s := h.cmds[i].Script
 	if !strings.Contains(s, `chown "$2:$3"`) || !strings.Contains(s, `"$(id -u)" "$(id -g)"`) || !strings.Contains(s, "umask 077") {
 		t.Errorf("archive must stay 0600 and be chowned to the deploy user:\n%s", s)
+	}
+}
+
+func TestRestoreVolumeScripts(t *testing.T) {
+	for _, sh := range []string{verifyVolumeSh, restoreVolumeSh} {
+		if out, err := exec.Command("sh", "-n", "-c", sh).CombinedOutput(); err != nil {
+			t.Errorf("sh -n: %v %s", err, out)
+		}
+	}
+	if strings.Contains(restoreVolumeSh, "-mindepth 1 -delete") {
+		t.Error("restore must not wipe the volume before extraction succeeded")
+	}
+	if strings.Index(restoreVolumeSh, "tar -C") > strings.Index(restoreVolumeSh, "rm -rf {} +") {
+		t.Error("extraction must happen before the live data is removed")
+	}
+}
+
+func TestRestoreCorruptArchiveChangesNothing(t *testing.T) {
+	h := &fakeHost{}
+	h.respond = dockerResponder(func(s string) (string, error) {
+		if strings.Contains(s, "volume ls") {
+			return "yoho-shop-production_pgdata\n", nil
+		}
+		if strings.Contains(s, "tar -tzf") && !strings.Contains(s, "-xzf") {
+			return "", errors.New("gzip: unexpected end of file")
+		}
+		return "", nil
+	})
+	data := "/var/lib/yoho/backups/shop/production/restore-20261008T030000Z/data"
+	mj, _ := json.Marshal(Manifest{App: "shop", Destination: "production", Services: map[string]ManifestService{
+		"db": {Volumes: map[string]string{"pgdata": "db-pgdata.tar.gz"}},
+	}})
+	h.files = map[string][]byte{data + "/manifest.json": mj}
+	_, err := Restore(context.Background(), RestoreOptions{
+		App: "shop", Destination: "production", Host: h, Confirm: true,
+		ID:       "yoho-shop-production-20261001T030000Z.tar.gz",
+		Target:   config.BackupTarget{Type: "archive", Repository: "/srv/b"},
+		Services: map[string]config.ServiceBackup{"db": {Volumes: []string{"pgdata"}}},
+		Now:      func() time.Time { return time.Date(2026, 10, 8, 3, 0, 0, 0, time.UTC) },
+	})
+	if err == nil || !strings.Contains(err.Error(), "nothing was changed") {
+		t.Fatalf("err = %v", err)
+	}
+	all := h.scripts()
+	if strings.Contains(all, " stop ") || strings.Contains(all, "rm -rf {} +") {
+		t.Errorf("corrupt archive must not stop Services or wipe data:\n%s", all)
+	}
+}
+
+func TestSwarmStopFailureScalesBack(t *testing.T) {
+	h := &fakeHost{}
+	h.respond = func(_ context.Context, s string) (string, error) {
+		if strings.Contains(s, "service inspect") {
+			return "2", nil
+		}
+		if strings.Contains(s, "service scale 'p_b=0'") {
+			return "", errors.New("boom")
+		}
+		return "", nil
+	}
+	_, err := stopServices(context.Background(), h, "p", "swarm", []string{"a", "b"})
+	if err == nil {
+		t.Fatal("want error")
+	}
+	all := h.scripts()
+	if !strings.Contains(all, "service scale 'p_a=2'") || !strings.Contains(all, "service scale 'p_b=2'") {
+		t.Errorf("earlier Services not scaled back:\n%s", all)
 	}
 }

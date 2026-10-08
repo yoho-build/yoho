@@ -216,6 +216,14 @@ func Restore(ctx context.Context, o RestoreOptions) (res *RestoreResult, err err
 		}
 	}
 
+	// Check every archive before anything is stopped or wiped, so a
+	// truncated or corrupt one fails the restore with the App still running.
+	for _, v := range vols {
+		if err := o.Host.Run(ctx, remote.Cmd{Script: volumeScript(v.docker, data, verifyVolumeSh, v.file)}); err != nil {
+			return nil, fmt.Errorf("Backup archive for volume %s of %s is unreadable, nothing was changed: %w", v.key, v.svc, err)
+		}
+	}
+
 	var replicas map[string]int
 	if len(withVolumes) > 0 {
 		logf("stopping %s", strings.Join(withVolumes, ", "))
@@ -225,9 +233,7 @@ func Restore(ctx context.Context, o RestoreOptions) (res *RestoreResult, err err
 		}
 		for _, v := range vols {
 			logf("restoring volume %s of %s", v.key, v.svc)
-			script := "set -eu; docker run --rm --network none -v " + remote.Quote(v.docker+":/data") + " -v " + remote.Quote(data+":/in:ro") +
-				" " + remote.Quote(HelperImage) + " sh -c " +
-				remote.Quote(`set -eu; find /data -mindepth 1 -delete; tar -C /data -xzf "/in/$1"`) + " sh " + remote.Quote(v.file)
+			script := volumeScript(v.docker, data, restoreVolumeSh, v.file)
 			if err := o.Host.Run(ctx, remote.Cmd{Script: script}); err != nil {
 				keep = true
 				return nil, fmt.Errorf("restore volume %s of %s (Services left stopped, Backup kept at %s): %w", v.key, v.svc, data, err)
@@ -295,6 +301,32 @@ func Restore(ctx context.Context, o RestoreOptions) (res *RestoreResult, err err
 	return res, nil
 }
 
+const (
+	verifyVolumeSh = `set -eu; tar -tzf "/in/$1" >/dev/null`
+	// restoreVolumeSh extracts into a scratch directory inside the volume
+	// first and only then replaces the live data, so a failing tar (corrupt
+	// archive, disk full) leaves the volume as it was. The archive's "./"
+	// entry sets the scratch directory's owner and mode, which are copied to
+	// the volume root.
+	restoreVolumeSh = `set -eu
+t=/data/.yoho-restore-tmp
+trap 'rm -rf "$t"' EXIT
+rm -rf "$t"; mkdir "$t"
+tar -tzf "/in/$1" >/dev/null
+tar -C "$t" -xzf "/in/$1"
+own=$(stat -c %u:%g "$t"); mode=$(stat -c %a "$t")
+find /data -mindepth 1 -maxdepth 1 ! -name .yoho-restore-tmp -exec rm -rf {} +
+find "$t" -mindepth 1 -maxdepth 1 -exec mv {} /data/ \;
+chown "$own" /data; chmod "$mode" /data`
+)
+
+// volumeScript runs sh script (with file as $1) in the helper image with the
+// volume at /data and the staged Backup at /in.
+func volumeScript(volume, data, sh, file string) string {
+	return "set -eu; docker run --rm --network none -v " + remote.Quote(volume+":/data") + " -v " + remote.Quote(data+":/in:ro") +
+		" " + remote.Quote(HelperImage) + " sh -c " + remote.Quote(sh) + " sh " + remote.Quote(file)
+}
+
 // scaleAttempts is how many seconds restore waits for a Swarm Service to
 // reach the requested number of running tasks.
 const scaleAttempts = 180
@@ -311,6 +343,7 @@ func stopServices(ctx context.Context, h remote.Host, project, runtime string, s
 		return nil, nil
 	}
 	prev := map[string]int{}
+	var stopped []string
 	for _, svc := range svcs {
 		name := project + "_" + svc
 		out, err := h.Output(ctx, remote.Cmd{Script: "docker service inspect -f '{{.Spec.Mode.Replicated.Replicas}}' " + remote.Quote(name)})
@@ -323,8 +356,16 @@ func stopServices(ctx context.Context, h remote.Host, project, runtime string, s
 		}
 		prev[svc] = n
 		if err := scaleService(ctx, h, name, 0); err != nil {
+			// Nothing was restored yet: put back what was already stopped.
+			rctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), cleanupTimeout)
+			defer cancel()
+			back := append(stopped, svc)
+			if rerr := startServices(rctx, h, project, runtime, back, prev); rerr != nil {
+				err = fmt.Errorf("%w (also failed to scale back %s: %v)", err, strings.Join(back, ", "), rerr)
+			}
 			return prev, err
 		}
+		stopped = append(stopped, svc)
 	}
 	return prev, nil
 }

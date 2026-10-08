@@ -375,6 +375,11 @@ func TestParseStatus(t *testing.T) {
 	if m["a"].UpdateState != "completed" || m["a"].Replicas != "2/2" || m["b"].UpdateStarted != "" || !replicasReady(m["b"].Replicas) {
 		t.Errorf("%+v", m)
 	}
+	for in, want := range map[string]bool{"0/1 (1/1 completed)": true, "0/1 (0/1 completed)": false, "0/2 (1/2 completed)": false, "1/1": true, "": false} {
+		if replicasReady(in) != want {
+			t.Errorf("replicasReady(%q) != %v", in, want)
+		}
+	}
 	if replicasReady("1/2") || !replicasReady("3/3") {
 		t.Error("replicasReady")
 	}

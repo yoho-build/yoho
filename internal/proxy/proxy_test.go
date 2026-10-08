@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"os"
+	"os/exec"
 	"strings"
 	"testing"
 	"time"
@@ -88,7 +89,7 @@ func TestBootIdempotentAndRecreate(t *testing.T) {
 	h = &fakeHost{output: func(string) string { return "old|true" }}
 	var out bytes.Buffer
 	_ = Boot(context.Background(), h, config.ProxyConfig{}, &out)
-	if all := strings.Join(h.scripts, "\n"); !strings.Contains(all, "docker rm -f yoho-proxy") || !strings.Contains(all, "docker run -d") {
+	if all := strings.Join(h.scripts, "\n"); !strings.Contains(all, "docker rename yoho-proxy yoho-proxy-old") || !strings.Contains(all, "docker run -d") || !strings.Contains(all, "docker rename yoho-proxy-old yoho-proxy") {
 		t.Errorf("changed proxy should be recreated:\n%s", all)
 	}
 	if !strings.Contains(out.String(), "downtime") {
@@ -189,5 +190,27 @@ func TestBootWithSkipNetwork(t *testing.T) {
 	}
 	if !strings.Contains(all, "docker run -d") {
 		t.Errorf("proxy not booted:\n%s", all)
+	}
+}
+
+func TestBootRecreateRestoresOldProxyOnFailure(t *testing.T) {
+	h := &fakeHost{output: func(string) string { return "old|true" }}
+	if err := Boot(context.Background(), h, config.ProxyConfig{}, nil); err != nil {
+		t.Fatal(err)
+	}
+	script := h.scripts[len(h.scripts)-1]
+	stop := strings.Index(script, "docker stop yoho-proxy")
+	ren := strings.Index(script, "docker rename yoho-proxy yoho-proxy-old")
+	run := strings.Index(script, "if docker run -d")
+	undo := strings.Index(script, "docker rename yoho-proxy-old yoho-proxy")
+	start := strings.Index(script, "docker start yoho-proxy")
+	if !(stop >= 0 && stop < ren && ren < run && run < undo && undo < start) {
+		t.Fatalf("bad recreate order:\n%s", script)
+	}
+	if i := strings.Index(script, "docker rm -f yoho-proxy >"); i >= 0 && i < run {
+		t.Errorf("old proxy removed before the new one runs:\n%s", script)
+	}
+	if out, err := exec.Command("sh", "-n", "-c", script).CombinedOutput(); err != nil {
+		t.Errorf("sh -n: %v %s", err, out)
 	}
 }
