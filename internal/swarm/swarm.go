@@ -589,7 +589,7 @@ func (r *runner) diagnose(ctx context.Context, stack string, services []string) 
 // last until the task closes them, and DNS results may be cached briefly.
 func (r *runner) routes(ctx context.Context, d *plan.Deploy, p stackPlan) error {
 	for _, sp := range p.Services {
-		if sp.Proxy == nil {
+		if !sp.proxied() {
 			continue
 		}
 		target := p.Stack + "_" + sp.Name
@@ -623,7 +623,7 @@ func (r *runner) removeStaleRoutes(ctx context.Context, d *plan.Deploy, p stackP
 	}
 	keep := map[string]bool{}
 	for _, sp := range p.Services {
-		if sp.Proxy != nil {
+		if sp.proxied() {
 			keep[sp.Name] = true
 		}
 	}

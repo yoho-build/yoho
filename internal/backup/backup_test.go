@@ -91,6 +91,8 @@ func dockerResponder(extra func(string) (string, error)) func(context.Context, s
 		switch {
 		case strings.Contains(s, " ps -q "):
 			return "cid123", nil
+		case strings.HasPrefix(s, "docker inspect -f") && strings.Contains(s, "Config.Labels"):
+			return "yoho-shop-production||true|false", nil
 		case strings.HasPrefix(s, "docker volume ls"):
 			return "yoho-shop-production_pgdata", nil
 		case strings.HasPrefix(s, "wc -c <"):
@@ -1017,5 +1019,53 @@ func TestSwarmStopFailureScalesBack(t *testing.T) {
 	all := h.scripts()
 	if !strings.Contains(all, "service scale 'p_a=2'") || !strings.Contains(all, "service scale 'p_b=2'") {
 		t.Errorf("earlier Services not scaled back:\n%s", all)
+	}
+}
+
+func TestRunRefusesForeignContainerOnVolume(t *testing.T) {
+	base := dockerResponder(nil)
+	h := &fakeHost{respond: func(ctx context.Context, s string) (string, error) {
+		switch {
+		case strings.Contains(s, "docker ps -q --filter 'volume="):
+			return "cid123\nstranger1\n", nil
+		case strings.HasPrefix(s, "docker inspect -f") && strings.Contains(s, "Config.Labels") && strings.Contains(s, "stranger1"):
+			return "other-app||true|false", nil
+		}
+		return base(ctx, s)
+	}}
+	o := baseOpts(h)
+	o.Target = config.BackupTarget{Type: "archive", Format: "zip", Repository: "/srv/backups", PasswordSecret: "PW"}
+	o.Password = secretPW
+	_, err := Run(context.Background(), o)
+	if err == nil || !strings.Contains(err.Error(), "stranger1") {
+		t.Fatalf("want refusal naming the container, got %v", err)
+	}
+	if h.index("docker pause") >= 0 || h.index("docker unpause") >= 0 {
+		t.Fatalf("touched containers:\n%s", h.scripts())
+	}
+}
+
+func TestRunLeavesAlreadyPausedContainersAlone(t *testing.T) {
+	base := dockerResponder(nil)
+	h := &fakeHost{respond: func(ctx context.Context, s string) (string, error) {
+		switch {
+		case strings.Contains(s, "docker ps -q --filter 'volume="):
+			return "cid123\nworker77\n", nil
+		case strings.HasPrefix(s, "docker inspect -f") && strings.Contains(s, "Config.Labels") && strings.Contains(s, "worker77"):
+			return "yoho-shop-production||true|true", nil
+		}
+		return base(ctx, s)
+	}}
+	o := baseOpts(h)
+	o.Target = config.BackupTarget{Type: "archive", Format: "zip", Repository: "/srv/backups", PasswordSecret: "PW"}
+	o.Password = secretPW
+	if _, err := Run(context.Background(), o); err != nil {
+		t.Fatal(err)
+	}
+	if h.index("docker pause 'worker77'") >= 0 || h.index("docker unpause 'worker77'") >= 0 {
+		t.Fatalf("touched pre-paused container:\n%s", h.scripts())
+	}
+	if h.index("docker pause 'cid123'") < 0 || h.index("docker unpause 'cid123'") < 0 {
+		t.Fatalf("Service container not paused/unpaused:\n%s", h.scripts())
 	}
 }

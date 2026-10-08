@@ -61,6 +61,12 @@ type stackPlan struct {
 	EnvFiles bool `json:"env_files,omitempty"`
 }
 
+// proxied reports whether the Service has a Proxy route: x-yoho.proxy and
+// at least one task. A replicated Service scaled to zero has no healthy
+// target, so its route is removed instead of health-gated; global mode runs
+// a task per node.
+func (sp servicePlan) proxied() bool { return sp.Proxy != nil && (sp.Global || sp.Replicas > 0) }
+
 func (p stackPlan) needsProxy() bool {
 	return slices.ContainsFunc(p.Services, func(sp servicePlan) bool { return sp.Proxy != nil || sp.ProxyNetwork })
 }

@@ -3,6 +3,7 @@ package swarm
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -14,6 +15,7 @@ import (
 	"github.com/compose-spec/compose-go/v2/types"
 
 	"github.com/yoho-build/yoho/internal/config"
+	"github.com/yoho-build/yoho/internal/deploy"
 	"github.com/yoho-build/yoho/internal/plan"
 	"github.com/yoho-build/yoho/internal/release"
 	"github.com/yoho-build/yoho/internal/remote"
@@ -546,5 +548,47 @@ func TestStaleBridgeRemoval(t *testing.T) {
 	err := r.removeStaleBridge(context.Background(), plan.NamedHost{Name: "edge", Host: busy})
 	if err == nil || !strings.Contains(err.Error(), "needs downtime") || !strings.Contains(err.Error(), "web-1") {
 		t.Errorf("err = %v", err)
+	}
+}
+
+func TestRoutesSkipZeroReplicaServicesAndRemoveTheirRoute(t *testing.T) {
+	withRoot(t)
+	h := &fakeHost{name: "primary", local: &remote.Local{}, respond: func(string) (string, error) { return "", nil }}
+	d := testDeploy(t, h, nil)
+	px := &config.ServiceProxy{Hosts: []string{"x.example.com"}, Port: 80, HealthPath: "/up"}
+	// Previous Release served web through the Proxy.
+	dir := release.Dir("shop", "production", "v1")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	prev := stackPlan{Stack: "yoho-shop-production", Services: []servicePlan{{Name: "web", Replicas: 2, Proxy: px}}}
+	b, _ := json.Marshal(prev)
+	if err := os.WriteFile(filepath.Join(dir, "plan.json"), b, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("releases/v1", filepath.Join(release.AppDir("shop", "production"), "current")); err != nil {
+		t.Fatal(err)
+	}
+	next := stackPlan{Stack: "yoho-shop-production", Services: []servicePlan{
+		{Name: "web", Replicas: 0, Proxy: px},
+		{Name: "api", Replicas: 2, Proxy: px},
+		{Name: "edge", Global: true, Proxy: px},
+	}}
+	var out bytes.Buffer
+	r := &runner{h: h, out: &out, app: "shop", dest: "production"}
+	if err := r.routes(context.Background(), d, next); err != nil {
+		t.Fatal(err)
+	}
+	all := h.all()
+	if strings.Contains(all, "'deploy' '"+deploy.RouteName("shop", "production", "web")+"'") {
+		t.Errorf("zero-replica Service was deployed to the Proxy:\n%s", all)
+	}
+	for _, n := range []string{"api", "edge"} {
+		if !strings.Contains(all, "'deploy' '"+deploy.RouteName("shop", "production", n)+"'") {
+			t.Errorf("route %s not deployed:\n%s", n, all)
+		}
+	}
+	if !strings.Contains(all, "'remove' '"+deploy.RouteName("shop", "production", "web")+"'") {
+		t.Errorf("zero-replica route not removed:\n%s", all)
 	}
 }

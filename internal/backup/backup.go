@@ -308,11 +308,36 @@ func withQuiesced(ctx context.Context, o RunOptions, cid string, vols map[string
 		}
 		cids = appendUniqueIDs(cids, strings.Fields(out))
 	}
+	// Only touch what Yoho owns and what this Backup stops: refuse when a
+	// container of another project mounts the volume, and leave containers
+	// that are not running or were already paused alone.
+	project := o.project()
+	var toPause []string
+	for _, id := range cids {
+		out, err := o.Host.Output(ctx, remote.Cmd{Script: "docker inspect -f " +
+			remote.Quote(`{{index .Config.Labels "com.docker.compose.project"}}|{{index .Config.Labels "com.docker.stack.namespace"}}|{{.State.Running}}|{{.State.Paused}}`) +
+			" " + remote.Quote(id)})
+		if err != nil {
+			return fmt.Errorf("inspect container %s: %w", id, err)
+		}
+		f := strings.Split(strings.TrimSpace(out), "|")
+		if len(f) != 4 {
+			return fmt.Errorf("inspect container %s: unexpected output %q", id, strings.TrimSpace(out))
+		}
+		if f[0] != project && f[1] != project {
+			return fmt.Errorf("container %s outside project %s mounts the backed-up volume; Yoho will not pause it. Stop it or define backup.pre_backup for the Service", id, project)
+		}
+		if f[2] == "true" && f[3] != "true" {
+			toPause = append(toPause, id)
+		}
+	}
+	var paused []string
 	defer func() {
 		uctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), unpauseTimeout)
 		defer cancel()
-		// Unpause unconditionally: a cancelled pause may still have applied.
-		for _, id := range cids {
+		// Unpause what this Backup paused, unconditionally: a cancelled
+		// pause may still have applied.
+		for _, id := range paused {
 			script := "docker unpause " + remote.Quote(id) + " >/dev/null 2>&1 || true; " +
 				"test \"$(docker inspect -f '{{.State.Paused}}' " + remote.Quote(id) + ")\" = false"
 			if uerr := run(uctx, o.Host, remote.Cmd{Script: script}); uerr != nil {
@@ -320,7 +345,8 @@ func withQuiesced(ctx context.Context, o RunOptions, cid string, vols map[string
 			}
 		}
 	}()
-	for _, id := range cids {
+	for _, id := range toPause {
+		paused = append(paused, id)
 		if err := run(ctx, o.Host, remote.Cmd{Script: "set -eu; docker pause " + remote.Quote(id) + " >/dev/null"}); err != nil {
 			return fmt.Errorf("pause %s: %w", id, err)
 		}
