@@ -472,9 +472,17 @@ func RsyncArgv(o Options) ([]string, error) {
 	return append(argv, "-e", rsh, src, host+":"+dst), nil
 }
 
+// noRsync is the marker the Server probe prints when rsync is absent.
+const noRsync = "yoho-no-rsync"
+
 func syncSource(ctx context.Context, o Options) error {
-	if err := o.Host.Run(ctx, remote.Cmd{Script: "mkdir -p -m 0700 " + remote.Quote(o.sourceDir())}); err != nil {
+	// One round trip: create the source dir and probe for rsync.
+	out, err := o.Host.Output(ctx, remote.Cmd{Script: "set -eu\nmkdir -p -m 0700 " + remote.Quote(o.sourceDir()) + "\ncommand -v rsync >/dev/null 2>&1 || echo " + noRsync})
+	if err != nil {
 		return err
+	}
+	if strings.Contains(out, noRsync) {
+		return fmt.Errorf("rsync is missing on %s\nhint: run `yoho setup` or install rsync on the Server", o.Host.Name())
 	}
 	argv, err := RsyncArgv(o)
 	if err != nil {

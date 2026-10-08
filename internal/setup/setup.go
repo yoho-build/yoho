@@ -16,6 +16,7 @@ import (
 	"io"
 	"path"
 	"regexp"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -36,6 +37,9 @@ type Config struct {
 	AuthorizedKeys []string
 	// Opt-in: enable Docker's containerd image store (needed for pussh).
 	ContainerdImageStore bool
+	// BuildOnServer: the Destination builds with builder.location=server,
+	// which rsyncs the source to the Server; install rsync.
+	BuildOnServer bool
 }
 
 // OSInfo is parsed from /etc/os-release.
@@ -265,8 +269,12 @@ func Steps(ctx context.Context, h remote.Host, cfg Config, osi OSInfo, priv bool
 		}
 	}
 	steps := []*Step{dockerStep(osi)}
-	if len(sc.Packages) > 0 {
-		steps = append(steps, packagesStep(sc.Packages))
+	pkgs := sc.Packages
+	if cfg.BuildOnServer && !slices.Contains(pkgs, "rsync") {
+		pkgs = append(slices.Clone(pkgs), "rsync")
+	}
+	if len(pkgs) > 0 {
+		steps = append(steps, packagesStep(pkgs))
 	}
 	steps = append(steps, userStep(user, cfg.AuthorizedKeys), dirsStep(user))
 	if sc.Firewall == nil || *sc.Firewall {

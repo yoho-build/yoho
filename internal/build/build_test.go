@@ -3,6 +3,7 @@ package build
 import (
 	"bytes"
 	"context"
+	"errors"
 	"io"
 	"os"
 	"strings"
@@ -186,7 +187,7 @@ func TestServerBuild(t *testing.T) {
 	if got := strings.Join(c.Argv, " "); got != "rsync -az --delete --exclude=.git --exclude=/.yoho/secrets* --exclude=node_modules -e ssh -o BatchMode=yes /src/ deploy@web1:/srv/source/" {
 		t.Fatalf("rsync %s", got)
 	}
-	if h.cmds[0].Script != "mkdir -p -m 0700 '/srv/source'" {
+	if h.cmds[0].Script != "set -eu\nmkdir -p -m 0700 '/srv/source'\ncommand -v rsync >/dev/null 2>&1 || echo yoho-no-rsync" {
 		t.Fatalf("mkdir %q", h.cmds[0].Script)
 	}
 	b := h.cmds[1]
@@ -276,5 +277,49 @@ func TestE2ELocalDockerBuild(t *testing.T) {
 	imgs, err = Images(ctx, o)
 	if err != nil || !strings.HasPrefix(imgs["w"].ID, "sha256:") {
 		t.Fatalf("%+v %v", imgs, err)
+	}
+}
+
+type noRsyncHost struct{ recHost }
+
+func (h *noRsyncHost) Output(ctx context.Context, c remote.Cmd) (string, error) {
+	h.cmds = append(h.cmds, c)
+	return "yoho-no-rsync", nil
+}
+
+func TestServerBuildRsyncMissing(t *testing.T) {
+	r := &recExec{}
+	h := &noRsyncHost{}
+	h.HostName = "web1"
+	o := Options{Dir: "/src", App: "shop", Version: "v1", Project: project("/src"),
+		Builder: config.Builder{Location: "server"}, Host: h, RsyncTarget: "deploy@web1", SourceDir: "/srv/source", Exec: r.exec}
+	_, err := Images(context.Background(), o)
+	if err == nil || !strings.Contains(err.Error(), "rsync is missing on web1") || !strings.Contains(err.Error(), "hint: run `yoho setup`") {
+		t.Fatalf("err %v", err)
+	}
+	if _, i := r.find("rsync"); i >= 0 {
+		t.Fatal("rsync must not run when missing")
+	}
+}
+
+type mkdirFailHost struct{ recHost }
+
+func (h *mkdirFailHost) Output(ctx context.Context, c remote.Cmd) (string, error) {
+	h.cmds = append(h.cmds, c)
+	return "", errors.New("mkdir: permission denied")
+}
+
+func TestServerBuildMkdirFails(t *testing.T) {
+	r := &recExec{}
+	h := &mkdirFailHost{}
+	h.HostName = "web1"
+	o := Options{Dir: "/src", App: "shop", Version: "v1", Project: project("/src"),
+		Builder: config.Builder{Location: "server"}, Host: h, RsyncTarget: "deploy@web1", SourceDir: "/srv/source", Exec: r.exec}
+	_, err := Images(context.Background(), o)
+	if err == nil || !strings.Contains(err.Error(), "mkdir: permission denied") {
+		t.Fatalf("err %v", err)
+	}
+	if _, i := r.find("rsync"); i >= 0 {
+		t.Fatal("rsync must not run when mkdir fails")
 	}
 }

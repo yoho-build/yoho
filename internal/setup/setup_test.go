@@ -369,3 +369,55 @@ func TestApplyAllRunsUserBeforeDirs(t *testing.T) {
 		t.Fatalf("user at %d, dirs at %d", u, d)
 	}
 }
+
+func TestPlanInstallsRsyncForServerBuilder(t *testing.T) {
+	h := host(ubuntu, "root")
+	base := h.respond
+	missing := true
+	h.respond = func(s string) string {
+		if strings.HasPrefix(s, "for p in") {
+			if missing {
+				return "install rsync"
+			}
+			return ""
+		}
+		return base(s)
+	}
+	cfg := Config{Setup: config.SetupConfig{Packages: []string{"htop"}}, BuildOnServer: true}
+	find := func() PlannedStep {
+		plan, err := Plan(context.Background(), h, cfg)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, p := range plan {
+			if p.Step.ID == "packages" {
+				return p
+			}
+		}
+		t.Fatal("no packages step")
+		return PlannedStep{}
+	}
+	p := find()
+	if !p.Needed || p.Detail != "install rsync" || p.Step.Title != "Extra packages: htop rsync" {
+		t.Fatalf("%+v", p)
+	}
+	missing = false
+	if p := find(); p.Needed || p.Detail != "ok" {
+		t.Fatalf("rsync present: %+v", p)
+	}
+
+	// Without the server builder there is no packages step; no duplicate when listed.
+	plan, err := Plan(context.Background(), h, Config{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, p := range plan {
+		if p.Step.ID == "packages" {
+			t.Fatal("unexpected packages step")
+		}
+	}
+	cfg.Setup.Packages = []string{"rsync"}
+	if p := find(); p.Step.Title != "Extra packages: rsync" {
+		t.Fatalf("dup: %s", p.Step.Title)
+	}
+}

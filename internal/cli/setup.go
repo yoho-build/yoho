@@ -64,6 +64,7 @@ Supports Debian and Ubuntu.`,
 				ProxyPorts:           a.setupProxyPorts(),
 				AuthorizedKeys:       a.cfg.Setup.AuthorizedKeys,
 				ContainerdImageStore: containerd,
+				BuildOnServer:        a.cfg.Builder.Location == "server",
 			}
 			if len(cfg.AuthorizedKeys) == 0 {
 				cfg.AuthorizedKeys = localPublicKeys()

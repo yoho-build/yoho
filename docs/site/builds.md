@@ -6,7 +6,7 @@
 
 - `local` (default): your machine.
 - `remote`: a dedicated build Server (`builder.remote: user@host`).
-- `server`: sync source to the Destination's Server and build there (`builder.exclude` skips paths).
+- `server`: sync source to the Destination's Server and build there (`builder.exclude` skips paths). Needs `rsync` on the Server; `yoho setup` installs it, and deploy fails with a hint if it is missing.
 
 ## Local engine
 

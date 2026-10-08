@@ -19,7 +19,7 @@ Privileged steps need root or `servers.<name>.sudo: true` with passwordless sudo
 setup:
   user: yoho
   authorized_keys: ["ssh-ed25519 AAAA... me@laptop"]   # default: your ~/.ssh/*.pub
-  packages: [htop]
+  packages: [htop]                                     # with builder.location: server, rsync is added automatically
   firewall: true
   allow_ports: [2222]
   auto_updates: true
