@@ -91,3 +91,25 @@ services:
     x-yoho:
       proxy: { hosts: [shop.example.com], port: 3000 }
 ```
+
+## Files from the App directory
+
+Compose resolves `./relative` bind sources on your machine; the Server has no such path. Yoho ships them instead:
+
+- A **read-only** bind mount whose source is inside the App directory (a file or a directory tree), and a top-level `configs:` `file:` there, is uploaded with each deploy to `<root>/apps/<app>/<destination>/files/<hash>/<name>` with its file modes, and the compiled compose points at that copy. `.yoho/` is never shipped.
+- The directory is named after a hash of the content, so unchanged files keep their path (no container recreate) and a change shows in `yoho plan` as `config changed: labels, volumes`. Each Release keeps the files it was deployed with, so `yoho rollback` mounts the old content; they are removed when no retained Release or container uses them.
+- The total is capped at 50 MB. Bake larger files into an image or keep them in a named volume.
+- A **writable** bind mount inside the App directory is an error: state belongs in a named volume.
+- Sources outside the App directory (`/var/run/docker.sock`, `/etc/ssl/certs`) are paths on the Server and are left alone. `yoho config check` warns when one looks like a path on your machine (`/Users/...`, `/Volumes/...`, your home directory).
+- Under `runtime: swarm` bind mounts from the App directory are an error; Yoho does not ship files to swarm nodes.
+
+```yaml
+services:
+  clickhouse:
+    image: clickhouse/clickhouse-server:24
+    volumes:
+      - ./clickhouse/init.sql:/docker-entrypoint-initdb.d/init.sql:ro  # shipped per Release
+      - chdata:/var/lib/clickhouse                                      # state: named volume
+volumes:
+  chdata:
+```

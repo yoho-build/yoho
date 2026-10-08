@@ -151,6 +151,13 @@ func compile(d *plan.Deploy, server, generationDir string, svcSecrets map[string
 		return nil, nil, err
 	}
 	p.Name = release.ProjectName(d.App, d.Destination)
+	// Bind sources and config files from the App directory are local paths
+	// here; point them at the copies shipped to the Server.
+	files, err := appFiles(d.Project)
+	if err != nil {
+		return nil, nil, err
+	}
+	rewriteAppFiles(p, files, d.App, d.Destination)
 	// The loader named networks and volumes after the local project name
 	// (<name>_<key>). Rename them so each Destination gets its own volumes
 	// on a shared Server instead of silently sharing data.

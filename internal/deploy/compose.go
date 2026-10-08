@@ -139,6 +139,10 @@ func (c Compose) Deploy(ctx context.Context, d *plan.Deploy) (_ *release.Release
 		return nil, err
 	}
 
+	appFileHashes, err := shipAppFiles(ctx, h, d, r.logf)
+	if err != nil {
+		return nil, err
+	}
 	composeYAML, plans, err := compile(d, srv.Name, genDir, svcSecrets, key, DockerServerVersion(ctx, h))
 	if err != nil {
 		return nil, err
@@ -150,7 +154,7 @@ func (c Compose) Deploy(ctx context.Context, d *plan.Deploy) (_ *release.Release
 	rel := &release.Release{
 		App: d.App, Destination: d.Destination, Server: srv.Name, Version: d.Version,
 		Runtime: "compose", Role: "all", DeployedAt: start, Performer: d.Performer,
-		Images: map[string]string{}, SecretsGeneration: generation,
+		Images: map[string]string{}, SecretsGeneration: generation, Files: appFileHashes,
 		Secrets:       secretAudit(d, svcSecrets, generated, key),
 		ComposeSHA256: sha256Hex(composeYAML), Status: "failed",
 	}
@@ -286,6 +290,11 @@ func (c Compose) Rollback(ctx context.Context, d *plan.Deploy, version string) (
 			return nil, fmt.Errorf("release %s: secrets generation %s is gone", version, rel.SecretsGeneration)
 		}
 	}
+	for _, f := range rel.Files {
+		if err := h.Run(ctx, remote.Cmd{Script: "test -d " + remote.Quote(path.Join(dir, "files", f))}); err != nil {
+			return nil, fmt.Errorf("release %s: App files %s are gone", version, f)
+		}
+	}
 	prev, _ := h.Output(ctx, remote.Cmd{Script: "readlink " + remote.Quote(path.Join(dir, "current")) + " 2>/dev/null || true"})
 	prevVersion := path.Base(strings.TrimSpace(prev))
 
@@ -357,7 +366,8 @@ func listReleases(ctx context.Context, h remote.Host, app, dest string) ([]relea
 }
 
 // prune keeps the newest RetainReleases Releases (always current) and the
-// secrets generations they use or that existing containers still mount.
+// secrets generations and App files they use or that existing containers
+// still mount.
 func prune(ctx context.Context, r *runner, d *plan.Deploy, current string) error {
 	r.logf("checking old releases")
 	retain := d.RetainReleases
@@ -370,10 +380,14 @@ func prune(ctx context.Context, r *runner, d *plan.Deploy, current string) error
 	}
 	dir := release.AppDir(d.App, d.Destination)
 	keepGen := map[string]bool{}
+	keepFiles := map[string]bool{}
 	var drop []string
 	for i, rel := range rels {
 		if i < retain || rel.Version == current {
 			keepGen[rel.SecretsGeneration] = true
+			for _, f := range rel.Files {
+				keepFiles[f] = true
+			}
 			continue
 		}
 		drop = append(drop, path.Join(dir, "releases", rel.Version))
@@ -387,10 +401,15 @@ func prune(ctx context.Context, r *runner, d *plan.Deploy, current string) error
 		return err
 	}
 	secretsRoot := path.Join(dir, "secrets") + "/"
+	filesRoot := path.Join(dir, "files") + "/"
 	for _, m := range lines(mounts) {
 		if rest, ok := strings.CutPrefix(m, secretsRoot); ok {
 			gen, _, _ := strings.Cut(rest, "/")
 			keepGen[gen] = true
+		}
+		if rest, ok := strings.CutPrefix(m, filesRoot); ok {
+			f, _, _ := strings.Cut(rest, "/")
+			keepFiles[f] = true
 		}
 	}
 	// macOS ls colors names when CLICOLOR_FORCE is set, even if stdout is not
@@ -404,9 +423,18 @@ func prune(ctx context.Context, r *runner, d *plan.Deploy, current string) error
 			drop = append(drop, path.Join(dir, "secrets", g))
 		}
 	}
+	files, err := r.h.Output(ctx, remote.Cmd{Script: "for f in " + remote.Quote(path.Join(dir, "files")) + "/* " + remote.Quote(path.Join(dir, "files")) + "/.upload.*; do [ -d \"$f\" ] && echo \"${f##*/}\"; done; true"})
+	if err != nil {
+		return err
+	}
+	for _, f := range lines(files) {
+		if !keepFiles[f] {
+			drop = append(drop, path.Join(dir, "files", f))
+		}
+	}
 	if len(drop) == 0 {
 		return nil
 	}
-	r.logf("pruning %d old release/secrets director(ies)", len(drop))
+	r.logf("pruning %d old release/secrets/files director(ies)", len(drop))
 	return r.h.Run(ctx, remote.Cmd{Script: "rm -rf " + remote.QuoteArgs(drop...)})
 }

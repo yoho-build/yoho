@@ -164,7 +164,7 @@ func Check(r *Result, runtime string, secretKeys []string) []Finding {
 
 		// Stateful guard (ADR 0005): data must not silently diverge across Servers.
 		if !ext.Stateful {
-			if desc := stateDescription(svc); desc != "" {
+			if desc := stateDescription(svc, r.Project.WorkingDir); desc != "" {
 				switch {
 				case swarm && !hasPlacement(svc):
 					svcAdd(LevelError, "%s but not marked x-yoho.stateful and has no deploy.placement.constraints; tasks could land on any node", desc)
@@ -174,6 +174,7 @@ func Check(r *Result, runtime string, secretKeys []string) []Finding {
 			}
 		}
 
+		checkBinds(svc, r.Project.WorkingDir, swarm, svcAdd)
 		if swarm {
 			checkSwarm(svc, svcAdd)
 		}
@@ -231,14 +232,15 @@ func hasPlacement(svc types.ServiceConfig) bool {
 }
 
 // stateDescription names why a service looks stateful, or "".
-func stateDescription(svc types.ServiceConfig) string {
+// Writable binds inside the App directory are reported by checkBinds.
+func stateDescription(svc types.ServiceConfig, appDir string) string {
 	var named, binds []string
 	for _, v := range svc.Volumes {
 		switch v.Type {
 		case types.VolumeTypeVolume:
 			named = append(named, v.Source)
 		case types.VolumeTypeBind:
-			if !v.ReadOnly {
+			if _, in := InAppDir(appDir, v.Source); !v.ReadOnly && !in {
 				binds = append(binds, v.Source)
 			}
 		}

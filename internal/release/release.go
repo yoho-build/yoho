@@ -77,6 +77,8 @@ type Release struct {
 	// Secret name -> fingerprint (HMAC-SHA256 truncated, keyed per Destination)
 	// plus provider reference. Never the value.
 	Secrets map[string]SecretAudit `json:"secrets,omitempty"`
+	// Content hashes of the App files (files/<hash>) this Release mounts.
+	Files []string `json:"files,omitempty"`
 	// SHA-256 of the compiled compose file.
 	ComposeSHA256 string `json:"compose_sha256"`
 	Status        string `json:"status"` // deployed | failed | rolled_back
