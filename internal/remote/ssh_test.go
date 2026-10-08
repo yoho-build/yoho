@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 )
 
 type call struct {
@@ -277,5 +278,56 @@ func TestE2ELocalhost(t *testing.T) {
 	}
 	if _, err := s.ReadFile(ctx, "/nonexistent-yoho", false); !errors.Is(err, os.ErrNotExist) {
 		t.Fatal(err)
+	}
+}
+
+// Close must use "-O stop" so sessions owned by other yoho processes sharing
+// the ControlMaster are not killed ("-O exit" would).
+func TestCloseUsesStop(t *testing.T) {
+	f := &fakeExec{}
+	s := newTestSSH(t, "deploy@example.com", false, f)
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if len(f.calls) != 1 {
+		t.Fatalf("calls: %d", len(f.calls))
+	}
+	argv := f.calls[0].argv
+	j := strings.Join(argv, " ")
+	if !strings.Contains(j, " -O stop ") || strings.Contains(j, " -O exit") {
+		t.Fatalf("argv %v", argv)
+	}
+}
+
+// YOHO_E2E=1 YOHO_E2E_SSH=user@host: closing one Host must not interrupt a
+// running command on another Host sharing the same ControlMaster.
+func TestE2ECloseKeepsOtherSessions(t *testing.T) {
+	target := os.Getenv("YOHO_E2E_SSH")
+	if os.Getenv("YOHO_E2E") != "1" || target == "" {
+		t.Skip("YOHO_E2E=1 and YOHO_E2E_SSH not set")
+	}
+	dir, err := os.MkdirTemp("", "yoho")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(dir)
+	a, err := NewSSH("a", target, false, SSHOptions{ControlDir: dir})
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := NewSSH("b", target, false, SSHOptions{ControlDir: dir})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	if err := a.Run(ctx, Cmd{Script: "true"}); err != nil { // start the master
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	go func() { done <- a.Run(ctx, Cmd{Script: "sleep 5"}) }()
+	time.Sleep(time.Second)
+	_ = b.Close()
+	if err := <-done; err != nil {
+		t.Fatalf("running command interrupted by Close on another Host: %v", err)
 	}
 }

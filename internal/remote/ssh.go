@@ -346,9 +346,14 @@ func (s *SSH) ReadFile(ctx context.Context, p string, sudo bool) ([]byte, error)
 	return out.Bytes(), nil
 }
 
-// Close stops the ControlMaster. Errors (e.g. no master running) are ignored.
+// Close asks the ControlMaster to stop accepting new multiplexed sessions. It
+// uses "-O stop", not "-O exit": the ControlPath is shared by every yoho
+// process talking to the same Server, so "exit" would kill sessions owned by
+// other processes. With "stop" the master removes its listener socket and
+// exits on its own once the existing sessions finish (or ControlPersist
+// expires). Errors (e.g. no master running) are ignored.
 func (s *SSH) Close() error {
-	argv := append(s.SSHArgs(), "-O", "exit", "--", s.Destination())
+	argv := append(s.SSHArgs(), "-O", "stop", "--", s.Destination())
 	_ = s.opts.Exec(context.Background(), argv, nil, io.Discard, io.Discard)
 	return nil
 }
