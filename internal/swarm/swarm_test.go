@@ -424,6 +424,12 @@ func TestPruneKeepsRetainedSecrets(t *testing.T) {
 	if _, err := os.Stat(release.Dir("shop", "production", "v1")); !errors.Is(err, os.ErrNotExist) {
 		t.Error("v1 release dir should be pruned with retain 1")
 	}
+	if indexOf(h, "docker image ls -a", "--filter 'label=yoho.app=shop'", "--no-trunc") < 0 {
+		t.Error("swarm image cleanup did not list this App's images")
+	}
+	if strings.Contains(h.all(), "docker image rm") && strings.Contains(h.all(), "--force") {
+		t.Error("image removal must not be forced")
+	}
 }
 
 func TestWorkerNeverCreatesLocalNetwork(t *testing.T) {

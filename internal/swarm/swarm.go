@@ -783,6 +783,9 @@ func (r *runner) finish(ctx context.Context, d *plan.Deploy, rel *release.Releas
 	if err := r.prune(ctx, d, rel.Version); err != nil {
 		r.logf("warning: pruning old releases failed: %v", err)
 	}
+	// Same image cleanup as compose. Swarm's `stack deploy --prune` removes
+	// services, not images. One manager: worker disks are not touched.
+	deploy.PruneImages(ctx, r.h, d.App, r.logf)
 	return nil
 }
 
