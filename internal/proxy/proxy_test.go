@@ -248,21 +248,27 @@ func runLockSnippet(t *testing.T, base, body string, hideFlock bool) (string, er
 	}
 	cmd := exec.Command("sh", "-c", script)
 	if hideFlock {
-		// A shim dir with only the tools the snippet needs.
-		bin := t.TempDir()
-		for _, n := range []string{"mkdir", "rmdir", "dirname", "sleep", "sh"} {
-			p, err := exec.LookPath(n)
-			if err != nil {
-				t.Skipf("no %s", n)
-			}
-			if err := os.Symlink(p, bin+"/"+n); err != nil {
-				t.Fatal(err)
-			}
-		}
-		cmd.Env = []string{"PATH=" + bin}
+		cmd.Env = noFlockEnv(t)
 	}
 	out, err := cmd.CombinedOutput()
 	return string(out), err
+}
+
+// noFlockEnv returns an environment whose PATH is a shim dir with only the
+// tools the lock snippet needs, so flock is hidden.
+func noFlockEnv(t *testing.T) []string {
+	t.Helper()
+	bin := t.TempDir()
+	for _, n := range []string{"mkdir", "rmdir", "dirname", "sleep", "sh"} {
+		p, err := exec.LookPath(n)
+		if err != nil {
+			t.Skipf("no %s", n)
+		}
+		if err := os.Symlink(p, bin+"/"+n); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return []string{"PATH=" + bin}
 }
 
 func TestProxyLockMkdirFallback(t *testing.T) {
@@ -280,7 +286,9 @@ func TestProxyLockMkdirFallback(t *testing.T) {
 	}
 	cmd := "waited=119\n"
 	script := "set -eu\n" + strings.Replace(proxyLockScript(base), "waited=0\n", cmd, 1) + "echo acquired\n"
-	got, err := exec.Command("sh", "-c", script).CombinedOutput()
+	stale := exec.Command("sh", "-c", script)
+	stale.Env = noFlockEnv(t)
+	got, err := stale.CombinedOutput()
 	if err == nil || strings.Contains(string(got), "acquired") || !strings.Contains(string(got), "rmdir") {
 		t.Fatalf("stale lock must fail with guidance, got err=%v %s", err, got)
 	}
