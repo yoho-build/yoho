@@ -1,6 +1,6 @@
 ---
 name: yoho
-description: Deploy and operate Docker Compose apps on your own servers with the yoho CLI (yoho.yml, x-yoho in compose.yaml, .yoho/secrets, zero-downtime deploys, backups, Cloudflare Tunnel). Use when the user wants to deploy a compose app over SSH, edit yoho.yml or x-yoho, run yoho commands, or migrate from Kamal, Coolify, Dokploy or Ansible rsync+compose playbooks.
+description: Deploy and operate Docker Compose apps on your own servers with the yoho CLI (yoho.yml, x-yoho in compose.yaml, .yoho/secrets, zero-downtime deploys, backups, Cloudflare Tunnel). Use when the user wants to deploy a compose app over SSH, edit yoho.yml or x-yoho, run yoho commands, or migrate from Kamal, Coolify, Dokploy or Ansible rsync+compose playbooks. Also use for first-time setup: installing the yoho CLI and walking the user through their first deploy.
 ---
 
 # Yoho
@@ -8,6 +8,20 @@ description: Deploy and operate Docker Compose apps on your own servers with the
 Yoho is like Kamal but compose-native: one static Go binary deploys a `compose.yaml` app to Servers over SSH, builds locally, ships images without a registry, switches traffic with kamal-proxy, and backs up volumes. Per-Service settings live in `x-yoho` inside the compose file; where/how settings (Servers, Destinations, Builder, secrets, Backups) live in `yoho.yml`.
 
 Always run `yoho config check` after editing config. Use `--json` (NDJSON events) whenever you parse output. Use `yoho schema` / `yoho schema --ext` for the JSON Schema of the Yoho file / `x-yoho`.
+
+## First-time setup
+
+Follow in order. Ask before installing anything, editing files, or running any command against a Server. Never use sudo.
+
+1. Ask what the user wants: new deploy, migrate from Kamal/Coolify/Dokploy/Ansible (read the matching migrate reference), or operate an existing App. Ask for the target Server (`ssh user@host`) and confirm before any remote command.
+2. Run `yoho version`. If missing, ask, then install with `curl -fsSL https://yohobuild.com/install.sh | sh` (fallback `curl -fsSL https://raw.githubusercontent.com/yoho-build/yoho/main/scripts/install.sh | sh`) or `go install github.com/yoho-build/yoho/cmd/yoho@latest`.
+3. Offer `yoho skill install` so this skill persists in the project.
+4. Run `yoho init`. Edit `yoho.yml` and `x-yoho` in `compose.yaml` using the config reference. Secrets only as refs in `.yoho/secrets`; never write values into the repo.
+5. Run `yoho config check` and fix what it reports.
+6. Run `yoho setup --plan`. `yoho setup` is interactive: tell the user to run it, or run `yoho setup -y` only with their consent.
+7. Run `yoho plan`, show the plan, get explicit approval, then `yoho apply`.
+8. Verify: hit the health URL, run `yoho app ps` and `yoho releases`. Report the rollback command (`yoho rollback VERSION`).
+9. After 2-3 failed attempts on the same step, stop and report the step and the exact error.
 
 ## Kamal to Yoho
 
@@ -103,8 +117,10 @@ A proxied Service needs that compose `healthcheck` (an error under swarm, a warn
 
 ## References
 
-- `references/config-reference.md`: every field of `yoho.yml` and `x-yoho`
-- `references/migrate-kamal.md`
-- `references/migrate-coolify.md`
-- `references/migrate-dokploy.md`
-- `references/migrate-ansible.md`
+Fetch with `curl -sL <url>` (not a summarizing fetch tool). Relative paths are under `skills/yoho/`.
+
+- `references/config-reference.md`: every field of `yoho.yml` and `x-yoho`. https://raw.githubusercontent.com/yoho-build/yoho/main/skills/yoho/references/config-reference.md
+- `references/migrate-kamal.md`: https://raw.githubusercontent.com/yoho-build/yoho/main/skills/yoho/references/migrate-kamal.md
+- `references/migrate-coolify.md`: https://raw.githubusercontent.com/yoho-build/yoho/main/skills/yoho/references/migrate-coolify.md
+- `references/migrate-dokploy.md`: https://raw.githubusercontent.com/yoho-build/yoho/main/skills/yoho/references/migrate-dokploy.md
+- `references/migrate-ansible.md`: https://raw.githubusercontent.com/yoho-build/yoho/main/skills/yoho/references/migrate-ansible.md

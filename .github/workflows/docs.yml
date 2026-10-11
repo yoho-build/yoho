@@ -2,7 +2,7 @@ name: docs
 on:
   push:
     branches: [main]
-    paths: ["docs/site/**", "mkdocs.yml", ".github/workflows/docs.yml"]
+    paths: ["docs/site/**", "mkdocs.yml", ".github/workflows/docs.yml", "scripts/install.sh", "internal/config/**", "internal/composefile/**", "cmd/**"]
   workflow_dispatch:
 permissions:
   contents: read
@@ -19,8 +19,17 @@ jobs:
       - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
       - run: pip install mkdocs-material
       - run: mkdocs build --strict
+      - name: Publish installer and JSON Schemas
+        run: |
+          cp scripts/install.sh site/install.sh
+          mkdir -p site/schema
+          go run ./cmd/yoho schema > site/schema/yoho.schema.json
+          go run ./cmd/yoho schema --ext > site/schema/x-yoho.schema.json
       - uses: actions/upload-pages-artifact@v5
         with:
           path: site

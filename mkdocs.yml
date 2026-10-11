@@ -20,6 +20,7 @@ markdown_extensions:
 nav:
   - Home: index.md
   - Getting started: getting-started.md
+  - Set up with your AI agent: agents.md
   - Configuration: configuration.md
   - Secrets: secrets.md
   - Zero-downtime & proxy: zero-downtime.md

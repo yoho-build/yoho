@@ -8,13 +8,39 @@ Yoho is one static Go binary. Your `compose.yaml` stays the source of truth; Yoh
 
 Status: **alpha**. Expect breaking changes. License: MIT.
 
+## Set up with your AI agent
+
+No manual install needed. Your coding agent (Claude Code, Codex, Cursor, ...) reads the Yoho skill, installs the CLI, writes the config, and asks before it touches any Server.
+
+Paste this into your agent, in the repo you want to deploy:
+
+```text
+Read https://raw.githubusercontent.com/yoho-build/yoho/main/skills/yoho/SKILL.md with curl (not a summarizing fetch tool) and follow its "First-time setup" section to deploy this repo with Yoho. Ask me before installing anything, editing files, or connecting to a server.
+```
+
+The agent will:
+
+1. Ask what you want (new deploy, migrate from Kamal, Coolify, Dokploy or Ansible, or operate an existing App) and which Server (`user@host`).
+2. Install `yoho` if missing, after asking. No sudo.
+3. Run `yoho init` and write `yoho.yml`, `x-yoho` and `.yoho/secrets` references. No secret values in the repo.
+4. Run `yoho config check`, then `yoho setup --plan`. `yoho setup` is interactive, so you run it (or approve `-y`).
+5. Run `yoho plan` and show it. Nothing is deployed until you approve `yoho apply`.
+6. Verify the health URL, `yoho app ps` and `yoho releases`, and tell you the rollback command.
+
+Keep the skill installed so later sessions know Yoho without the prompt:
+
+```sh
+npx skills add yoho-build/yoho    # skills CLI; the skill lives at skills/yoho/SKILL.md
+yoho skill install                # after installing the CLI; --agent claude|codex|all
+```
+
 ## Install
 
 ```sh
-curl -fsSL https://yohobuild.com | sh
+curl -fsSL https://yohobuild.com/install.sh | sh
 ```
 
-The installer downloads the binary for this OS and architecture from GitHub Releases, verifies the SHA-256 in `checksums.txt`, and installs to `/usr/local/bin` when that directory is writable, otherwise `~/.local/bin`. It does not use sudo. Pin a release with `YOHO_VERSION=v0.1.0` or choose a directory with `YOHO_INSTALL_DIR`. If the repository is private, set `GITHUB_TOKEN` or `GH_TOKEN` before running the installer.
+The installer downloads the binary for this OS and architecture from GitHub Releases, verifies the SHA-256 in `checksums.txt`, and installs to `/usr/local/bin` when that directory is writable, otherwise `~/.local/bin`. It does not use sudo. Pin a release with `YOHO_VERSION=v0.1.0` or choose a directory with `YOHO_INSTALL_DIR`.
 
 From source (Go 1.26): `go install github.com/yoho-build/yoho/cmd/yoho@latest`.
 

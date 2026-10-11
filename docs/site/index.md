@@ -5,6 +5,7 @@ Deploy Docker Compose apps to your own servers the way Kamal deploys one contain
 Yoho is one static Go binary. `compose.yaml` stays the source of truth; Yoho adds an `x-yoho` block per Service and a small `yoho.yml`. Status: alpha. License: MIT.
 
 - [Getting started](getting-started.md)
+- [Set up with your AI agent](agents.md)
 - [Configuration](configuration.md)
 - [CLI reference](cli.md)
 - Coming from another tool? [Kamal](migrating-from-kamal.md), [Coolify](migrating-from-coolify.md), [Dokploy](migrating-from-dokploy.md)
