@@ -747,9 +747,9 @@ func proxyCmd(g *globals) *cobra.Command {
 	return c
 }
 
-// appCmds adds ps / logs / exec.
+// appCmds adds ps / logs / stats / exec.
 func appCmds(g *globals) *cobra.Command {
-	c := &cobra.Command{Use: "app", Short: "Inspect the running App (ps, logs, exec)"}
+	c := &cobra.Command{Use: "app", Short: "Inspect the running App (ps, logs, stats, exec)"}
 	c.AddCommand(&cobra.Command{
 		Use: "ps", Short: "List the App's containers",
 		RunE: func(cmd *cobra.Command, _ []string) error {
@@ -763,38 +763,7 @@ func appCmds(g *globals) *cobra.Command {
 			return a.remoteRun(cmd, "docker compose -p "+remote.Quote(a.project())+" ps --format 'table {{.Service}}\\t{{.Name}}\\t{{.Status}}\\t{{.Image}}'")
 		},
 	})
-	var follow bool
-	var tail int
-	logs := &cobra.Command{
-		Use: "logs [SERVICE...]", Short: "Show App logs",
-		RunE: func(cmd *cobra.Command, args []string) error {
-			a, err := g.load(cmd)
-			if err != nil {
-				return err
-			}
-			s := fmt.Sprintf("docker compose -p %s logs --tail %d", remote.Quote(a.project()), tail)
-			if follow {
-				s += " -f"
-			}
-			if len(args) > 0 {
-				s += " " + remote.QuoteArgs(args...)
-			}
-			if a.dest.Runtime == "swarm" {
-				if len(args) != 1 {
-					return errors.New("swarm: name exactly one Service, e.g. `yoho app logs web`")
-				}
-				s = fmt.Sprintf("docker service logs --tail %d", tail)
-				if follow {
-					s += " -f"
-				}
-				s += " " + remote.Quote(a.project()+"_"+args[0])
-			}
-			return a.remoteRun(cmd, s+" 2>&1")
-		},
-	}
-	logs.Flags().BoolVarP(&follow, "follow", "f", false, "Follow")
-	logs.Flags().IntVarP(&tail, "lines", "n", 100, "Lines from the end")
-	c.AddCommand(logs)
+	c.AddCommand(logsCmd(g), statsCmd(g))
 	c.AddCommand(&cobra.Command{
 		Use: "exec SERVICE -- COMMAND...", Short: "Run a command in a running Service container",
 		Args: cobra.MinimumNArgs(2),

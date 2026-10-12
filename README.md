@@ -55,7 +55,7 @@ yoho plan                 # show what would change on the Server (read-only)
 yoho apply                # confirm, then build, ship, health-gated zero-downtime cutover
 ```
 
-Then `yoho app logs -f`, `yoho releases`, `yoho rollback <version>`.
+Then `yoho app logs web -f`, `yoho app stats`, `yoho releases`, `yoho rollback <version>`.
 
 ## Features
 
@@ -134,7 +134,7 @@ See `examples/basic` for a fuller file.
 | `init`, `config check\|show`, `schema [--ext]` | create and validate config |
 | `setup` | provision a Server |
 | `plan`, `apply`, `deploy`, `releases`, `rollback VERSION` | review and release lifecycle |
-| `app ps\|logs\|exec` | inspect the running App |
+| `app ps\|logs\|stats\|exec` | inspect the running App |
 | `proxy boot\|status\|logs`, `tunnel up\|status\|down` | Proxy and Cloudflare Tunnel |
 | `secrets list\|print` | inspect secrets |
 | `backup run\|list\|restore`, `schedule install\|status\|remove` | Backups and Scheduled Jobs |

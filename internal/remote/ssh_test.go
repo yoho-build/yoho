@@ -331,3 +331,35 @@ func TestE2ECloseKeepsOtherSessions(t *testing.T) {
 		t.Fatalf("running command interrupted by Close on another Host: %v", err)
 	}
 }
+
+func TestRunTerminalArgv(t *testing.T) {
+	for _, tty := range []bool{true, false} {
+		f := &fakeExec{respond: func(int, call, io.Writer) error { return exitCode(130) }}
+		s := newTestSSH(t, "deploy@example.com:2222", true, f)
+		script := "exec docker stats 'it''s'"
+		err := s.RunTerminal(context.Background(), script, tty, strings.NewReader("keys"), io.Discard, io.Discard)
+		var ee *ExitError
+		if !errors.As(err, &ee) || ee.Code != 130 {
+			t.Fatalf("tty=%v: err %v", tty, err)
+		}
+		argv := f.calls[0].argv
+		flag := "-T"
+		if tty {
+			flag = "-t"
+		}
+		n := len(argv)
+		if argv[0] != "ssh" || argv[n-4] != flag || argv[n-3] != "--" || argv[n-2] != "deploy@example.com" {
+			t.Errorf("tty=%v: argv %q", tty, argv)
+		}
+		// One quoted sh -c argument, no sudo, stdin passed through untouched.
+		if argv[n-1] != "sh -c "+Quote(script) || strings.Contains(argv[n-1], "sudo") {
+			t.Errorf("tty=%v: remote command %q", tty, argv[n-1])
+		}
+		if !strings.Contains(strings.Join(argv, " "), "-p 2222") || !strings.Contains(strings.Join(argv, " "), "ControlPath=") {
+			t.Errorf("tty=%v: SSHArgs missing: %q", tty, argv)
+		}
+		if f.calls[0].stdin != "keys" {
+			t.Errorf("tty=%v: stdin %q", tty, f.calls[0].stdin)
+		}
+	}
+}

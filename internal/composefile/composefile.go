@@ -12,6 +12,7 @@ import (
 
 	"github.com/compose-spec/compose-go/v2/cli"
 	"github.com/compose-spec/compose-go/v2/dotenv"
+	"github.com/compose-spec/compose-go/v2/loader"
 	"github.com/compose-spec/compose-go/v2/types"
 
 	"github.com/yoho-build/yoho/internal/config"
@@ -46,18 +47,10 @@ type Result struct {
 // environment is never read, so builds are reproducible and operator secrets
 // cannot leak into the compiled compose.
 func Load(ctx context.Context, dir string, files []string, env map[string]string, projectName, destination string) (*Result, error) {
-	if len(files) == 0 {
-		for _, n := range DefaultFiles {
-			if st, err := os.Stat(filepath.Join(dir, n)); err == nil && !st.IsDir() {
-				files = []string{n}
-				break
-			}
-		}
-		if len(files) == 0 {
-			return nil, fmt.Errorf("no compose file in %s (looked for %v)", dir, DefaultFiles)
-		}
+	paths, overlays, err := discover(dir, files, destination)
+	if err != nil {
+		return nil, err
 	}
-	paths, overlays := composePaths(dir, files, destination)
 	res := &Result{Ext: map[string]config.ServiceExt{}, Overlays: overlays}
 	for _, p := range paths {
 		b, err := os.ReadFile(p)
@@ -66,22 +59,11 @@ func Load(ctx context.Context, dir string, files []string, env map[string]string
 		}
 		res.Raw = append(res.Raw, b)
 	}
-
-	merged := map[string]string{}
-	if dotenvPath := filepath.Join(dir, ".env"); fileExists(dotenvPath) {
-		m, err := dotenv.GetEnvFromFile(map[string]string{}, []string{dotenvPath})
-		if err != nil {
-			return nil, fmt.Errorf(".env: %w", err)
-		}
-		for k, v := range m {
-			merged[k] = v
-			res.EnvFileKeys = append(res.EnvFileKeys, k)
-		}
-		sort.Strings(res.EnvFileKeys)
+	merged, keys, err := mergeEnv(dir, env)
+	if err != nil {
+		return nil, err
 	}
-	for k, v := range env {
-		merged[k] = v
-	}
+	res.EnvFileKeys = keys
 
 	opts, err := cli.NewProjectOptions(paths,
 		cli.WithWorkingDirectory(dir),
@@ -110,6 +92,79 @@ func Load(ctx context.Context, dir string, files []string, env map[string]string
 		res.Ext[name] = e
 	}
 	return res, nil
+}
+
+// ServiceNames returns the sorted names of the active Services (the ones Yoho
+// deploys; profile-disabled Services are excluded) from the same files,
+// Destination overlays and env as Load. It is a lenient load for diagnostic
+// commands: env_file and label_file are not read, and consistency checks,
+// schema validation and x-yoho decoding are skipped.
+func ServiceNames(ctx context.Context, dir string, files []string, env map[string]string, projectName, destination string) ([]string, error) {
+	paths, _, err := discover(dir, files, destination)
+	if err != nil {
+		return nil, err
+	}
+	merged, _, err := mergeEnv(dir, env)
+	if err != nil {
+		return nil, err
+	}
+	opts, err := cli.NewProjectOptions(paths,
+		cli.WithWorkingDirectory(dir),
+		cli.WithName(projectName),
+		cli.WithoutEnvironmentResolution,
+		cli.WithoutLabelsResolution,
+		cli.WithConsistency(false),
+		cli.WithResolvedPaths(false),
+		cli.WithLoadOptions(loader.WithSkipValidation),
+	)
+	if err != nil {
+		return nil, err
+	}
+	opts.Environment = merged
+	p, err := opts.LoadProject(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return p.ServiceNames(), nil
+}
+
+// discover resolves the compose files (default discovery when files is
+// empty) and the Destination overlays.
+func discover(dir string, files []string, destination string) (paths, overlays []string, err error) {
+	if len(files) == 0 {
+		for _, n := range DefaultFiles {
+			if fileExists(filepath.Join(dir, n)) {
+				files = []string{n}
+				break
+			}
+		}
+		if len(files) == 0 {
+			return nil, nil, fmt.Errorf("no compose file in %s (looked for %v)", dir, DefaultFiles)
+		}
+	}
+	paths, overlays = composePaths(dir, files, destination)
+	return paths, overlays, nil
+}
+
+// mergeEnv returns the interpolation environment: dir/.env at the lowest
+// precedence, then env. keys are the sorted .env keys.
+func mergeEnv(dir string, env map[string]string) (merged map[string]string, keys []string, err error) {
+	merged = map[string]string{}
+	if dotenvPath := filepath.Join(dir, ".env"); fileExists(dotenvPath) {
+		m, err := dotenv.GetEnvFromFile(map[string]string{}, []string{dotenvPath})
+		if err != nil {
+			return nil, nil, fmt.Errorf(".env: %w", err)
+		}
+		for k, v := range m {
+			merged[k] = v
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+	}
+	for k, v := range env {
+		merged[k] = v
+	}
+	return merged, keys, nil
 }
 
 func fileExists(p string) bool {

@@ -122,6 +122,22 @@ func (u *UI) Warn(format string, args ...any) {
 	u.stamp()
 }
 
+// Error reports a failure outside any step (e.g. bad arguments found before
+// connecting), with a hint for what to do next.
+func (u *UI) Error(err error, hint string) {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	if u.mode == JSON {
+		u.event("error", map[string]any{"error": err.Error(), "hint": hint})
+		return
+	}
+	fmt.Fprintln(u.w, u.indent()+u.paint(red, "✗ "+err.Error()))
+	if hint != "" {
+		fmt.Fprintln(u.w, u.indent()+"  "+u.paint(yellow, "hint: ")+hint)
+	}
+	u.stamp()
+}
+
 // Finding prints a check result (level error or warning).
 func (u *UI) Finding(level, subject, msg string) {
 	u.mu.Lock()

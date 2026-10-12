@@ -15,6 +15,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // ExecFunc runs a local process. Errors exposing ExitCode() int (like
@@ -48,6 +49,9 @@ type SSH struct {
 	port int
 	sudo bool
 	opts SSHOptions
+	// ttyExec runs RunTerminal: os/exec with SIGINT on cancel unless
+	// SSHOptions.Exec was injected.
+	ttyExec ExecFunc
 
 	controlPath string
 }
@@ -73,10 +77,12 @@ func NewSSH(name, target string, sudo bool, opts SSHOptions) (*SSH, error) {
 	if opts.Binary == "" {
 		opts.Binary = "ssh"
 	}
+	ttyExec := opts.Exec
 	if opts.Exec == nil {
 		opts.Exec = osExec
+		ttyExec = osExecInterrupt
 	}
-	s := &SSH{name: name, user: user, host: host, port: port, sudo: sudo, opts: opts}
+	s := &SSH{name: name, user: user, host: host, port: port, sudo: sudo, opts: opts, ttyExec: ttyExec}
 	if s.name == "" {
 		s.name = host
 	}
@@ -274,6 +280,24 @@ func (s *SSH) Run(ctx context.Context, cmd Cmd) error {
 	return s.exec(ctx, cmd.Script, s.argv(rc), stdin, cmd.Stdout, cmd.Stderr)
 }
 
+// RunTerminal runs script with the remote pseudo-terminal choice made
+// explicit: tty requests one (ssh -t) for interactive programs like a live
+// `docker stats`, otherwise ssh -T. stdin belongs to the program (the local
+// terminal), so the script travels as a quoted `sh -c` argument and must not
+// carry secrets. No sudo. Cancelling ctx interrupts ssh rather than killing
+// it, so ssh can restore the local terminal.
+func (s *SSH) RunTerminal(ctx context.Context, script string, tty bool, stdin io.Reader, stdout, stderr io.Writer) error {
+	return s.execWith(ctx, s.ttyExec, script, s.terminalArgv(script, tty), stdin, stdout, stderr)
+}
+
+func (s *SSH) terminalArgv(script string, tty bool) []string {
+	flag := "-T"
+	if tty {
+		flag = "-t"
+	}
+	return append(s.SSHArgs(), flag, "--", s.Destination(), "sh -c "+Quote(script))
+}
+
 // writeEnvFile uploads exports to a 0600 temp file on the Server over stdin.
 func (s *SSH) writeEnvFile(ctx context.Context, env map[string]string) (string, error) {
 	exports, err := exportLines(env)
@@ -293,6 +317,10 @@ func (s *SSH) writeEnvFile(ctx context.Context, env map[string]string) (string, 
 }
 
 func (s *SSH) exec(ctx context.Context, label string, argv []string, stdin io.Reader, stdout, stderrW io.Writer) error {
+	return s.execWith(ctx, s.opts.Exec, label, argv, stdin, stdout, stderrW)
+}
+
+func (s *SSH) execWith(ctx context.Context, run ExecFunc, label string, argv []string, stdin io.Reader, stdout, stderrW io.Writer) error {
 	var stderr bytes.Buffer
 	var ew io.Writer = &stderr
 	if stderrW != nil {
@@ -301,7 +329,7 @@ func (s *SSH) exec(ctx context.Context, label string, argv []string, stdin io.Re
 	if stdout == nil {
 		stdout = io.Discard
 	}
-	err := s.opts.Exec(ctx, argv, stdin, stdout, ew)
+	err := run(ctx, argv, stdin, stdout, ew)
 	if err == nil {
 		return nil
 	}
@@ -382,6 +410,17 @@ func (s *SSH) Forward(ctx context.Context, localPort int, remoteAddr string) (st
 
 func osExec(ctx context.Context, argv []string, stdin io.Reader, stdout, stderr io.Writer) error {
 	c := exec.CommandContext(ctx, argv[0], argv[1:]...)
+	c.Stdin, c.Stdout, c.Stderr = stdin, stdout, stderr
+	return c.Run()
+}
+
+// osExecInterrupt is osExec that sends SIGINT instead of SIGKILL when ctx is
+// cancelled (killing after a grace period), so an interactive ssh restores
+// the terminal.
+func osExecInterrupt(ctx context.Context, argv []string, stdin io.Reader, stdout, stderr io.Writer) error {
+	c := exec.CommandContext(ctx, argv[0], argv[1:]...)
+	c.Cancel = func() error { return c.Process.Signal(os.Interrupt) }
+	c.WaitDelay = 5 * time.Second
 	c.Stdin, c.Stdout, c.Stderr = stdin, stdout, stderr
 	return c.Run()
 }

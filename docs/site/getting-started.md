@@ -50,7 +50,8 @@ A proxied Service needs a `/up` endpoint (configurable with `health_path`) that 
 
 ```sh
 yoho app ps
-yoho app logs -f
+yoho app logs web -f     # name the Service, or --all
+yoho app stats
 yoho releases
 yoho rollback <version>
 ```

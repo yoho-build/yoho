@@ -68,7 +68,7 @@ If versions carry `_uncommitted_`, the build used local changes. Suggest committ
 | `KAMAL_*` in hooks | `YOHO_*` |
 | container env `KAMAL_VERSION`, `KAMAL_HOST`... | `YOHO_APP`, `YOHO_DESTINATION`, `YOHO_VERSION`, `YOHO_SERVER`, `YOHO_SERVICE` |
 | `kamal setup` | `yoho setup` (interactive, Debian/Ubuntu) then `yoho deploy` |
-| `kamal deploy` / `rollback` / `app logs` | `yoho deploy` / `yoho rollback VERSION` / `yoho app logs` |
+| `kamal deploy` / `rollback` / `app logs` | `yoho deploy` / `yoho rollback VERSION` / `yoho app logs SERVICE` (required with several Services; `--all` interleaves every Service, compose only) |
 | `kamal secrets fetch` | `secrets.providers` + `secrets.values` (op, bw, bws, command) |
 
 ## Hooks
@@ -97,7 +97,7 @@ yoho plan [--version V] [--detailed-exitcode]   # read-only diff; exit 2 = chang
 yoho apply [--auto-approve] [--skip-build] [--version V]   # plan, confirm, deploy
 yoho deploy [--skip-build] [--version V]   # apply --auto-approve without the plan
 yoho releases ; yoho rollback VERSION
-yoho app ps | logs [SERVICE...] [-f] [-n N] | exec SERVICE -- CMD...
+yoho app ps | logs [SERVICE...] [--all] [-f] [-n N] | stats [SERVICE...] [--no-stream] | exec SERVICE -- CMD...
 yoho proxy boot | status | logs
 yoho tunnel up | status | down    # Cloudflare Tunnel (Quick Tunnel when no token)
 yoho backup run [JOB] | list [JOB] | restore ID [--job JOB] [-y]   # ID may be "latest"
