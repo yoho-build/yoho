@@ -31,7 +31,7 @@ npx skills add yoho-build/yoho          # skills CLI; the skill lives at skills/
 yoho skill install                      # after installing the CLI; --agent claude|codex|all
 ```
 
-`yoho skill install` writes the skill into the project for Claude Code and Codex. `yoho skill print` prints it.
+`yoho skill install` writes all bundled skills into the project for Claude Code and Codex. `yoho skill print [SKILL]` prints one.
 
 ## Prefer to do it yourself
 

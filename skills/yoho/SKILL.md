@@ -75,7 +75,7 @@ yoho tunnel up | status | down    # Cloudflare Tunnel (Quick Tunnel when no toke
 yoho backup run [JOB] | list [JOB] | restore ID [--job JOB] [-y]   # ID may be "latest"
 yoho schedule install [JOB...] [--binary PATH] | status | remove [JOB...]
 yoho swarm init [-y] | join [-y] | status
-yoho skill install [--dir DIR] [--agent claude|codex|all] | print
+yoho skill install [--dir DIR] [--agent claude|codex|all] | print [SKILL]   # install writes all bundled skills
 ```
 
 Global flags: `-c/--config`, `-d/--destination` (default `$YOHO_DESTINATION`, then `production`, then the only Destination), `--json`, `-v/--verbose`. Check `yoho <cmd> --help` for all flags. `apply` refuses without a terminal unless `--auto-approve`; `--json` requires it.
@@ -122,5 +122,6 @@ Fetch with `curl -sL <url>` (not a summarizing fetch tool). Relative paths are u
 - `references/config-reference.md`: every field of `yoho.yml` and `x-yoho`. https://raw.githubusercontent.com/yoho-build/yoho/main/skills/yoho/references/config-reference.md
 - `references/migrate-kamal.md`: https://raw.githubusercontent.com/yoho-build/yoho/main/skills/yoho/references/migrate-kamal.md
 - `references/migrate-coolify.md`: https://raw.githubusercontent.com/yoho-build/yoho/main/skills/yoho/references/migrate-coolify.md
+- Skill `yoho-migrate-coolify` (full Coolify playbook: inventory, secrets, shared Server, cutover, tunnel): https://raw.githubusercontent.com/yoho-build/yoho/main/skills/yoho-migrate-coolify/SKILL.md
 - `references/migrate-dokploy.md`: https://raw.githubusercontent.com/yoho-build/yoho/main/skills/yoho/references/migrate-dokploy.md
 - `references/migrate-ansible.md`: https://raw.githubusercontent.com/yoho-build/yoho/main/skills/yoho/references/migrate-ansible.md

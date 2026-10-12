@@ -7,6 +7,8 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"slices"
+	"strings"
 
 	"github.com/spf13/cobra"
 
@@ -17,19 +19,19 @@ func init() {
 	extraCommands = append(extraCommands, skillCmd)
 }
 
-// skillDirs maps --agent values to project-local skill directories.
+// skillDirs maps --agent values to project-local skills directories.
 var skillDirs = map[string]string{
-	"claude": filepath.Join(".claude", "skills", "yoho"),
-	"codex":  filepath.Join(".agents", "skills", "yoho"),
+	"claude": filepath.Join(".claude", "skills"),
+	"codex":  filepath.Join(".agents", "skills"),
 }
 
 func skillCmd(g *globals) *cobra.Command {
-	c := &cobra.Command{Use: "skill", Short: "Install the Yoho agent skill for coding agents"}
+	c := &cobra.Command{Use: "skill", Short: "Install the Yoho agent skills for coding agents"}
 
 	var dir, agent string
 	install := &cobra.Command{
 		Use:   "install",
-		Short: "Write the embedded skill to .claude/skills/yoho and/or .agents/skills/yoho",
+		Short: "Write all bundled skills to .claude/skills/<name> and/or .agents/skills/<name>",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			var targets []string
@@ -43,16 +45,18 @@ func skillCmd(g *globals) *cobra.Command {
 			}
 			out := cmd.OutOrStdout()
 			for _, t := range targets {
-				dest := filepath.Join(dir, skillDirs[t])
-				n, err := writeSkill(dest)
-				if err != nil {
-					return err
-				}
-				if g.json {
-					b, _ := json.Marshal(map[string]any{"event": "skill_installed", "agent": t, "path": dest, "files": n})
-					fmt.Fprintln(out, string(b))
-				} else {
-					fmt.Fprintf(out, "installed skill for %s: %s (%d files)\n", t, dest, n)
+				for _, name := range skills.Names() {
+					dest := filepath.Join(dir, skillDirs[t], name)
+					n, err := writeSkill(name, dest)
+					if err != nil {
+						return err
+					}
+					if g.json {
+						b, _ := json.Marshal(map[string]any{"event": "skill_installed", "agent": t, "skill": name, "path": dest, "files": n})
+						fmt.Fprintln(out, string(b))
+					} else {
+						fmt.Fprintf(out, "installed skill %s for %s: %s (%d files)\n", name, t, dest, n)
+					}
 				}
 			}
 			return nil
@@ -62,11 +66,18 @@ func skillCmd(g *globals) *cobra.Command {
 	install.Flags().StringVar(&agent, "agent", "all", "Agent to install for: claude, codex or all")
 
 	print := &cobra.Command{
-		Use:   "print",
-		Short: "Print the skill's SKILL.md",
-		Args:  cobra.NoArgs,
-		RunE: func(cmd *cobra.Command, _ []string) error {
-			b, err := skills.FS.ReadFile("yoho/SKILL.md")
+		Use:   "print [SKILL]",
+		Short: "Print a skill's SKILL.md (default: yoho)",
+		Args:  cobra.MaximumNArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			name := "yoho"
+			if len(args) == 1 {
+				name = args[0]
+			}
+			if !slices.Contains(skills.Names(), name) {
+				return fmt.Errorf("unknown skill %q (available: %s)", name, strings.Join(skills.Names(), ", "))
+			}
+			b, err := skills.FS.ReadFile(name + "/SKILL.md")
 			if err != nil {
 				return err
 			}
@@ -78,14 +89,14 @@ func skillCmd(g *globals) *cobra.Command {
 	return c
 }
 
-// writeSkill copies the embedded skill into dest and returns the file count.
-func writeSkill(dest string) (int, error) {
+// writeSkill copies the embedded skill name into dest and returns the file count.
+func writeSkill(name, dest string) (int, error) {
 	n := 0
-	err := fs.WalkDir(skills.FS, "yoho", func(p string, d fs.DirEntry, err error) error {
+	err := fs.WalkDir(skills.FS, name, func(p string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
-		rel := filepath.FromSlash(path.Clean(p[len("yoho"):]))
+		rel := filepath.FromSlash(path.Clean(p[len(name):]))
 		target := filepath.Join(dest, rel)
 		if d.IsDir() {
 			return os.MkdirAll(target, 0o755)

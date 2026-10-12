@@ -140,7 +140,7 @@ See `examples/basic` for a fuller file.
 | `backup run\|list\|restore`, `schedule install\|status\|remove` | Backups and Scheduled Jobs |
 | `swarm init\|join\|status` | Swarm runtime |
 | `builder status\|setup` | local Builder |
-| `skill install\|print` | agent skill |
+| `skill install\|print [SKILL]` | agent skills |
 
 Global flags: `-c/--config`, `-d/--destination` (default: `$YOHO_DESTINATION`, then `production`, then the only Destination), `--json`, `-v/--verbose`.
 

@@ -32,8 +32,8 @@ Global flags (every command): `-c, --config FILE`, `-d, --destination NAME` (def
 | `swarm status` | Swarm nodes and the App's services. |
 | `builder status` | Build engine in use and Apple `container` state. |
 | `builder setup [-y]` | Install/upgrade Apple container, Rosetta, builder VM; smoke test. |
-| `skill install [--dir DIR] [--agent claude\|codex\|all]` | Write the agent skill to `.claude/skills/yoho` and/or `.agents/skills/yoho`. |
-| `skill print` | Print the skill's `SKILL.md`. |
+| `skill install [--dir DIR] [--agent claude\|codex\|all]` | Write all bundled agent skills to `.claude/skills/<name>` and/or `.agents/skills/<name>`. |
+| `skill print [SKILL]` | Print a skill's `SKILL.md` (default `yoho`). |
 | `version` | Print the version. |
 | `completion` | Shell completion script. |
 
