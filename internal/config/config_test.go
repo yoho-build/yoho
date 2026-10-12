@@ -280,3 +280,26 @@ destinations:
 		t.Errorf("got:\n%s", j)
 	}
 }
+
+func TestAuthorizedKeysEmptyListIsNotUnset(t *testing.T) {
+	for name, src := range map[string]string{
+		"yaml": "app: a\nsetup:\n  authorized_keys: []\n",
+		"toml": "app = \"a\"\n[setup]\nauthorized_keys = []\n",
+		"json": `{"app":"a","setup":{"authorized_keys":[]}}`,
+	} {
+		c, err := Parse([]byte(src), name)
+		if err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		if c.Setup.AuthorizedKeys == nil || len(c.Setup.AuthorizedKeys) != 0 {
+			t.Errorf("%s: authorized_keys = %#v, want non-nil empty", name, c.Setup.AuthorizedKeys)
+		}
+	}
+	c, err := Parse([]byte("app: a\n"), "yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Setup.AuthorizedKeys != nil {
+		t.Errorf("unset authorized_keys = %#v, want nil", c.Setup.AuthorizedKeys)
+	}
+}

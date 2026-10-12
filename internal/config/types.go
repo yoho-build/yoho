@@ -190,7 +190,7 @@ type BackupJob struct {
 type SetupConfig struct {
 	// Deploy user created on the Server. Default: yoho.
 	User string `json:"user,omitempty"`
-	// Public keys authorized for the deploy user. Default: ~/.ssh/*.pub of the operator.
+	// Public keys authorized for the deploy user. Default (unset): ~/.ssh/*.pub of the operator. An empty list authorizes no keys.
 	AuthorizedKeys []string `json:"authorized_keys,omitempty"`
 	// Extra apt packages.
 	Packages []string `json:"packages,omitempty"`

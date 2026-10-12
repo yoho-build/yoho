@@ -13,12 +13,14 @@ yoho setup --containerd-image-store # also enable the containerd image store (re
 
 Without a terminal (or with `--json`) and without `-y`, setup only shows the plan. Setup runs on every Server of the selected Destination. When you connect as a non-root user, that user is the deploy user and `setup.user` is not used.
 
+To keep setup minimal on a shared host reached as root, set `user: root` and `authorized_keys: []`: no key is added, root is not added to the docker group (uid 0 needs no membership), and the user step reports ok. Linger and the Yoho directories only need the deploy user to exist; declining the user step skips them only when the user is missing.
+
 Privileged steps need root or `servers.<name>.sudo: true` with passwordless sudo; without it steps are reported as blocked, not half-applied.
 
 ```yaml
 setup:
   user: yoho
-  authorized_keys: ["ssh-ed25519 AAAA... me@laptop"]   # default: your ~/.ssh/*.pub
+  authorized_keys: ["ssh-ed25519 AAAA... me@laptop"]   # unset: your ~/.ssh/*.pub; [] authorizes no keys
   packages: [htop]                                     # with builder.location: server, rsync is added automatically
   firewall: true
   allow_ports: [2222]

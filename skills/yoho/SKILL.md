@@ -27,8 +27,8 @@ Follow in order. Ask before installing anything, editing files, or running any c
 
 Use this when the user asks whether there is something new to deploy, or asks to deploy the latest code. Yoho has no git webhook: deploys happen only when someone runs `yoho deploy`, by hand or from CI.
 
-1. Run `yoho releases` to find the current Version. It is the git SHA, with `_uncommitted_<hash>` when local changes were built.
-2. Run `git fetch`, then `git log <current-sha>..origin/<branch> -- <app dir>`. If nothing is listed, report that there is nothing new and stop.
+1. `yoho releases` shows the current Version as 12 hex characters of the git SHA, plus `_uncommitted_<8 hex>` when local changes were built. Strip the suffix and resolve the prefix with `git rev-parse <prefix>`.
+2. Run `git fetch`. List what changed since that commit: `git log <sha>..origin/<branch>`, plus local commits and `git status`. Limit the log by path only to cover every build input: the build `context` and anything it pulls in, such as shared packages, lockfiles or the compose and Yoho files. In a monorepo the build context is often wider than the app directory.
 3. Scan the diff for risk:
    - Database migrations.
    - Dockerfile, lockfile or compose changes.
@@ -36,15 +36,18 @@ Use this when the user asks whether there is something new to deploy, or asks to
 
    Add any new secret keys to `.yoho/secrets` and `x-yoho.secrets` before deploying.
 4. Update the work tree with a fast-forward only (`git merge --ff-only`). Keep uncommitted Yoho files as they are.
-5. Run `yoho plan`. Normally only built Services change, shown as `update in-place (zero downtime)`. If a stateful Service would be replaced or destroyed, stop and ask the user.
+5. Let `yoho plan` decide whether anything needs deploying (it builds nothing). Read each action:
+   - A changed proxied Service is `update in-place (zero downtime)`.
+   - Any other changed Service is normally `replace`, with a short restart of that Service, workers included. A change to only its `release_command` is an `update` without a restart.
+   - If a stateful Service would be replaced or destroyed, stop and ask the user.
 6. Before a migration that cannot be undone, run `yoho backup run`. Then run `yoho deploy`.
 7. Verify:
    - Each hostname returns 200 on its health path.
-   - The new container is healthy.
+   - The new containers are healthy.
    - The proxy logs show no 5xx responses during the switch (`yoho proxy logs`).
    - `yoho releases` marks the new Version as current.
 
-   Report the rollback command: `yoho rollback <previous version>`.
+   Report the rollback command: `yoho rollback <previous version>`. Rollback does not revert migrations.
 
 If versions carry `_uncommitted_`, the build used local changes. Suggest committing them so that each Version maps to a commit.
 

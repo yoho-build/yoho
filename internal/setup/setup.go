@@ -51,13 +51,18 @@ type OSInfo struct {
 type Step struct {
 	ID    string
 	Title string
-	// Needs lists step IDs that must be satisfied first: either not needed
-	// or applied. Apply skips the step when one was declined or skipped.
+	// Needs lists step IDs that must be satisfied first: either not needed,
+	// applied, or (when the step only provides something that already
+	// exists) declined. Apply skips the step when one was declined or
+	// skipped and its result is still missing.
 	Needs []string
 	// checkSudo: Check itself needs privileges. Apply always does.
 	checkSudo bool
-	check     func(ctx context.Context, h remote.Host) (needed bool, detail string, err error)
-	apply     func(ctx context.Context, h remote.Host) error
+	// absent: set by Check; the thing other steps need (the deploy user) does
+	// not exist yet. Only meaningful for steps others list in Needs.
+	absent bool
+	check  func(ctx context.Context, h remote.Host) (needed bool, detail string, err error)
+	apply  func(ctx context.Context, h remote.Host) error
 }
 
 // Check reports whether the step would change the Server, and what.
@@ -229,12 +234,12 @@ func Apply(ctx context.Context, h remote.Host, steps []PlannedStep, confirm func
 		if ps.Blocked != "" {
 			fmt.Fprintf(out, "skip %s: %s\n", ps.Step.Title, ps.Blocked)
 			blocked = append(blocked, ps.Step.ID)
-			unmet[ps.Step.ID] = ps.Step
+			markUnmet(unmet, ps.Step)
 			continue
 		}
 		if confirm != nil && !confirm(ps) {
 			fmt.Fprintf(out, "skip %s\n", ps.Step.Title)
-			unmet[ps.Step.ID] = ps.Step
+			markUnmet(unmet, ps.Step)
 			continue
 		}
 		fmt.Fprintf(out, "applying %s\n", ps.Step.Title)
@@ -246,6 +251,15 @@ func Apply(ctx context.Context, h remote.Host, steps []PlannedStep, confirm func
 		return fmt.Errorf("not applied, need sudo: %s", strings.Join(blocked, ", "))
 	}
 	return nil
+}
+
+// markUnmet records a declined or blocked step. A step that only provides
+// what already exists (the deploy user) does not hold back its dependents.
+func markUnmet(unmet map[string]*Step, s *Step) {
+	if s.ID == "user" && !s.absent {
+		return
+	}
+	unmet[s.ID] = s
 }
 
 // Steps returns the provisioning steps for cfg in dependency order.
@@ -386,12 +400,14 @@ func packagesStep(pkgs []string) *Step {
 
 func userStep(user string, keys []string) *Step {
 	q := remote.Quote(user)
+	// uid 0 is already root-equivalent; docker group membership adds nothing.
+	notRoot := "[ \"$(id -u " + q + " 2>/dev/null)\" = 0 ] || "
 	checkScript := "id -u " + q + " >/dev/null 2>&1 || echo " + remote.Quote("create user "+user) + "\n" +
-		"id -nG " + q + " 2>/dev/null | tr ' ' '\\n' | grep -qx docker || echo " + remote.Quote("add "+user+" to docker group (root-equivalent)") + "\n" +
+		notRoot + "{ id -nG " + q + " 2>/dev/null | tr ' ' '\\n' | grep -qx docker || echo " + remote.Quote("add "+user+" to docker group (root-equivalent)") + "; }\n" +
 		"f=\"$(getent passwd " + q + " | cut -d: -f6)/.ssh/authorized_keys\"\n"
 	applyScript := "id -u " + q + " >/dev/null 2>&1 || useradd -m -s /bin/bash " + q + "\n" +
 		"getent group docker >/dev/null || groupadd docker\n" +
-		"usermod -aG docker " + q + "\n" +
+		notRoot + "usermod -aG docker " + q + "\n" +
 		"home=$(getent passwd " + q + " | cut -d: -f6)\n" +
 		"install -d -m 0700 -o " + q + " -g \"$(id -gn " + q + ")\" \"$home/.ssh\"\n" +
 		"f=\"$home/.ssh/authorized_keys\"\ntouch \"$f\"\n"
@@ -411,21 +427,21 @@ func userStep(user string, keys []string) *Step {
 		checkScript += "if [ -e \"$f\" ] && [ ! -r \"$f\" ]; then echo \"cannot read $f without privileges\"; else\n" + keyChecks + "fi\n"
 	}
 	applyScript += "chmod 0600 \"$f\"\nchown " + remote.Quote(user+":") + " \"$f\"\n"
-	return &Step{
-		ID: "user", Title: "Deploy user " + user,
-		check: func(ctx context.Context, h remote.Host) (bool, string, error) {
-			out, err := h.Output(ctx, remote.Cmd{Script: checkScript, Sudo: true})
-			if err != nil {
-				return false, "", err
-			}
-			n, d := lines(out)
-			if len(keys) == 0 {
-				d += "; warning: no authorized keys given"
-			}
-			return n, d, nil
-		},
-		apply: func(ctx context.Context, h remote.Host) error { return run(ctx, h, applyScript) },
+	st := &Step{ID: "user", Title: "Deploy user " + user}
+	st.check = func(ctx context.Context, h remote.Host) (bool, string, error) {
+		out, err := h.Output(ctx, remote.Cmd{Script: checkScript, Sudo: true})
+		if err != nil {
+			return false, "", err
+		}
+		st.absent = strings.Contains(out, "create user "+user)
+		n, d := lines(out)
+		if len(keys) == 0 && user != "root" {
+			d += "; warning: no authorized keys given"
+		}
+		return n, d, nil
 	}
+	st.apply = func(ctx context.Context, h remote.Host) error { return run(ctx, h, applyScript) }
+	return st
 }
 
 // lingerCheckScript prints n/a, on or off. It reads the linger marker file

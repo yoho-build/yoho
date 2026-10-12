@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"os"
 	"os/exec"
+	"slices"
 	"strings"
 	"testing"
 
@@ -512,5 +513,160 @@ func TestLingerApplyAndDependencySkip(t *testing.T) {
 		if strings.Contains(c.Script, "enable-linger") {
 			t.Fatal("ran skipped linger step")
 		}
+	}
+}
+
+// userHost answers the user, linger and directory checks. exists: the deploy
+// user exists already; root: it is uid 0 (no docker group line).
+func userHost(user string, exists bool) *fakeHost {
+	h := host(ubuntu, "root")
+	prev := h.respond
+	h.respond = func(s string) string {
+		switch {
+		case strings.HasPrefix(s, "id -u '"+user+"'"):
+			if exists {
+				return ""
+			}
+			return "create user " + user
+		case strings.Contains(s, "/var/lib/systemd/linger/"):
+			return "off"
+		}
+		return prev(s)
+	}
+	return h
+}
+
+func planByID(t *testing.T, plan []PlannedStep) map[string]PlannedStep {
+	t.Helper()
+	m := map[string]PlannedStep{}
+	for _, p := range plan {
+		m[p.Step.ID] = p
+	}
+	return m
+}
+
+func applyDecliningUser(t *testing.T, h *fakeHost, plan []PlannedStep) (string, []string) {
+	t.Helper()
+	var out bytes.Buffer
+	var asked []string
+	if err := Apply(context.Background(), h, plan, func(p PlannedStep) bool {
+		asked = append(asked, p.Step.ID)
+		return p.Step.ID != "user"
+	}, &out); err != nil {
+		t.Fatal(err)
+	}
+	return out.String(), asked
+}
+
+func TestRootDeployUserNeedsNothingWithoutKeys(t *testing.T) {
+	h := userHost("root", true)
+	plan, err := Plan(context.Background(), h, Config{Setup: config.SetupConfig{User: "root"}, AuthorizedKeys: []string{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := planByID(t, plan)
+	if m["user"].Needed {
+		t.Fatalf("user step needed: %q", m["user"].Detail)
+	}
+	if !m["dirs"].Needed || !m["linger"].Needed {
+		t.Fatalf("dirs/linger not needed: %+v %+v", m["dirs"], m["linger"])
+	}
+	var script string
+	for _, c := range h.cmds {
+		if strings.HasPrefix(c.Script, "id -u 'root'") {
+			script = c.Script
+		}
+	}
+	if !strings.Contains(script, `[ "$(id -u 'root' 2>/dev/null)" = 0 ] || { id -nG`) {
+		t.Fatalf("docker group check not guarded by uid 0:\n%s", script)
+	}
+	if strings.Contains(script, "authorize key") {
+		t.Fatalf("no keys requested:\n%s", script)
+	}
+	if err := Apply(context.Background(), h, plan, func(PlannedStep) bool { return true }, nil); err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range h.cmds {
+		if strings.Contains(c.Script, "useradd") {
+			t.Fatalf("user step ran: %s", c.Script)
+		}
+	}
+}
+
+func TestUserApplyGuardsDockerGroupForUID0(t *testing.T) {
+	s := userStep("root", nil)
+	h := userHost("root", false)
+	if err := s.Apply(context.Background(), h); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(h.cmds[0].Script, `[ "$(id -u 'root' 2>/dev/null)" = 0 ] || usermod -aG docker 'root'`) {
+		t.Fatalf("script:\n%s", h.cmds[0].Script)
+	}
+}
+
+func TestUnsetKeysStillAuthorizeProvided(t *testing.T) {
+	h := userHost("yoho", true)
+	plan, err := Plan(context.Background(), h, Config{AuthorizedKeys: []string{"ssh-ed25519 AAAAC3Nz op@laptop"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var script string
+	for _, c := range h.cmds {
+		if strings.HasPrefix(c.Script, "id -u 'yoho'") {
+			script = c.Script
+		}
+	}
+	if !strings.Contains(script, "authorize key op@laptop") {
+		t.Fatalf("key check missing:\n%s", script)
+	}
+	if planByID(t, plan)["user"].Detail == "" {
+		t.Fatal("empty detail")
+	}
+}
+
+func TestDeclinedUserKeepsDependentsWhenUserExists(t *testing.T) {
+	h := userHost("yoho", true)
+	// An existing user still lacking the docker group makes the step needed.
+	prev := h.respond
+	h.respond = func(s string) string {
+		if strings.HasPrefix(s, "id -u 'yoho'") {
+			return "add yoho to docker group (root-equivalent)"
+		}
+		return prev(s)
+	}
+	plan, err := Plan(context.Background(), h, Config{AuthorizedKeys: []string{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !planByID(t, plan)["user"].Needed {
+		t.Fatal("user step not needed")
+	}
+	h.cmds = nil
+	out, asked := applyDecliningUser(t, h, plan)
+	if !slices.Contains(asked, "dirs") || !slices.Contains(asked, "linger") {
+		t.Fatalf("dirs/linger not offered: %v\n%s", asked, out)
+	}
+	ran := ""
+	for _, c := range h.cmds {
+		ran += c.Script
+	}
+	if !strings.Contains(ran, "enable-linger") || !strings.Contains(ran, "install -d -m 0700 -o 'yoho'") || strings.Contains(ran, "useradd") {
+		t.Fatalf("ran:\n%s", ran)
+	}
+}
+
+func TestDeclinedUserBlocksDependentsWhenUserMissing(t *testing.T) {
+	h := userHost("yoho", false)
+	plan, err := Plan(context.Background(), h, Config{AuthorizedKeys: []string{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	h.cmds = nil
+	out, asked := applyDecliningUser(t, h, plan)
+	if slices.Contains(asked, "dirs") || slices.Contains(asked, "linger") {
+		t.Fatalf("dependents offered: %v", asked)
+	}
+	if !strings.Contains(out, "needs Deploy user yoho") {
+		t.Fatalf("output:\n%s", out)
 	}
 }

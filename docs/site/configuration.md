@@ -37,7 +37,7 @@ Validate with `yoho config check`; print the resolved file with `yoho config sho
 | `proxy.tunnel` | Managed Cloudflare Tunnel: `token_secret` (empty or `tunnel: {}` = Quick Tunnel), `image`, `replicas` (default 1). See [Cloudflare Tunnel](cloudflare-tunnel.md). |
 | `backups.targets.<n>` | `type` (`restic` default, `archive`), `repository`, `format` (`tar.gz`, `zip`, `7z`), `password_secret`, `env_secrets`, `keep_last`. |
 | `backups.jobs.<n>` | `destination`, `services`, `target`, `schedule` (systemd `OnCalendar`; empty = on demand). |
-| `setup` | `user` (default `yoho`), `authorized_keys`, `packages`, `firewall`, `allow_ports`, `auto_updates`, `swap`, `timezone`. |
+| `setup` | `user` (default `yoho`), `authorized_keys` (unset: your `~/.ssh/*.pub`; `[]`: none), `packages`, `firewall`, `allow_ports`, `auto_updates`, `swap`, `timezone`. |
 | `hooks.path` | Default `.yoho/hooks`. |
 | `retain_releases` | Releases kept per Server for rollback. Default 5. |
 

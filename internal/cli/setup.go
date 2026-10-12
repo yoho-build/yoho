@@ -62,12 +62,9 @@ Supports Debian and Ubuntu.`,
 			cfg := setup.Config{
 				Setup:                a.cfg.Setup,
 				ProxyPorts:           a.setupProxyPorts(),
-				AuthorizedKeys:       a.cfg.Setup.AuthorizedKeys,
+				AuthorizedKeys:       resolveAuthorizedKeys(a.cfg.Setup.AuthorizedKeys),
 				ContainerdImageStore: containerd,
 				BuildOnServer:        a.cfg.Builder.Location == "server",
-			}
-			if len(cfg.AuthorizedKeys) == 0 {
-				cfg.AuthorizedKeys = localPublicKeys()
 			}
 			for _, name := range a.dest.Servers {
 				srv := a.cfg.Servers[name]
@@ -222,6 +219,15 @@ func (a *app) setupProxyPorts() []int {
 		}
 	}
 	return ports
+}
+
+// resolveAuthorizedKeys applies the default: unset means the operator's local
+// keys; an explicit empty list authorizes none.
+func resolveAuthorizedKeys(configured []string) []string {
+	if configured == nil {
+		return localPublicKeys()
+	}
+	return configured
 }
 
 // localPublicKeys reads ~/.ssh/*.pub as the default authorized keys.

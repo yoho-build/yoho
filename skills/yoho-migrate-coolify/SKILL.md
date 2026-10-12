@@ -16,7 +16,7 @@ Ground rules:
 
 ## 1. Inventory (read-only)
 
-Find the app's uuid (Coolify UI URL, `coolify app list`, or the compose project label), then on the Server:
+Find the app's uuid (in the Coolify UI URL, or the `com.docker.compose.project` label of its containers), then on the Server:
 
 ```sh
 ls -la /data/coolify/applications/<uuid>/          # docker-compose.yaml, .env (services: /data/coolify/services/<uuid>/)
@@ -24,8 +24,14 @@ docker ps -a --filter label=com.docker.compose.project=<uuid> --format '{{.Names
 docker inspect <container> --format '{{range .Mounts}}{{.Type}} {{.Name}} -> {{.Destination}}{{"\n"}}{{end}}'
 docker inspect <container> --format '{{json .HostConfig.PortBindings}}'
 docker image inspect <image-id> --format '{{json .RepoTags}} {{json .RepoDigests}}'
-sed -E 's/=.*//' /data/coolify/applications/<uuid>/.env      # keys only
+docker inspect <container> --format '{{.HostConfig.RestartPolicy.Name}}'
+# env keys and entry lengths, never values (a multiline value stays inside one entry):
+docker inspect <container> --format '{{range .Config.Env}}{{index (split . "=") 0}} {{len .}}{{"\n"}}{{end}}'
+# count .env lines that are not KEY='single-line value' or KEY=plain-word (prints a number, never a line; grep exits 1 when it is 0):
+grep -vcE "^([A-Za-z_][A-Za-z0-9_]*=('[^']*'|[A-Za-z0-9_./:@%+,=-]*))?$" /data/coolify/applications/<uuid>/.env
 ```
+
+Do not print the `.env` file or filter it line by line (`sed 's/=.*//'` and the like): a multiline value spills secret lines. Do not `source` or `eval` it unless that count is 0: dotenv is not shell, and an unquoted value with a space or a `$(...)` would leak part of a value in an error or run a command. Coolify writes values single-quoted on one line, and plain names (such as `SERVICE_NAME_*`) unquoted; both pass.
 
 Record:
 
@@ -56,25 +62,29 @@ Start from the repo's compose file (Coolify's stored copy has image IDs and inje
 - Databases and caches with volumes: `x-yoho.stateful: true`. Add `backup.dump`/`restore_dump` (for Postgres: `["pg_dump","-U","<user>","-Fc","<db>"]` and `["pg_restore","-U","<user>","-d","<db>","--clean","--if-exists","--no-owner"]`).
 - The web Service: `x-yoho.proxy` with `hosts` (every hostname that reaches it), `port`, `health_path`, and a compose `healthcheck` using a tool the image has (curl or wget).
 - Non-secret config goes literally in `environment:`. Keep empty values as `""` when the app sets them today, so env validation behaves the same.
-- Keep host ports if the user relies on them; they free up only once the Coolify containers stop.
+- Keep host ports on non-proxied Services (often `127.0.0.1:<port>` for a database) if the user relies on them; they free up only once the Coolify containers stop. A proxied Service must not publish ports or set `container_name` (`yoho config check` rejects both): drop them from the web Service and reach it through the Proxy or `yoho app exec`.
 
 ## 3. Secrets without exposing values
 
 Coolify's `.env` holds runtime values, usually single-quoted. Pick a source with the user:
 
 - A password manager: `KEY=$(op read op://Vault/item/field)` in `.yoho/secrets`. Moving values there is the user's job or needs their session.
-- Or keep them on the Server: copy the file on the Server (never through the chat) to a root-only path outside Coolify, so deleting the Coolify app later cannot lose them:
+- Or keep them on the Server (only when the count above is 0): copy the file on the Server (never through the chat) to a root-only path outside Coolify, so deleting the Coolify app later cannot lose them:
 
   ```sh
   install -d -m 700 /root/yoho-secrets
   install -m 600 /data/coolify/applications/<uuid>/.env /root/yoho-secrets/<app>.env
   ```
 
-  Then in `.yoho/secrets` (single quotes keep `$KEY` for the remote shell; sourcing handles the quoting):
+  Then in `.yoho/secrets`, read the file once over SSH and evaluate it locally for each key. Earlier keys are in the environment of later `$(...)` commands. `${KEY?missing}` makes a missing key fail the deploy instead of yielding an empty value:
 
   ```sh
-  POSTGRES_PASSWORD=$(ssh user@host '. /root/yoho-secrets/<app>.env && printf %s "$POSTGRES_PASSWORD"')
+  # One SSH read; no Service declares _SERVER_ENV, so it never reaches a container.
+  _SERVER_ENV=$(ssh user@host 'cat /root/yoho-secrets/<app>.env')
+  POSTGRES_PASSWORD=$(eval "$_SERVER_ENV"; printf %s "${POSTGRES_PASSWORD?missing}")
   ```
+
+  Re-run the format count whenever someone edits that file. One `ssh` per key also works, but each opens a new connection, and resolving runs serially.
 
 - Values built from other secrets use `${VAR}` inside `.yoho/secrets`, e.g. `DB_URI=postgres://app:${DB_PASSWORD}@db:5432/app`.
 - Already-initialized databases keep their existing password. Do not use `x-yoho.generate` for them.
@@ -101,6 +111,7 @@ proxy:                     # Coolify's Traefik keeps 80/443
     token_secret: TUNNEL_TOKEN
 setup:
   user: root               # when connecting as root; avoids a new deploy user
+  authorized_keys: []      # authorize no extra keys (unset = your ~/.ssh/*.pub)
   firewall: false          # do not enable ufw on a Server with other apps
   auto_updates: false
 backups:
@@ -111,7 +122,7 @@ backups:
 ```
 
 - Without a tunnel and with 80/443 taken, publish the Proxy on another port (`http_port: 8080`) and route to it from Traefik or DNS, or plan the Traefik removal separately.
-- Run `yoho setup --plan` and read every step. On a shared Server, skip steps that change accounts, keys or the firewall. Create the Yoho directories by hand if that is all that is missing (`install -d -m 700 /var/lib/yoho/{apps,backups,jobs}`; `loginctl enable-linger root` for backup timers).
+- Run `yoho setup --plan` and read every step. On a shared Server, decline steps that change accounts, keys or the firewall; with root, `authorized_keys: []` and `firewall: false`, only Yoho directories, linger (for backup timers) and, for server builds when it is missing, the rsync package should remain.
 - `yoho config check`, then `yoho plan -d <dest>`. The plan should only add `yoho-*` resources. Anything that touches other projects is a stop.
 - A local `.env` that compose loads triggers secret warnings. Make sure git ignores it, so `builder.location: server` does not ship it.
 
@@ -120,10 +131,31 @@ backups:
 Get the user's OK on a downtime window. The old and new stacks must never run on the same data volume at once: two Postgres servers on one data directory corrupt it.
 
 1. Back up: `pg_dump -Fc` each database from the running Coolify containers into a dated directory on the Server, and check it with `pg_restore -l`.
-2. Turn off Coolify auto-deploy for the app (UI: the application's Advanced settings, or its API). Otherwise a git push restarts the old stack on the same volumes.
-3. Stop (not remove) the app's containers: `docker stop $(docker ps -q --filter label=com.docker.compose.project=<uuid>)`. Their `restart: unless-stopped` keeps them down.
-4. `yoho deploy -d <dest>`: it builds, starts the stateful Services, health-gates the web Service, switches the Proxy and starts the tunnel connector. With a server build the downtime is the build time; there is no separate build step.
-5. If anything fails and the fix is not quick, roll back: stop the `yoho-<app>-<dest>-*` containers, then `docker start` the Coolify containers. The volumes are unchanged.
+2. Ask the user to turn off auto-deploy for the app in the Coolify UI (or its API, if the user has a token and you have checked the current API). Do not edit Coolify's database. Then confirm no deployment is running for the app (the Coolify deployments list; no `coolify-helper` build in `docker ps`). Otherwise a git push restarts the old stack on the same volumes.
+3. Check each old container's restart policy (`{{.HostConfig.RestartPolicy.Name}}`). `unless-stopped` and `no` stay down after `docker stop`. Change `always` to `unless-stopped` first (`docker update --restart=unless-stopped <id>`), or a Docker restart would bring the old database back.
+4. Stop the old stack after the build, not before it. A one-time `.yoho/hooks/pre-deploy` hook runs after the image is built and shipped, and before Yoho starts any Service, so the downtime does not include the build:
+
+   ```sh
+   #!/bin/sh
+   # One-time Coolify cutover; delete this hook afterwards.
+   set -eu
+   # The remote side runs in its own POSIX shell with set -eu, so a failing docker command fails the hook.
+   ssh user@host sh -s <<'EOF'
+   set -eu
+   ids=$(docker ps -q --filter label=com.docker.compose.project=<uuid>)
+   if [ -n "$ids" ]; then docker stop $ids >/dev/null; fi
+   for v in <data-volume-1> <data-volume-2>; do
+     if [ -n "$(docker ps -q --filter volume=$v)" ]; then echo "volume $v is still in use" >&2; exit 1; fi
+   done
+   EOF
+   ```
+
+   `chmod +x` it, then run `yoho deploy -d <dest>`. The volume check also makes a later deploy fail if the hook is left in place, because Yoho's own containers then use the volumes. Yoho starts the stateful Services, runs release commands, health-gates the web Service, switches the Proxy and starts the tunnel connector. Remove the hook once the deploy succeeds.
+5. If it fails and the fix is not quick, roll back:
+   - Stop every Yoho container of the app by all three ownership labels: `docker ps -q --filter label=com.docker.compose.project=yoho-<app>-<dest> --filter label=yoho.app=<app> --filter label=yoho.destination=<dest>`, then `docker stop` those IDs if there are any (none is normal when the deploy failed before starting a Service; `docker stop` with no IDs exits 1, so do not stop there). Do not match on names (a Service with `container_name` would not match), and do not rely on the project name alone (`foo-bar`/`prod` and `foo`/`bar-prod` share it).
+   - Confirm that nothing else uses the data volumes: `docker ps --filter volume=<name>` must be empty. Also list stopped users with `docker ps -a --filter volume=<name>`: set any Yoho container there with restart policy `always` to `docker update --restart=no`, or a Docker restart brings it back.
+   - If the new version ran migrations the old code cannot handle (check the app log and the migrations in the diff), the database has to go back to the step 1 dump. Ask the user before restoring.
+   - Only then `docker start` the Coolify containers.
 
 ## 6. Verify
 
