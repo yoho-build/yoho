@@ -23,6 +23,31 @@ Follow in order. Ask before installing anything, editing files, or running any c
 8. Verify: hit the health URL, run `yoho app ps` and `yoho releases`. Report the rollback command (`yoho rollback VERSION`).
 9. After 2-3 failed attempts on the same step, stop and report the step and the exact error.
 
+## Ship a new version
+
+Use this when the user asks whether there is something new to deploy, or asks to deploy the latest code. Yoho has no git webhook: deploys happen only when someone runs `yoho deploy`, by hand or from CI.
+
+1. Run `yoho releases` to find the current Version. It is the git SHA, with `_uncommitted_<hash>` when local changes were built.
+2. Run `git fetch`, then `git log <current-sha>..origin/<branch> -- <app dir>`. If nothing is listed, report that there is nothing new and stop.
+3. Scan the diff for risk:
+   - Database migrations.
+   - Dockerfile, lockfile or compose changes.
+   - New environment variables, from the app's env schema or `process.env`/`os.Getenv` uses.
+
+   Add any new secret keys to `.yoho/secrets` and `x-yoho.secrets` before deploying.
+4. Update the work tree with a fast-forward only (`git merge --ff-only`). Keep uncommitted Yoho files as they are.
+5. Run `yoho plan`. Normally only built Services change, shown as `update in-place (zero downtime)`. If a stateful Service would be replaced or destroyed, stop and ask the user.
+6. Before a migration that cannot be undone, run `yoho backup run`. Then run `yoho deploy`.
+7. Verify:
+   - Each hostname returns 200 on its health path.
+   - The new container is healthy.
+   - The proxy logs show no 5xx responses during the switch (`yoho proxy logs`).
+   - `yoho releases` marks the new Version as current.
+
+   Report the rollback command: `yoho rollback <previous version>`.
+
+If versions carry `_uncommitted_`, the build used local changes. Suggest committing them so that each Version maps to a commit.
+
 ## Kamal to Yoho
 
 | Kamal | Yoho |
