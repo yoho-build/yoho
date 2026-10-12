@@ -189,6 +189,13 @@ func statsCmd(g *globals) *cobra.Command {
 	var noStream bool
 	c := &cobra.Command{
 		Use: "stats [SERVICE...]", Short: "Show CPU, memory, network and disk I/O of the App's containers",
+		Long: `Show CPU, memory, network and disk I/O of the App's containers.
+
+In a terminal this is docker's live view (Ctrl-C to quit). Otherwise it prints
+one snapshot and exits: with --no-stream, --json, when stdin or stdout is not a
+terminal, or when CI is set or TERM=dumb. Scripts and coding agents should use
+--no-stream (table) or --json (one docker JSON object per container).`,
+		Example: "  yoho app stats\n  yoho app stats web --no-stream\n  yoho --json app stats",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			a, err := g.load(cmd)
 			if err != nil {
@@ -209,7 +216,7 @@ func statsCmd(g *globals) *cobra.Command {
 				}
 			}
 			swarm := a.dest.Runtime == "swarm"
-			live := !noStream && !g.json && isTerminal(cmd.InOrStdin()) && isTerminal(cmd.OutOrStdout())
+			live := liveStats(noStream, g.json, cmd.InOrStdin(), cmd.OutOrStdout(), os.Getenv)
 			name := a.dest.Servers[0]
 			if swarm {
 				a.ui.Info("swarm: only tasks running on %s (the Destination's first Server)", name)
@@ -240,6 +247,15 @@ func statsCmd(g *globals) *cobra.Command {
 	}
 	c.Flags().BoolVar(&noStream, "no-stream", false, "Print one snapshot instead of a live view")
 	return c
+}
+
+// liveStats reports whether stats should run docker's live view: only for a
+// human at a terminal, never in CI, dumb terminals, --no-stream or --json.
+func liveStats(noStream, jsonOut bool, in, out any, getenv func(string) string) bool {
+	if noStream || jsonOut || getenv("CI") != "" || getenv("TERM") == "dumb" {
+		return false
+	}
+	return isTerminal(in) && isTerminal(out)
 }
 
 // isTerminal reports whether f is a terminal file.

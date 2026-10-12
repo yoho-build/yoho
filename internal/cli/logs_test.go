@@ -182,3 +182,22 @@ func TestLogsUnreadableComposeNeedsService(t *testing.T) {
 		t.Fatalf("err %v; output:\n%s", err, out)
 	}
 }
+
+func TestLiveStatsNeverWithoutTerminal(t *testing.T) {
+	env := func(m map[string]string) func(string) string { return func(k string) string { return m[k] } }
+	for _, c := range []struct {
+		name           string
+		noStream, json bool
+		vars           map[string]string
+	}{
+		{"no terminal", false, false, nil},
+		{"no-stream", true, false, nil},
+		{"json", false, true, nil},
+		{"CI", false, false, map[string]string{"CI": "true"}},
+		{"dumb", false, false, map[string]string{"TERM": "dumb"}},
+	} {
+		if liveStats(c.noStream, c.json, nil, nil, env(c.vars)) {
+			t.Errorf("%s: live view without a terminal", c.name)
+		}
+	}
+}

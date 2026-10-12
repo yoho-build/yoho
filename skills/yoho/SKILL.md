@@ -106,7 +106,7 @@ yoho swarm init [-y] | join [-y] | status
 yoho skill install [--dir DIR] [--agent claude|codex|all] | print [SKILL]   # install writes all bundled skills
 ```
 
-Global flags: `-c/--config`, `-d/--destination` (default `$YOHO_DESTINATION`, then `production`, then the only Destination), `--json`, `-v/--verbose`. Check `yoho <cmd> --help` for all flags. `apply` refuses without a terminal unless `--auto-approve`; `--json` requires it.
+Global flags: `-c/--config`, `-d/--destination` (default `$YOHO_DESTINATION`, then `production`, then the only Destination), `--json`, `-v/--verbose`. Check `yoho <cmd> --help` for all flags. `apply` refuses without a terminal unless `--auto-approve`; `--json` requires it. Agents: never use `app logs -f` or live `app stats`; use `yoho app logs SERVICE -n N`, `yoho app stats --no-stream`, or `yoho --json app stats` (one JSON object per container).
 
 ## Safety rules
 
