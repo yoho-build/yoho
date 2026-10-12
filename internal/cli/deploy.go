@@ -227,14 +227,9 @@ func (a *app) buildAndShip(ctx context.Context, s *session, skipBuild bool) (map
 	hosts, store, r, ver, hook := s.hosts, s.store, s.r, s.ver, s.hook
 	var built []string
 	engine := ""
-	platform := ""
-	var err error
-	if len(a.cfg.Builder.Platforms) == 0 {
-		if platform, err = build.ServerPlatform(ctx, hosts[0].Host); err != nil {
-			return nil, err
-		}
-	} else {
-		platform = a.cfg.Builder.Platforms[0]
+	platform, err := deploymentPlatform(ctx, hosts, a.cfg.Builder.Platforms)
+	if err != nil {
+		return nil, err
 	}
 	if err = hook(ctx, "pre-build", nil); err != nil {
 		return nil, err
@@ -311,6 +306,36 @@ func (a *app) buildAndShip(ctx context.Context, s *session, skipBuild bool) (map
 		step.Done(strings.Join(methods, ", "))
 	}
 	return images, nil
+}
+
+// deploymentPlatform selects the image to ship from the Servers, not the order
+// of builder.platforms. Transport currently ships one platform to all Servers.
+func deploymentPlatform(ctx context.Context, hosts []plan.NamedHost, platforms []string) (string, error) {
+	if len(hosts) == 0 {
+		return "", errors.New("cannot select a deployment platform without a Server")
+	}
+	platform, err := build.ServerPlatform(ctx, hosts[0].Host)
+	if err != nil {
+		return "", err
+	}
+	for _, h := range hosts[1:] {
+		p, err := build.ServerPlatform(ctx, h.Host)
+		if err != nil {
+			return "", err
+		}
+		if p != platform {
+			return "", fmt.Errorf("Servers have different platforms: %s is %s, %s is %s; use separate Destinations for each architecture", hosts[0].Name, platform, h.Name, p)
+		}
+	}
+	if len(platforms) == 0 {
+		return platform, nil
+	}
+	for _, p := range platforms {
+		if p == platform || strings.HasPrefix(p, platform+"/") {
+			return p, nil
+		}
+	}
+	return "", fmt.Errorf("builder.platforms [%s] does not include Server platform %s; add %s or omit builder.platforms to detect it automatically", strings.Join(platforms, ", "), platform, platform)
 }
 
 // newDeploy builds the plan.Deploy for the session. forPlan works on a copy

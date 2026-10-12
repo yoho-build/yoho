@@ -1,12 +1,18 @@
 package build
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"os"
+	"os/exec"
+	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/compose-spec/compose-go/v2/types"
 
@@ -107,6 +113,67 @@ func TestContainerBuild(t *testing.T) {
 	}
 	if strings.Join(c.Env, ",") != "GH_TOKEN=ghs_secret,NPM_TOKEN=npm_secret" {
 		t.Fatalf("env %v", c.Env)
+	}
+}
+
+// TestE2EContainerAMD64Build verifies the local Rosetta build path without
+// requiring Docker or an SSH Server. Enable with YOHO_E2E=1 on Apple silicon.
+func TestE2EContainerAMD64Build(t *testing.T) {
+	if os.Getenv("YOHO_E2E") != "1" {
+		t.Skip("YOHO_E2E not set")
+	}
+	if runtime.GOOS != "darwin" || runtime.GOARCH != "arm64" {
+		t.Skip("requires an Apple silicon Mac")
+	}
+	if _, err := exec.LookPath("container"); err != nil {
+		t.Skip("container CLI not installed")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+	defer cancel()
+	if err := ContainerStatus(ctx, osExec); err != nil {
+		t.Fatalf("start Apple container with `container system start`: %v", err)
+	}
+	dir := t.TempDir()
+	dockerfile := "FROM alpine\nRUN --mount=type=secret,id=TOK,env=TOK test \"$TOK\" = ok && test \"$(uname -m)\" = x86_64 && uname -m > /arch\nCMD cat /arch\n"
+	if err := os.WriteFile(filepath.Join(dir, "Dockerfile"), []byte(dockerfile), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ver := fmt.Sprintf("t%d", time.Now().UnixNano())
+	ref := ImageName(nil, "yoho-e2e-amd64", "", "web", ver)
+	t.Cleanup(func() {
+		cleanup, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		if err := osExec(cleanup, Command{Argv: []string{"container", "image", "delete", ref}, Stdout: io.Discard, Stderr: io.Discard}); err != nil {
+			t.Errorf("remove QA image %s: %v", ref, err)
+		}
+	})
+	p := &types.Project{WorkingDir: dir, Services: types.Services{"web": {WorkloadSpec: types.WorkloadSpec{Build: &types.BuildConfig{Context: "."}}}}}
+	imgs, err := Images(ctx, Options{App: "yoho-e2e-amd64", Version: ver, Project: p,
+		Platforms: []string{"linux/amd64"}, Builder: config.Builder{Secrets: []string{"TOK"}},
+		BuildEnv: []string{"TOK=ok"}, Out: os.Stderr})
+	if err != nil {
+		t.Fatal(err)
+	}
+	img := imgs["web"]
+	if img.Engine != EngineContainer || !img.Built || img.Ref != ref {
+		t.Fatalf("auto must select Apple container: %+v", img)
+	}
+	inspected, err := InspectContainerImage(ctx, osExec, ref)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := inspected.Variant("linux/amd64"); !ok {
+		t.Fatalf("AMD64 variant missing: %+v", inspected)
+	}
+	if _, ok := inspected.Variant("linux/arm64"); ok {
+		t.Fatal("built native ARM64 instead of AMD64")
+	}
+	var out bytes.Buffer
+	if err := osExec(ctx, Command{Argv: []string{"container", "run", "--platform", "linux/amd64", "--rosetta", "--rm", ref}, Stdout: &out, Stderr: os.Stderr}); err != nil {
+		t.Fatal(err)
+	}
+	if strings.TrimSpace(out.String()) != "x86_64" {
+		t.Fatalf("run output %q", out.String())
 	}
 }
 
