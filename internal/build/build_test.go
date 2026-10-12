@@ -4,12 +4,8 @@ import (
 	"bytes"
 	"context"
 	"errors"
-	"fmt"
 	"io"
 	"os"
-	"os/exec"
-	"path/filepath"
-	"sort"
 	"strings"
 	"testing"
 
@@ -191,12 +187,32 @@ func fixedRunID(t *testing.T, ids ...string) {
 	t.Cleanup(func() { newRunID = old })
 }
 
+// serverSrc is a Yoho directory for project(): app/ is the context, and
+// compose.yaml at the top is not a build input.
+func serverSrc(t *testing.T) string {
+	t.Helper()
+	t.Setenv("GIT_CONFIG_GLOBAL", os.DevNull)
+	dir := t.TempDir()
+	writeTree(t, dir, map[string]string{"app/Dockerfile.prod": "FROM alpine\n", "app/main.go": "package main\n", "compose.yaml": "services: {}\n"})
+	return dir
+}
+
 func TestServerBuild(t *testing.T) {
 	fixedRunID(t, "r1")
-	r := &recExec{}
+	dir := serverSrc(t)
+	root, _ := physical(dir)
+	var excl string
+	r := &recExec{fail: func(a string) error {
+		if i := strings.Index(a, "--exclude-from="); i >= 0 {
+			b, _ := os.ReadFile(strings.Fields(a[i+len("--exclude-from="):])[0])
+			excl = string(b)
+		}
+		return nil
+	}}
 	h := &recHost{}
 	h.HostName = "web1"
-	o := Options{Dir: "/src", App: "shop", Version: "v1", Project: project("/src"),
+	var sum SourceSummary
+	o := Options{Dir: dir, App: "shop", Version: "v1", Project: project(dir), OnSource: func(s SourceSummary) { sum = s },
 		Builder:  config.Builder{Location: "server", Exclude: []string{"node_modules"}},
 		BuildEnv: []string{"NPM_TOKEN=npm_secret"}, Host: h, RsyncTarget: "deploy@web1", SourceDir: "/srv/source", Exec: r.exec}
 	imgs, err := Images(context.Background(), o)
@@ -207,15 +223,27 @@ func TestServerBuild(t *testing.T) {
 		t.Fatalf("%+v", imgs)
 	}
 	c, _ := r.find("rsync")
-	if got := strings.Join(c.Argv, " "); got != "rsync -az --delete --exclude=.git --exclude=/.yoho/secrets* --exclude=node_modules -e ssh -o BatchMode=yes /src/ deploy@web1:/srv/source.run-r1/" {
+	got := strings.Join(c.Argv, " ")
+	if !strings.HasPrefix(got, "rsync -az --delete --exclude=.git --exclude=.yoho/secrets* --exclude=node_modules --from0 --exclude-from=") ||
+		!strings.HasSuffix(got, " --delete-excluded -e ssh -o BatchMode=yes "+root+"/ deploy@web1:/srv/source.run-r1/source/") {
 		t.Fatalf("rsync %s", got)
 	}
-	if h.cmds[0].Script != "set -eu\nmkdir -p -m 0700 '/srv/source.run-r1'\nif [ -d '/srv/source' ]; then cp -a '/srv/source'/. '/srv/source.run-r1'/ 2>/dev/null || true; fi\ncommand -v rsync >/dev/null 2>&1 || echo yoho-no-rsync" {
+	if excl != "/compose.yaml\x00" {
+		t.Fatalf("exclude list %q", excl)
+	}
+	if sum.Root != root || sum.Files != 2 || sum.Bytes != int64(len("FROM alpine\n")+len("package main\n")) {
+		t.Fatalf("summary %+v", sum)
+	}
+	want := "set -eu\numask 077\nmkdir -p '/srv'\nmkdir -m 0700 '/srv/source.run-r1'\n" +
+		privateDirCheck("/srv/source.run-r1") +
+		"mkdir '/srv/source.run-r1/source'\n" +
+		"if [ -d '/srv/source' ]; then cp -a '/srv/source'/. '/srv/source.run-r1/source'/ 2>/dev/null || true; fi\ncommand -v rsync >/dev/null 2>&1 || echo yoho-no-rsync"
+	if h.cmds[0].Script != want {
 		t.Fatalf("mkdir %q", h.cmds[0].Script)
 	}
 	b := h.cmds[1]
-	if !strings.HasPrefix(b.Script, "set -eu\nDOCKER_BUILDKIT=1 docker build '--tag' 'yoho/shop-web:v1' '--file' '/srv/source.run-r1/app/Dockerfile.prod'") ||
-		!strings.HasSuffix(b.Script, "'--secret' 'id=npm,env=NPM_TOKEN' '/srv/source.run-r1/app'") {
+	if !strings.HasPrefix(b.Script, "set -eu\nDOCKER_BUILDKIT=1 docker build '--tag' 'yoho/shop-web:v1' '--file' '/srv/source.run-r1/source/app/Dockerfile.prod'") ||
+		!strings.HasSuffix(b.Script, "'--secret' 'id=npm,env=NPM_TOKEN' '/srv/source.run-r1/source/app'") {
 		t.Fatalf("script %s", b.Script)
 	}
 	if strings.Contains(b.Script, "npm_secret") || b.Env["NPM_TOKEN"] != "npm_secret" {
@@ -314,7 +342,8 @@ func TestServerBuildRsyncMissing(t *testing.T) {
 	r := &recExec{}
 	h := &noRsyncHost{}
 	h.HostName = "web1"
-	o := Options{Dir: "/src", App: "shop", Version: "v1", Project: project("/src"),
+	dir := serverSrc(t)
+	o := Options{Dir: dir, App: "shop", Version: "v1", Project: project(dir),
 		Builder: config.Builder{Location: "server"}, Host: h, RsyncTarget: "deploy@web1", SourceDir: "/srv/source", Exec: r.exec}
 	_, err := Images(context.Background(), o)
 	if err == nil || !strings.Contains(err.Error(), "rsync is missing on web1") || !strings.Contains(err.Error(), "hint: run `yoho setup`") {
@@ -336,7 +365,8 @@ func TestServerBuildMkdirFails(t *testing.T) {
 	r := &recExec{}
 	h := &mkdirFailHost{}
 	h.HostName = "web1"
-	o := Options{Dir: "/src", App: "shop", Version: "v1", Project: project("/src"),
+	dir := serverSrc(t)
+	o := Options{Dir: dir, App: "shop", Version: "v1", Project: project(dir),
 		Builder: config.Builder{Location: "server"}, Host: h, RsyncTarget: "deploy@web1", SourceDir: "/srv/source", Exec: r.exec}
 	_, err := Images(context.Background(), o)
 	if err == nil || !strings.Contains(err.Error(), "mkdir: permission denied") {
@@ -347,103 +377,15 @@ func TestServerBuildMkdirFails(t *testing.T) {
 	}
 }
 
-func gitTestRepo(t *testing.T) string {
-	t.Helper()
-	if _, err := exec.LookPath("git"); err != nil {
-		t.Skip("git not installed")
-	}
-	dir := t.TempDir()
-	write := func(name, body string) {
-		p := filepath.Join(dir, name)
-		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.WriteFile(p, []byte(body), 0o644); err != nil {
-			t.Fatal(err)
-		}
-	}
-	write(".gitignore", "node_modules/\n.env.*\n")
-	write("app.go", "tracked")
-	write("untracked.txt", "untracked")
-	write("my file [1].txt", "untracked space")
-	write(".env.local", "SECRET")
-	write("node_modules/x/index.js", "x")
-	write("pkg/node_modules/y.js", "y")
-	write("pkg/.env.prod", "SECRET")
-	write("pkg/keep.txt", "keep")
-	write("pkg/[a] b/.env.x", "SECRET")
-	write("pkg/[a] b/ok.txt", "ok")
-	for _, args := range [][]string{{"init", "-q"}, {"add", "app.go", ".gitignore"}} {
-		c := exec.Command("git", append([]string{"-C", dir}, args...)...)
-		if out, err := c.CombinedOutput(); err != nil {
-			t.Fatalf("git %v: %v %s", args, err, out)
-		}
-	}
-	return dir
-}
-
-func TestIgnoredExcludes(t *testing.T) {
-	dir := gitTestRepo(t)
-	got, err := IgnoredExcludes(context.Background(), dir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	sort.Strings(got)
-	want := []string{`/.env.local`, `/node_modules/`, `/pkg/.env.prod`, `/pkg/\[a\] b/.env.x`, `/pkg/node_modules/`}
-	if strings.Join(got, "|") != strings.Join(want, "|") {
-		t.Fatalf("got %q want %q", got, want)
-	}
-	if ex, err := IgnoredExcludes(context.Background(), t.TempDir()); err != nil || ex != nil {
-		t.Fatalf("non-git: %v %v", ex, err)
-	}
-}
-
-func TestSyncSourceSkipsGitIgnored(t *testing.T) {
-	if _, err := exec.LookPath("rsync"); err != nil {
-		t.Skip("rsync not installed")
-	}
-	dir := gitTestRepo(t)
-	dst := filepath.Join(t.TempDir(), "source")
-	// A stale ignored file from an earlier sync must be removed.
-	if err := os.MkdirAll(filepath.Join(dst, "node_modules"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(dst, "node_modules", "stale.js"), []byte("x"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	o := Options{
-		Dir: dir, Host: &remote.Local{HostName: "local"}, SourceDir: dst, Out: io.Discard,
-		Exec: func(ctx context.Context, c Command) error {
-			out, err := exec.CommandContext(ctx, c.Argv[0], c.Argv[1:]...).CombinedOutput()
-			if err != nil {
-				return fmt.Errorf("%w: %s", err, out)
-			}
-			return nil
-		},
-	}
-	if err := syncSource(context.Background(), o); err != nil {
-		t.Fatal(err)
-	}
-	for _, p := range []string{"app.go", ".gitignore", "untracked.txt", "my file [1].txt", "pkg/keep.txt", "pkg/[a] b/ok.txt"} {
-		if _, err := os.Stat(filepath.Join(dst, p)); err != nil {
-			t.Errorf("%s should be synced: %v", p, err)
-		}
-	}
-	for _, p := range []string{".env.local", "node_modules", "pkg/node_modules", "pkg/.env.prod", "pkg/[a] b/.env.x"} {
-		if _, err := os.Stat(filepath.Join(dst, p)); err == nil {
-			t.Errorf("%s should not be synced", p)
-		}
-	}
-}
-
 func TestServerBuildUsesPrivateSourceDirPerInvocation(t *testing.T) {
 	fixedRunID(t, "aaa", "bbb")
 	var dirs []string
+	dir := serverSrc(t)
 	for i := 0; i < 2; i++ {
 		r := &recExec{}
 		h := &recHost{}
 		h.HostName = "web1"
-		o := Options{Dir: "/src", App: "shop", Destination: "prod", Version: "v1", Project: project("/src"),
+		o := Options{Dir: dir, App: "shop", Destination: "prod", Version: "v1", Project: project(dir),
 			Builder: config.Builder{Location: "server"}, Host: h, RsyncTarget: "deploy@web1", Exec: r.exec}
 		if _, err := Images(context.Background(), o); err != nil {
 			t.Fatal(err)
@@ -451,11 +393,12 @@ func TestServerBuildUsesPrivateSourceDirPerInvocation(t *testing.T) {
 		c, _ := r.find("rsync")
 		dirs = append(dirs, c.Argv[len(c.Argv)-1])
 		last := h.cmds[len(h.cmds)-1].Script
-		if !strings.Contains(last, "mv '/var/lib/yoho/apps/shop/prod/source.run-"+[]string{"aaa", "bbb"}[i]+"' '/var/lib/yoho/apps/shop/prod/source'") {
+		run := "'/var/lib/yoho/apps/shop/prod/source.run-" + []string{"aaa", "bbb"}[i]
+		if !strings.Contains(last, "chmod 0700 "+run+"/source'; then mv "+run+"/source' '/var/lib/yoho/apps/shop/prod/source'") {
 			t.Errorf("successful build should refresh the seed copy, got %s", last)
 		}
 	}
-	if dirs[0] == dirs[1] || !strings.HasSuffix(dirs[0], "source.run-aaa/") || !strings.HasSuffix(dirs[1], "source.run-bbb/") {
+	if dirs[0] == dirs[1] || !strings.HasSuffix(dirs[0], "source.run-aaa/source/") || !strings.HasSuffix(dirs[1], "source.run-bbb/source/") {
 		t.Fatalf("overlapping deploys must not share a source dir: %v", dirs)
 	}
 }
@@ -470,13 +413,14 @@ func TestServerBuildFailureRemovesPrivateSourceDir(t *testing.T) {
 	}}
 	h := &recHost{}
 	h.HostName = "web1"
-	o := Options{Dir: "/src", App: "shop", Destination: "prod", Version: "v1", Project: project("/src"),
+	dir := serverSrc(t)
+	o := Options{Dir: dir, App: "shop", Destination: "prod", Version: "v1", Project: project(dir),
 		Builder: config.Builder{Location: "server"}, Host: h, RsyncTarget: "deploy@web1", Exec: r.exec}
 	if _, err := Images(context.Background(), o); err == nil {
 		t.Fatal("want rsync failure")
 	}
 	last := h.cmds[len(h.cmds)-1].Script
-	if last != "rm -rf '/var/lib/yoho/apps/shop/prod/source.run-zzz'" {
+	if last != "set -eu\nrm -rf '/var/lib/yoho/apps/shop/prod/source.run-zzz'\n" {
 		t.Errorf("cleanup %q", last)
 	}
 }

@@ -5,6 +5,7 @@ go 1.26.0
 require (
 	github.com/compose-spec/compose-go/v2 v2.16.1
 	github.com/invopop/jsonschema v0.14.0
+	github.com/moby/patternmatcher v0.6.1
 	github.com/pelletier/go-toml/v2 v2.4.3
 	github.com/spf13/cobra v1.10.2
 	github.com/tailscale/hujson v0.0.0-20260727124030-b80ff77dac4f

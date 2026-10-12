@@ -11,7 +11,8 @@
 //	  secrets/<generation>/<service>.env  env_file fallback (0600)
 //	  generated/<NAME>              secrets generated once on the Server (0600)
 //	  hmac.key                      audit fingerprint key (0600)
-//	  source/                       synced build context (builder.location=server)
+//	  source/                       seed copy of the last synced build inputs (builder.location=server, 0700)
+//	  source.run-<id>/source/       one build's synced inputs, inside a private 0700 dir
 //	<root>/backups/<app>/<destination>/   local Backup spool (0700)
 //	<root>/jobs/<app>-<destination>-<job>.json   Scheduled Job specs
 //

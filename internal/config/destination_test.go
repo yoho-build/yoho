@@ -194,3 +194,37 @@ func TestDestNameNoDestinations(t *testing.T) {
 		t.Fatalf("err %v", err)
 	}
 }
+
+func TestBuilderGitignore(t *testing.T) {
+	cases := []struct {
+		name, base, overlay string
+		want                bool
+		set                 bool
+	}{
+		{name: "omitted", want: true},
+		{name: "true", base: "builder: {location: server, gitignore: true}\n", want: true, set: true},
+		{name: "false", base: "builder: {location: server, gitignore: false}\n", want: false, set: true},
+		{name: "overlay false", base: "builder: {location: server}\n", overlay: "builder: {gitignore: false}\n", want: false, set: true},
+		{name: "overlay true over false", base: "builder: {gitignore: false}\n", overlay: "builder: {gitignore: true}\n", want: true, set: true},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			dir := t.TempDir()
+			base := writeYoho(t, dir, "yoho.yml", destBase+c.base)
+			if c.overlay != "" {
+				writeYoho(t, dir, "yoho.staging.yml", c.overlay)
+			}
+			cfg, _, _, err := LoadForDestination(base, "staging")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := cfg.Builder.HonorGitignore(); got != c.want || (cfg.Builder.Gitignore != nil) != c.set {
+				t.Fatalf("HonorGitignore %v, set %v", got, cfg.Builder.Gitignore != nil)
+			}
+		})
+	}
+	s, err := Schema()
+	if err != nil || !strings.Contains(string(s), `"gitignore"`) {
+		t.Fatalf("schema lacks builder.gitignore: %v", err)
+	}
+}

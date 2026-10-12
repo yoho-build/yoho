@@ -6,9 +6,10 @@
 //     with `docker buildx create ssh://<remote>`; the image is built there and
 //     `--load` streams the result back into the local daemon, so the normal
 //     image transport ships it to Servers afterwards.
-//   - server: the source is rsynced to the Destination's Server
-//     (<AppDir>/source) and built there with `docker build`, so no transport
-//     is needed. Build secrets travel as env through remote.Cmd.Env.
+//   - server: the build inputs are rsynced to the Destination's Server and
+//     built there with `docker build`, so no transport is needed. Build
+//     secrets travel as env through remote.Cmd.Env. See source.go and
+//     ADR 0009 for what ships.
 package build
 
 import (
@@ -54,8 +55,9 @@ type Options struct {
 	// Dir is the directory of the Yoho file; relative build contexts resolve
 	// against Project.WorkingDir, falling back to Dir.
 	Dir string
-	// ExcludeFrom is a NUL-separated rsync exclude file (git-ignored paths)
-	// for location=server; set by syncSource.
+	// ExcludeFrom is a NUL-separated rsync exclude file (everything under
+	// the transfer root that does not ship) for location=server; set by
+	// syncSource.
 	ExcludeFrom string
 	App         string
 	Destination string // location=server: picks <AppDir>/source
@@ -79,15 +81,30 @@ type Options struct {
 	RsyncTarget string
 	// SourceDir overrides the Server source directory for location=server.
 	SourceDir string
+	// OnSource, when set, receives what a location=server build ships,
+	// before the transfer.
+	OnSource func(SourceSummary)
 	// cacheDir is the shared seed copy of the source (location=server); the
-	// build itself runs in the private SourceDir.
+	// build itself runs in the private SourceDir, inside runDir.
 	cacheDir string
+	// runDir is this invocation's private (0700) directory holding SourceDir.
+	runDir string
+	// root is the local transfer root (location=server).
+	root string
 	// Exec runs local commands. Default os/exec.
 	Exec Exec
 	// GOOS, GOARCH and LookPath feed ResolveEngine. Default: this machine
 	// and exec.LookPath.
 	GOOS, GOARCH string
 	LookPath     func(string) (string, error)
+}
+
+// SourceSummary is what a location=server build ships: the local transfer
+// root and the files under it, counted by Yoho's own walk.
+type SourceSummary struct {
+	Root  string
+	Files int
+	Bytes int64
 }
 
 // Image is the image a Service runs.
@@ -193,14 +210,23 @@ func Images(ctx context.Context, o Options) (_ map[string]Image, err error) {
 		if o.Host == nil {
 			return nil, errors.New("builder.location=server needs a Server")
 		}
+		plan, err := planSource(o, names)
+		if err != nil {
+			return nil, err
+		}
+		o.root = plan.root
+		if o.OnSource != nil {
+			o.OnSource(SourceSummary{Root: plan.root, Files: plan.files, Bytes: plan.bytes})
+		}
 		// A private source dir per invocation: deploys of the same Destination
 		// can overlap (the Destination lock is only taken after the build), and
 		// a shared dir would let one rsync --delete change what the other builds.
 		o.cacheDir = o.sourceDir()
-		o.SourceDir = o.cacheDir + ".run-" + newRunID()
+		o.runDir = o.cacheDir + ".run-" + newRunID()
+		o.SourceDir = path.Join(o.runDir, "source")
 		done := false
 		defer func() { finishSource(o, done) }()
-		if err := syncSource(ctx, o); err != nil {
+		if err := syncSource(ctx, o, plan); err != nil {
 			return nil, err
 		}
 		defer func() { done = err == nil }()
@@ -268,8 +294,8 @@ func localSpec(o Options, b *types.BuildConfig) spec {
 	if ctxDir == "" {
 		ctxDir = "."
 	}
-	if !isRemoteContext(ctxDir) && !filepath.IsAbs(ctxDir) {
-		ctxDir = filepath.Join(o.baseDir(), ctxDir)
+	if !isRemoteContext(ctxDir) {
+		ctxDir = resolveLocal(o, ctxDir)
 	}
 	s := spec{context: ctxDir}
 	switch {
@@ -285,8 +311,8 @@ func localSpec(o Options, b *types.BuildConfig) spec {
 }
 
 // buildArgs renders docker build flags (after "docker buildx build" or
-// "docker build"). mapPath rewrites local file paths (secrets) for the
-// machine running docker.
+// "docker build"). mapPath rewrites local paths (additional contexts,
+// secrets) for the machine running docker.
 func buildArgs(o Options, service string, b *types.BuildConfig, s spec, ref string, mapPath func(string) (string, error)) ([]string, error) {
 	a := []string{"--tag", ref}
 	if s.dockerfile != "" {
@@ -319,7 +345,15 @@ func buildArgs(o Options, service string, b *types.BuildConfig, s spec, ref stri
 		a = append(a, "--cache-to", c)
 	}
 	for _, k := range sortedKeys(b.AdditionalContexts) {
-		a = append(a, "--build-context", k+"="+b.AdditionalContexts[k])
+		v := b.AdditionalContexts[k]
+		if isLocalContext(v) {
+			p, err := mapPath(resolveLocal(o, v))
+			if err != nil {
+				return nil, fmt.Errorf("additional context %s: %w", k, err)
+			}
+			v = p
+		}
+		a = append(a, "--build-context", k+"="+v)
 	}
 	for _, k := range b.SSH {
 		if k.Path != "" {
@@ -377,11 +411,7 @@ func secretArgs(o Options, b *types.BuildConfig, mapPath func(string) (string, e
 		case def.Environment != "":
 			a = append(a, "--secret", "id="+id+",env="+def.Environment)
 		case def.File != "":
-			p := def.File
-			if !filepath.IsAbs(p) {
-				p = filepath.Join(o.baseDir(), p)
-			}
-			p, err := mapPath(p)
+			p, err := mapPath(resolveLocal(o, def.File))
 			if err != nil {
 				return nil, fmt.Errorf("build secret %q: %w", sec.Source, err)
 			}
@@ -455,18 +485,31 @@ var newRunID = func() string {
 	return hex.EncodeToString(b)
 }
 
-// finishSource removes this invocation's source dir. After a successful build
-// it first becomes the seed copy for the next one (best effort: the seed only
-// speeds up rsync, which --delete makes exact anyway).
+// finishSource removes this invocation's private dir. After a successful
+// build its source first becomes the seed copy for the next one, made 0700
+// before it leaves the private dir (best effort: the seed only speeds up
+// rsync, which --delete makes exact anyway). A mkdir lock serializes the
+// swap, so a concurrent build cannot recreate the cache between the check
+// and the mv, which would move the source into it; the cache is checked
+// again inside the lock. A lock is held only for two renames, so one older
+// than an hour was left by a killed run and is removed (-mmin means the same
+// to GNU and BSD find; -mtime +0 does not).
 func finishSource(o Options, ok bool) {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
 	defer cancel()
-	run, cache := remote.Quote(o.SourceDir), remote.Quote(o.cacheDir)
-	script := "rm -rf " + run
+	run, src, cache := remote.Quote(o.runDir), remote.Quote(o.SourceDir), remote.Quote(o.cacheDir)
+	script := "set -eu\nrm -rf " + run + "\n"
 	if ok {
-		old := remote.Quote(o.SourceDir + ".old")
-		script = "rm -rf " + old + "; mv " + cache + " " + old + " 2>/dev/null || true; " +
-			"if [ ! -e " + cache + " ]; then mv " + run + " " + cache + " 2>/dev/null || rm -rf " + run + "; else rm -rf " + run + "; fi; rm -rf " + old
+		old, lock := remote.Quote(o.runDir+".old"), remote.Quote(o.cacheDir+".lock")
+		script = "set -eu\n" +
+			"if [ -d " + lock + " ]; then find " + lock + " -prune -mmin +60 -exec rmdir {} \\; 2>/dev/null || true; fi\n" +
+			"if mkdir " + lock + " 2>/dev/null; then\n" +
+			"  rm -rf " + old + "\n" +
+			"  if [ -e " + cache + " ]; then mv " + cache + " " + old + " || true; fi\n" +
+			"  if [ ! -e " + cache + " ] && chmod 0700 " + src + "; then mv " + src + " " + cache + " || true; fi\n" +
+			"  rmdir " + lock + " || true\n" +
+			"fi\n" +
+			"rm -rf " + run + " " + old + "\n"
 	}
 	if err := o.Host.Run(ctx, remote.Cmd{Script: script}); err != nil {
 		fmt.Fprintf(o.Out, "warning: could not clean up %s on %s: %v\n", o.SourceDir, o.Host.Name(), err)
@@ -480,18 +523,26 @@ func (o Options) sourceDir() string {
 	return SourceDir(o.App, o.Destination)
 }
 
-// RsyncArgv returns the rsync command syncing o.Dir to the Server.
+// RsyncArgv returns the rsync command syncing the transfer root (o.Dir when
+// unset) to the Server. builder.exclude patterns are passed as written.
 func RsyncArgv(o Options) ([]string, error) {
-	excl := append([]string{".git", "/.yoho/secrets*"}, o.Builder.Exclude...)
+	excl := append([]string{".git", ".yoho/secrets*"}, o.Builder.Exclude...)
 	argv := []string{"rsync", "-az", "--delete"}
 	for _, e := range excl {
 		argv = append(argv, "--exclude="+e)
 	}
 	if o.ExcludeFrom != "" {
 		// NUL-separated, so names with spaces, newlines or leading # are safe.
-		argv = append(argv, "--from0", "--exclude-from="+o.ExcludeFrom, "--delete-excluded")
+		argv = append(argv, "--from0", "--exclude-from="+o.ExcludeFrom)
 	}
-	src := strings.TrimSuffix(o.Dir, "/") + "/"
+	// Always: the run dir is seeded from the cache, so a file that is
+	// excluded now (builder.exclude included) must be deleted, not kept.
+	argv = append(argv, "--delete-excluded")
+	root := o.root
+	if root == "" {
+		root = o.Dir
+	}
+	src := strings.TrimSuffix(root, "/") + "/"
 	dst := o.sourceDir() + "/"
 	switch h := o.Host.(type) {
 	case *remote.SSH:
@@ -523,36 +574,14 @@ func RsyncArgv(o Options) ([]string, error) {
 	return append(argv, "-e", rsh, src, host+":"+dst), nil
 }
 
-// rsyncEscape escapes rsync wildcard characters in a literal path.
+// rsyncEscape makes a literal path safe as an rsync pattern. rsync treats
+// *, ? and [ as wildcards, and honors backslash escapes only in a pattern
+// that has a wildcard, so a path without one is used as is.
 func rsyncEscape(p string) string {
+	if !strings.ContainsAny(p, "*?[") {
+		return p
+	}
 	return strings.NewReplacer(`\`, `\\`, "*", `\*`, "?", `\?`, "[", `\[`, "]", `\]`).Replace(p)
-}
-
-// IgnoredExcludes returns anchored rsync exclude patterns for everything git
-// ignores under dir (fully ignored directories collapse to "/dir/"). It
-// returns nil when dir is not inside a git work tree or git is unavailable.
-func IgnoredExcludes(ctx context.Context, dir string) ([]string, error) {
-	if _, err := exec.LookPath("git"); err != nil {
-		return nil, nil
-	}
-	inside := exec.CommandContext(ctx, "git", "-C", dir, "rev-parse", "--is-inside-work-tree")
-	if out, err := inside.Output(); err != nil || strings.TrimSpace(string(out)) != "true" {
-		return nil, nil
-	}
-	cmd := exec.CommandContext(ctx, "git", "-C", dir, "ls-files", "-z", "--others", "--ignored", "--exclude-standard", "--directory")
-	var stderr bytes.Buffer
-	cmd.Stderr = &stderr
-	out, err := cmd.Output()
-	if err != nil {
-		return nil, fmt.Errorf("git ls-files: %w: %s", err, strings.TrimSpace(stderr.String()))
-	}
-	var excl []string
-	for _, p := range strings.Split(string(out), "\x00") {
-		if p != "" {
-			excl = append(excl, "/"+rsyncEscape(p))
-		}
-	}
-	return excl, nil
 }
 
 // writeExcludeFile writes NUL-separated patterns to a temp file; the caller
@@ -576,15 +605,30 @@ func writeExcludeFile(excl []string) (string, error) {
 	return f.Name(), nil
 }
 
+// privateDirCheck is a POSIX sh snippet failing unless dir is a directory
+// (not a symlink) owned by the current user with no group or other
+// permission bits. setgid and sticky bits are allowed.
+func privateDirCheck(dir string) string {
+	d := remote.Quote(dir)
+	return "if [ ! -d " + d + " ] || [ -L " + d + " ] || [ ! -O " + d + " ] || " +
+		"[ -n \"$(find " + d + " -prune \\( -perm -040 -o -perm -020 -o -perm -010 -o -perm -004 -o -perm -002 -o -perm -001 \\) -print)\" ]; then " +
+		"echo " + remote.Quote(dir+" is not a private (0700) directory owned by this user") + " >&2; exit 1; fi\n"
+}
+
 // noRsync is the marker the Server probe prints when rsync is absent.
 const noRsync = "yoho-no-rsync"
 
-func syncSource(ctx context.Context, o Options) error {
-	// One round trip: create the source dir and probe for rsync.
-	script := "set -eu\nmkdir -p -m 0700 " + remote.Quote(o.sourceDir()) + "\n"
+func syncSource(ctx context.Context, o Options, plan *sourcePlan) error {
+	// One round trip: create this invocation's private dir (fresh, 0700,
+	// checked before anything is copied into it), seed the source and probe
+	// for rsync. The private dir is never an rsync destination, so -a cannot
+	// widen its mode.
+	run, src := remote.Quote(o.runDir), remote.Quote(o.sourceDir())
+	script := "set -eu\numask 077\nmkdir -p " + remote.Quote(path.Dir(o.runDir)) + "\nmkdir -m 0700 " + run + "\n" +
+		privateDirCheck(o.runDir) + "mkdir " + src + "\n"
 	if o.cacheDir != "" {
 		// Seed from the last build's source so rsync only transfers changes.
-		script += "if [ -d " + remote.Quote(o.cacheDir) + " ]; then cp -a " + remote.Quote(o.cacheDir) + "/. " + remote.Quote(o.sourceDir()) + "/ 2>/dev/null || true; fi\n"
+		script += "if [ -d " + remote.Quote(o.cacheDir) + " ]; then cp -a " + remote.Quote(o.cacheDir) + "/. " + src + "/ 2>/dev/null || true; fi\n"
 	}
 	out, err := o.Host.Output(ctx, remote.Cmd{Script: script + "command -v rsync >/dev/null 2>&1 || echo " + noRsync})
 	if err != nil {
@@ -593,11 +637,8 @@ func syncSource(ctx context.Context, o Options) error {
 	if strings.Contains(out, noRsync) {
 		return fmt.Errorf("rsync is missing on %s\nhint: run `yoho setup` or install rsync on the Server", o.Host.Name())
 	}
-	excl, err := IgnoredExcludes(ctx, o.Dir)
-	if err != nil {
-		return err
-	}
-	if o.ExcludeFrom, err = writeExcludeFile(excl); err != nil {
+	o.root = plan.root
+	if o.ExcludeFrom, err = writeExcludeFile(plan.excludes); err != nil {
 		return err
 	}
 	if o.ExcludeFrom != "" {
@@ -607,7 +648,7 @@ func syncSource(ctx context.Context, o Options) error {
 	if err != nil {
 		return err
 	}
-	fmt.Fprintf(o.Out, "Syncing source to %s:%s\n", o.Host.Name(), o.sourceDir())
+	fmt.Fprintf(o.Out, "Syncing %s (%d files, %d bytes) to %s:%s\n", plan.root, plan.files, plan.bytes, o.Host.Name(), o.sourceDir())
 	if err := o.Exec(ctx, Command{Argv: argv, Stdout: o.Out, Stderr: o.Out}); err != nil {
 		return fmt.Errorf("rsync source: %w", err)
 	}
@@ -621,12 +662,28 @@ func ServerScript(o Options, service string, svc types.ServiceConfig, ref string
 	if isRemoteContext(local.context) {
 		return serverScriptFrom(o, service, svc, local, ref)
 	}
-	toRemote := func(p string) (string, error) {
-		rel, err := filepath.Rel(o.Dir, p)
-		if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
-			return "", fmt.Errorf("%s is outside %s and is not synced to the Server", p, o.Dir)
+	root := o.root
+	if root == "" {
+		ins, err := allInputs(o, []string{service})
+		if err != nil {
+			return "", nil, err
 		}
-		return path.Join(o.sourceDir(), filepath.ToSlash(rel)), nil
+		if root, _, err = transferRoot(o, ins); err != nil {
+			return "", nil, err
+		}
+	}
+	// Inputs map to <source>/<path relative to the transfer root>, as
+	// planSource kept them: directories through symlinks, files by the name
+	// as written (a symlinked Dockerfile keeps its .dockerignore beside it).
+	toRemote := func(p string) (string, error) {
+		pp, err := serverPath(p)
+		if err != nil {
+			return "", err
+		}
+		if !within(root, pp) {
+			return "", fmt.Errorf("%s is outside %s and is not synced to the Server", p, root)
+		}
+		return path.Join(o.sourceDir(), relTo(root, pp)), nil
 	}
 	var s spec
 	var err error

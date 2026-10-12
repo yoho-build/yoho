@@ -6,7 +6,49 @@
 
 - `local` (default): your machine.
 - `remote`: a dedicated build Server (`builder.remote: user@host`).
-- `server`: sync source to the Destination's Server and build there. It ships what git would (tracked plus untracked files that are not git-ignored), so `node_modules/` and `.env.local` stay local; outside a git work tree everything ships. `builder.exclude` skips more paths, and `.git` and `.yoho/secrets*` never ship. Needs `rsync` on the Server; `yoho setup` installs it, and deploy fails with a hint if it is missing.
+- `server`: sync the build inputs to the Destination's Server and build there with `docker build`. See [Server builds](#server-builds). Needs `rsync` on the Server; `yoho setup` installs it, and deploy fails with a hint if it is missing.
+
+## Server builds
+
+With `builder.location: server`, Yoho rsyncs only what Docker would use (ADR 0009):
+
+- every build context and local `additional_contexts` entry, filtered by its ignore file, as BuildKit chooses it: `<Dockerfile>.dockerignore` next to the Dockerfile, else `<context>/.dockerignore` (patterns are relative to the context);
+- minus what git ignores (`builder.gitignore`, on by default) and, always, `.git` and `.yoho/secrets*` at any depth;
+- plus every Dockerfile, ignore file in use and file-backed build secret, even when ignored.
+
+The transfer root is the deepest directory holding the Yoho file's directory and every input. When the inputs sit outside the Yoho file's directory, the root widens up to, at most, the git work tree; outside git, inputs must stay inside the Yoho file's directory. Files in the root that no context uses are excluded, so a sibling app with thousands of files costs one exclude line. The build step prints the root and the number and size of the files that ship.
+
+A bun, pnpm, npm or yarn workspace monorepo builds from the repo root, as with Kamal's `builder.context`:
+
+```yaml
+# apps/shop/web/compose.yaml, next to apps/shop/web/yoho.yml
+services:
+  web:
+    build:
+      context: ../../..                 # repo root
+      dockerfile: apps/shop/web/Dockerfile
+```
+
+Keep the context small with an ignore file next to the Dockerfile, so it applies to this build only:
+
+```gitignore
+# apps/shop/web/Dockerfile.dockerignore, relative to the context (repo root)
+*
+!package.json
+!bun.lock
+!packages/ui/**
+!apps/shop/web/**
+apps/shop/web/.env*
+```
+
+Without an ignore file, everything under the context that git does not ignore ships, and `yoho config check` warns. It also warns when a file secret sits inside a context and no ignore file excludes it, because Docker would add it to the context too.
+
+- `builder.gitignore: false` ships git-ignored files, for builds that need generated code or vendored artifacts. The dockerignore, `builder.exclude`, `.git` and `.yoho/secrets*` rules still apply.
+- `builder.exclude` adds rsync patterns, relative to the transfer root. When a build widens, re-root them: `node_modules` matches at any depth either way, but `/dist` becomes `/apps/shop/web/dist`. Widening also causes one full transfer.
+- `oci-layout://` additional contexts are not supported on the Server; use `builder.location: local` or `remote`. `docker-image://` and URLs pass through.
+- Two kept files whose paths differ only by case fail the build, because a case-insensitive Mac volume holds only one of them.
+
+The Version still comes from git (see [Transport](#transport)), so it does not change for git-ignored files shipped with `builder.gitignore: false`, files a `pre-build` hook writes, or uncommitted changes inside submodules. Commit those inputs or pass `--version` to get a distinct Version.
 
 ## Local engine
 

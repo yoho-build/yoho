@@ -7,6 +7,9 @@ import (
 	"strings"
 
 	"github.com/compose-spec/compose-go/v2/types"
+
+	"github.com/yoho-build/yoho/internal/build"
+	"github.com/yoho-build/yoho/internal/config"
 )
 
 // Finding levels.
@@ -178,6 +181,25 @@ func Check(r *Result, runtime string, secretKeys []string) []Finding {
 		if swarm {
 			checkSwarm(svc, svcAdd)
 		}
+	}
+	return out
+}
+
+// CheckServerBuild checks what a builder.location=server build would sync
+// (ADR 0009): an input it cannot sync is an error, a context without an
+// ignore file under a widened transfer root and a file secret Docker would
+// also add to the context are warnings. dir is the Yoho file's directory.
+func CheckServerBuild(r *Result, dir string, b config.Builder) []Finding {
+	if b.Location != "server" {
+		return nil
+	}
+	ws, err := build.SourceWarnings(build.Options{Dir: dir, Project: r.Project, Builder: b})
+	if err != nil {
+		return []Finding{{Level: LevelError, Message: "server build: " + err.Error()}}
+	}
+	var out []Finding
+	for _, w := range ws {
+		out = append(out, Finding{Level: LevelWarning, Service: w.Service, Message: w.Message})
 	}
 	return out
 }

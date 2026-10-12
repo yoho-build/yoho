@@ -251,6 +251,9 @@ func (a *app) buildAndShip(ctx context.Context, s *session, skipBuild bool) (map
 		Project: r.Project, Builder: a.cfg.Builder, Registry: a.cfg.Registry,
 		Platforms: platforms, BuildEnv: benv, BuildSecretArgs: bargs,
 		Out: store.Redactor(step.Output()), Host: hosts[0].Host,
+		OnSource: func(src build.SourceSummary) {
+			u.Info("  source: %s (%d files, %s)", src.Root, src.Files, humanBytes(src.Bytes))
+		},
 	})
 	if berr != nil {
 		step.Fail(berr, "rerun with -v to see the full build output")

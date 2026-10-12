@@ -79,9 +79,17 @@ type Builder struct {
 	Platforms []string `json:"platforms,omitempty"`
 	// Secret keys passed to buildx as --secret id=KEY,env=KEY.
 	Secrets []string `json:"secrets,omitempty"`
-	// Paths excluded when syncing source for location=server (beyond .git).
+	// For location=server: extra rsync exclude patterns, relative to the
+	// transfer root (the Yoho file's directory unless build inputs lie
+	// outside it). .git and .yoho/secrets* never ship.
 	Exclude []string `json:"exclude,omitempty"`
+	// For location=server: skip git-ignored paths when syncing source.
+	// Default true; false ships them (generated code, vendored artifacts).
+	Gitignore *bool `json:"gitignore,omitempty"`
 }
+
+// HonorGitignore reports whether server builds skip git-ignored paths.
+func (b Builder) HonorGitignore() bool { return b.Gitignore == nil || *b.Gitignore }
 
 // Transport controls how images reach Servers.
 type Transport struct {

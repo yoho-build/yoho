@@ -38,6 +38,7 @@ func configCmd(g *globals) *cobra.Command {
 				return &silentError{err}
 			}
 			findings := composefile.Check(r, a.dest.Runtime, keys)
+			findings = append(findings, composefile.CheckServerBuild(r, a.dir, a.cfg.Builder)...)
 			if t := a.proxyConfig().Tunnel; t != nil && t.TokenSecret == "" {
 				for _, name := range sortedKeys(r.Ext) {
 					if p := r.Ext[name].Proxy; p != nil && len(p.Hosts) > 0 {

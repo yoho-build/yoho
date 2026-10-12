@@ -158,6 +158,11 @@ func git(dir string, args ...string) (string, error) {
 	return strings.TrimSpace(string(out)), nil
 }
 
+// Git runs git in dir with the isolation the Version uses (no pager,
+// core.quotepath=off, no system config, no external diff) and returns stdout.
+// The error carries git's stderr.
+func Git(dir string, args ...string) ([]byte, error) { return gitRaw(dir, args...) }
+
 func gitRaw(dir string, args ...string) ([]byte, error) {
 	full := append([]string{"-C", dir, "--no-pager",
 		"-c", "core.quotepath=off",
