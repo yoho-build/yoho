@@ -224,6 +224,11 @@ func TestProxyOnEveryNode(t *testing.T) {
 	edge := &fakeHost{name: "edge", local: &remote.Local{}, respond: sim.respond}
 	d := testDeploy(t, mgr, nil)
 	d.Servers = append(d.Servers, plan.NamedHost{Name: "edge", Server: config.Server{SSH: "yoho@203.0.113.11"}, Host: edge})
+	d.Ext["web"].Proxy.HealthPort = new(9090)
+	d.Ext["web"].Proxy.HealthTimeout = new("750ms")
+	webExt := d.Ext["web"]
+	webExt.StrictDrain = true
+	d.Ext["web"] = webExt
 	if _, err := (Runtime{}).Deploy(context.Background(), d); err != nil {
 		t.Fatalf("%v\nmanager:\n%s\nedge:\n%s", err, mgr.all(), edge.all())
 	}
@@ -234,6 +239,9 @@ func TestProxyOnEveryNode(t *testing.T) {
 		t.Fatal("worker must not create the overlay")
 	}
 	for _, h := range []*fakeHost{mgr, edge} {
+		if indexOf(h, "'--target' 'tasks.yoho-shop-production_web:3000'", "'--health-check-port' '9090'", "'--health-check-timeout' '750ms'") < 0 {
+			t.Fatalf("%s missing independent task probe settings: %s", h.name, h.all())
+		}
 		if indexOf(h, "kamal-proxy' 'deploy' 'shop-production-web'") < 0 || indexOf(h, "yoho-proxy") < 0 {
 			t.Fatalf("%s missing proxy boot or route\n%s", h.name, h.all())
 		}
@@ -485,6 +493,11 @@ func TestWorkerPrunesUnusedImages(t *testing.T) {
 	}}}
 	d := testDeploy(t, mgr, nil)
 	d.Servers = append(d.Servers, plan.NamedHost{Name: "edge", Server: config.Server{SSH: "yoho@203.0.113.11"}, Host: edge})
+	d.Ext["web"].Proxy.HealthPort = new(9090)
+	d.Ext["web"].Proxy.HealthTimeout = new("750ms")
+	webExt := d.Ext["web"]
+	webExt.StrictDrain = true
+	d.Ext["web"] = webExt
 	if _, err := (Runtime{}).Deploy(context.Background(), d); err != nil {
 		t.Fatal(err)
 	}
@@ -516,6 +529,11 @@ func TestWorkerNeverCreatesLocalNetwork(t *testing.T) {
 	edge := &fakeHost{name: "edge", local: &remote.Local{}, respond: sim.respond}
 	d := testDeploy(t, mgr, nil)
 	d.Servers = append(d.Servers, plan.NamedHost{Name: "edge", Server: config.Server{SSH: "yoho@203.0.113.11"}, Host: edge})
+	d.Ext["web"].Proxy.HealthPort = new(9090)
+	d.Ext["web"].Proxy.HealthTimeout = new("750ms")
+	webExt := d.Ext["web"]
+	webExt.StrictDrain = true
+	d.Ext["web"] = webExt
 	if _, err := (Runtime{}).Deploy(context.Background(), d); err != nil {
 		t.Fatal(err)
 	}
@@ -581,7 +599,7 @@ func TestRoutesSkipZeroReplicaServicesAndRemoveTheirRoute(t *testing.T) {
 	}}
 	var out bytes.Buffer
 	r := &runner{h: h, out: &out, app: "shop", dest: "production"}
-	if err := r.routes(context.Background(), d, next); err != nil {
+	if err := r.routes(context.Background(), d, next, &prev); err != nil {
 		t.Fatal(err)
 	}
 	all := h.all()
@@ -595,5 +613,91 @@ func TestRoutesSkipZeroReplicaServicesAndRemoveTheirRoute(t *testing.T) {
 	}
 	if !strings.Contains(all, "'remove' '"+deploy.RouteName("shop", "production", "web")+"'") {
 		t.Errorf("zero-replica route not removed:\n%s", all)
+	}
+}
+
+func TestProxyHealthProbeSavedRollback(t *testing.T) {
+	withRoot(t)
+	fastPolling(t)
+	h := newFake(newSim())
+	d := testDeploy(t, h, nil)
+	d.RetainReleases = 5
+	ctx := context.Background()
+	port, timeout := 9090, "750ms"
+	d.Ext["web"].Proxy.HealthPort = &port
+	d.Ext["web"].Proxy.HealthTimeout = &timeout
+	d.Ext["web"].Proxy.DeployTimeout = 47
+	d.Ext["web"].Proxy.DrainTimeout = 19
+	if _, err := (Runtime{}).Deploy(ctx, d); err != nil {
+		t.Fatal(err)
+	}
+	for _, s := range []string{"'--health-check-port' '9090'", "'--health-check-timeout' '750ms'", "'--deploy-timeout' '47s'", "'--drain-timeout' '19s'", "'--target' 'yoho-shop-production_web:3000'"} {
+		if !strings.Contains(h.all(), s) {
+			t.Fatalf("missing %s in %s", s, h.all())
+		}
+	}
+	planPath := filepath.Join(release.Dir("shop", "production", "v1"), "plan.json")
+	saved, err := os.ReadFile(planPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(saved, []byte(`"health_port": 9090`)) && !bytes.Contains(saved, []byte(`"health_port":9090`)) {
+		t.Fatalf("saved plan %s", saved)
+	}
+	if !bytes.Contains(saved, []byte(`"health_timeout"`)) {
+		t.Fatalf("saved timeout missing: %s", saved)
+	}
+	port2, timeout2 := 9191, "2s"
+	d.Version = "v2"
+	d.Ext["web"].Proxy.HealthPort = &port2
+	d.Ext["web"].Proxy.HealthTimeout = &timeout2
+	d.Ext["web"].Proxy.DeployTimeout = 55
+	d.Ext["web"].Proxy.DrainTimeout = 21
+	if _, err := (Runtime{}).Deploy(ctx, d); err != nil {
+		t.Fatal(err)
+	}
+	h.scripts = nil
+	if _, err := (Runtime{}).Rollback(ctx, d, "v1"); err != nil {
+		t.Fatal(err)
+	}
+	for _, s := range []string{"'--health-check-port' '9090'", "'--health-check-timeout' '750ms'", "'--deploy-timeout' '47s'", "'--drain-timeout' '19s'"} {
+		if !strings.Contains(h.all(), s) {
+			t.Fatalf("rollback lost %s: %s", s, h.all())
+		}
+	}
+	if strings.Contains(h.all(), "'9191'") || strings.Contains(h.all(), "'2s'") {
+		t.Fatalf("rollback used today's probe settings: %s", h.all())
+	}
+	// Simulate a Release written before HTTP probe settings existed.
+	var raw struct {
+		Services []map[string]any `json:"services"`
+	}
+	if err := json.Unmarshal(saved, &raw); err != nil {
+		t.Fatal(err)
+	}
+	for _, svc := range raw.Services {
+		if p, ok := svc["proxy"].(map[string]any); ok {
+			delete(p, "health_port")
+			delete(p, "health_timeout")
+		}
+	}
+	legacy, err := json.Marshal(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = os.WriteFile(planPath, legacy, 0600); err != nil {
+		t.Fatal(err)
+	}
+	h.scripts = nil
+	if _, err := (Runtime{}).Rollback(ctx, d, "v1"); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(h.all(), "--health-check-port") || strings.Contains(h.all(), "--health-check-timeout") {
+		t.Fatalf("legacy probe defaults overridden: %s", h.all())
+	}
+	for _, s := range []string{"'--deploy-timeout' '47s'", "'--drain-timeout' '19s'"} {
+		if !strings.Contains(h.all(), s) {
+			t.Fatalf("legacy lost %s", s)
+		}
 	}
 }

@@ -273,3 +273,34 @@ func TestReleaseFailureRedactsSecrets(t *testing.T) {
 }
 
 var _ = config.ServiceExt{}
+
+func TestDiffProxyHealthProbeSettings(t *testing.T) {
+	d, _ := currentFixture(t)
+	for _, which := range []string{"port", "timeout", "both"} {
+		t.Run(which, func(t *testing.T) {
+			p := *d.Ext["web"].Proxy
+			port, timeout := 9090, "750ms"
+			p.HealthPort, p.HealthTimeout = nil, nil
+			if which != "timeout" {
+				p.HealthPort = &port
+			}
+			if which != "port" {
+				p.HealthTimeout = &timeout
+			}
+			e := d.Ext["web"]
+			e.Proxy = &p
+			d.Ext["web"] = e
+			cs, err := Runtime{}.Diff(context.Background(), d)
+			if err != nil {
+				t.Fatal(err)
+			}
+			c := findChange(cs, "route", "shop-production-web")
+			if c.Action != plan.ActionUpdate || !strings.Contains(strings.Join(c.Reasons, ","), "health_") {
+				t.Fatalf("change %+v", c)
+			}
+			if c := findChange(cs, "service", "web"); c.Action != plan.ActionNoop {
+				t.Fatalf("HTTP probe must not restart Service: %+v", c)
+			}
+		})
+	}
+}

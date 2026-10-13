@@ -336,3 +336,87 @@ func TestRollbackAndPrune(t *testing.T) {
 		t.Errorf("releases after rollback: %+v", rels)
 	}
 }
+
+func TestProxyHealthProbeSavedRollback(t *testing.T) {
+	withRoot(t)
+
+	h := &dockerHost{local: &remote.Local{}, respond: respond(nil)}
+	d := testDeploy(t, h, nil)
+	d.RetainReleases = 5
+	ctx := context.Background()
+	port, timeout := 9090, "750ms"
+	d.Ext["web"].Proxy.HealthPort = &port
+	d.Ext["web"].Proxy.HealthTimeout = &timeout
+	d.Ext["web"].Proxy.DeployTimeout = 47
+	d.Ext["web"].Proxy.DrainTimeout = 19
+	if _, err := (Compose{}).Deploy(ctx, d); err != nil {
+		t.Fatal(err)
+	}
+	for _, s := range []string{"'--health-check-port' '9090'", "'--health-check-timeout' '750ms'", "'--deploy-timeout' '47s'", "'--drain-timeout' '19s'", "'--target' 'yoho-shop-production-web-3:3000'"} {
+		if !strings.Contains(h.all(), s) {
+			t.Fatalf("missing %s in %s", s, h.all())
+		}
+	}
+	planPath := filepath.Join(release.Dir("shop", "production", "v1"), "plan.json")
+	saved, err := os.ReadFile(planPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(saved, []byte(`"health_port": 9090`)) && !bytes.Contains(saved, []byte(`"health_port":9090`)) {
+		t.Fatalf("saved plan %s", saved)
+	}
+	if !bytes.Contains(saved, []byte(`"health_timeout"`)) {
+		t.Fatalf("saved timeout missing: %s", saved)
+	}
+	port2, timeout2 := 9191, "2s"
+	d.Version = "v2"
+	d.Ext["web"].Proxy.HealthPort = &port2
+	d.Ext["web"].Proxy.HealthTimeout = &timeout2
+	d.Ext["web"].Proxy.DeployTimeout = 55
+	d.Ext["web"].Proxy.DrainTimeout = 21
+	if _, err := (Compose{}).Deploy(ctx, d); err != nil {
+		t.Fatal(err)
+	}
+	h.scripts = nil
+	if _, err := (Compose{}).Rollback(ctx, d, "v1"); err != nil {
+		t.Fatal(err)
+	}
+	for _, s := range []string{"'--health-check-port' '9090'", "'--health-check-timeout' '750ms'", "'--deploy-timeout' '47s'", "'--drain-timeout' '19s'"} {
+		if !strings.Contains(h.all(), s) {
+			t.Fatalf("rollback lost %s: %s", s, h.all())
+		}
+	}
+	if strings.Contains(h.all(), "'9191'") || strings.Contains(h.all(), "'2s'") {
+		t.Fatalf("rollback used today's probe settings: %s", h.all())
+	}
+	// Simulate a Release written before HTTP probe settings existed.
+	var raw []map[string]any
+	if err := json.Unmarshal(saved, &raw); err != nil {
+		t.Fatal(err)
+	}
+	for _, svc := range raw {
+		if p, ok := svc["proxy"].(map[string]any); ok {
+			delete(p, "health_port")
+			delete(p, "health_timeout")
+		}
+	}
+	legacy, err := json.Marshal(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = os.WriteFile(planPath, legacy, 0600); err != nil {
+		t.Fatal(err)
+	}
+	h.scripts = nil
+	if _, err := (Compose{}).Rollback(ctx, d, "v1"); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(h.all(), "--health-check-port") || strings.Contains(h.all(), "--health-check-timeout") {
+		t.Fatalf("legacy probe defaults overridden: %s", h.all())
+	}
+	for _, s := range []string{"'--deploy-timeout' '47s'", "'--drain-timeout' '19s'"} {
+		if !strings.Contains(h.all(), s) {
+			t.Fatalf("legacy lost %s", s)
+		}
+	}
+}

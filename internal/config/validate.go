@@ -5,6 +5,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"time"
 )
 
 var appPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9-]*$`)
@@ -196,4 +197,19 @@ func (e *NoDestinationsError) Error() string {
 		names = strings.Join(e.Servers, ", ")
 	}
 	return fmt.Sprintf("no Destinations defined: add destinations.production.servers: [%s] to %s", names, file)
+}
+
+// ValidateHealthCheck checks optional Proxy HTTP probe settings. Pointer fields
+// distinguish omission from explicit zero/empty values, which are invalid.
+func (p ServiceProxy) ValidateHealthCheck() error {
+	if p.HealthPort != nil && (*p.HealthPort < 1 || *p.HealthPort > 65535) {
+		return fmt.Errorf("x-yoho.proxy.health_port must be between 1 and 65535")
+	}
+	if p.HealthTimeout != nil {
+		d, err := time.ParseDuration(*p.HealthTimeout)
+		if err != nil || d <= 0 {
+			return fmt.Errorf("x-yoho.proxy.health_timeout must be a positive duration (e.g. 2s or 500ms)")
+		}
+	}
+	return nil
 }

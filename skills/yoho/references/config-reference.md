@@ -44,6 +44,7 @@ Compose files follow the same idea. After the base files are resolved, Yoho also
 | Key | Notes |
 |---|---|
 | `proxy` | `hosts`, `port` (80), `health_path` (`/up`), `tls` (Let's Encrypt; off behind a tunnel), `deploy_timeout` (30s), `drain_timeout` (30s). The Service also needs a compose `healthcheck` (error under swarm, warning under compose). The image needs wget or curl: `healthcheck: {test: ["CMD", "wget", "-qO-", "http://127.0.0.1:3000/up"], interval: 5s}`. |
+| `proxy.health_port`, `proxy.health_timeout` | Optional per-Service Proxy HTTP probe settings (Compose and Swarm). `health_port`: 1–65535; omitted probes the traffic `port`, explicit `0` is invalid. `health_timeout`: positive Go duration such as `750ms` or `2s`; omitted uses the pinned Proxy default. Empty/zero/negative/unitless/invalid durations fail config check. These do not change the traffic port, overall `deploy_timeout`, Docker `HEALTHCHECK`, or restore readiness. Saved Releases restore these settings on rollback; legacy Releases keep the original probe defaults and saved deploy/drain deadlines. |
 | `stateful` | Pinned to one Server, stop-first recreate, never scaled. |
 | `secrets` | List `["KEY", "NAME:KEY"]` or map `{NAME: KEY}`. Delivered as files in `/run/secrets/NAME`; use `*_FILE` env vars. |
 | `secrets_as_env` | Deliver as env (`env_file`) instead of files. |

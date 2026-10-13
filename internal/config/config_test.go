@@ -303,3 +303,54 @@ func TestAuthorizedKeysEmptyListIsNotUnset(t *testing.T) {
 		t.Errorf("unset authorized_keys = %#v, want nil", c.Setup.AuthorizedKeys)
 	}
 }
+
+func TestServiceProxyHealthSettings(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		values map[string]any
+		valid  bool
+	}{
+		{"omitted", map[string]any{}, true},
+		{"valid", map[string]any{"health_port": 9090, "health_timeout": "750ms"}, true},
+		{"minimum", map[string]any{"health_port": 1, "health_timeout": "1ns"}, true},
+		{"maximum", map[string]any{"health_port": 65535, "health_timeout": "1m30s"}, true},
+		{"zero port", map[string]any{"health_port": 0}, false},
+		{"negative port", map[string]any{"health_port": -1}, false},
+		{"large port", map[string]any{"health_port": 65536}, false},
+		{"fraction port", map[string]any{"health_port": 1.5}, false},
+		{"string port", map[string]any{"health_port": "9090"}, false},
+		{"empty timeout", map[string]any{"health_timeout": ""}, false},
+		{"zero timeout", map[string]any{"health_timeout": "0s"}, false},
+		{"negative timeout", map[string]any{"health_timeout": "-1s"}, false},
+		{"unitless timeout", map[string]any{"health_timeout": "2"}, false},
+		{"number timeout", map[string]any{"health_timeout": 2}, false},
+		{"overflow timeout", map[string]any{"health_timeout": "999999999999h"}, false},
+		{"malformed timeout", map[string]any{"health_timeout": "2s; touch /tmp/x"}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			e, err := DecodeServiceExt(map[string]any{"proxy": tc.values})
+			if err == nil {
+				err = e.Proxy.ValidateHealthCheck()
+			}
+			if (err == nil) != tc.valid {
+				t.Fatalf("validation = %v, valid %v", err, tc.valid)
+			}
+		})
+	}
+	b, err := ServiceExtSchema()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var s map[string]any
+	if err = json.Unmarshal(b, &s); err != nil {
+		t.Fatal(err)
+	}
+	p := s["$defs"].(map[string]any)["ServiceProxy"].(map[string]any)["properties"].(map[string]any)
+	port := p["health_port"].(map[string]any)
+	if port["minimum"] != float64(1) || port["maximum"] != float64(65535) {
+		t.Fatalf("port schema %v", port)
+	}
+	if p["health_timeout"].(map[string]any)["type"] != "string" {
+		t.Fatalf("timeout schema %v", p["health_timeout"])
+	}
+}

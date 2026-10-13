@@ -377,6 +377,13 @@ func (c Compose) Rollback(ctx context.Context, d *plan.Deploy, version string) (
 	if err := json.Unmarshal(planJSON, &plans); err != nil {
 		return nil, fmt.Errorf("release %s: bad plan.json: %w", version, err)
 	}
+	for _, sp := range plans {
+		if sp.Proxy != nil {
+			if err := sp.Proxy.ValidateHealthCheck(); err != nil {
+				return nil, fmt.Errorf("release %s: service %s: %w", version, sp.Name, err)
+			}
+		}
+	}
 	if err := recoverReadinessPlans(plans, composeYAML); err != nil {
 		return nil, fmt.Errorf("release %s: readiness metadata: %w", version, err)
 	}

@@ -104,37 +104,43 @@ type currentState struct {
 	plans    map[string]servicePlan
 }
 
-func loadCurrent(ctx context.Context, h remote.Host, app, dest string) *currentState {
+func loadCurrent(ctx context.Context, h remote.Host, app, dest string) (*currentState, error) {
 	dir := release.AppDir(app, dest)
 	link, err := h.Output(ctx, remote.Cmd{Script: "readlink " + remote.Quote(path.Join(dir, "current")) + " 2>/dev/null || true"})
 	if err != nil || strings.TrimSpace(link) == "" {
-		return nil
+		return nil, nil
 	}
 	relDir := path.Join(dir, "releases", path.Base(strings.TrimSpace(link)))
 	rel, err := readRelease(ctx, h, path.Join(relDir, "release.json"))
 	if err != nil {
-		return nil
+		return nil, nil
 	}
 	raw, err := h.ReadFile(ctx, path.Join(relDir, "compose.yaml"), false)
 	if err != nil {
-		return nil
+		return nil, nil
 	}
 	if rel.SecretsGeneration != "" {
 		raw = bytes.ReplaceAll(raw, []byte(release.SecretsDir(app, dest, rel.SecretsGeneration)), []byte(planGenDir))
 	}
 	st := &currentState{rel: rel, plans: map[string]servicePlan{}}
 	if st.services, err = serviceEntries(raw); err != nil {
-		return nil
+		return nil, nil
 	}
 	if pj, err := h.ReadFile(ctx, path.Join(relDir, "plan.json"), false); err == nil {
 		var ps []servicePlan
-		if json.Unmarshal(pj, &ps) == nil {
-			for _, p := range ps {
-				st.plans[p.Name] = p
+		if err := json.Unmarshal(pj, &ps); err != nil {
+			return nil, fmt.Errorf("parse %s/plan.json: %w", relDir, err)
+		}
+		for _, p := range ps {
+			if p.Proxy != nil {
+				if err := p.Proxy.ValidateHealthCheck(); err != nil {
+					return nil, fmt.Errorf("parse %s/plan.json: service %s: %w", relDir, p.Name, err)
+				}
 			}
+			st.plans[p.Name] = p
 		}
 	}
-	return st
+	return st, nil
 }
 
 // serviceEntries parses a compiled compose file into per-Service maps with
@@ -256,7 +262,10 @@ func (c Compose) Diff(ctx context.Context, d *plan.Deploy) ([]plan.Change, error
 	if err != nil {
 		return nil, err
 	}
-	cur := loadCurrent(ctx, h, d.App, d.Destination)
+	cur, err := loadCurrent(ctx, h, d.App, d.Destination)
+	if err != nil {
+		return nil, err
+	}
 
 	// Proxy container.
 	if needsProxy(plans) {

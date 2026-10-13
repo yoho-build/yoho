@@ -23,6 +23,22 @@ Non-Proxy Services and release-command prerequisites have a 30-second minimum re
 
 On Docker 25 or newer, Yoho compiles `start_period: 60s` and `start_interval: 1s` into a proxied Service's healthcheck when neither is set, so the first probes run every second while the container starts.
 
+## Proxy HTTP probes
+
+`x-yoho.proxy.health_port` probes a different port on each traffic target (1–65535), without changing `proxy.port` or publishing a host port. `health_timeout` is the timeout for **each HTTP probe**, expressed as a positive Go duration such as `750ms` or `2s`. Omit these fields to retain the traffic port and pinned kamal-proxy default probe timeout. Explicit port `0` and empty/zero/negative/invalid durations are rejected.
+
+```yaml
+x-yoho:
+  proxy:
+    port: 3000
+    health_path: /ready
+    health_port: 9090
+    health_timeout: 750ms
+    deploy_timeout: 47  # overall readiness/cutover deadline in seconds
+```
+
+The health endpoint must listen on the target's network-reachable interface, not only its loopback address. These settings do not change Docker `HEALTHCHECK`, container readiness, or restore gates. Both Compose candidates and Swarm VIP/task targets use them; Releases save them for rollback. Older Releases omit them and retain the original Proxy defaults and saved deploy/drain deadlines. Changing either field appears in `yoho plan` and is applied to the route.
+
 ## Failed deploys
 
 Before removing fresh Proxy candidates, Yoho collects best-effort diagnostics: container State and exit code/OOM, plus the last two healthcheck results and up to 20 recent log lines **only for verified fresh candidates using this deploy's secret inventory**. Retained or unverified containers (including release prerequisites and plain Services) get state/exit/OOM metadata only: rotated values from their older generations cannot be safely redacted using today's inventory. An uncertain Proxy switch still diagnoses only its verified fresh candidates, never old replicas. Batch prerequisite startup failures sample up to 8 prerequisite Services fairly under one shared 30s/8-container/32 KiB budget; samples do not identify which Service caused the batch failure. Collection has a shared 30-second deadline independent of a cancelled deploy, at most 8 containers, and a 32 KiB output cap. Per-container State JSON is capped at 16 KiB; invalid/truncated JSON is omitted, never printed raw. Logs process at most 64 KiB of input per container and retain at most 2 KiB of redacted text. Known resolved/generated secrets (including escaped, multiline and short values) are masked before output limits; incomplete secret prefixes are discarded on interrupted collection. Full inspect, Config, environment and healthcheck commands are never collected. Unavailable diagnostics do not replace the original deploy error. On rollback, arbitrary health/log text is omitted when retained secret values are unavailable for redaction.

@@ -147,6 +147,9 @@ func Check(r *Result, runtime string, secretKeys []string) []Finding {
 		}
 
 		if ext.Proxy != nil {
+			if err := ext.Proxy.ValidateHealthCheck(); err != nil {
+				svcAdd(LevelError, "%s", err)
+			}
 			if len(svc.Ports) > 0 {
 				svcAdd(LevelError, "proxied service must not publish ports; the Proxy owns host ports")
 			}

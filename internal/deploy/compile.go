@@ -96,6 +96,9 @@ func validate(d *plan.Deploy) error {
 		if ext.Proxy == nil {
 			continue
 		}
+		if err := ext.Proxy.ValidateHealthCheck(); err != nil {
+			errs = append(errs, fmt.Errorf("service %s: %w", name, err))
+		}
 		if ext.Stateful {
 			errs = append(errs, fmt.Errorf("service %s: stateful services cannot use x-yoho.proxy (they are recreated stop-first, proxy cutover needs two containers)", name))
 		}
@@ -125,6 +128,14 @@ func proxyWithDefaults(p *config.ServiceProxy) *config.ServiceProxy {
 	}
 	c := *p
 	c.Hosts = slices.Clone(p.Hosts)
+	if p.HealthPort != nil {
+		v := *p.HealthPort
+		c.HealthPort = &v
+	}
+	if p.HealthTimeout != nil {
+		v := *p.HealthTimeout
+		c.HealthTimeout = &v
+	}
 	if c.Port == 0 {
 		c.Port = defaultProxyPort
 	}

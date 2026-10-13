@@ -432,13 +432,11 @@ func (r *runner) switchProxied(ctx context.Context, stage *stagedProxy) error {
 	sp, old, targets := stage.plan, stage.old, stage.targets
 	route := RouteName(r.app, r.dest, sp.Name)
 	r.logf("switching proxy route %s to %s", route, strings.Join(targets, ","))
-	err := proxy.Deploy(ctx, r.h, route, strings.Join(targets, ","), proxy.DeployOptions{
-		Hosts:         sp.Proxy.Hosts,
-		HealthPath:    sp.Proxy.HealthPath,
-		TLS:           sp.Proxy.TLS,
-		DeployTimeout: time.Duration(sp.Proxy.DeployTimeout) * time.Second,
-		DrainTimeout:  time.Duration(sp.Proxy.DrainTimeout) * time.Second,
-	})
+	opts, err := proxy.ServiceDeployOptions(*sp.Proxy)
+	if err != nil {
+		return fmt.Errorf("service %s: %w", sp.Name, err)
+	}
+	err = proxy.Deploy(ctx, r.h, route, strings.Join(targets, ","), opts)
 	if err != nil {
 		return r.proxySwitchFailed(ctx, sp.Name, route, targets, err, func(err error) error {
 			err = r.failure(ctx, err, sp.Name, stage.fresh)

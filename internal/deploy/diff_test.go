@@ -3,6 +3,7 @@ package deploy
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -262,6 +263,95 @@ func TestDiffOneShotService(t *testing.T) {
 			c := byKey(cs)["service db"]
 			if c.Action != tc.action || (tc.reason != "" && (len(c.Reasons) != 1 || c.Reasons[0] != tc.reason)) {
 				t.Errorf("%+v", c)
+			}
+		})
+	}
+}
+
+func TestDiffProxyHealthProbeSettings(t *testing.T) {
+	h, _, _ := deployed(t)
+	for _, which := range []string{"port", "timeout", "both"} {
+		t.Run(which, func(t *testing.T) {
+			d := testDeploy(t, h, io.Discard)
+			port, timeout := 9090, "750ms"
+			if which != "timeout" {
+				d.Ext["web"].Proxy.HealthPort = &port
+			}
+			if which != "port" {
+				d.Ext["web"].Proxy.HealthTimeout = &timeout
+			}
+			cs, err := Compose{}.Diff(context.Background(), d)
+			if err != nil {
+				t.Fatal(err)
+			}
+			c := byKey(cs)["service web"]
+			if c.Action != plan.ActionUpdate || !strings.Contains(strings.Join(c.Reasons, ","), "proxy settings changed") {
+				t.Fatalf("change %+v", c)
+			}
+		})
+	}
+}
+
+func TestDiffRejectsInvalidRetainedProxyHealthProbe(t *testing.T) {
+	for _, tc := range []struct {
+		field string
+		value any
+	}{
+		{"health_port", 0}, {"health_port", 65536}, {"health_port", "bad"},
+		{"health_timeout", "0s"}, {"health_timeout", ""}, {"health_timeout", "bad"},
+	} {
+		t.Run(tc.field+fmt.Sprint(tc.value), func(t *testing.T) {
+			h, _, root := deployed(t)
+			planPath := filepath.Join(root, "apps", "shop", "production", "current", "plan.json")
+			saved, err := os.ReadFile(planPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var ps []map[string]any
+			if err = json.Unmarshal(saved, &ps); err != nil {
+				t.Fatal(err)
+			}
+			for _, sp := range ps {
+				if sp["name"] == "web" {
+					sp["proxy"].(map[string]any)[tc.field] = tc.value
+				}
+			}
+			invalid, err := json.Marshal(ps)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err = os.WriteFile(planPath, invalid, 0600); err != nil {
+				t.Fatal(err)
+			}
+			h.scripts = nil
+			cs, err := Compose{}.Diff(context.Background(), testDeploy(t, h, io.Discard))
+			if err == nil || !strings.Contains(err.Error(), tc.field) || len(cs) != 0 {
+				t.Fatalf("invalid retained plan: changes %v, error %v", cs, err)
+			}
+			after, err := os.ReadFile(planPath)
+			if err != nil || string(after) != string(invalid) {
+				t.Fatal("Diff rewrote retained plan")
+			}
+			for _, forbidden := range []string{"docker run", "docker stop", "docker rm", "kamal-proxy' 'deploy", "kamal-proxy' 'remove", "docker compose"} {
+				if strings.Contains(h.all(), forbidden) {
+					t.Fatalf("Diff mutated runtime: %s", h.all())
+				}
+			}
+		})
+	}
+}
+
+func TestDiffAllowsMissingAndLegacyProxyHealthPlan(t *testing.T) {
+	for _, missing := range []bool{false, true} {
+		t.Run(fmt.Sprint(missing), func(t *testing.T) {
+			h, _, root := deployed(t)
+			if missing {
+				if err := os.Remove(filepath.Join(root, "apps", "shop", "production", "current", "plan.json")); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if _, err := (Compose{}).Diff(context.Background(), testDeploy(t, h, io.Discard)); err != nil {
+				t.Fatal(err)
 			}
 		})
 	}

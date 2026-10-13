@@ -192,3 +192,24 @@ func TestStripBuild(t *testing.T) {
 		t.Errorf("%+v", w)
 	}
 }
+
+func TestProxyHealthProbeCheck(t *testing.T) {
+	for _, runtime := range []string{"compose", "swarm"} {
+		for _, settings := range []string{"health_port: 0", "health_port: 65536", "health_timeout: ''", "health_timeout: 0s", "health_timeout: garbage"} {
+			t.Run(runtime+settings, func(t *testing.T) {
+				dir := t.TempDir()
+				src := "services:\n  web:\n    image: nginx\n    healthcheck: {test: ['CMD', 'true']}\n    x-yoho: {proxy: {" + settings + "}}\n"
+				if err := os.WriteFile(filepath.Join(dir, "compose.yaml"), []byte(src), 0600); err != nil {
+					t.Fatal(err)
+				}
+				loaded, err := Load(context.Background(), dir, nil, nil, "shop", "")
+				if err != nil {
+					t.Fatal(err)
+				}
+				if fs := Check(loaded, runtime, nil); !HasErrors(fs) || !strings.Contains(msgs(fs, LevelError), "x-yoho.proxy.health_") {
+					t.Fatalf("findings %v", fs)
+				}
+			})
+		}
+	}
+}

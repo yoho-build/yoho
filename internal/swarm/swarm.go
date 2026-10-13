@@ -184,16 +184,23 @@ func (Runtime) Deploy(ctx context.Context, d *plan.Deploy) (_ *release.Release, 
 		return nil, err
 	}
 
-	r.logf("preparing release %s", d.Version)
-	if err := h.Run(ctx, remote.Cmd{Script: "set -eu\numask 077\nmkdir -p " + remote.QuoteArgs(r.dir, path.Join(r.dir, "releases"), path.Join(r.dir, "secrets"), path.Join(r.dir, "generated"), relDir)}); err != nil {
-		return nil, fmt.Errorf("prepare %s: %w", r.dir, err)
-	}
 	// Recovery after a failed attempt restores the current Release, so
 	// learn it now, before anything changes: guessing wrong after a
 	// transient SSH failure would redeploy the wrong Release.
 	liveVersion, err := currentVersion(ctx, h, r.dir)
 	if err != nil {
 		return nil, fmt.Errorf("cannot tell which Release is current on %s (nothing was changed): %w", mgr.Name, err)
+	}
+	// Validate and retain the old plan under the Destination lock before even
+	// preparing files. Same-Version deploys must not overwrite invalid current
+	// metadata, and stale-route cleanup must use the pre-deploy plan.
+	livePlan, err := planForVersion(ctx, h, d.App, d.Destination, liveVersion)
+	if err != nil {
+		return nil, fmt.Errorf("current Release %s: %w", liveVersion, err)
+	}
+	r.logf("preparing release %s", d.Version)
+	if err := h.Run(ctx, remote.Cmd{Script: "set -eu\numask 077\nmkdir -p " + remote.QuoteArgs(r.dir, path.Join(r.dir, "releases"), path.Join(r.dir, "secrets"), path.Join(r.dir, "generated"), relDir)}); err != nil {
+		return nil, fmt.Errorf("prepare %s: %w", r.dir, err)
 	}
 	key, err := deploy.EnsureHMACKey(ctx, h, r.dir)
 	if err != nil {
@@ -303,7 +310,7 @@ func (Runtime) Deploy(ctx context.Context, d *plan.Deploy) (_ *release.Release, 
 	if err := r.deployStack(ctx, stackFile, r.stack, true, auth, stackServiceNames(c.Plan)...); err != nil {
 		return nil, err
 	}
-	if err := r.routes(ctx, d, c.Plan); err != nil {
+	if err := r.routes(ctx, d, c.Plan, livePlan); err != nil {
 		return nil, err
 	}
 
@@ -381,7 +388,7 @@ func (r *runner) restoreStack(ctx context.Context, d *plan.Deploy, relDir string
 			if err := r.deployStack(ctx, path.Join(relDir, "compose.yaml"), r.stack, true, registryAuth(d, *p), stackServiceNames(*p)...); err != nil {
 				return err
 			}
-			if err := r.routes(ctx, d, *p); err != nil {
+			if err := r.routes(ctx, d, *p, nil); err != nil {
 				return err
 			}
 			return r.removeRoutes(ctx, d, attempted, *p)
@@ -764,7 +771,7 @@ func (r *runner) diagnose(ctx context.Context, stack string, services []string) 
 // kamal-proxy resolves tasks.<service> per new connection, so a removed task
 // stops receiving new connections at once; keep-alive connections to it
 // last until the task closes them, and DNS results may be cached briefly.
-func (r *runner) routes(ctx context.Context, d *plan.Deploy, p stackPlan) error {
+func (r *runner) routes(ctx context.Context, d *plan.Deploy, p stackPlan, prev *stackPlan) error {
 	for _, sp := range p.Services {
 		if !sp.proxied() {
 			continue
@@ -776,10 +783,9 @@ func (r *runner) routes(ctx context.Context, d *plan.Deploy, p stackPlan) error 
 		target += ":" + strconv.Itoa(sp.Proxy.Port)
 		route := deploy.RouteName(d.App, d.Destination, sp.Name)
 		r.logf("proxy route %s -> %s on %d servers", route, target, len(d.Servers))
-		opts := proxy.DeployOptions{
-			Hosts: sp.Proxy.Hosts, HealthPath: sp.Proxy.HealthPath, TLS: sp.Proxy.TLS,
-			DeployTimeout: time.Duration(sp.Proxy.DeployTimeout) * time.Second,
-			DrainTimeout:  time.Duration(sp.Proxy.DrainTimeout) * time.Second,
+		opts, err := proxy.ServiceDeployOptions(*sp.Proxy)
+		if err != nil {
+			return fmt.Errorf("service %s: %w", sp.Name, err)
 		}
 		for _, s := range d.Servers {
 			if err := proxy.Deploy(ctx, s.Host, route, target, opts); err != nil {
@@ -787,18 +793,10 @@ func (r *runner) routes(ctx context.Context, d *plan.Deploy, p stackPlan) error 
 			}
 		}
 	}
-	return r.removeStaleRoutes(ctx, d, p)
-}
-
-// removeStaleRoutes drops Proxy routes that the previous Release had and
-// this plan does not, on every node. kamal-proxy keeps a route until it is
-// removed; stack prune does not touch the Proxy.
-func (r *runner) removeStaleRoutes(ctx context.Context, d *plan.Deploy, p stackPlan) error {
-	prev, err := currentPlan(ctx, r.h, d.App, d.Destination)
-	if err != nil || prev == nil {
-		return err
+	if prev != nil {
+		return r.removeRoutes(ctx, d, *prev, p)
 	}
-	return r.removeRoutes(ctx, d, *prev, p)
+	return nil
 }
 
 // removeRoutes drops the routes of prev's x-yoho.proxy Services that p does
@@ -837,14 +835,21 @@ func currentPlan(ctx context.Context, h remote.Host, app, dest string) (*stackPl
 	if ver == "" || ver == "." {
 		return nil, nil
 	}
-	p, err := readPlan(ctx, h, release.Dir(app, dest, ver))
-	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return nil, nil
-		}
-		return nil, err
+	return planForVersion(ctx, h, app, dest, ver)
+}
+
+// planForVersion reads a known current Version without rediscovering current.
+// No current Release or a missing legacy plan is supported; other read/parse
+// failures must abort before any deploy mutation.
+func planForVersion(ctx context.Context, h remote.Host, app, dest, ver string) (*stackPlan, error) {
+	if ver == "" {
+		return nil, nil
 	}
-	return p, nil
+	p, err := readPlan(ctx, h, release.Dir(app, dest, ver))
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, nil
+	}
+	return p, err
 }
 
 // releaseCommands runs each x-yoho.release_command before the stack update.
@@ -1140,6 +1145,13 @@ func readPlan(ctx context.Context, h remote.Host, relDir string) (*stackPlan, er
 	if err := json.Unmarshal(b, &p); err != nil {
 		return nil, fmt.Errorf("parse %s/plan.json: %w", relDir, err)
 	}
+	for _, sp := range p.Services {
+		if sp.Proxy != nil {
+			if err := sp.Proxy.ValidateHealthCheck(); err != nil {
+				return nil, fmt.Errorf("parse %s/plan.json: service %s: %w", relDir, sp.Name, err)
+			}
+		}
+	}
 	return &p, nil
 }
 
@@ -1172,6 +1184,14 @@ func (Runtime) Rollback(ctx context.Context, d *plan.Deploy, version string) (_ 
 	if _, err := checkSwarm(ctx, d); err != nil {
 		return nil, err
 	}
+	prevVersion, err := currentVersion(ctx, h, r.dir)
+	if err != nil {
+		return nil, fmt.Errorf("cannot tell which Release is current on %s (nothing was changed): %w", d.Servers[0].Name, err)
+	}
+	prevPlan, err := planForVersion(ctx, h, d.App, d.Destination, prevVersion)
+	if err != nil {
+		return nil, fmt.Errorf("current Release %s: %w", prevVersion, err)
+	}
 
 	rel, err := deploy.ReadRelease(ctx, h, path.Join(relDir, "release.json"))
 	if err != nil {
@@ -1201,8 +1221,6 @@ func (Runtime) Rollback(ctx context.Context, d *plan.Deploy, version string) (_ 
 			return nil, fmt.Errorf("release %s: secrets generation %s is gone", version, rel.SecretsGeneration)
 		}
 	}
-	prev, _ := h.Output(ctx, remote.Cmd{Script: "readlink " + remote.Quote(path.Join(r.dir, "current")) + " 2>/dev/null || true"})
-	prevVersion := path.Base(strings.TrimSpace(prev))
 
 	r.logf("rolling back to %s (volumes, data and migrations are not reverted)", version)
 	if p.needsProxy() {
@@ -1213,7 +1231,7 @@ func (Runtime) Rollback(ctx context.Context, d *plan.Deploy, version string) (_ 
 	if err := r.deployStack(ctx, stackFile, r.stack, true, registryAuth(d, *p), stackServiceNames(*p)...); err != nil {
 		return nil, err
 	}
-	if err := r.routes(ctx, d, *p); err != nil {
+	if err := r.routes(ctx, d, *p, prevPlan); err != nil {
 		return nil, err
 	}
 	if prevVersion != "" && prevVersion != "." && prevVersion != version {

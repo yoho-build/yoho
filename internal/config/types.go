@@ -257,6 +257,11 @@ type ServiceProxy struct {
 	Port int `json:"port,omitempty"`
 	// Health check path. Default /up.
 	HealthPath string `json:"health_path,omitempty"`
+	// Proxy HTTP probe port. Omitted: use the traffic target's port.
+	HealthPort *int `json:"health_port,omitempty" jsonschema:"minimum=1,maximum=65535,description=Proxy HTTP probe port; omitted uses the traffic target port"`
+	// Timeout for each Proxy HTTP probe (Go duration, e.g. 2s or 500ms).
+	// Omitted: use the pinned Proxy default; not the deploy deadline or Docker healthcheck timeout.
+	HealthTimeout *string `json:"health_timeout,omitempty" jsonschema:"minLength=1,description=Positive Go duration per Proxy HTTP probe (e.g. 750ms or 2s); omitted uses the pinned Proxy default; separate from deploy_timeout and Docker healthcheck"`
 	// Terminate TLS with Let's Encrypt in the Proxy. Off behind Cloudflare Tunnel.
 	TLS bool `json:"tls,omitempty"`
 	// Seconds to wait for the new container to become healthy. Default 30.

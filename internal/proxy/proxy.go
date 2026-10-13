@@ -329,10 +329,35 @@ type DeployOptions struct {
 	// Hostnames routed to the target. Empty: catch-all.
 	Hosts      []string
 	HealthPath string
-	TLS        bool
+	// Zero: probe the traffic target port / use the pinned Proxy probe timeout.
+	HealthPort    int
+	HealthTimeout time.Duration
+	TLS           bool
 	// Zero: kamal-proxy defaults.
 	DeployTimeout time.Duration
 	DrainTimeout  time.Duration
+}
+
+// ServiceDeployOptions maps retained per-Service settings for both runtimes.
+// The caller applies existing path/deploy/drain defaults; omitted HTTP probe
+// settings remain zero so kamal-proxy supplies its own defaults.
+func ServiceDeployOptions(p config.ServiceProxy) (DeployOptions, error) {
+	if err := p.ValidateHealthCheck(); err != nil {
+		return DeployOptions{}, err
+	}
+	o := DeployOptions{
+		Hosts: p.Hosts, HealthPath: p.HealthPath, TLS: p.TLS,
+		DeployTimeout: time.Duration(p.DeployTimeout) * time.Second,
+		DrainTimeout:  time.Duration(p.DrainTimeout) * time.Second,
+	}
+	if p.HealthPort != nil {
+		o.HealthPort = *p.HealthPort
+	}
+	if p.HealthTimeout != nil {
+		// ValidateHealthCheck has already parsed and checked the duration.
+		o.HealthTimeout, _ = time.ParseDuration(*p.HealthTimeout)
+	}
+	return o, nil
 }
 
 // DeployArgs is the kamal-proxy argv for Deploy (exported for tests and
@@ -345,6 +370,12 @@ func DeployArgs(service, target string, opts DeployOptions) []string {
 	}
 	if opts.HealthPath != "" {
 		argv = append(argv, "--health-check-path", opts.HealthPath)
+	}
+	if opts.HealthPort > 0 {
+		argv = append(argv, "--health-check-port", strconv.Itoa(opts.HealthPort))
+	}
+	if opts.HealthTimeout > 0 {
+		argv = append(argv, "--health-check-timeout", opts.HealthTimeout.String())
 	}
 	if opts.TLS {
 		argv = append(argv, "--tls")
@@ -364,6 +395,9 @@ func DeployArgs(service, target string, opts DeployOptions) []string {
 func Deploy(ctx context.Context, host remote.Host, service, target string, opts DeployOptions) error {
 	if service == "" || target == "" {
 		return errors.New("proxy deploy: service and target are required")
+	}
+	if opts.HealthPort < 0 || opts.HealthPort > 65535 || opts.HealthTimeout < 0 {
+		return fmt.Errorf("proxy deploy %s: invalid HTTP probe port or timeout", service)
 	}
 	if opts.TLS && len(opts.Hosts) == 0 {
 		return fmt.Errorf("proxy deploy %s: tls requires at least one host", service)

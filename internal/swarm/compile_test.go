@@ -418,3 +418,51 @@ func TestCompileValidDockerStack(t *testing.T) {
 		}
 	}
 }
+
+func TestCompileProxyHealthProbeDoesNotChangeDockerHealthcheck(t *testing.T) {
+	d := testDeploy(t, nil, nil)
+	in := compileInput{PinHost: "node-1", HMACKey: testKey}
+	before, err := compile(d, in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	port, timeout := 9090, "750ms"
+	p := d.Ext["web"].Proxy
+	p.HealthPort = &port
+	p.HealthTimeout = &timeout
+	after, err := compile(d, in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(before.YAML) != string(after.YAML) {
+		t.Fatal("HTTP probe settings changed compiled stack/Docker healthcheck")
+	}
+	for _, sp := range after.Plan.Services {
+		if sp.Name == "web" {
+			if sp.Proxy.HealthPort == nil || *sp.Proxy.HealthPort != 9090 || sp.Proxy.HealthTimeout == nil || *sp.Proxy.HealthTimeout != "750ms" {
+				t.Fatalf("compiled Proxy %+v", sp.Proxy)
+			}
+			port = 9191
+			timeout = "2s"
+			if *sp.Proxy.HealthPort != 9090 || *sp.Proxy.HealthTimeout != "750ms" {
+				t.Fatal("saved plan aliases caller's optional settings")
+			}
+		}
+	}
+}
+
+func TestValidateProxyHealthProbe(t *testing.T) {
+	h := newFake(newSim())
+	for _, p := range []config.ServiceProxy{{HealthPort: new(0)}, {HealthTimeout: new("0s")}} {
+		d := testDeploy(t, h, nil)
+		e := d.Ext["web"]
+		e.Proxy = &p
+		d.Ext["web"] = e
+		if err := validate(d); err == nil || !strings.Contains(err.Error(), "health_") {
+			t.Fatalf("validation %v", err)
+		}
+	}
+	if h.all() != "" {
+		t.Fatal("validation performed Server actions")
+	}
+}

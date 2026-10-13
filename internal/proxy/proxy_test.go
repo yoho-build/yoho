@@ -418,3 +418,41 @@ func TestProxyLockFlock(t *testing.T) {
 		t.Fatalf("flock run: %v %s", err, out)
 	}
 }
+
+func TestServiceDeployOptionsHealthProbe(t *testing.T) {
+	port, timeout := 9090, "750ms"
+	p := config.ServiceProxy{Port: 3000, HealthPath: "/ready", HealthPort: &port, HealthTimeout: &timeout, DeployTimeout: 47, DrainTimeout: 19}
+	o, err := ServiceDeployOptions(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if o.HealthPort != 9090 || o.HealthTimeout != 750*time.Millisecond || o.DeployTimeout != 47*time.Second || o.DrainTimeout != 19*time.Second {
+		t.Fatalf("mapped options %+v", o)
+	}
+	h := &fakeHost{}
+	if err = Deploy(context.Background(), h, "shop-production-web", "a:3000,b:3000", o); err != nil {
+		t.Fatal(err)
+	}
+	for _, s := range []string{"'--target' 'a:3000,b:3000'", "'--health-check-port' '9090'", "'--health-check-timeout' '750ms'", "'--deploy-timeout' '47s'", "'--drain-timeout' '19s'"} {
+		if !strings.Contains(h.scripts[0], s) {
+			t.Errorf("missing %s in %s", s, h.scripts[0])
+		}
+	}
+	o, err = ServiceDeployOptions(config.ServiceProxy{Port: 3000, DeployTimeout: 47, DrainTimeout: 19})
+	if err != nil {
+		t.Fatal(err)
+	}
+	args := strings.Join(DeployArgs("web", "a:3000", o), " ")
+	if strings.Contains(args, "--health-check-port") || strings.Contains(args, "--health-check-timeout") {
+		t.Fatalf("legacy defaults overridden: %s", args)
+	}
+	port = 0
+	if _, err = ServiceDeployOptions(p); err == nil {
+		t.Fatal("invalid port accepted")
+	}
+	port = 9090
+	timeout = "0s"
+	if _, err = ServiceDeployOptions(p); err == nil {
+		t.Fatal("invalid timeout accepted")
+	}
+}
