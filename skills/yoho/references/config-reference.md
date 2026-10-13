@@ -18,7 +18,7 @@ The Yoho file (`yoho.yml`, `.yaml`, `.toml`, `.json`, `.jsonc`; format detected 
 | `proxy` | `image` (pinned kamal-proxy), `http_port`, `https_port` (0 disables publishing), `bind`, `tunnel`. |
 | `proxy.tunnel` | `token_secret` (empty or `tunnel: {}` = Quick Tunnel; leave `x-yoho.proxy.hosts` empty with it, one replica only), `image`, `replicas` (default 1). |
 | `backups.targets.<n>` | `type` (`restic` default, `archive`), `repository`, `format` (`tar.gz`, `zip`, `7z`; archive only), `password_secret`, `env_secrets`, `keep_last`. |
-| `backups.jobs.<n>` | `destination`, `services`, `target`, `schedule` (systemd OnCalendar; empty = on demand). |
+| `backups.jobs.<n>` | `destination`, `services`, `target`, `schedule` (systemd OnCalendar; empty = on demand), `retries` (Scheduled Backups only, 0–5 extra attempts, default 0), `retry_delay_sec` (0/unset = 30s, max 300s). Retries require volume-only selected Services without dump/pre_backup commands. No retry after storage starts or unsafe cleanup; one whole-run timeout/cancellation budget. Reinstall/apply changes. |
 | `setup` | `user` (default `yoho`), `authorized_keys`, `packages`, `firewall`, `allow_ports`, `auto_updates`, `swap`, `timezone`. |
 | `hooks.path` | Default `.yoho/hooks`. |
 | `retain_releases` | Releases kept per Server, default 5. |

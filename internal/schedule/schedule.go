@@ -61,7 +61,9 @@ type Job struct {
 	// Resolved values for Target.PasswordSecret and Target.EnvSecrets.
 	Secrets map[string]string
 	// Default 6h.
-	Timeout time.Duration
+	Timeout       time.Duration
+	Retries       int
+	RetryDelaySec int
 	// Destination runtime: "compose" (default) or "swarm".
 	Runtime string
 	// Keyed fingerprints of Secrets (key -> fingerprint), stored in the spec
@@ -91,6 +93,8 @@ type Spec struct {
 	// Secret key -> keyed fingerprint of the value in SecretFiles.
 	SecretFingerprints map[string]string `json:"secret_fingerprints,omitempty"`
 	TimeoutSec         int               `json:"timeout_sec"`
+	Retries            int               `json:"retries,omitempty"`
+	RetryDelaySec      int               `json:"retry_delay_sec,omitempty"`
 }
 
 // Mode selects system or user systemd units.
@@ -181,11 +185,18 @@ func NewSpec(j Job) (Spec, error) {
 	if len(j.Services) == 0 {
 		return Spec{}, fmt.Errorf("job %s: no Services to back up", j.Name)
 	}
+	if err := validateRetries(j.Retries, j.RetryDelaySec, j.Services); err != nil {
+		return Spec{}, fmt.Errorf("job %s: %w", j.Name, err)
+	}
+	if j.Timeout < 0 || (j.Timeout > 0 && j.Timeout < time.Second) {
+		return Spec{}, fmt.Errorf("job %s: timeout must be at least one second", j.Name)
+	}
 	s := Spec{
 		Version: specVersion, App: j.App, Destination: j.Destination, Job: j.Name,
 		Project: j.Project, Root: release.Root, Services: j.Services,
 		TargetName: j.TargetName, Target: j.Target, Schedule: j.Schedule,
 		SecretFiles: map[string]string{}, TimeoutSec: int(defaultTimeout / time.Second),
+		Retries: j.Retries, RetryDelaySec: j.RetryDelaySec,
 	}
 	switch j.Runtime {
 	case "", "compose":
@@ -505,11 +516,23 @@ func loadSpecs(ctx context.Context, h remote.Host, app, dest string, sudo bool) 
 
 // JobState is the last run of a job, written by RunJob.
 type JobState struct {
-	LastRun     time.Time  `json:"last_run"`
-	LastSuccess *time.Time `json:"last_success,omitempty"`
-	Error       string     `json:"error,omitempty"`
-	BackupID    string     `json:"backup_id,omitempty"`
-	DurationSec float64    `json:"duration_sec,omitempty"`
+	LastRun     time.Time      `json:"last_run"`
+	LastSuccess *time.Time     `json:"last_success,omitempty"`
+	Error       string         `json:"error,omitempty"`
+	BackupID    string         `json:"backup_id,omitempty"`
+	DurationSec float64        `json:"duration_sec,omitempty"`
+	Attempts    []AttemptState `json:"attempts,omitempty"`
+}
+
+// AttemptState records actual outcomes, including a stored Backup when later
+// retention/unlock fails. Errors are redacted before persistence.
+type AttemptState struct {
+	Number      int       `json:"number"`
+	StartedAt   time.Time `json:"started_at"`
+	DurationSec float64   `json:"duration_sec"`
+	Outcome     string    `json:"outcome"` // success, failed, cancelled, timeout
+	Error       string    `json:"error,omitempty"`
+	BackupID    string    `json:"backup_id,omitempty"`
 }
 
 // JobStatus combines systemd and RunJob state.
@@ -526,6 +549,21 @@ type JobStatus struct {
 	State         JobState
 }
 
+// SuccessHealth reports last-success freshness, never an inferred OnCalendar
+// period. A future success is invalid rather than healthy. maxAge must be > 0.
+func SuccessHealth(st JobState, now time.Time, maxAge time.Duration) string {
+	if st.LastSuccess == nil || st.LastSuccess.IsZero() {
+		return "never-success"
+	}
+	if st.LastSuccess.After(now) {
+		return "future-success"
+	}
+	if now.Sub(*st.LastSuccess) > maxAge {
+		return "stale"
+	}
+	return "healthy"
+}
+
 // Status reports installed jobs of an App/Destination.
 func Status(ctx context.Context, h remote.Host, app, dest string, m Mode) ([]JobStatus, error) {
 	specs, err := loadSpecs(ctx, h, app, dest, m.Sudo)
@@ -534,7 +572,11 @@ func Status(ctx context.Context, h remote.Host, app, dest string, m Mode) ([]Job
 	}
 	states := map[string]JobState{}
 	if b, err := h.ReadFile(ctx, StatePath(app, dest), m.Sudo); err == nil {
-		_ = json.Unmarshal(b, &states)
+		if err := json.Unmarshal(b, &states); err != nil {
+			return nil, fmt.Errorf("parse Scheduled Job state: %w", err)
+		}
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return nil, fmt.Errorf("read Scheduled Job state: %w", err)
 	}
 	var out []JobStatus
 	for _, s := range specs {

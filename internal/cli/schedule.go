@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -24,6 +25,7 @@ import (
 	"github.com/yoho-build/yoho/internal/remote"
 	"github.com/yoho-build/yoho/internal/schedule"
 	"github.com/yoho-build/yoho/internal/secrets"
+	"github.com/yoho-build/yoho/internal/ui"
 )
 
 func init() {
@@ -162,7 +164,7 @@ func (a *app) installJobs(ctx context.Context, hosts []plan.NamedHost, names []s
 			App: a.cfg.App, Destination: a.destName, Name: n, Project: a.project(),
 			Services: j.services, TargetName: j.targetName, Target: j.target,
 			Schedule: j.cfg.Schedule, Secrets: sec, Runtime: a.dest.Runtime,
-			SecretFingerprints: fps,
+			SecretFingerprints: fps, Retries: j.cfg.Retries, RetryDelaySec: j.cfg.RetryDelaySec,
 		})
 	}
 
@@ -407,10 +409,15 @@ func yohoSourceDir() string {
 }
 
 func scheduleStatusCmd(g *globals) *cobra.Command {
-	return &cobra.Command{
+	var maxAge time.Duration
+	c := &cobra.Command{
 		Use:   "status",
 		Short: "Show installed Scheduled Jobs, their timers and last runs",
+		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
+			if cmd.Flags().Changed("max-age") && maxAge <= 0 {
+				return errors.New("--max-age must be a positive duration (e.g. 48h)")
+			}
 			a, err := g.load(cmd)
 			if err != nil {
 				return err
@@ -422,41 +429,113 @@ func scheduleStatusCmd(g *globals) *cobra.Command {
 			}
 			defer closeHosts()
 			step := a.ui.Step(hosts[0].Name, "Read Scheduled Jobs")
-			sts, err := schedule.Status(ctx, hosts[0].Host, a.cfg.App, a.destName, a.scheduleMode())
+			sts, now, err := readScheduleStatus(ctx, hosts[0].Host, a.cfg.App, a.destName, a.scheduleMode(), maxAge)
 			if err != nil {
 				step.Fail(err, "rerun with -v")
 				return &silentError{err}
 			}
 			step.Done(fmt.Sprintf("%d jobs", len(sts)))
-			if len(sts) == 0 {
-				a.ui.Info("no Scheduled Jobs installed; run `yoho schedule install`")
-				return nil
-			}
-			rows := make([][]string, 0, len(sts))
-			for _, s := range sts {
-				last, backupID := "-", s.State.BackupID
-				if !s.State.LastRun.IsZero() {
-					last = s.State.LastRun.Local().Format("2006-01-02 15:04:05")
-					if s.State.Error != "" {
-						last += " FAILED"
-					} else {
-						last += " ok"
-					}
-				}
-				if backupID == "" {
-					backupID = "-"
-				}
-				rows = append(rows, []string{s.Job, s.Schedule, s.TimerState, orDash(s.NextRun), last, backupID, orDash(s.ServiceResult)})
-			}
-			a.ui.Table([]string{"JOB", "SCHEDULE", "TIMER", "NEXT RUN", "LAST RUN", "LAST BACKUP", "RESULT"}, rows)
-			for _, s := range sts {
-				if s.State.Error != "" {
-					a.ui.Warn("%s: last run failed: %s", s.Job, s.State.Error)
-				}
-			}
-			return nil
+			return writeScheduleStatus(a.ui, sts, maxAge, now)
 		},
 	}
+	c.Flags().DurationVar(&maxAge, "max-age", 0, "Explicit last-success freshness check; fail for stale, never-success or future-success jobs (e.g. 48h; no schedule period inferred)")
+	return c
+}
+
+// readScheduleStatus samples the Server clock after reading Server-written
+// state, avoiding operator/Server clock skew and subsecond truncation. Normal
+// informational status makes no clock query; explicit checks fail closed.
+func readScheduleStatus(ctx context.Context, h remote.Host, app, dest string, mode schedule.Mode, maxAge time.Duration) ([]schedule.JobStatus, time.Time, error) {
+	sts, err := schedule.Status(ctx, h, app, dest, mode)
+	if err != nil {
+		return nil, time.Time{}, err
+	}
+	if maxAge <= 0 {
+		return sts, time.Time{}, nil
+	}
+	out, err := h.Output(ctx, remote.Cmd{Script: "set -eu\ndate -u +%s.%N\n"})
+	if err != nil {
+		return nil, time.Time{}, fmt.Errorf("read Server clock for last-success check: %w", errors.Join(err, ctx.Err()))
+	}
+	now, err := parseScheduleServerClock(out)
+	if err != nil {
+		return nil, time.Time{}, err
+	}
+	return sts, now, nil
+}
+
+func parseScheduleServerClock(out string) (time.Time, error) {
+	seconds, nanos, ok := strings.Cut(strings.TrimSpace(out), ".")
+	if !ok || seconds == "" || len(nanos) != 9 {
+		return time.Time{}, errors.New("last-success check: malformed Server clock; require GNU date seconds.nanoseconds")
+	}
+	for _, digit := range seconds + nanos {
+		if digit < '0' || digit > '9' {
+			return time.Time{}, errors.New("last-success check: malformed Server clock; require GNU date seconds.nanoseconds")
+		}
+	}
+	sec, err := strconv.ParseInt(seconds, 10, 64)
+	if err != nil {
+		return time.Time{}, fmt.Errorf("last-success check: invalid Server clock seconds: %w", err)
+	}
+	ns, err := strconv.ParseInt(nanos, 10, 64)
+	if err != nil {
+		return time.Time{}, fmt.Errorf("last-success check: invalid Server clock nanoseconds: %w", err)
+	}
+	return time.Unix(sec, ns).UTC(), nil
+}
+
+func writeScheduleStatus(u *ui.UI, sts []schedule.JobStatus, maxAge time.Duration, now time.Time) error {
+	if len(sts) == 0 {
+		u.Info("no Scheduled Jobs installed; run `yoho schedule install`")
+		if maxAge > 0 {
+			return errors.New("last-success check: no Scheduled Jobs installed")
+		}
+		return nil
+	}
+	header := []string{"JOB", "SCHEDULE", "TIMER", "NEXT RUN", "LAST RUN", "LAST BACKUP", "RESULT"}
+	if maxAge > 0 {
+		header = append(header, "LAST SUCCESS", "SUCCESS HEALTH", "MAX AGE")
+	}
+	rows := make([][]string, 0, len(sts))
+	unhealthy := 0
+	for _, s := range sts {
+		last, backupID := "-", s.State.BackupID
+		if !s.State.LastRun.IsZero() {
+			last = s.State.LastRun.Local().Format("2006-01-02 15:04:05")
+			if s.State.Error != "" {
+				last += " FAILED"
+			} else {
+				last += " ok"
+			}
+		}
+		if backupID == "" {
+			backupID = "-"
+		}
+		row := []string{s.Job, s.Schedule, s.TimerState, orDash(s.NextRun), last, backupID, orDash(s.ServiceResult)}
+		if maxAge > 0 {
+			health := schedule.SuccessHealth(s.State, now, maxAge)
+			success := "-"
+			if s.State.LastSuccess != nil && !s.State.LastSuccess.IsZero() {
+				success = s.State.LastSuccess.UTC().Format(time.RFC3339Nano)
+			}
+			row = append(row, success, health, maxAge.String())
+			if health != "healthy" {
+				unhealthy++
+			}
+		}
+		rows = append(rows, row)
+	}
+	u.Table(header, rows)
+	for _, s := range sts {
+		if s.State.Error != "" {
+			u.Warn("%s: last run failed: %s", s.Job, s.State.Error)
+		}
+	}
+	if unhealthy > 0 {
+		return fmt.Errorf("last-success check: %d Scheduled Job(s) unhealthy (max age %s)", unhealthy, maxAge)
+	}
+	return nil
 }
 
 func orDash(s string) string {

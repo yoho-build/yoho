@@ -384,6 +384,15 @@ func (t *target) fetch(ctx context.Context, h remote.Host, base, dir, id string)
 		return path.Dir(out), nil
 	}
 
+	return t.fetchArchive(ctx, h, dir, id, false)
+}
+
+// fetchArchive extracts only inside its new private staging directory. Check
+// runs the extractor as the deploy user, never reading a manifest symlink on
+// the Server. Restore keeps its existing root extraction/ownership semantics.
+func (t *target) fetchArchive(ctx context.Context, h remote.Host, dir, id string, forCheck bool) (string, error) {
+	data := path.Join(dir, "data")
+
 	if !t.archiveRe().MatchString(id) {
 		return "", fmt.Errorf("archive %q does not belong to %s (%s)", id, t.project, t.format)
 	}
@@ -415,12 +424,27 @@ func (t *target) fetch(ctx context.Context, h remote.Host, base, dir, id string)
 		inner = `set -eu; z=$(command -v 7zz || command -v 7z || command -v 7za); "$z" x -bd -y` +
 			t.passFlag() + ` -o/s/data ` + remote.Quote("/s/"+id) + ` && ` + ownExtractedTree
 	}
+	if forCheck {
+		inner = strings.ReplaceAll(inner, ownExtractedTree, `chmod -R u+rwX,go-rwx /s/data`)
+	}
 	extract := dockerSh(image, envFlags, []string{dir + ":/s"}, inner)
+	if forCheck {
+		extract = strings.Replace(extract, "docker run --rm", `docker run --rm --user "$uid:$gid"`, 1)
+	}
+
 	if t.format == "tar.gz" {
 		extract += " " + remote.Quote(id)
 	}
 	if err := h.Run(ctx, remote.Cmd{Script: extract, Env: t.env}); err != nil {
 		return "", fmt.Errorf("extract %s: %w", id, err)
+	}
+	if forCheck {
+		manifest := path.Join(data, "manifest.json")
+		script := "set -eu\ntest -d " + remote.Quote(data) + " && test ! -L " + remote.Quote(data) + "\ntest -f " + remote.Quote(manifest) + " && test ! -L " + remote.Quote(manifest) + " && test -r " + remote.Quote(manifest)
+		if err := h.Run(ctx, remote.Cmd{Script: script}); err != nil {
+			return "", fmt.Errorf("archive check: manifest.json missing, linked or unreadable: %w", err)
+		}
+		return data, nil
 	}
 	manifest := path.Join(data, "manifest.json")
 	if _, err := h.ReadFile(ctx, manifest, false); err != nil {

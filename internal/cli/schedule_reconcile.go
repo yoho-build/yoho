@@ -162,6 +162,9 @@ func (a *app) readInstalledSpec(ctx context.Context, h interface {
 // jobDiff compares non-secret fields of an installed spec with the desired job.
 func jobDiff(spec schedule.Spec, j *backupJob, runtime string) []string {
 	var reasons []string
+	if spec.Retries != j.cfg.Retries || (j.cfg.Retries > 0 && scheduleRetryDelay(spec.RetryDelaySec) != scheduleRetryDelay(j.cfg.RetryDelaySec)) {
+		reasons = append(reasons, "retry policy changed")
+	}
 	if normRuntime(spec.Runtime) != normRuntime(runtime) {
 		reasons = append(reasons, fmt.Sprintf("runtime %s → %s", normRuntime(spec.Runtime), normRuntime(runtime)))
 	}
@@ -279,4 +282,11 @@ func secretDiff(spec schedule.Spec, want map[string]string) string {
 		return ""
 	}
 	return "credential changed: " + strings.Join(changed, ", ")
+}
+
+func scheduleRetryDelay(seconds int) int {
+	if seconds == 0 {
+		return 30
+	}
+	return seconds
 }

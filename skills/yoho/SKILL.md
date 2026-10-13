@@ -101,7 +101,8 @@ yoho app ps | logs [SERVICE...] [--all] [-f] [-n N] | stats [SERVICE...] [--no-s
 yoho proxy boot | status | logs
 yoho tunnel up | status | down    # Cloudflare Tunnel (Quick Tunnel when no token)
 yoho backup run [JOB] | list [JOB] | restore ID [--job JOB] [-y]   # ID may be "latest"
-yoho schedule install [JOB...] [--binary PATH] | status | remove [JOB...]
+yoho backup check [JOB] [--id ID | --read-data]   # integrity only, not restore proof
+yoho schedule install [JOB...] [--binary PATH] | status [--max-age 48h] | remove [JOB...]
 yoho swarm init [-y] | join [-y] | status
 yoho skill install [--dir DIR] [--agent claude|codex|all] | print [SKILL]   # install writes all bundled skills
 ```
@@ -115,6 +116,9 @@ Global flags: `-c/--config`, `-d/--destination` (default `$YOHO_DESTINATION`, th
 - Do not print secret values; use `yoho secrets list`. `secrets print` needs `--reveal` and a terminal.
 - Rollback does not revert volumes or migrations. Take a `yoho backup run` before risky releases.
 - Run `yoho config check` and `yoho plan` before `yoho deploy`; deploy to staging first when a Destination exists.
+- `backup check` is read-only to the target/App data and never initializes or restores. Restic checks repository structure (`--read-data` adds all packs); archive checks one owned Backup (`--id`, default latest), its manifest/files and nested volume archives in private staging. It does not prove dump loading or App recovery. Coordinate external/shared-repository writers: only this Destination's Yoho lock is held, restic uses `--no-lock --no-cache`.
+- `schedule status --max-age 48h` explicitly checks last-success freshness against the Server clock (queried after state with nanosecond precision; query/parse failure never falls back locally) and exits nonzero for stale, never-success, future-success or no installed jobs. Pick the threshold for the user's real policy; never infer arbitrary `OnCalendar` periods (weekly jobs need a longer threshold). Default status stays informational. Parse `success_health`/`last_success` NDJSON rows; no automatic external notifications.
+- Scheduled Backup `retries` is opt-in (0–5, default 0), `retry_delay_sec` is bounded (0/unset = 30s, max 300s). Only volume-only Backups without dump/pre_backup commands may retry; no post hooks or arbitrary commands. A whole-run timeout/cancellation bounds attempts and delays. No retry after storage starts, uncertain unpause, cancellation or timeout. Reinstall/apply policy changes; failed runs retain last success and record redacted attempt outcomes.
 - Parse output with `--json`, never by scraping human output.
 - Switching a Destination between `compose` and `swarm` runtime causes downtime.
 

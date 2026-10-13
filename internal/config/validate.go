@@ -123,6 +123,15 @@ func Validate(c *Config) []error {
 	}
 	for _, n := range sortedKeys(c.Backups.Jobs) {
 		j := c.Backups.Jobs[n]
+		if j.Retries < 0 || j.Retries > 5 {
+			add("backups.jobs.%s.retries must be between 0 and 5", n)
+		}
+		if j.RetryDelaySec < 0 || j.RetryDelaySec > 300 {
+			add("backups.jobs.%s.retry_delay_sec must be between 0 and 300 (0 means 30)", n)
+		}
+		if j.Retries > 0 && j.Schedule == "" {
+			add("backups.jobs.%s.retries requires a schedule", n)
+		}
 		if _, ok := c.Destinations[j.Destination]; !ok {
 			add("backups.jobs.%s.destination: unknown Destination %q", n, j.Destination)
 		}

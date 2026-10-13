@@ -192,6 +192,11 @@ type BackupJob struct {
 	Target   string   `json:"target" jsonschema:"required"`
 	// systemd OnCalendar expression, e.g. "*-*-* 03:00:00". Empty: on demand only.
 	Schedule string `json:"schedule,omitempty"`
+	// Extra attempts for Scheduled Backups only. Default 0; at most 5.
+	// Allowed only for volume-only Backups without dump/pre_backup commands.
+	Retries int `json:"retries,omitempty" jsonschema:"minimum=0,maximum=5"`
+	// Fixed delay between attempts in seconds; default 30, maximum 300.
+	RetryDelaySec int `json:"retry_delay_sec,omitempty" jsonschema:"minimum=0,maximum=300"`
 }
 
 // SetupConfig drives `yoho setup` (Server provisioning).

@@ -44,10 +44,24 @@ Generated secrets (`x-yoho.generate`, on the Server as `generated/<NAME>`) are i
 ```sh
 yoho backup run [JOB]                      # take a Backup now
 yoho backup list [JOB]                     # stored Backups, newest first
+yoho backup check [JOB]                    # integrity only; never a restore proof
+yoho backup check [JOB] --read-data        # restic: also read all data packs
+yoho backup check [JOB] --id ID            # archive: selected ID (default latest)
 yoho backup restore ID [--job JOB] [-y]    # restore; confirmation required unless -y
 ```
 
 `JOB` defaults to the Destination's only Backup job (several jobs: name one; `restore` takes `--job`). Pass `-d` to pick the Destination. `ID` is the id shown by `backup list`; `latest` selects the newest. Hooks `pre-backup`, `post-backup`, `pre-restore`, `post-restore` run on your machine and also get `YOHO_BACKUP_JOB`, `YOHO_BACKUP_TARGET` and (after the Backup, or for a restore) `YOHO_BACKUP_ID`.
+
+## Read-only integrity checking
+
+`backup check` requires an existing Backup Target and at least one Backup belonging to this App/Destination. A missing/uninitialized target, empty repository, unreadable archive, missing/foreign manifest, missing referenced file or corrupt volume archive fails with a nonzero exit. It never initializes or prunes the target, restores a restic snapshot, loads dumps, runs backup/restore Hooks, or mounts/changes App volumes. On Swarm it uses the first Server, like other Backup commands.
+
+- **restic:** `restic check` verifies the repository's structural consistency across all snapshots, not just this App. Normal checking does not read every data pack; explicit `--read-data` adds that full read (potentially expensive). It does not validate Yoho manifests or application data. Yoho lists and validates exact owned snapshot tags both before and after the repository check; disappearance of the last owned Backup or a failed/malformed post-check listing fails the command. This is a point-in-time availability observation, not a guarantee against subsequent concurrent pruning. `--id` is not supported.
+- **archive:** checks one Backup, newest by default or explicitly `--id` from `backup list`. Only this App/Destination's filename is fetched. Yoho verifies outer archive integrity, exact manifest App/Destination/project ownership, referenced regular files, and readability of each volume's tar/gzip archive. Dumps and generated-secret files are checked for presence/readability, not semantic correctness. Extraction runs as the deploy user in new private staging under the App's Backup spool, which is removed on success, error or cancellation; a cleanup failure reports the remaining path. `--read-data` is not supported.
+
+Checking takes the same Yoho Destination lock as Backup/deploy/restore. Restic uses `--no-lock --no-cache` and local repositories are mounted read-only, so checking does not write repository locks or initialize directories. **Coordinate external restic writers and Yoho jobs from other Destinations sharing the repository yourself**; concurrent writes/pruning can cause transient check failures. The Destination lock is not a repository-wide lock. Helper images may be pulled if absent. `--json` emits UI events and a result row containing `method`, `backup_id`, `verified`, and `restore_proven: "false"`.
+
+A passed check is **not a restore proof**: it does not test dump loading, application consistency or recovery. Plan an explicitly authorized isolated restore drill separately.
 
 ## Restore safety and recovery
 

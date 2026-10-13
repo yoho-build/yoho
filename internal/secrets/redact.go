@@ -70,6 +70,27 @@ func NewDiagnosticRedactor(w io.Writer, values ...string) *Redactor {
 	return newRedactorMin(w, m, 1)
 }
 
+// RedactError masks known secret values in diagnostics while retaining the
+// original error chain (including cancellation and ownership errors).
+func RedactError(err error, values ...string) error {
+	if err == nil {
+		return nil
+	}
+	var b bytes.Buffer
+	r := NewDiagnosticRedactor(&b, values...)
+	_, _ = io.WriteString(r, err.Error())
+	_ = r.Flush()
+	return &redactedError{message: b.String(), cause: err}
+}
+
+type redactedError struct {
+	message string
+	cause   error
+}
+
+func (e *redactedError) Error() string { return e.message }
+func (e *redactedError) Unwrap() error { return e.cause }
+
 func newRedactor(w io.Writer, valueLabels map[string]string) *Redactor {
 	return newRedactorMin(w, valueLabels, minRedactLen)
 }

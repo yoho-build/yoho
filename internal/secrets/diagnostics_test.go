@@ -2,9 +2,22 @@ package secrets
 
 import (
 	"bytes"
+	"context"
+	"errors"
+	"fmt"
 	"strings"
 	"testing"
 )
+
+func TestRedactErrorRetainsCancellationAndMasksVariants(t *testing.T) {
+	err := RedactError(fmt.Errorf("abc c2VjcmV0 secret: %w", context.Canceled), "abc", "secret")
+	if !errors.Is(err, context.Canceled) || strings.Contains(err.Error(), "abc") || strings.Contains(err.Error(), "secret") || strings.Contains(err.Error(), "c2VjcmV0") {
+		t.Fatalf("%v", err)
+	}
+	if RedactError(nil, "secret") != nil {
+		t.Fatal("nil error changed")
+	}
+}
 
 func TestDiagnosticRedactorShortAndMultilineWindow(t *testing.T) {
 	var out bytes.Buffer

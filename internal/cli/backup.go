@@ -141,6 +141,14 @@ func (a *app) resolveServices(ctx context.Context, j *backupJob) error {
 	if len(j.services) == 0 {
 		return errors.New("no Service has x-yoho.backup; add e.g. `x-yoho: {backup: {volumes: [data]}}` to a Service")
 	}
+	if j.cfg.Retries > 0 {
+		for _, svc := range sortedKeys(j.services) {
+			sb := j.services[svc]
+			if len(sb.Dump) > 0 || len(sb.PreBackup) > 0 {
+				return fmt.Errorf("Scheduled Backup retries require volume-only Services without dump or pre_backup commands (Service %s)", svc)
+			}
+		}
+	}
 	return nil
 }
 
@@ -237,7 +245,7 @@ func backupCmd(g *globals) *cobra.Command {
 		Long: `Backups copy the volumes and dumps declared in x-yoho.backup to a Backup
 Target defined in the Yoho file (backups.targets / backups.jobs).`,
 	}
-	c.AddCommand(backupRunCmd(g), backupListCmd(g), backupRestoreCmd(g))
+	c.AddCommand(backupRunCmd(g), backupListCmd(g), backupRestoreCmd(g), backupCheckCmd(g))
 	return c
 }
 
@@ -577,4 +585,73 @@ func humanBytes(n int64) string {
 		return fmt.Sprintf("%d B", n)
 	}
 	return fmt.Sprintf("%.1f %s", f, units[i])
+}
+
+func backupCheckCmd(g *globals) *cobra.Command {
+	var id string
+	var readData bool
+	c := &cobra.Command{
+		Use:   "check [JOB]",
+		Short: "Read-only Backup integrity check (not a restore proof)",
+		Long: `Check restic repository structure (optionally all data packs with --read-data),
+ or the selected owned archive Backup (--id, default latest), its manifest and
+ referenced files/volume archives in private staging. Never initializes a
+ repository, changes App volumes, loads dumps, restores or prunes. Coordinate
+ external writers to the Backup Target: only the Yoho Destination lock is held.`,
+		Args: cobra.MaximumNArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) (err error) {
+			if cmd.Flags().Changed("id") && id == "" {
+				return errors.New("--id must name an archive Backup (or latest)")
+			}
+			if readData && cmd.Flags().Changed("id") {
+				return errors.New("--id and --read-data cannot be combined")
+			}
+			name := ""
+			if len(args) > 0 {
+				name = args[0]
+			}
+			a, err := g.loadForJob(cmd, name)
+			if err != nil {
+				return err
+			}
+			defer func() {
+				if err != nil {
+					a.ui.Finished(err, "")
+				}
+			}()
+			ctx := cmd.Context()
+			j, err := a.prepareBackup(ctx, name, false)
+			if err != nil {
+				return err
+			}
+			if (j.target.Type == "" || j.target.Type == "restic") && id != "" {
+				return errors.New("--id is only supported for archive targets")
+			}
+			if j.target.Type == "archive" && readData {
+				return errors.New("--read-data is only supported for restic targets")
+			}
+			hosts, closeHosts, err := a.connect(ctx)
+			if err != nil {
+				return err
+			}
+			defer closeHosts()
+			h := hosts[0]
+			step := a.ui.Step(h.Name, "Check Backup integrity in %s", j.targetName)
+			res, err := backup.Check(ctx, backup.CheckOptions{
+				ListOptions: backup.ListOptions{App: a.cfg.App, Destination: a.destName, Project: a.project(), Target: j.target, Password: j.password, TargetEnv: j.env, Host: h.Host},
+				ID:          id, ReadData: readData, Lock: a.backupLock(h.Host, "backup check"),
+			})
+			if err != nil {
+				step.Fail(err, "check the existing Backup Target credentials and stored Backups; integrity checking is not a restore drill")
+				return &silentError{err}
+			}
+			step.Done(res.Method + " · " + res.ID)
+			a.ui.Table([]string{"METHOD", "BACKUP ID", "VERIFIED", "RESTORE PROVEN"}, [][]string{{res.Method, res.ID, res.Verified, "false"}})
+			a.ui.Finished(nil, "Backup integrity check passed; application restore has not been proven")
+			return nil
+		},
+	}
+	c.Flags().StringVar(&id, "id", "", "Archive Backup ID (default latest); not supported by restic repository checks")
+	c.Flags().BoolVar(&readData, "read-data", false, "Restic only: read and verify all data packs, not just repository structure")
+	return c
 }

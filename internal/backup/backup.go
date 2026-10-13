@@ -39,6 +39,17 @@ var (
 // unlock is always called, with a context that is not cancelled.
 type LockFunc func(ctx context.Context) (unlock func(ctx context.Context) error, err error)
 
+// UnsafeToRetry reports uncertain cleanup/storage outcomes that Scheduled Jobs
+// must never automatically repeat, even with opt-in retries.
+func UnsafeToRetry(err error) bool {
+	var unsafe *retryUnsafeError
+	return errors.As(err, &unsafe)
+}
+
+type retryUnsafeError struct{ error }
+
+func (e *retryUnsafeError) Unwrap() error { return e.error }
+
 // RunOptions describes one Backup.
 type RunOptions struct {
 	App         string
@@ -187,7 +198,9 @@ func Run(ctx context.Context, o RunOptions) (res *Result, err error) {
 	o.logf("storing in %s target", t.method())
 	res, err = t.store(ctx, o.Host, base, ts)
 	if err != nil {
-		return nil, err
+		// Storage may have committed before its reply was lost. Retrying can
+		// duplicate a Backup or retention side effects; preserve a known ID.
+		return res, &retryUnsafeError{err}
 	}
 	res.Duration = now().Sub(start)
 	o.logf("Backup %s stored (%d bytes, %s)", res.ID, res.Size, res.Duration.Round(time.Second))
@@ -350,7 +363,7 @@ func withQuiesced(ctx context.Context, o RunOptions, cid string, vols map[string
 			script := "docker unpause " + remote.Quote(id) + " >/dev/null 2>&1 || true; " +
 				"test \"$(docker inspect -f '{{.State.Paused}}' " + remote.Quote(id) + ")\" = false"
 			if uerr := run(uctx, o.Host, remote.Cmd{Script: script}); uerr != nil {
-				err = errors.Join(err, fmt.Errorf("unpause %s FAILED, container may still be paused: %w", id, uerr))
+				err = errors.Join(err, &retryUnsafeError{fmt.Errorf("unpause %s FAILED, container may still be paused: %w", id, uerr)})
 			}
 		}
 	}()
