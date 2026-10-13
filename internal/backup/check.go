@@ -214,29 +214,18 @@ const checkOwnerMarker = ".yoho-check-owner"
 
 func createCheckStaging(ctx context.Context, h remote.Host, base, dir, token string) error {
 	// mkdir must succeed before the marker is written; no mkdir -p on dir.
-	return h.Run(ctx, remote.Cmd{Script: "set -eu\numask 077\nmkdir -p " + remote.Quote(base) +
-		"\nmkdir -m 0700 " + remote.Quote(dir) + "\nprintf '%s' " + remote.Quote(token) +
-		" > " + remote.Quote(path.Join(dir, checkOwnerMarker)) + "\n"})
+	return createPrivateStaging(ctx, h, base, dir, token)
 }
 
 func removeCheckStaging(ctx context.Context, h remote.Host, dir, token string) error {
-	qdir, marker := remote.Quote(dir), remote.Quote(path.Join(dir, checkOwnerMarker))
-	// Match both bytes and length: command substitution alone would accept a
-	// marker with extra trailing newlines. Refuse symlink directories/markers.
-	script := "set -eu\nif [ ! -e " + qdir + " ] && [ ! -L " + qdir + " ]; then exit 0; fi\n" +
-		"test -d " + qdir + " && test ! -L " + qdir + "\n" +
-		"test -f " + marker + " && test ! -L " + marker + "\n" +
-		"test \"$(cat " + marker + ")\" = " + remote.Quote(token) + "\n" +
-		fmt.Sprintf("test \"$(wc -c < %s | tr -d '[:space:]')\" -eq %d\n", marker, len(token)) +
-		"rm -rf " + qdir + "\n"
-	return h.Run(ctx, remote.Cmd{Script: script})
+	return removePrivateStaging(ctx, h, dir, token)
 }
 
 func (t *target) readOnlyResticPrelude() string {
 	mounts := []string{}
 	pre := "set -eu\n"
 	if strings.HasPrefix(t.cfg.Repository, "/") {
-		pre += "test -d " + remote.Quote(t.cfg.Repository) + "\n"
+		pre += safeDir(path.Clean(t.cfg.Repository), false, false) + "test -d " + remote.Quote(t.cfg.Repository) + "\n"
 		mounts = append(mounts, t.cfg.Repository+":"+t.cfg.Repository+":ro")
 	}
 	return pre + "if command -v restic >/dev/null 2>&1; then r() { restic --no-lock --no-cache \"$@\"; }; else r() { docker run --rm" + t.envFlags() + mountFlags(mounts) + " " + remote.Quote(ResticImage) + " --no-lock --no-cache \"$@\"; }; fi\n"

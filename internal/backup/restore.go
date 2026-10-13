@@ -139,18 +139,38 @@ func Restore(ctx context.Context, o RestoreOptions) (res *RestoreResult, err err
 	}
 
 	base := release.BackupDir(o.App, o.Destination)
-	name := "restore-" + now().UTC().Format(tsLayout)
-	dir := path.Join(base, name)
-	if err := o.Host.Run(ctx, remote.Cmd{Script: "set -eu; umask 077; mkdir -p " + remote.Quote(base) +
-		" && chmod 0700 " + remote.Quote(base) + " && mkdir -m 0700 " + remote.Quote(dir)}); err != nil {
-		return nil, fmt.Errorf("create staging dir: %w", err)
+	name, token, err := newStagingName("restore-" + now().UTC().Format(tsLayout))
+	if err != nil {
+		return nil, err
 	}
+	dir := path.Join(base, name)
 	keep := false
+	var state *restoreState
+	isolated := false
 	defer func() {
 		if !keep {
-			cleanup(ctx, o.Host, base, name)
+			cctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), cleanupTimeout)
+			defer cancel()
+			if cerr := removePrivateStaging(cctx, o.Host, dir, token); cerr != nil {
+				err = errors.Join(err, fmt.Errorf("remove private restore staging %s: %w", dir, cerr))
+				// This defer runs after the normal isolation guard. A cleanup
+				// failure after resume is still a failed operation: fail closed,
+				// but do not pretend a partly removed Backup is recoverable.
+				if isolated {
+					rctx, rcancel := context.WithTimeout(context.WithoutCancel(ctx), cleanupTimeout)
+					defer rcancel()
+					if stopErr := state.stopBounded(rctx, o.Host); stopErr != nil {
+						err = fmt.Errorf("%w; isolation cleanup failed: %v; verify and manually stop this App's Services immediately; staged files may be incomplete", err, stopErr)
+					} else {
+						err = fmt.Errorf("%w (Services left stopped; no data rollback; staged files may be incomplete)", err)
+					}
+				}
+			}
 		}
 	}()
+	if err := createPrivateStaging(ctx, o.Host, base, dir, token); err != nil {
+		return nil, fmt.Errorf("create staging dir: %w", err)
+	}
 
 	logf("fetching Backup %s", o.ID)
 	data, err := t.fetch(ctx, o.Host, base, dir, o.ID)
@@ -198,6 +218,9 @@ func Restore(ctx context.Context, o RestoreOptions) (res *RestoreResult, err err
 			if !nameRe.MatchString(ms.Dump) {
 				return nil, fmt.Errorf("manifest: invalid file name %q", ms.Dump)
 			}
+			if err := o.Host.Run(ctx, remote.Cmd{Script: safeFile(path.Join(data, ms.Dump), false)}); err != nil {
+				return nil, fmt.Errorf("unsafe Backup dump for Service %s: %w", svc, err)
+			}
 			if len(o.Services[svc].RestoreDump) > 0 {
 				dumps = append(dumps, svc)
 			} else {
@@ -217,6 +240,27 @@ func Restore(ctx context.Context, o RestoreOptions) (res *RestoreResult, err err
 				return nil, fmt.Errorf("%w (deploy the App before restoring)", err)
 			}
 			vols = append(vols, vol{svc, key, file, dn})
+		}
+	}
+
+	for _, name := range m.GeneratedSecrets {
+		if !generatedNameRe.MatchString(name) {
+			return nil, fmt.Errorf("manifest: invalid generated secret name %q", name)
+		}
+		if err := o.Host.Run(ctx, remote.Cmd{Script: safeFile(path.Join(data, generatedPrefix, name), true)}); err != nil {
+			return nil, fmt.Errorf("unsafe Backup generated secret %s: %w", name, err)
+		}
+	}
+	if len(m.GeneratedSecrets) > 0 {
+		// Preflight existing destinations without creating or changing App files.
+		d := generatedDir(o.App, o.Destination)
+		pre := safeDir(d, false, false) + "if [ -d " + remote.Quote(d) + " ]; then yoho_private " + remote.Quote(d) + "; fi\n"
+		for _, name := range m.GeneratedSecrets {
+			f := path.Join(d, name)
+			pre += "if [ -e " + remote.Quote(f) + " ] || [ -L " + remote.Quote(f) + " ]; then yoho_secret " + remote.Quote(f) + "; fi\n"
+		}
+		if err := o.Host.Run(ctx, remote.Cmd{Script: pre}); err != nil {
+			return nil, fmt.Errorf("unsafe generated secret destinations: %w", err)
 		}
 	}
 
@@ -269,7 +313,7 @@ func Restore(ctx context.Context, o RestoreOptions) (res *RestoreResult, err err
 			afterDumps = append(afterDumps, svc)
 		}
 	}
-	state, err := snapshotRestoreState(ctx, o.Host, project, o.App, o.Destination, rt, services, temporary, requireHealth)
+	state, err = snapshotRestoreState(ctx, o.Host, project, o.App, o.Destination, rt, services, temporary, requireHealth)
 	if err != nil {
 		return nil, err
 	}
@@ -306,6 +350,7 @@ func Restore(ctx context.Context, o RestoreOptions) (res *RestoreResult, err err
 		}
 	}()
 	logf("isolating App Services during restore (availability interrupted)")
+	isolated = true
 	if err := state.stop(ctx, o.Host); err != nil {
 		return nil, fmt.Errorf("stop Services: %w", err)
 	}
@@ -403,13 +448,13 @@ const (
 	// entry sets the scratch directory's owner and mode, which are copied to
 	// the volume root.
 	restoreVolumeSh = `set -eu
-n=.yoho-restore-$$-$(date +%s)
-t=/data/$n
-l=/tmp/yoho-list-$$
-trap 'rm -f "$l"; rm -rf "$t"' EXIT
+t=$(mktemp -d /data/.yoho-restore-XXXXXXXXXXXX)
+n=${t##*/}
+l=
+trap 'if [ -n "$l" ]; then rm -f "$l"; fi; rm -rf "$t"' EXIT
+l=$(mktemp /tmp/yoho-list-XXXXXXXXXXXX)
 tar -tzf "/in/$1" >"$l"
 if grep -qE "^(\./)?$n(/|$)" "$l"; then echo "archive contains the scratch name $n" >&2; exit 1; fi
-rm -rf "$t"; mkdir "$t"
 tar -C "$t" -xzf "/in/$1"
 own=$(stat -c %u:%g "$t"); mode=$(stat -c %a "$t")
 find /data -mindepth 1 -maxdepth 1 ! -name "$n" -exec rm -rf {} +
@@ -425,7 +470,7 @@ chown "$own" /data; chmod "$mode" /data`
 // volumeScript runs sh script (with file as $1) in the helper image with the
 // volume at /data and the staged Backup at /in.
 func volumeScript(volume, data, sh, file string) string {
-	return "set -eu; docker run --rm --network none -v " + remote.Quote(volume+":/data") + " -v " + remote.Quote(data+":/in:ro") +
+	return safeDir(data, false, false) + "yoho_file " + remote.Quote(path.Join(data, file)) + "\ndocker run --rm --network none --read-only --cap-drop ALL --cap-add CHOWN --cap-add FOWNER --cap-add DAC_OVERRIDE --cap-add FSETID --cap-add MKNOD --security-opt no-new-privileges --tmpfs /tmp:rw,noexec,nosuid,nodev -v " + remote.Quote(volume+":/data") + " -v " + remote.Quote(data+":/in:ro") +
 		" " + remote.Quote(HelperImage) + " sh -c " + remote.Quote(sh) + " sh " + remote.Quote(file)
 }
 

@@ -155,13 +155,26 @@ func Run(ctx context.Context, o RunOptions) (res *Result, err error) {
 	}
 
 	ts := start.UTC().Format(tsLayout)
-	base := release.BackupDir(o.App, o.Destination)
-	staging := path.Join(base, ts)
-	if err := run(ctx, o.Host, remote.Cmd{Script: "set -eu; umask 077; mkdir -p " + remote.Quote(base) +
-		" && chmod 0700 " + remote.Quote(base) + " && mkdir -m 0700 " + remote.Quote(staging)}); err != nil {
+	spool := release.BackupDir(o.App, o.Destination)
+	name, token, err := newStagingName("run")
+	if err != nil {
+		return nil, err
+	}
+	base := path.Join(spool, name)
+	defer func() {
+		cctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), cleanupTimeout)
+		defer cancel()
+		if cerr := removePrivateStaging(cctx, o.Host, base, token); cerr != nil {
+			err = errors.Join(err, &retryUnsafeError{fmt.Errorf("remove private Backup staging %s: %w", base, cerr)})
+		}
+	}()
+	if err := createPrivateStaging(ctx, o.Host, spool, base, token); err != nil {
 		return nil, fmt.Errorf("create staging dir: %w", err)
 	}
-	defer cleanup(ctx, o.Host, base, ts)
+	staging := path.Join(base, ts)
+	if err := run(ctx, o.Host, remote.Cmd{Script: safeDir(base, true, false) + "mkdir -m 0700 " + remote.Quote(staging)}); err != nil {
+		return nil, fmt.Errorf("create Backup data dir: %w", err)
+	}
 
 	m := Manifest{
 		App: o.App, Destination: o.Destination, Project: o.project(),
@@ -196,7 +209,7 @@ func Run(ctx context.Context, o RunOptions) (res *Result, err error) {
 	}
 
 	o.logf("storing in %s target", t.method())
-	res, err = t.store(ctx, o.Host, base, ts)
+	res, err = t.store(ctx, o.Host, spool, base, ts)
 	if err != nil {
 		// Storage may have committed before its reply was lost. Retrying can
 		// duplicate a Backup or retention side effects; preserve a known ID.
@@ -513,6 +526,9 @@ func volumeName(ctx context.Context, h remote.Host, project, vol, runtime string
 
 // currentVersion reads the current Release version; empty when unknown.
 func currentVersion(ctx context.Context, h remote.Host, app, dest string) string {
+	if err := h.Run(ctx, remote.Cmd{Script: safeCurrentFile(release.AppDir(app, dest), "release.json")}); err != nil {
+		return ""
+	}
 	b, err := h.ReadFile(ctx, path.Join(release.AppDir(app, dest), "current", "release.json"), false)
 	if err != nil {
 		return ""
@@ -522,17 +538,6 @@ func currentVersion(ctx context.Context, h remote.Host, app, dest string) string
 		return ""
 	}
 	return r.Version
-}
-
-// cleanup removes a staging dir under base. Files written by helper
-// containers are root-owned, so fall back to removing them in a container.
-func cleanup(ctx context.Context, h remote.Host, base, name string) {
-	cctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), cleanupTimeout)
-	defer cancel()
-	dir := path.Join(base, name)
-	script := "rm -rf " + remote.Quote(dir) + " 2>/dev/null || docker run --rm --network none -v " +
-		remote.Quote(base+":/b") + " " + remote.Quote(HelperImage) + " rm -rf " + remote.Quote("/b/"+name)
-	_ = run(cctx, h, remote.Cmd{Script: script})
 }
 
 func run(ctx context.Context, h remote.Host, c remote.Cmd) error {

@@ -119,7 +119,7 @@ type checkLocalHost struct {
 	cmds []remote.Cmd
 }
 
-var checkMountRe = regexp.MustCompile(`-v '([^']+):/(s|in)(?::ro)?'`)
+var checkMountRe = regexp.MustCompile(`-v '([^']+):/(archive|out|s|in)(?::ro)?'`)
 
 func (h *checkLocalHost) Run(ctx context.Context, c remote.Cmd) error {
 	_, err := h.Output(ctx, c)
@@ -128,7 +128,11 @@ func (h *checkLocalHost) Run(ctx context.Context, c remote.Cmd) error {
 func (h *checkLocalHost) Output(ctx context.Context, c remote.Cmd) (string, error) {
 	h.cmds = append(h.cmds, c)
 	if strings.Contains(c.Script, "docker run") {
-		m := checkMountRe.FindStringSubmatch(c.Script)
+		mounts := checkMountRe.FindAllStringSubmatch(c.Script, -1)
+		var m []string
+		if len(mounts) > 0 {
+			m = mounts[0]
+		}
 		if m == nil {
 			return "", fmt.Errorf("unexpected helper: %s", c.Script)
 		}
@@ -143,8 +147,11 @@ func (h *checkLocalHost) Output(ctx context.Context, c remote.Cmd) (string, erro
 				tail = strings.TrimSuffix(tail, "'")
 			}
 			inner := strings.ReplaceAll(tail, "'\\''", "'")
-			inner = strings.ReplaceAll(inner, "/"+m[2], m[1])
-			c.Script = "set -eu\nuid=$(id -u); gid=$(id -g)\nsh -c " + remote.Quote(inner) + args
+			for _, mount := range mounts {
+				inner = strings.ReplaceAll(inner, "/"+mount[2], mount[1])
+			}
+			pre := c.Script[:strings.Index(c.Script, "docker run")]
+			c.Script = pre + "\nuid=$(id -u); gid=$(id -g)\nsh -c " + remote.Quote(inner) + args
 		} else if i := strings.Index(c.Script, " tar -tzf "); i >= 0 {
 			c.Script = "set -eu\ntar -tzf " + strings.ReplaceAll(c.Script[i+len(" tar -tzf "):], "/s", m[1])
 		} else {
@@ -294,12 +301,17 @@ func TestCheckEncryptedArchivesUsePrivateReadOnlyValidation(t *testing.T) {
 			h := &fakeHost{files: map[string][]byte{}}
 			h.respond = func(ctx context.Context, sc string) (string, error) {
 				if strings.Contains(sc, " x -bd ") {
-					m := checkMountRe.FindStringSubmatch(sc)
+					var m []string
+					for _, mount := range checkMountRe.FindAllStringSubmatch(sc, -1) {
+						if mount[2] == "out" {
+							m = mount
+						}
+					}
 					if m == nil {
 						t.Fatal(sc)
 					}
 					manifest, _ := json.Marshal(validCheckManifest())
-					h.files[filepath.Join(m[1], "data", "manifest.json")] = manifest
+					h.files[filepath.Join(m[1], "manifest.json")] = manifest
 				}
 				if corrupt && strings.Contains(sc, " t -bd") {
 					return "", errors.New("CRC error " + secretPW)
@@ -317,7 +329,7 @@ func TestCheckEncryptedArchivesUsePrivateReadOnlyValidation(t *testing.T) {
 			if err != nil && strings.Contains(err.Error(), secretPW) {
 				t.Fatal("secret in error")
 			}
-			if sc := h.scripts(); strings.Contains(sc, secretPW) || !strings.Contains(sc, `--user "$uid:$gid"`) || !strings.Contains(sc, " t -bd") || !strings.Contains(sc, ":/s:ro") {
+			if sc := h.scripts(); strings.Contains(sc, secretPW) || !strings.Contains(sc, `--user "$(id -u):$(id -g)"`) || !strings.Contains(sc, " t -bd") || !strings.Contains(sc, ":/s:ro") {
 				t.Fatal(sc)
 			}
 			if h.index("rm -rf") < 0 {
@@ -388,7 +400,7 @@ func (h *stagingFailureHost) Run(ctx context.Context, c remote.Cmd) error {
 			return h.Local.Run(ctx, c) // mkdir EEXIST must not write our marker
 		}
 		if h.kind == "marker-failure" {
-			c.Script = strings.Split(c.Script, "\nprintf '%s' ")[0]
+			c.Script = strings.Split(c.Script, "\n(set -C; printf '%s' ")[0]
 		}
 		if err := h.Local.Run(ctx, c); err != nil {
 			return err
@@ -454,6 +466,9 @@ func TestRemoveCheckStagingRejectsForeignOrLinkedMarker(t *testing.T) {
 	for _, kind := range []string{"wrong-token", "trailing-newline", "symlink-marker", "symlink-dir"} {
 		t.Run(kind, func(t *testing.T) {
 			base := t.TempDir()
+			if err := os.Chmod(base, 0700); err != nil {
+				t.Fatal(err)
+			}
 			dir := filepath.Join(base, "check-private")
 			h := &remote.Local{}
 			token := "1234567890abcdef1234567890abcdef"

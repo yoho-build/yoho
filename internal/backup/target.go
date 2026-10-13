@@ -33,9 +33,29 @@ type target struct {
 }
 
 func newTarget(app, dest, project string, cfg config.BackupTarget, password string, targetEnv map[string]string) (*target, error) {
+	if !nameRe.MatchString(app) || !nameRe.MatchString(dest) || !nameRe.MatchString(project) {
+		return nil, errors.New("backup target: invalid App, Destination or project name")
+	}
+	if (cfg.Type == "" || cfg.Type == "restic") && strings.HasPrefix(cfg.Repository, "local:") {
+		cfg.Repository = strings.TrimPrefix(cfg.Repository, "local:")
+	}
+	if strings.HasPrefix(cfg.Repository, "/") {
+		if strings.Contains(cfg.Repository, ":") {
+			return nil, errors.New("backup target: local path cannot contain a colon")
+		}
+		for _, part := range strings.Split(cfg.Repository, "/") {
+			if part == ".." {
+				return nil, errors.New("backup target: local path cannot contain parent traversal")
+			}
+		}
+		cfg.Repository = path.Clean(cfg.Repository)
+	}
 	t := &target{app: app, dest: dest, project: project, cfg: cfg, typ: cfg.Type, format: cfg.Format, env: map[string]string{}}
 	if t.typ == "" {
 		t.typ = "restic"
+	}
+	if !strings.HasPrefix(cfg.Repository, "/") && !strings.Contains(cfg.Repository, ":") && cfg.Repository != "" {
+		return nil, errors.New("backup target: local repository must be an absolute path")
 	}
 	if cfg.Repository == "" {
 		return nil, errors.New("backup target: repository is required")
@@ -126,14 +146,14 @@ func mountFlags(mounts []string) string {
 func (t *target) resticPrelude(base string, extra ...string) string {
 	cache := path.Join(base, ".restic-cache")
 	mounts := []string{cache + ":/cache"}
-	pre := "mkdir -p " + remote.Quote(cache)
+	pre := safeDir(cache, true, true)
 	if strings.HasPrefix(t.cfg.Repository, "/") {
 		mounts = append(mounts, t.cfg.Repository+":"+t.cfg.Repository)
-		pre += " " + remote.Quote(t.cfg.Repository)
+		pre += safeDir(path.Clean(t.cfg.Repository), false, true)
 	}
 	mounts = append(mounts, extra...)
-	return "set -eu\n" + pre + "\n" +
-		"if command -v restic >/dev/null 2>&1; then r() { restic \"$@\"; }; else r() { docker run --rm" +
+	return pre + "\n" +
+		"if command -v restic >/dev/null 2>&1; then r() { restic \"$@\"; }; else r() { docker run --rm --user \"$(id -u):$(id -g)\"" +
 		t.envFlags() + " -e RESTIC_CACHE_DIR=/cache" + mountFlags(mounts) + " " + remote.Quote(ResticImage) +
 		" \"$@\"; }; fi\n"
 }
@@ -152,7 +172,7 @@ func (t *target) rclonePrelude(mounts ...string) string {
 // hide it from other users. 7-Zip offers no non-interactive stdin input.
 func (t *target) sevenZip(mounts []string, inner string) string {
 	return "set -eu\ndocker run --rm --network none" + t.envFlags() + mountFlags(mounts) + " --entrypoint sh " +
-		remote.Quote(SevenZipImage) + " -c " + remote.Quote("set -eu; z=$(command -v 7zz || command -v 7z || command -v 7za); "+inner)
+		remote.Quote(SevenZipImage) + " -c " + remote.Quote("set -eu; umask 077; z=$(command -v 7zz || command -v 7z || command -v 7za); "+inner)
 }
 
 func (t *target) passFlag() string {
@@ -177,10 +197,10 @@ func (t *target) remoteFile(name string) string {
 }
 
 // store saves base/<ts> to the Backup Target.
-func (t *target) store(ctx context.Context, h remote.Host, base, ts string) (*Result, error) {
+func (t *target) store(ctx context.Context, h remote.Host, cacheBase, base, ts string) (*Result, error) {
 	staging := path.Join(base, ts)
 	if t.typ == "restic" {
-		return t.storeRestic(ctx, h, base, staging)
+		return t.storeRestic(ctx, h, cacheBase, staging)
 	}
 	return t.storeArchive(ctx, h, base, ts)
 }
@@ -227,17 +247,14 @@ func (t *target) storeArchive(ctx context.Context, h remote.Host, base, ts strin
 	staging := path.Join(base, ts)
 	name := t.project + "-" + ts + "." + t.archiveExt()
 	local := path.Join(base, name)
-	defer func() {
-		cctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), cleanupTimeout)
-		defer cancel()
-		_ = h.Run(cctx, remote.Cmd{Script: "rm -f " + remote.Quote(local)})
-	}()
+	// Archives are created by the deploy UID in this call's exclusive staging,
+	// never at a shared spool filename. Cleanup is owned by the staging marker.
 
 	var create string
 	switch t.format {
 	case "tar.gz":
 		create = "set -eu\ndocker run --rm --network none" + mountFlags([]string{staging + ":/in:ro", base + ":/out"}) + " " +
-			remote.Quote(HelperImage) + " tar -C /in -czf " + remote.Quote("/out/"+name) + " ."
+			remote.Quote(HelperImage) + " sh -c " + remote.Quote("umask 077; tar -C /in -czf "+remote.Quote("/out/"+name)+" .")
 	case "zip":
 		// AES-256, never ZipCrypto.
 		create = t.sevenZip([]string{staging + ":/in:ro", base + ":/out"},
@@ -246,6 +263,8 @@ func (t *target) storeArchive(ctx context.Context, h remote.Host, base, ts strin
 		create = t.sevenZip([]string{staging + ":/in:ro", base + ":/out"},
 			`cd /in && "$z" a -bd -t7z -mhe=on`+t.passFlag()+" "+remote.Quote("/out/"+name)+" .")
 	}
+	create = safeDir(base, true, false) + "test ! -e " + remote.Quote(local) + " && test ! -L " + remote.Quote(local) + "\n" +
+		strings.Replace(create, "docker run --rm", `docker run --rm --user "$(id -u):$(id -g)"`, 1)
 	if err := h.Run(ctx, remote.Cmd{Script: create, Env: t.env}); err != nil {
 		return nil, fmt.Errorf("create %s archive: %w", t.format, err)
 	}
@@ -255,17 +274,15 @@ func (t *target) storeArchive(ctx context.Context, h remote.Host, base, ts strin
 	}
 	res := &Result{ID: name, Size: parseInt(size), Method: t.method()}
 
-	var copyScript string
+	var copyErr error
 	if t.isRclone() {
-		copyScript = t.rclonePrelude(base+":"+base+":ro") + "rc copyto " + remote.Quote(local) + " " + remote.Quote(t.remoteFile(name)) + "\n"
+		copyScript := t.rclonePrelude(base+":"+base+":ro") + "rc copyto " + remote.Quote(local) + " " + remote.Quote(t.remoteFile(name)) + "\n"
+		copyErr = h.Run(ctx, remote.Cmd{Script: copyScript, Env: t.env})
 	} else {
-		repo := t.cfg.Repository
-		copyScript = "set -eu\numask 077\nmkdir -p " + remote.Quote(repo) + "\ncp " + remote.Quote(local) + " " +
-			remote.Quote(path.Join(repo, name+".partial")) + "\nmv -f " + remote.Quote(path.Join(repo, name+".partial")) +
-			" " + remote.Quote(path.Join(repo, name)) + "\n"
+		copyErr = publishArchive(ctx, h, local, path.Clean(t.cfg.Repository), name)
 	}
-	if err := h.Run(ctx, remote.Cmd{Script: copyScript, Env: t.env}); err != nil {
-		return nil, fmt.Errorf("copy archive to %s: %w", t.cfg.Repository, err)
+	if copyErr != nil {
+		return nil, fmt.Errorf("copy archive to %s: %w", t.cfg.Repository, copyErr)
 	}
 	if t.cfg.KeepLast > 0 {
 		if err := t.pruneArchives(ctx, h); err != nil {
@@ -293,9 +310,12 @@ func (t *target) pruneArchives(ctx context.Context, h remote.Host) error {
 			b.WriteString("rc deletefile " + remote.Quote(t.remoteFile(e.ID)) + " </dev/null\n")
 		}
 	} else {
-		b.WriteString("set -eu\n")
+		b.WriteString(safeDir(path.Clean(t.cfg.Repository), false, false))
 		for _, e := range old {
-			b.WriteString("rm -f " + remote.Quote(path.Join(t.cfg.Repository, e.ID)) + "\n")
+			file := path.Join(t.cfg.Repository, e.ID)
+			b.WriteString("yoho_file " + remote.Quote(file) + "\n" +
+				"test -n \"$(find " + remote.Quote(file) + " -prune -user \"$yoho_uid\" -print)\"\n" +
+				"rm -f " + remote.Quote(file) + "\n")
 		}
 	}
 	return h.Run(ctx, remote.Cmd{Script: b.String(), Env: t.env})
@@ -340,9 +360,10 @@ func (t *target) list(ctx context.Context, h remote.Host, base string) ([]Entry,
 			script = t.rclonePrelude() + "rc lsf --files-only --format ps --separator ' ' " + remote.Quote(t.cfg.Repository) + "\n"
 		} else {
 			// POSIX only: find -printf is GNU-specific and absent on BusyBox.
-			dir := remote.Quote(strings.TrimRight(t.cfg.Repository, "/"))
-			script = "set -eu\n[ -d " + dir + " ] || exit 0\nfor f in " + dir + "/* " + dir + "/.[!.]*; do\n" +
-				"  [ -f \"$f\" ] || continue\n  printf '%s %s\\n' \"${f##*/}\" \"$(wc -c < \"$f\" | tr -d ' ')\"\ndone\n"
+			dir := remote.Quote(path.Clean(t.cfg.Repository))
+			script = safeDir(path.Clean(t.cfg.Repository), false, false) + "[ -d " + dir + " ] || exit 0\nfor f in " + dir + "/*; do\n" +
+				"  case \"${f##*/}\" in " + remote.Quote(t.project) + "-*." + remote.Quote(t.archiveExt()) + ") ;; *) continue;; esac\n" +
+				"  yoho_file \"$f\"\n  printf '%s %s\\n' \"${f##*/}\" \"$(wc -c < \"$f\" | tr -d ' ')\"\ndone\n"
 		}
 		out, err := h.Output(ctx, remote.Cmd{Script: script, Env: t.env})
 		if err != nil {
@@ -381,16 +402,22 @@ func (t *target) fetch(ctx context.Context, h remote.Host, base, dir, id string)
 		if out == "" {
 			return "", fmt.Errorf("snapshot %s has no manifest.json; not a Yoho Backup", id)
 		}
-		return path.Dir(out), nil
+		found := path.Dir(out)
+		if !strings.HasPrefix(found+"/", data+"/") {
+			return "", errors.New("restic restore: manifest outside private staging")
+		}
+		if err := h.Run(ctx, remote.Cmd{Script: safeFile(path.Join(found, "manifest.json"), false)}); err != nil {
+			return "", fmt.Errorf("restic restore: unsafe manifest: %w", err)
+		}
+		return found, nil
 	}
 
 	return t.fetchArchive(ctx, h, dir, id, false)
 }
 
 // fetchArchive extracts only inside its new private staging directory. Check
-// runs the extractor as the deploy user, never reading a manifest symlink on
-// the Server. Restore keeps its existing root extraction/ownership semantics.
-func (t *target) fetchArchive(ctx context.Context, h remote.Host, dir, id string, forCheck bool) (string, error) {
+// and Restore run the extractor as the deploy user with only data writable.
+func (t *target) fetchArchive(ctx context.Context, h remote.Host, dir, id string, _ bool) (string, error) {
 	data := path.Join(dir, "data")
 
 	if !t.archiveRe().MatchString(id) {
@@ -401,67 +428,41 @@ func (t *target) fetchArchive(ctx context.Context, h remote.Host, dir, id string
 	if t.isRclone() {
 		get = t.rclonePrelude(dir+":"+dir) + "rc copyto " + remote.Quote(t.remoteFile(id)) + " " + remote.Quote(local) + "\n"
 	} else {
-		get = "set -eu\ncp " + remote.Quote(path.Join(t.cfg.Repository, id)) + " " + remote.Quote(local) + "\n"
+		get = safeFile(path.Join(t.cfg.Repository, id), false) + "cp " + remote.Quote(path.Join(t.cfg.Repository, id)) + " " + remote.Quote(local) + "\n"
 	}
+	get = safeDir(dir, true, false) + "test ! -e " + remote.Quote(local) + " && test ! -L " + remote.Quote(local) + "\n" + get
 	if err := h.Run(ctx, remote.Cmd{Script: get, Env: t.env}); err != nil {
 		return "", fmt.Errorf("fetch %s: %w", id, err)
 	}
-	// Extractors run as root. p7zip creates -o directories with mkdir(..., 0700)
-	// and restores archived modes (0600 files, 0700 dirs) owned by root, so the
-	// deploy user cannot traverse them and [ -e manifest.json ] looks like a
-	// missing file. Hand the tree back, then fail if the manifest is still
-	// unreadable instead of reporting a later bare "file does not exist".
-	var inner string
-	var image string
-	var envFlags string
+	// Untrusted outer archives get one writable mount: a new data directory.
+	// The archive and ownership marker cannot be overwritten by an extractor.
+	// Running unprivileged with a read-only rootfs also confines absolute/link
+	// targets outside /out; no App volume or host parent is mounted here.
+	pre := safeDir(dir, true, false) + "mkdir -m 0700 " + remote.Quote(data) + "\n"
+	var inner, image, envFlags string
 	switch t.format {
 	case "tar.gz":
 		image = HelperImage
-		inner = `set -eu; mkdir -p /s/data && tar -C /s/data -xzf "/s/$3" && ` + ownExtractedTree
+		// -o discards outer ownership even when the deploy UID is root and
+		// the Backup was created by a different UID. Payload volume metadata
+		// remains packed inside its own tar and is restored separately.
+		inner = `set -eu; tar -C /out -xozf /archive`
 	default:
 		image = SevenZipImage
 		envFlags = t.envFlags()
-		inner = `set -eu; z=$(command -v 7zz || command -v 7z || command -v 7za); "$z" x -bd -y` +
-			t.passFlag() + ` -o/s/data ` + remote.Quote("/s/"+id) + ` && ` + ownExtractedTree
+		inner = `set -eu; z=$(command -v 7zz || command -v 7z || command -v 7za); "$z" x -bd -y` + t.passFlag() + ` -o/out /archive`
 	}
-	if forCheck {
-		inner = strings.ReplaceAll(inner, ownExtractedTree, `chmod -R u+rwX,go-rwx /s/data`)
-	}
-	extract := dockerSh(image, envFlags, []string{dir + ":/s"}, inner)
-	if forCheck {
-		extract = strings.Replace(extract, "docker run --rm", `docker run --rm --user "$uid:$gid"`, 1)
-	}
-
-	if t.format == "tar.gz" {
-		extract += " " + remote.Quote(id)
-	}
+	// The outer format contains only regular payload files and directories.
+	// Internal App symlinks/metadata remain inside each untouched volume tar.
+	inner += `; links=$(find /out -type l -print); test -z "$links"; links=$(find /out -type f -links +1 -print); test -z "$links"; special=$(find /out ! -type f ! -type d -print); test -z "$special"`
+	extract := pre + `docker run --rm --network none --read-only --cap-drop ALL --security-opt no-new-privileges --user "$(id -u):$(id -g)" --tmpfs /tmp:rw,noexec,nosuid,nodev` + envFlags +
+		mountFlags([]string{local + ":/archive:ro", data + ":/out"}) + " --entrypoint sh " + remote.Quote(image) + " -c " + remote.Quote(inner)
 	if err := h.Run(ctx, remote.Cmd{Script: extract, Env: t.env}); err != nil {
 		return "", fmt.Errorf("extract %s: %w", id, err)
 	}
-	if forCheck {
-		manifest := path.Join(data, "manifest.json")
-		script := "set -eu\ntest -d " + remote.Quote(data) + " && test ! -L " + remote.Quote(data) + "\ntest -f " + remote.Quote(manifest) + " && test ! -L " + remote.Quote(manifest) + " && test -r " + remote.Quote(manifest)
-		if err := h.Run(ctx, remote.Cmd{Script: script}); err != nil {
-			return "", fmt.Errorf("archive check: manifest.json missing, linked or unreadable: %w", err)
-		}
-		return data, nil
-	}
 	manifest := path.Join(data, "manifest.json")
-	if _, err := h.ReadFile(ctx, manifest, false); err != nil {
-		return "", fmt.Errorf("extract %s: manifest.json missing or not readable in %s: %w", id, data, err)
+	if err := h.Run(ctx, remote.Cmd{Script: safeFile(manifest, false)}); err != nil {
+		return "", fmt.Errorf("archive: manifest.json missing, linked or unsafe: %w", err)
 	}
 	return data, nil
-}
-
-// ownExtractedTree runs inside the extractor container. $1 and $2 are the
-// deploy user's uid and gid, passed as sh -c arguments.
-const ownExtractedTree = `chown -R "$1:$2" /s/data && chmod -R u+rwX,go-rwx /s/data`
-
-// dockerSh runs inner as root in image with the host dir mounted, then
-// passes the deploy user's uid and gid as $1 and $2. For tar.gz the archive
-// file name is appended by the caller and arrives as $3.
-func dockerSh(image, envFlags string, mounts []string, inner string) string {
-	return "set -eu\nuid=$(id -u); gid=$(id -g)\n" +
-		"docker run --rm --network none" + envFlags + mountFlags(mounts) + " --entrypoint sh " +
-		remote.Quote(image) + " -c " + remote.Quote(inner) + ` sh "$uid" "$gid"`
 }

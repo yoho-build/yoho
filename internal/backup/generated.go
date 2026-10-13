@@ -79,11 +79,14 @@ func ListGenerated(ctx context.Context, h remote.Host, app, dest string) ([]stri
 		return nil, errors.New("backup: Host is required")
 	}
 	dir := generatedDir(app, dest)
-	script := "set -eu\n" +
+	script := safeDir(dir, false, false) +
 		"d=" + remote.Quote(dir) + "\n" +
 		"[ -d \"$d\" ] || exit 0\n" +
+		"yoho_private \"$d\"\n" +
 		"for f in \"$d\"/* \"$d\"/.[!.]* \"$d\"/..?*; do\n" +
-		"  [ -f \"$f\" ] || continue\n" +
+		"  [ -e \"$f\" ] || [ -L \"$f\" ] || continue\n" +
+		"  case \"${f##*/}\" in [0-9]*|*[!A-Za-z0-9_]*|\"\") continue;; esac\n" +
+		"  yoho_secret \"$f\"\n" +
 		"  printf '%s\\n' \"${f##*/}\"\n" +
 		"done\n"
 	out, err := h.Output(ctx, remote.Cmd{Script: script})
@@ -108,9 +111,15 @@ func ListGenerated(ctx context.Context, h remote.Host, app, dest string) ([]stri
 // (files 0600, directory 0700). Callers must not log the bytes.
 func stageGenerated(ctx context.Context, h remote.Host, app, dest, staging string, names []string) error {
 	src := generatedDir(app, dest)
+	if err := h.Run(ctx, remote.Cmd{Script: safeDir(src, true, false) + safeDir(path.Join(staging, generatedPrefix), true, true)}); err != nil {
+		return fmt.Errorf("generated secret paths: %w", err)
+	}
 	for _, name := range names {
 		if !generatedNameRe.MatchString(name) {
 			return fmt.Errorf("invalid generated secret name %q", name)
+		}
+		if err := h.Run(ctx, remote.Cmd{Script: safeFile(path.Join(src, name), true)}); err != nil {
+			return fmt.Errorf("unsafe generated secret %s: %w", name, err)
 		}
 		b, err := h.ReadFile(ctx, path.Join(src, name), false)
 		if err != nil {
@@ -134,7 +143,7 @@ func restoreGenerated(ctx context.Context, h remote.Host, app, dest, data string
 		return nil, nil, nil
 	}
 	dir := generatedDir(app, dest)
-	script := "set -eu; umask 077; mkdir -p " + remote.Quote(dir) + " && chmod 0700 " + remote.Quote(dir)
+	script := safeDir(dir, true, true)
 	if err := h.Run(ctx, remote.Cmd{Script: script}); err != nil {
 		return nil, nil, fmt.Errorf("create generated dir: %w", err)
 	}
@@ -142,11 +151,17 @@ func restoreGenerated(ctx context.Context, h remote.Host, app, dest, data string
 		if !generatedNameRe.MatchString(name) {
 			return nil, nil, fmt.Errorf("manifest: invalid generated secret name %q", name)
 		}
+		if err := h.Run(ctx, remote.Cmd{Script: safeFile(path.Join(data, generatedPrefix, name), true)}); err != nil {
+			return nil, nil, fmt.Errorf("unsafe Backup generated secret %s: %w", name, err)
+		}
 		b, err := h.ReadFile(ctx, path.Join(data, generatedPrefix, name), false)
 		if err != nil {
 			return nil, nil, fmt.Errorf("generated secret %s missing from Backup: %w", name, err)
 		}
 		dst := path.Join(dir, name)
+		if err := h.Run(ctx, remote.Cmd{Script: pathSafety + "yoho_private " + remote.Quote(dir) + "\nif [ -e " + remote.Quote(dst) + " ] || [ -L " + remote.Quote(dst) + " ]; then yoho_secret " + remote.Quote(dst) + "; fi\n"}); err != nil {
+			return nil, nil, fmt.Errorf("unsafe generated secret destination %s: %w", name, err)
+		}
 		existing, err := h.ReadFile(ctx, dst, false)
 		switch {
 		case err == nil:

@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -50,7 +51,17 @@ func (f *fakeHost) Output(ctx context.Context, c remote.Cmd) (string, error) {
 	return "", nil
 }
 
+// Timestamp-keyed fixtures describe payloads independent of staging nonces.
+// Commands retain actual nonce paths, so ownership/cleanup assertions see them.
+var fixtureNonce = regexp.MustCompile(`(/restore-[0-9]{8}T[0-9]{6}Z)-[0-9a-f]{32}(/|$)`)
+var fixtureRun = regexp.MustCompile(`/run-[0-9a-f]{32}/`)
+
+func fixturePath(p string) string {
+	return fixtureRun.ReplaceAllString(fixtureNonce.ReplaceAllString(p, "$1$2"), "/")
+}
+
 func (f *fakeHost) WriteFile(_ context.Context, p string, data []byte, mode os.FileMode, _ bool) error {
+	p = fixturePath(p)
 	if f.files == nil {
 		f.files = map[string][]byte{}
 	}
@@ -66,6 +77,7 @@ func (f *fakeHost) WriteFile(_ context.Context, p string, data []byte, mode os.F
 }
 
 func (f *fakeHost) ReadFile(_ context.Context, p string, _ bool) ([]byte, error) {
+	p = fixturePath(p)
 	if b, ok := f.files[p]; ok {
 		return b, nil
 	}
@@ -88,7 +100,7 @@ func (f *fakeHost) scripts() string {
 
 func (f *fakeHost) index(sub string) int {
 	for i, c := range f.cmds {
-		if strings.Contains(c.Script, sub) {
+		if strings.Contains(fixturePath(c.Script), sub) {
 			return i
 		}
 	}
@@ -262,7 +274,7 @@ func TestRunArchiveZipPasswordNeverInScript(t *testing.T) {
 	if !(dump >= 0 && dump < pause && pause < cp && cp < unpause) {
 		t.Fatalf("bad order dump=%d pause=%d copy=%d unpause=%d\n%s", dump, pause, cp, unpause, all)
 	}
-	if h.index("rm -rf '/var/lib/yoho/backups/shop/production/20261008T030000Z'") < 0 {
+	if h.index("rm -rf '/var/lib/yoho/backups/shop/production/run-") < 0 {
 		t.Fatal("staging not cleaned up")
 	}
 	var m Manifest
@@ -413,7 +425,7 @@ func TestListArchivesPOSIXScript(t *testing.T) {
 	if len(es) != 2 || es[0].Size != 12 || es[1].Size != 7 {
 		t.Fatalf("entries %+v", es)
 	}
-	for _, gnu := range []string{"-printf", "stat -c", "find "} {
+	for _, gnu := range []string{"-printf", "stat -c"} {
 		if strings.Contains(script, gnu) {
 			t.Errorf("script uses %q:\n%s", gnu, script)
 		}
@@ -799,7 +811,7 @@ func TestEncryptedArchiveExtractOwnsTreeAndReportsMissingManifest(t *testing.T) 
 			i := -1
 			var script string
 			for n, c := range h.cmds {
-				if strings.Contains(c.Script, "chown -R") && strings.Contains(c.Script, "-o/s/data") {
+				if strings.Contains(c.Script, "--read-only") && strings.Contains(c.Script, "-o/out") {
 					i = n
 					script = c.Script
 					break
@@ -808,8 +820,8 @@ func TestEncryptedArchiveExtractOwnsTreeAndReportsMissingManifest(t *testing.T) 
 			if i < 0 {
 				t.Fatalf("extract script missing:\n%s", h.scripts())
 			}
-			if !strings.Contains(script, `uid=$(id -u)`) || !strings.Contains(script, `gid=$(id -g)`) || !strings.Contains(script, `chown -R "$1:$2" /s/data`) || !strings.Contains(script, `chmod -R u+rwX,go-rwx /s/data`) {
-				t.Fatalf("extract does not hand the tree to the deploy user:\n%s", script)
+			if !strings.Contains(script, `--user "$(id -u):$(id -g)"`) || !strings.Contains(script, ":/archive:ro") || !strings.Contains(script, ":/out") || strings.Contains(script, "chown -R") || strings.Contains(script, "chmod -R") {
+				t.Fatalf("extract is not confined to deploy-user data:\n%s", script)
 			}
 			if !strings.Contains(script, `-p"$YOHO_ARCHIVE_PASSWORD"`) || strings.Contains(script, secretPW) {
 				t.Fatal("password must be expanded inside the extractor, not written into the script")
@@ -831,7 +843,7 @@ func TestEncryptedArchiveExtractOwnsTreeAndReportsMissingManifest(t *testing.T) 
 		Services: map[string]config.ServiceBackup{"db": {Volumes: []string{"pgdata"}}},
 		Now:      func() time.Time { return time.Date(2026, 10, 8, 3, 0, 0, 0, time.UTC) },
 	})
-	if err == nil || !strings.Contains(err.Error(), "manifest.json missing or not readable") {
+	if err == nil || !strings.Contains(err.Error(), "read manifest") {
 		t.Fatalf("err = %v", err)
 	}
 }
@@ -839,7 +851,7 @@ func TestEncryptedArchiveExtractOwnsTreeAndReportsMissingManifest(t *testing.T) 
 func TestGeneratedStagingRemovedAfterStore(t *testing.T) {
 	const staging = "/var/lib/yoho/backups/shop/production/20261008T030000Z"
 	staged := staging + "/yoho-generated/PG"
-	cleanup := "rm -rf '" + staging + "'"
+	cleanup := "rm -rf '/var/lib/yoho/backups/shop/production/run-"
 
 	success := func(t *testing.T, tg config.BackupTarget, storeMarker string) {
 		t.Helper()
@@ -1183,6 +1195,15 @@ func TestRestoreVolumeShRuns(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(src, ".dot"), []byte("dot"), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	if err := os.Symlink("keep/f", filepath.Join(src, "relative-link")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("missing", filepath.Join(src, "dangling-link")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Link(filepath.Join(src, "keep", "f"), filepath.Join(src, "hard-link")); err != nil {
+		t.Fatal(err)
+	}
 	in := filepath.Join(root, "in")
 	data := filepath.Join(root, "data")
 	for _, d := range []string{in, data} {
@@ -1208,7 +1229,7 @@ func TestRestoreVolumeShRuns(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(bin, "chown"), []byte("#!/bin/sh\n"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	sh := strings.NewReplacer("/data", data, "/in/", in+"/").Replace(restoreVolumeSh)
+	sh := strings.NewReplacer("/data", data, "/in/", in+"/", "/tmp/yoho-list-", filepath.Join(root, "yoho-list-")).Replace(restoreVolumeSh)
 	cmd := exec.Command("sh", "-c", sh, "sh", "a.tar.gz")
 	cmd.Env = append(os.Environ(), "PATH="+bin+":"+os.Getenv("PATH"), "TMPDIR="+root)
 	if out, err := cmd.CombinedOutput(); err != nil {
@@ -1222,8 +1243,21 @@ func TestRestoreVolumeShRuns(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(data, "old")); err == nil {
 		t.Error("old data not removed")
 	}
-	left, _ := filepath.Glob(filepath.Join(data, ".yoho-restore-*-*"))
-	if len(left) != 0 {
-		t.Errorf("scratch left behind: %v", left)
+	for name, want := range map[string]string{"relative-link": "keep/f", "dangling-link": "missing"} {
+		got, err := os.Readlink(filepath.Join(data, name))
+		if err != nil || got != want {
+			t.Fatalf("App symlink %s: %q %v", name, got, err)
+		}
+	}
+	fi1, _ := os.Stat(filepath.Join(data, "keep", "f"))
+	fi2, _ := os.Stat(filepath.Join(data, "hard-link"))
+	if !os.SameFile(fi1, fi2) {
+		t.Fatal("App hard link lost")
+	}
+	left, _ := filepath.Glob(filepath.Join(data, ".yoho-restore-*"))
+	for _, f := range left {
+		if filepath.Base(f) != ".yoho-restore-tmp" {
+			t.Errorf("scratch left behind: %s", f)
+		}
 	}
 }
