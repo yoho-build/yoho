@@ -376,9 +376,13 @@ func backupRestoreCmd(g *globals) *cobra.Command {
 	c := &cobra.Command{
 		Use:   "restore ID",
 		Short: "Restore a Backup, replacing the Services' volume data",
-		Long: `Restore stops the Services in the Backup, replaces their volume contents,
-starts them, loads dumps with x-yoho.backup.restore_dump and runs post_restore.
-Current volume data is lost. Use "latest" as ID for the newest Backup.`,
+		Long: `Restore interrupts this App's availability by stopping its deployed Services,
+replaces selected volume contents, loads restore_dump and runs post_restore and
+post-restore Hooks with consumers stopped. Only private restore targets start
+before success. Previously stopped Services stay stopped on success.
+Failure or interruption keeps Services stopped; data is not rolled back. Inspect
+and repair the data before manually resuming. Current volume data is lost.
+Use "latest" as ID for the newest Backup.`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) (err error) {
 			a, err := g.loadForJob(cmd, jobName)
@@ -446,6 +450,9 @@ Current volume data is lost. Use "latest" as ID for the newest Backup.`,
 				Services: j.services, Target: j.target, Password: j.password, TargetEnv: j.env,
 				Host: h.Host, Out: out, Lock: a.backupLock(h.Host, "restore"), ID: found.ID, Confirm: true,
 				Runtime: a.dest.Runtime,
+				AfterRestore: func(ctx context.Context) error {
+					return hook(ctx, "post-restore", hookEnv)
+				},
 			})
 			flush()
 			if err != nil {
@@ -467,9 +474,6 @@ Current volume data is lost. Use "latest" as ID for the newest Backup.`,
 				u.Warn("dumps not loaded (no x-yoho.backup.restore_dump); they are on the Server: %s", strings.Join(res.DumpFiles, " "))
 			}
 			warnIfGeneratedChanged(u, res.GeneratedChanged)
-			if err = hook(ctx, "post-restore", hookEnv); err != nil {
-				return err
-			}
 			u.Finished(nil, fmt.Sprintf("Restored %s (%s) from %s in %s", a.cfg.App, a.destName, found.ID, time.Since(start).Round(100*time.Millisecond)))
 			return nil
 		},
@@ -484,8 +488,12 @@ func restoreHint(err error) string {
 	switch {
 	case errors.As(err, &le):
 		return "wait for the running deploy or Backup to finish"
+	case strings.Contains(err.Error(), "isolation cleanup failed"):
+		return "verify and manually stop this App's Services immediately; repair or rerun the restore before resuming (data was not rolled back)"
 	case strings.Contains(err.Error(), "Services left stopped"):
-		return "fix the cause and rerun the restore; start the Services with `yoho deploy` to serve the old data instead"
+		return "fix the cause and rerun the restore, or inspect and repair the data before manually resuming from prior-state.json; deploy does not roll back volume data"
+	case strings.Contains(err.Error(), "restore isolation"):
+		return "check deployed ownership and isolate the restore target's published ports, Proxy/Tunnel access and shared networks before retrying; no routes were removed"
 	case strings.Contains(err.Error(), "deploy the App"):
 		return "deploy the App first so its volumes exist, then restore"
 	case strings.Contains(err.Error(), "restore dump"):
@@ -541,6 +549,8 @@ func writeRestoreSummary(w io.Writer, appName, dest, server string, e *backup.En
 		fmt.Fprintf(w, "  - generated secrets: %d\n", generated)
 	}
 	fmt.Fprintln(w, "Data written since the Backup is lost.")
+	fmt.Fprintln(w, "This App's deployed Services (including Web/workers) stop during restore. Prior running state resumes only after success.")
+	fmt.Fprintln(w, "Failure/interruption leaves the App stopped; no automatic data rollback. Inspect and repair data before manual recovery.")
 }
 
 // warnIfGeneratedChanged tells the operator that running Services still

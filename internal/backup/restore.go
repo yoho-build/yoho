@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"io"
 	"path"
-	"strconv"
 	"strings"
 	"time"
 
@@ -61,6 +60,10 @@ type RestoreOptions struct {
 	Now     func() time.Time
 	// Runtime is "compose" (default) or "swarm".
 	Runtime string
+	// AfterRestore runs after Service post_restore commands, while consumers
+	// remain stopped. Failure keeps the App isolated. Intended for the CLI's
+	// post-restore Hook; it must not start consumers or change exposure.
+	AfterRestore func(context.Context) error
 }
 
 // RestoreResult reports what was restored.
@@ -85,10 +88,11 @@ type RestoreResult struct {
 	GeneratedChanged []string
 }
 
-// Restore fetches a Backup, stops the Services, replaces their volume
-// contents, starts them, loads dumps through RestoreDump and runs
-// PostRestore. On failure after the stop,
-// Services are left stopped so a half-restored volume is not served.
+// Restore fetches and verifies a Backup, then stops this App's deployed
+// Services before changing data. Only private dump/post_restore targets run
+// temporarily; consumers resume their prior state after all restore work and
+// Hooks succeed. Failure or cancellation keeps the App stopped (best effort if
+// the Server is unreachable); volume changes are never automatically rolled back.
 func Restore(ctx context.Context, o RestoreOptions) (res *RestoreResult, err error) {
 	if !o.Confirm {
 		return nil, errors.New("restore replaces volume data; confirmation required")
@@ -184,7 +188,7 @@ func Restore(ctx context.Context, o RestoreOptions) (res *RestoreResult, err err
 	}
 	type vol struct{ svc, key, file, docker string }
 	var vols []vol
-	var withVolumes, dumps []string
+	var dumps, hookRoots []string
 	for _, svc := range services {
 		ms, ok := m.Services[svc]
 		if !ok {
@@ -200,8 +204,8 @@ func Restore(ctx context.Context, o RestoreOptions) (res *RestoreResult, err err
 				res.DumpFiles = append(res.DumpFiles, path.Join(data, ms.Dump))
 			}
 		}
-		if len(ms.Volumes) > 0 {
-			withVolumes = append(withVolumes, svc)
+		if len(o.Services[svc].PostRestore) > 0 {
+			hookRoots = append(hookRoots, svc)
 		}
 		for _, key := range sortedKeys(ms.Volumes) {
 			file := ms.Volumes[key]
@@ -228,45 +232,110 @@ func Restore(ctx context.Context, o RestoreOptions) (res *RestoreResult, err err
 		}
 	}
 
-	var replicas map[string]int
-	if len(withVolumes) > 0 {
-		logf("stopping %s", strings.Join(withVolumes, ", "))
-		replicas, err = stopServices(ctx, o.Host, project, rt, withVolumes)
-		if err != nil {
-			return nil, fmt.Errorf("stop Services: %w", err)
+	dumpTargets, requireHealth, err := restorePrerequisites(ctx, o.Host, o.App, o.Destination, rt, dumps)
+	if err != nil {
+		return nil, err
+	}
+	hookTargets, hookHealth, err := restorePrerequisites(ctx, o.Host, o.App, o.Destination, rt, hookRoots)
+	if err != nil {
+		return nil, err
+	}
+	for name := range hookHealth {
+		if requireHealth == nil {
+			requireHealth = map[string]bool{}
 		}
-		for _, v := range vols {
-			logf("restoring volume %s of %s", v.key, v.svc)
-			script := volumeScript(v.docker, data, restoreVolumeSh, v.file)
-			if err := o.Host.Run(ctx, remote.Cmd{Script: script}); err != nil {
-				keep = true
-				return nil, fmt.Errorf("restore volume %s of %s (Services left stopped, Backup kept at %s): %w", v.key, v.svc, data, err)
-			}
-			res.Volumes = append(res.Volumes, v.svc+"/"+v.key)
+		requireHealth[name] = true
+	}
+	// Starting a hook-only target runs its normal process too. Never let a
+	// worker start while another Service's dump is still loading, even when
+	// that worker is declared as a dump prerequisite.
+	dumpSet, dumpRootSet := map[string]bool{}, map[string]bool{}
+	for _, svc := range dumps {
+		dumpRootSet[svc] = true
+	}
+	for _, svc := range dumpTargets {
+		dumpSet[svc] = true
+	}
+	for _, svc := range hookRoots {
+		if dumpSet[svc] && !dumpRootSet[svc] {
+			return nil, fmt.Errorf("restore isolation: hook-only target %s is a dump prerequisite; its normal process cannot safely run while dumps load", svc)
 		}
+	}
+	temporary := append([]string(nil), dumpTargets...)
+	var afterDumps []string
+	for _, svc := range hookTargets {
+		if !dumpSet[svc] {
+			temporary = append(temporary, svc)
+			afterDumps = append(afterDumps, svc)
+		}
+	}
+	state, err := snapshotRestoreState(ctx, o.Host, project, o.App, o.Destination, rt, services, temporary, requireHealth)
+	if err != nil {
+		return nil, err
+	}
+	for _, v := range vols {
+		if err := checkRestoreVolumeUsers(ctx, o.Host, v.docker, project, o.App, o.Destination, rt); err != nil {
+			return nil, err
+		}
+	}
+	// Keep a names/status-only recovery record beside the staged Backup. It
+	// survives errors and an interrupted process; no secret values are saved.
+	stateFile := path.Join(dir, "prior-state.json")
+	stateJSON, err := json.Marshal(state)
+	if err != nil {
+		return nil, err
+	}
+	if err := o.Host.WriteFile(ctx, stateFile, stateJSON, 0600, false); err != nil {
+		return nil, fmt.Errorf("write restore recovery state: %w", err)
+	}
+	// Install the fail-closed cleanup before the first stop: a stop/start can
+	// partly succeed before SSH or the caller's context fails. Never recover
+	// service availability automatically on a failed data operation.
+	defer func() {
+		if err == nil {
+			return
+		}
+		keep = true
+		rctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), cleanupTimeout)
+		defer cancel()
+		stopErr := state.stopBounded(rctx, o.Host)
+		if stopErr != nil {
+			err = fmt.Errorf("%w; isolation cleanup failed: %v; verify and manually stop this App's Services immediately (Backup kept at %s, prior state at %s)", err, stopErr, data, stateFile)
+		} else {
+			err = fmt.Errorf("%w (Services left stopped; no data rollback; Backup kept at %s, prior state at %s)", err, data, stateFile)
+		}
+	}()
+	logf("isolating App Services during restore (availability interrupted)")
+	if err := state.stop(ctx, o.Host); err != nil {
+		return nil, fmt.Errorf("stop Services: %w", err)
+	}
+	for _, v := range vols {
+		logf("restoring volume %s of %s", v.key, v.svc)
+		script := volumeScript(v.docker, data, restoreVolumeSh, v.file)
+		if err := o.Host.Run(ctx, remote.Cmd{Script: script}); err != nil {
+			return nil, fmt.Errorf("restore volume %s of %s: %w", v.key, v.svc, err)
+		}
+		res.Volumes = append(res.Volumes, v.svc+"/"+v.key)
 	}
 	// Generated secrets go back after volumes and before Services start,
 	// so the data and the passwords it was created with land together.
 	// The next deploy keeps these files (ensureFileOnce never overwrites).
 	restored, changed, err := restoreGenerated(ctx, o.Host, o.App, o.Destination, data, m.GeneratedSecrets, logf)
 	if err != nil {
-		if len(withVolumes) > 0 {
-			keep = true
-			return nil, fmt.Errorf("restore generated secrets (Services left stopped, Backup kept at %s): %w", data, err)
-		}
 		return nil, fmt.Errorf("restore generated secrets: %w", err)
 	}
 	res.Generated = restored
 	res.GeneratedChanged = changed
-	if len(withVolumes) > 0 {
-		logf("starting %s", strings.Join(withVolumes, ", "))
-		if err := startServices(ctx, o.Host, project, rt, withVolumes, replicas); err != nil {
-			return nil, fmt.Errorf("start Services: %w", err)
+	// Start prerequisites in dependency order and load each target's dump before
+	// starting downstream processes that could otherwise consume partial data.
+	for _, svc := range dumpTargets {
+		logf("starting private dump prerequisite %s (consumers remain stopped)", svc)
+		if err := state.startTemporary(ctx, o.Host, project, []string{svc}); err != nil {
+			return nil, fmt.Errorf("start restore targets: %w", err)
 		}
-	}
-	// Dumps load after volumes, into the started container, so a dump can
-	// overwrite (or complement) restored volume data.
-	for _, svc := range dumps {
+		if !dumpRootSet[svc] {
+			continue
+		}
 		cid, err := containerID(ctx, o.Host, project, svc, rt)
 		if err != nil {
 			return nil, err
@@ -283,6 +352,12 @@ func Restore(ctx context.Context, o RestoreOptions) (res *RestoreResult, err err
 		}
 		res.Dumps = append(res.Dumps, svc)
 	}
+	if len(afterDumps) > 0 {
+		logf("dumps loaded; starting private post_restore targets %s", strings.Join(afterDumps, ", "))
+		if err := state.startTemporary(ctx, o.Host, project, afterDumps); err != nil {
+			return nil, fmt.Errorf("start post_restore targets: %w", err)
+		}
+	}
 	for _, svc := range services {
 		post := o.Services[svc].PostRestore
 		if len(post) == 0 {
@@ -292,10 +367,25 @@ func Restore(ctx context.Context, o RestoreOptions) (res *RestoreResult, err err
 		if err != nil {
 			return nil, err
 		}
+		if err := waitReady(ctx, o.Host, cid, readyTimeout); err != nil {
+			return nil, fmt.Errorf("Service %s: %w", svc, err)
+		}
 		logf("running post-restore for %s", svc)
 		if err := o.Host.Run(ctx, remote.Cmd{Script: "set -eu; docker exec " + remote.Quote(cid) + " " + remote.QuoteArgs(post...)}); err != nil {
 			return nil, fmt.Errorf("post-restore %s: %w", svc, err)
 		}
+	}
+	if o.AfterRestore != nil {
+		if err := o.AfterRestore(ctx); err != nil {
+			return nil, fmt.Errorf("post-restore Hook: %w", err)
+		}
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	logf("restore succeeded; resuming the App's prior running state")
+	if err := state.resume(ctx, o.Host); err != nil {
+		return nil, fmt.Errorf("resume Services: %w", err)
 	}
 	if len(res.DumpFiles) > 0 {
 		keep = true
@@ -343,74 +433,27 @@ func volumeScript(volume, data, sh, file string) string {
 // reach the requested number of running tasks.
 const scaleAttempts = 180
 
-// stopServices stops compose Services, or scales Swarm Services to 0 and
-// waits until no task is running. The returned map is the previous replica
-// count (swarm only).
-func stopServices(ctx context.Context, h remote.Host, project, runtime string, svcs []string) (map[string]int, error) {
-	if runtime != "swarm" {
-		script := "set -eu; docker compose -p " + remote.Quote(project) + " stop " + remote.QuoteArgs(svcs...)
-		if err := h.Run(ctx, remote.Cmd{Script: script}); err != nil {
-			return nil, err
-		}
-		return nil, nil
-	}
-	prev := map[string]int{}
-	var stopped []string
-	for _, svc := range svcs {
-		name := project + "_" + svc
-		out, err := h.Output(ctx, remote.Cmd{Script: "docker service inspect -f '{{.Spec.Mode.Replicated.Replicas}}' " + remote.Quote(name)})
-		if err != nil {
-			return prev, fmt.Errorf("inspect replicas of %s: %w", name, err)
-		}
-		n, err := strconv.Atoi(strings.TrimSpace(out))
-		if err != nil {
-			return prev, fmt.Errorf("replicas of %s: %q", name, strings.TrimSpace(out))
-		}
-		prev[svc] = n
-		if err := scaleService(ctx, h, name, 0); err != nil {
-			// Nothing was restored yet: put back what was already stopped.
-			rctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), cleanupTimeout)
-			defer cancel()
-			back := append(stopped, svc)
-			if rerr := startServices(rctx, h, project, runtime, back, prev); rerr != nil {
-				err = fmt.Errorf("%w (also failed to scale back %s: %v)", err, strings.Join(back, ", "), rerr)
-			}
-			return prev, err
-		}
-		stopped = append(stopped, svc)
-	}
-	return prev, nil
-}
-
-// startServices starts compose Services, or scales Swarm Services back and
-// waits until that many tasks are running.
-func startServices(ctx context.Context, h remote.Host, project, runtime string, svcs []string, replicas map[string]int) error {
-	if runtime != "swarm" {
-		return h.Run(ctx, remote.Cmd{Script: "set -eu; docker compose -p " + remote.Quote(project) + " start " + remote.QuoteArgs(svcs...)})
-	}
-	for _, svc := range svcs {
-		n := replicas[svc]
-		if n < 1 {
-			n = 1
-		}
-		if err := scaleService(ctx, h, project+"_"+svc, n); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
 func scaleService(ctx context.Context, h remote.Host, name string, replicas int) error {
+	if err := h.Run(ctx, remote.Cmd{Script: "set -eu; docker service scale " + remote.Quote(fmt.Sprintf("%s=%d", name, replicas)) + " --detach=true >/dev/null"}); err != nil {
+		return fmt.Errorf("scale %s to %d: %w", name, replicas, err)
+	}
+	return waitServiceReplicas(ctx, h, name, replicas)
+}
+
+func waitServiceReplicas(ctx context.Context, h remote.Host, name string, replicas int) error {
 	script := fmt.Sprintf(`set -eu
-docker service scale %s >/dev/null
 i=0
 while :; do
-  n=$(docker ps -q --filter %s --filter status=running | wc -l | tr -d ' ')
-  if [ "$n" = %d ]; then exit 0; fi
+  states=$(docker service ps --no-trunc --format '{{.CurrentState}}' %s)
+  n=$(printf '%%s\n' "$states" | grep -c '^Running ' || true)
+  active=$(printf '%%s\n' "$states" | grep -cvE '^$|^(Shutdown|Complete|Failed|Rejected) ' || true)
+  if [ %d = 0 ]; then
+    if [ "$active" = 0 ]; then exit 0; fi
+  elif [ "$n" = %d ]; then exit 0; fi
   i=$((i+1))
   if [ "$i" -ge %d ]; then echo "service %s did not converge to %d running tasks (have $n)" >&2; exit 1; fi
   sleep 1
-done`, remote.Quote(fmt.Sprintf("%s=%d", name, replicas)), remote.Quote("label=com.docker.swarm.service.name="+name), replicas, scaleAttempts, name, replicas)
+done`, remote.Quote(name), replicas, replicas, scaleAttempts, name, replicas)
 	if err := h.Run(ctx, remote.Cmd{Script: script}); err != nil {
 		return fmt.Errorf("scale %s to %d: %w", name, replicas, err)
 	}

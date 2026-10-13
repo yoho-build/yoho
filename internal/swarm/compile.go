@@ -44,12 +44,16 @@ type servicePlan struct {
 	// Mode is deploy.mode ("replicated" when unset). Plans written before it
 	// was recorded (v0.1.0-rc.3 and earlier) have none: Replicas 0 there may
 	// be a global Service, so see proxied.
-	Mode           string               `json:"mode,omitempty"`
-	Proxy          *config.ServiceProxy `json:"proxy,omitempty"` // defaults applied
-	StrictDrain    bool                 `json:"strict_drain,omitempty"`
-	ProxyNetwork   bool                 `json:"proxy_network,omitempty"`
-	DependsOn      []string             `json:"depends_on,omitempty"`
-	ReleaseCommand []string             `json:"release_command,omitempty"`
+	Mode         string               `json:"mode,omitempty"`
+	Proxy        *config.ServiceProxy `json:"proxy,omitempty"` // defaults applied
+	StrictDrain  bool                 `json:"strict_drain,omitempty"`
+	ProxyNetwork bool                 `json:"proxy_network,omitempty"`
+	DependsOn    []string             `json:"depends_on,omitempty"`
+	// Swarm drops depends_on from the compiled manifest. Retain conditions
+	// so restore can safely stage private prerequisites and reject completion
+	// jobs instead of silently treating them as long-running Services.
+	DependencyConditions map[string]string `json:"dependency_conditions,omitempty"`
+	ReleaseCommand       []string          `json:"release_command,omitempty"`
 }
 
 // stackPlan is releases/<version>/plan.json for the swarm runtime.
@@ -492,10 +496,14 @@ func compile(d *plan.Deploy, in compileInput) (*compiled, error) {
 			needNet = true
 		}
 
+		dependencyConditions := map[string]string{}
+		for dep, dependency := range ps.DependsOn {
+			dependencyConditions[dep] = dependency.Condition
+		}
 		c.Plan.Services = append(c.Plan.Services, servicePlan{
 			Name: name, Image: ps.Image, Stateful: ext.Stateful, Replicas: replicas, Mode: mode,
 			Proxy: proxyWithDefaults(ext.Proxy), StrictDrain: ext.StrictDrain && ext.Proxy != nil,
-			ProxyNetwork: onNet, DependsOn: sortedKeys(ps.DependsOn),
+			ProxyNetwork: onNet, DependsOn: sortedKeys(ps.DependsOn), DependencyConditions: dependencyConditions,
 			ReleaseCommand: slices.Clone(ext.ReleaseCommand),
 		})
 	}

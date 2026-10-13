@@ -63,6 +63,10 @@ func (f *fakeHost) ReadFile(_ context.Context, p string, _ bool) ([]byte, error)
 	if b, ok := f.files[p]; ok {
 		return b, nil
 	}
+	if p == "/var/lib/yoho/apps/shop/production/current/plan.json" {
+		// Existing restore fixtures deploy one independent database Service.
+		return []byte(`[{"name":"db"}]`), nil
+	}
 	return nil, os.ErrNotExist
 }
 
@@ -89,6 +93,16 @@ func (f *fakeHost) index(sub string) int {
 func dockerResponder(extra func(string) (string, error)) func(context.Context, string) (string, error) {
 	return func(_ context.Context, s string) (string, error) {
 		switch {
+		case strings.HasPrefix(s, "set -eu; node=$(docker info -f") && strings.Contains(s, "docker node inspect"):
+			return "manager-node|node-1", nil
+		case strings.HasPrefix(s, "set -eu; docker ps -aq --filter"):
+			return "cid123", nil
+		case strings.HasPrefix(s, "set -eu; docker service ls -q --filter"):
+			return "sid123", nil
+		case strings.HasPrefix(s, "set -eu; docker service inspect -f"):
+			return restoreFixtureJSON("swarm", "db", "running", 1), nil
+		case strings.HasPrefix(s, "set -eu; docker inspect -f"):
+			return restoreFixtureJSON("compose", "db", "running", 1), nil
 		case strings.Contains(s, " ps -q "):
 			return "cid123", nil
 		case strings.HasPrefix(s, "docker inspect -f") && strings.Contains(s, ".Mounts"):
@@ -180,7 +194,7 @@ func TestSwarmRestoreScalesService(t *testing.T) {
 	if strings.Contains(all, "docker compose") {
 		t.Fatal("swarm restore used compose")
 	}
-	inspect := h.index("docker service inspect -f '{{.Spec.Mode.Replicated.Replicas}}' 'yoho-shop-production_db'")
+	inspect := h.index("set -eu; docker service inspect -f")
 	down := h.index("docker service scale 'yoho-shop-production_db=0'")
 	wipe := h.index("-exec rm -rf {} +")
 	up := h.index("docker service scale 'yoho-shop-production_db=1'")
@@ -445,7 +459,7 @@ func TestRestoreArchive(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	stop, wipe, start, post := h.index(" stop 'db'"), h.index("-exec rm -rf {} +"), h.index(" start 'db'"), h.index("/hooks/post-restore")
+	stop, wipe, start, post := h.index("docker stop 'cid123'"), h.index("-exec rm -rf {} +"), h.index("docker start 'cid123'"), h.index("/hooks/post-restore")
 	if !(stop >= 0 && stop < wipe && wipe < start && start < post) {
 		t.Fatalf("bad order\n%s", h.scripts())
 	}
@@ -518,7 +532,7 @@ func TestRestoreDumpAfterStart(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	start, ready, load, post := h.index(" start 'db'"), h.index("State.Health"), h.index("docker exec -i 'cid123' 'psql' '-U' 'app' < '"+data+"/db.dump'"), h.index("'/post'")
+	start, ready, load, post := h.index("docker start 'cid123'"), h.index("State.Health"), h.index("docker exec -i 'cid123' 'psql' '-U' 'app' < '"+data+"/db.dump'"), h.index("'/post'")
 	if !(start >= 0 && start < ready && ready < load && load < post) {
 		t.Fatalf("bad order %d %d %d %d\n%s", start, ready, load, post, h.scripts())
 	}
@@ -715,7 +729,7 @@ func TestRestoreWritesGeneratedSecretsBeforeStart(t *testing.T) {
 	}
 	wipe := h.index("-exec rm -rf {} +")
 	write := h.index("#writefile " + dst)
-	start := h.index(" start 'db'")
+	start := h.index("docker start 'cid123'")
 	if !(wipe >= 0 && wipe < write && write < start) {
 		t.Fatalf("order wipe=%d write=%d start=%d\n%s", wipe, write, start, h.scripts())
 	}
@@ -1006,24 +1020,23 @@ func TestRestoreCorruptArchiveChangesNothing(t *testing.T) {
 	}
 }
 
-func TestSwarmStopFailureScalesBack(t *testing.T) {
-	h := &fakeHost{}
-	h.respond = func(_ context.Context, s string) (string, error) {
-		if strings.Contains(s, "service inspect") {
-			return "2", nil
-		}
+func TestSwarmStopFailureKeepsIsolation(t *testing.T) {
+	h := &fakeHost{respond: func(_ context.Context, s string) (string, error) {
 		if strings.Contains(s, "service scale 'p_b=0'") {
 			return "", errors.New("boom")
 		}
 		return "", nil
-	}
-	_, err := stopServices(context.Background(), h, "p", "swarm", []string{"a", "b"})
-	if err == nil {
+	}}
+	n := 2
+	state := &restoreState{Runtime: "swarm", Objects: []restoreObject{
+		{ID: "p_a", Replicas: &n}, {ID: "p_b", Replicas: &n}, {ID: "p_c", Replicas: &n},
+	}}
+	if err := state.stop(context.Background(), h); err == nil {
 		t.Fatal("want error")
 	}
 	all := h.scripts()
-	if !strings.Contains(all, "service scale 'p_a=2'") || !strings.Contains(all, "service scale 'p_b=2'") {
-		t.Errorf("earlier Services not scaled back:\n%s", all)
+	if strings.Contains(all, "=2'") || !strings.Contains(all, "service scale 'p_c=0'") {
+		t.Errorf("must not reopen earlier Services and must attempt remaining stops:\n%s", all)
 	}
 }
 

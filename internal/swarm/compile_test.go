@@ -58,6 +58,22 @@ func get(t *testing.T, v any, keys ...string) any {
 	return v
 }
 
+func TestCompileRetainsRestoreDependencyConditions(t *testing.T) {
+	c, doc := compileTest(t, nil)
+	for _, svc := range c.Plan.Services {
+		if svc.Name == "web" {
+			if !reflect.DeepEqual(svc.DependencyConditions, map[string]string{"db": "service_started"}) {
+				t.Fatalf("Swarm plan lost restore dependency conditions: %v", svc.DependencyConditions)
+			}
+			if _, present := get(t, doc, "services", "web").(map[string]any)["depends_on"]; present {
+				t.Fatal("Swarm manifest must still drop unsupported depends_on")
+			}
+			return
+		}
+	}
+	t.Fatal("web Service missing")
+}
+
 func TestCompileUpdateConfig(t *testing.T) {
 	_, doc := compileTest(t, nil)
 	web := get(t, doc, "services", "web", "deploy")
