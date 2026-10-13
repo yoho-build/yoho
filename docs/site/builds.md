@@ -31,7 +31,7 @@ services:
 
 Keep the context small with an ignore file next to the Dockerfile, so it applies to this build only:
 
-```gitignore
+```text
 # apps/shop/web/Dockerfile.dockerignore, relative to the context (repo root)
 *
 !package.json

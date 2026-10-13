@@ -2,6 +2,8 @@
 
 # Yoho
 
+[English](README.md) · [繁體中文](README-ZH-Hant.md) · [Français](README-FR.md) · [Deutsch](README-DE.md) · [Español](README-ES.md)
+
 **Deploy Docker Compose apps to your own servers the way Kamal deploys one container: one command, zero downtime, no platform to run.**
 
 Yoho is one static Go binary. Your `compose.yaml` stays the source of truth; Yoho adds an `x-yoho` block per Service and a small `yoho.yml`. It builds images on your machine, ships them over SSH (no registry needed), switches traffic through kamal-proxy, keeps secrets in your password manager, and backs up volumes.
@@ -64,7 +66,7 @@ Then `yoho app logs web -f`, `yoho app stats`, `yoho releases`, `yoho rollback <
 - Compose-native: `docker compose up` still works locally; Yoho reads `x-yoho` and ignores nothing else.
 - Zero downtime: health-gated, drained cutover via kamal-proxy, also behind Cloudflare Tunnel.
 - Registry-less: local build (Apple `container` on Apple silicon, Docker elsewhere), amd64 cross-builds, layer push over SSH.
-- Secrets never in the repo, image, or `docker inspect`: resolved locally from 1Password, Bitwarden, or any command; delivered as files; generated secrets on the Server.
+- File-based secrets by default: resolved locally from 1Password, Bitwarden, or any command; delivered as files; generated secrets on the Server. Values stay out of the repo, image, and `docker inspect` in this mode. Opt-in `secrets_as_env: true` delivers environment variables, which `docker inspect` can expose.
 - Stateful Services are pinned and never `down -v`.
 - Backups (restic, S3, B2, SFTP, rclone, or encrypted archives) and restore; opt-in scheduled jobs via systemd timers.
 - Cloudflare Tunnel, including account-less Quick Tunnels.
@@ -125,7 +127,7 @@ services:
 volumes: { pgdata: {} }
 ```
 
-A proxied Service needs that compose `healthcheck` (an error under swarm, a warning under compose). The image needs wget or curl.
+A proxied Service needs that compose `healthcheck` (an error under swarm, a warning under compose). This example executes `wget`, so the image must include `wget`; if you use `curl`, change the healthcheck command accordingly.
 
 See `examples/basic` for a fuller file.
 
@@ -148,4 +150,4 @@ Global flags: `-c/--config`, `-d/--destination` (default: `$YOHO_DESTINATION`, t
 
 ## Docs
 
-Source in `docs/site` (MkDocs Material, `mkdocs serve`). Design: `VISION.md`, `GLOSSARY.md`, `docs/adr/`.
+Source in `docs/site` (VitePress). From the repository root, run `npm ci` and `npm run docs:dev`. Design: `VISION.md`, `GLOSSARY.md`, `docs/adr/`.

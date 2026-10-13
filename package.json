@@ -1,0 +1,16 @@
+{
+  "name": "yoho-docs",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "docs:dev": "node docs/site/.vitepress/prepare.mjs && vitepress dev docs/site",
+    "docs:build": "node docs/site/.vitepress/prepare.mjs && vitepress build docs/site && node docs/site/.vitepress/check.mjs && node --test docs/site/.vitepress/server.test.mjs",
+    "docs:preview": "node docs/site/.vitepress/preview.mjs"
+  },
+  "devDependencies": {
+    "vitepress": "1.6.4"
+  }
+}

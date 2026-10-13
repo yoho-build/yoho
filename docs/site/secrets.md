@@ -1,6 +1,6 @@
 # Secrets
 
-Secrets are resolved on your machine at deploy time, written to the Server as versioned files (0444 in 0700 directories owned by the deploy user), and mounted via compose `secrets:` at `/run/secrets/<NAME>`. They stay out of the repo, the image, and `docker inspect`.
+By default, secrets are resolved on your machine at deploy time, written to the Server as versioned files (0444 in 0700 directories owned by the deploy user), and mounted via compose `secrets:` at `/run/secrets/<NAME>`. File delivery keeps secret values out of the repo, the image, and `docker inspect`. Explicit `secrets_as_env: true` uses `env_file` instead: values become container environment variables visible through `docker inspect`.
 
 ## Where values come from
 

@@ -1,5 +1,7 @@
 # Yoho
 
+<div class="yoho-route" aria-label="Docker Compose apps deployed over SSH to your Server"><span>compose.yaml</span> → <span>SSH</span> → <span>your Server</span></div>
+
 Deploy Docker Compose apps to your own servers the way Kamal deploys one container: one command, zero downtime, no platform to run.
 
 Yoho is one static Go binary. `compose.yaml` stays the source of truth; Yoho adds an `x-yoho` block per Service and a small `yoho.yml`. Status: alpha. License: MIT.

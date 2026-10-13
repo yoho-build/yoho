@@ -1,0 +1,48 @@
+/* Logo-derived forest + tide; technical typography, no font downloads. */
+:root {
+  --vp-font-family-base: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  --vp-font-family-mono: 'SFMono-Regular', Consolas, 'Liberation Mono', monospace;
+  --vp-c-brand-1: #0c4d33;
+  --vp-c-brand-2: #116345;
+  --vp-c-brand-3: #0c4d33;
+  --vp-c-brand-soft: rgba(20, 187, 166, .12);
+  --vp-c-bg: #f7faf9;
+  --vp-c-bg-alt: #eef4f1;
+  --vp-c-text-1: #17342d;
+  --vp-c-text-2: #526760;
+}
+.dark {
+  --vp-c-brand-1: #59d6bd;
+  --vp-c-brand-2: #7ce4cf;
+  --vp-c-brand-3: #14bba6;
+  --vp-c-bg: #101f1a;
+  --vp-c-bg-alt: #152a23;
+  --vp-c-text-1: #e0eee8;
+  --vp-c-text-2: #a8beb4;
+}
+.VPFooter.has-sidebar { display: block; }
+@media (min-width: 960px) {
+  .VPFooter.has-sidebar { padding-inline-start: calc(var(--vp-sidebar-width) + 32px); }
+}
+.VPNavBarTitle .logo { width: 36px; height: 36px; }
+.dark .VPNavBarTitle .logo { background: #e0eee8; border-radius: 5px; }
+.vp-doc h1 { letter-spacing: -.035em; }
+.vp-doc h2 { border-top-color: var(--vp-c-divider); }
+.vp-doc a:focus-visible, button:focus-visible, input:focus-visible {
+  outline: 3px solid var(--vp-c-brand-1);
+  outline-offset: 4px;
+}
+.yoho-route {
+  margin: 24px 0;
+  padding: 20px 24px;
+  border-inline-start: 4px solid #14bba6;
+  background: var(--vp-c-bg-alt);
+  font-family: var(--vp-font-family-mono);
+  font-size: clamp(14px, 2.3vw, 20px);
+  font-weight: 600;
+  line-height: 1.7;
+}
+.yoho-route span { display: inline-block; }
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { scroll-behavior: auto !important; }
+}

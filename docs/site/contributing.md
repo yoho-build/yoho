@@ -10,6 +10,26 @@ Three jobs run in parallel on `ubuntu-24.04`:
 | `swarm` | `docker swarm init`, two deploys with a request loop, rollback |
 | `e2e-go` | `YOHO_E2E=1 YOHO_E2E_SSH=runner@127.0.0.1 go test -race ./...` |
 
+## Documentation site
+
+From the repository root, use Node.js 22 or newer (CI pins Node LTS 24.21.0) and the Go version in `go.mod`:
+
+```sh
+npm ci
+npm run docs:dev
+# Build and check the static site, then preview it:
+npm run docs:build
+npm run docs:preview
+```
+
+The site uses pinned VitePress 1.6.4 and the committed npm lockfile. The development server binds to loopback and blocks Vite's `/__open-in-editor` endpoint before upstream middleware (including its case-insensitive, slash and dot path variants). Loopback alone does not prevent the editor advisory's Windows UNC credential leak. `docs:preview` instead uses a built-in Node static server explicitly bound to IPv4 `127.0.0.1`; it serves only built output, rejects traversal/hidden paths and symlink escapes, and has no SPA fallback. Choose a different port with `npm run docs:preview -- --port 4181`; a port conflict fails rather than switching interfaces or ports.
+
+Do not expose development tooling to the network. This stable VitePress line still inherits npm audit findings in Vite/esbuild; the endpoint guard is a targeted mitigation, not a clean audit or a fix for every development-server advisory. Review advisories before changing versions, and do not use `npm audit fix --force` to silently switch the site to an alpha or unsupported dependency combination. Production Pages serves only the generated static files, not a Node server.
+
+Edit Markdown under `docs/site`; keep relative `.md` links for GitHub readers. The site resolves those links to the corresponding directory URLs, including nested pages. Existing MkDocs directory URLs and heading anchors are retained; no hosting rewrite or SPA fallback is required. Use VitePress `::: tip`, `::: warning`, or `::: details` containers rather than MkDocs `!!!`/`???` admonitions. When adding a page, add its sidebar entry in `docs/site/.vitepress/config.mjs`.
+
+`docs:dev` and `docs:build` copy the current `scripts/install.sh` and generate both JSON Schemas with the current Go CLI, without connecting to a Server. They serve `/install.sh`, `/schema/yoho.schema.json`, `/schema/x-yoho.schema.json`, and `/assets/logo.svg` from the ignored generated files in `docs/site/public`. Rerun the command after changing the installer or schema structs. `docs:build` emits `docs/site/.vitepress/dist`, checks strict links, legacy paths/anchors, downloads and local-search coverage, and runs local server-security regressions. GitHub Pages publishes that directory with `public/CNAME` preserving `yohobuild.com`.
+
 ## Go vulnerability scanning
 
 The [Go vulnerability scan workflow](https://github.com/yoho-build/yoho/blob/main/.github/workflows/vulnerability.yml) runs weekly on Tuesdays at 06:23 UTC against the default branch, and manually from **Actions → Go vulnerability scan → Run workflow**. GitHub may delay scheduled runs. View the run status and findings in that workflow's Actions logs; it does not create issues or send custom notifications.

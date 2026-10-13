@@ -72,7 +72,7 @@ Compose files follow the same idea. After the base files are resolved, Yoho also
 | `proxy.deploy_timeout`, `drain_timeout` | Seconds; default 30 each. |
 | `stateful` | Pin to one Server, stop-first recreate, never scaled. |
 | `secrets` | List `["KEY", "NAME:KEY"]` or map `{NAME: KEY}`; `NAME` is the name inside the container. |
-| `secrets_as_env` | Deliver secrets via env instead of files. |
+| `secrets_as_env` | Default `false`: mount secret files. `true`: use `env_file`; values become container environment variables visible through `docker inspect`. |
 | `generate` | `{NAME: kind}`: `password32`, `password64`, `hex32`, `hex64`, `base64_32`, `base64_64`. Created once on the Server. |
 | `release_command` | One-off container from the new image before cutover (migrations). Failure aborts the deploy. |
 | `backup.volumes` | Named compose volumes to archive. |
@@ -85,7 +85,7 @@ Compose files follow the same idea. After the base files are resolved, Yoho also
 
 Stateful rule: a Service with volumes deployed to several Servers without `stateful: true` is an error.
 
-A proxied Service needs a compose `healthcheck` (an error under swarm, a warning under compose). The image needs wget or curl:
+A proxied Service needs a compose `healthcheck` (an error under swarm, a warning under compose). This example executes `wget`, so the image must include it. For a curl-only image, change the healthcheck test to execute `curl` instead:
 
 ```yaml
 services:

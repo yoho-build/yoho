@@ -2,48 +2,62 @@ name: docs
 on:
   push:
     branches: [main]
-    paths: ["docs/site/**", "mkdocs.yml", ".github/workflows/docs.yml", "scripts/install.sh", "internal/config/**", "internal/composefile/**", "cmd/**"]
+    paths:
+      - "docs/site/**"
+      - "package.json"
+      - "package-lock.json"
+      - ".github/workflows/docs.yml"
+      - "scripts/install.sh"
+      - "**/*.go"
+      - "go.mod"
+      - "go.sum"
+  pull_request:
+    paths:
+      - "docs/site/**"
+      - "package.json"
+      - "package-lock.json"
+      - ".github/workflows/docs.yml"
+      - "scripts/install.sh"
+      - "**/*.go"
+      - "go.mod"
+      - "go.sum"
   workflow_dispatch:
-permissions:
-  contents: read
-  pages: write
-  id-token: write
+permissions: {}
 concurrency:
-  group: pages
+  group: docs-${{ github.ref }}
   cancel-in-progress: true
 jobs:
   build:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-python@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          python-version: "3.12"
-      - uses: actions/setup-go@v7
+          persist-credentials: false
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
+        with:
+          node-version: "24.21.0" # Node LTS Krypton
+          cache: npm
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
-      - run: pip install mkdocs-material
-      - run: mkdocs build --strict
-      - name: Publish installer and JSON Schemas
-        run: |
-          cp scripts/install.sh site/install.sh
-          mkdir -p site/schema
-          go run ./cmd/yoho schema > site/schema/yoho.schema.json
-          go run ./cmd/yoho schema --ext > site/schema/x-yoho.schema.json
-      - uses: actions/upload-pages-artifact@v5
+      - run: npm ci
+      - run: npm run docs:build
+      - uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
+        if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
         with:
-          path: site
+          path: docs/site/.vitepress/dist
   deploy:
-    # GitHub Pages cannot be enabled while this repo is private (API: current plan
-    # does not support Pages), so deploy-pages returns 404. Skip deploy until the
-    # repo is public. github.event.repository is present for both push and
-    # workflow_dispatch (repository is a required webhook field; private is set).
-    if: ${{ !github.event.repository.private }}
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
     needs: build
     runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
       - id: deployment
-        uses: actions/deploy-pages@v5
+        uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346 # v5.0.1

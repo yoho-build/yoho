@@ -60,7 +60,7 @@ services:
       proxy: { hosts: [shop.example.com], port: 3000 }
 ```
 
-A proxied Service needs a `/up` endpoint (configurable with `health_path`) that returns 2xx when ready, and a compose `healthcheck` (an error under swarm, a warning under compose). The image needs wget or curl.
+A proxied Service needs a `/up` endpoint (configurable with `health_path`) that returns 2xx when ready, and a compose `healthcheck` (an error under swarm, a warning under compose). This example executes `wget`, so the image must include it. For a curl-only image, change the healthcheck test to execute `curl` instead.
 
 ## After the first deploy
 

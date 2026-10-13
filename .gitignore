@@ -3,3 +3,9 @@
 /dist/
 /yoho
 .claude/
+/node_modules/
+/docs/site/.vitepress/cache/
+/docs/site/.vitepress/dist/
+/docs/site/public/install.sh
+/docs/site/public/schema/
+/docs/site/public/assets/
