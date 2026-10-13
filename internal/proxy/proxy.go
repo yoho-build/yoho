@@ -36,8 +36,14 @@ const (
 	configLabel = "yoho.proxy.config"
 )
 
-// runArgs returns the `docker run` arguments (after `docker run -d`) for cfg.
+// runArgs preserves the original json-file configuration fingerprint.
 func runArgs(cfg config.ProxyConfig) []string {
+	return runArgsForDriver(cfg, "json-file")
+}
+
+// runArgsForDriver respects the daemon default: no --log-driver override.
+// Rotation options are supported only by json-file and local logging.
+func runArgsForDriver(cfg config.ProxyConfig, driver string) []string {
 	image := cfg.Image
 	if image == "" {
 		image = DefaultImage
@@ -47,7 +53,9 @@ func runArgs(cfg config.ProxyConfig) []string {
 		"--network", Network,
 		"--restart", "unless-stopped",
 		"--volume", Volume + ":" + stateDir,
-		"--log-opt", "max-size=10m",
+	}
+	if driver == "json-file" || driver == "local" {
+		args = append(args, "--log-opt", "max-size=10m")
 	}
 	bind := cfg.Bind
 	if strings.Contains(bind, ":") && !strings.HasPrefix(bind, "[") {
@@ -77,6 +85,25 @@ func runArgs(cfg config.ProxyConfig) []string {
 func configHash(args []string) string {
 	h := sha256.Sum256([]byte(strings.Join(args, "\x00")))
 	return hex.EncodeToString(h[:8])
+}
+
+// desiredRunArgs keeps an already matching Proxy unchanged. A daemon logging
+// change does not alter existing containers; only new/recreated ones inherit it.
+func desiredRunArgs(ctx context.Context, host remote.Host, cfg config.ProxyConfig, label string) ([]string, error) {
+	for _, args := range [][]string{runArgs(cfg), runArgsForDriver(cfg, "")} {
+		if label == configHash(args) {
+			return args, nil
+		}
+	}
+	driver, err := host.Output(ctx, remote.Cmd{Script: "set -eu\ndocker info --format '{{.LoggingDriver}}'"})
+	if err != nil {
+		return nil, fmt.Errorf("inspect Docker logging driver: %w", err)
+	}
+	driver = strings.TrimSpace(driver)
+	if driver == "" {
+		return nil, errors.New("Docker returned an empty default logging driver")
+	}
+	return runArgsForDriver(cfg, driver), nil
 }
 
 // EnsureNetwork creates the shared `yoho` network if missing.
@@ -117,14 +144,16 @@ func BootWith(ctx context.Context, host remote.Host, cfg config.ProxyConfig, out
 			return err
 		}
 	}
-	args := runArgs(cfg)
-	want := configHash(args)
-	image := args[len(args)-3]
-
 	label, running, exists, err := inspectProxy(ctx, host)
 	if err != nil {
 		return err
 	}
+	args, err := desiredRunArgs(ctx, host, cfg, label)
+	if err != nil {
+		return err
+	}
+	want := configHash(args)
+	image := args[len(args)-3]
 	if exists && label == want {
 		if !running {
 			fmt.Fprintf(out, "[%s] starting proxy %s\n", host.Name(), ContainerName)
@@ -230,10 +259,14 @@ func NeedsBoot(ctx context.Context, host remote.Host, cfg config.ProxyConfig) (b
 	if err != nil {
 		return false, "", err
 	}
+	args, err := desiredRunArgs(ctx, host, cfg, label)
+	if err != nil {
+		return false, "", err
+	}
 	switch {
 	case !exists:
 		return true, "proxy container " + ContainerName + " is missing", nil
-	case label != configHash(runArgs(cfg)):
+	case label != configHash(args):
 		return true, "proxy configuration changed (recreated, brief proxy downtime)", nil
 	case !running:
 		return true, "proxy container is stopped", nil

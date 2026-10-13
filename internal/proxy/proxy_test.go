@@ -3,6 +3,7 @@ package proxy
 import (
 	"bytes"
 	"context"
+	"errors"
 	"os"
 	"os/exec"
 	"strings"
@@ -14,8 +15,10 @@ import (
 )
 
 type fakeHost struct {
-	scripts []string
-	output  func(script string) string
+	scripts   []string
+	output    func(script string) string
+	logDriver *string
+	logErr    error
 }
 
 func (f *fakeHost) Name() string { return "s1" }
@@ -25,6 +28,15 @@ func (f *fakeHost) Run(_ context.Context, c remote.Cmd) error {
 }
 func (f *fakeHost) Output(_ context.Context, c remote.Cmd) (string, error) {
 	f.scripts = append(f.scripts, c.Script)
+	if strings.Contains(c.Script, "{{.LoggingDriver}}") {
+		if f.logErr != nil {
+			return "", f.logErr
+		}
+		if f.logDriver != nil {
+			return *f.logDriver, nil
+		}
+		return "json-file", nil
+	}
 	if f.output != nil {
 		return f.output(c.Script), nil
 	}
@@ -94,6 +106,105 @@ func TestBootIdempotentAndRecreate(t *testing.T) {
 	}
 	if !strings.Contains(out.String(), "downtime") {
 		t.Errorf("missing downtime warning: %q", out.String())
+	}
+}
+
+func TestBootLoggingDriverCompatibility(t *testing.T) {
+	for _, driver := range []string{"json-file", "local", "fluentd", "syslog", "journald", "awslogs", "none", "custom/plugin:latest"} {
+		t.Run(driver, func(t *testing.T) {
+			h := &fakeHost{logDriver: &driver}
+			if err := Boot(context.Background(), h, config.ProxyConfig{}, nil); err != nil {
+				t.Fatal(err)
+			}
+			script := h.scripts[len(h.scripts)-1]
+			rotates := driver == "json-file" || driver == "local"
+			if strings.Contains(script, "'--log-opt' 'max-size=10m'") != rotates {
+				t.Fatalf("rotation options incompatible with %s:\n%s", driver, script)
+			}
+			if strings.Contains(script, "--log-driver") {
+				t.Fatal("Proxy must inherit the daemon default logging driver")
+			}
+			want := configHash(runArgsForDriver(config.ProxyConfig{}, driver))
+			if !strings.Contains(script, "'yoho.proxy.config="+want+"'") {
+				t.Fatal("config fingerprint does not match effective run arguments")
+			}
+			if out, err := exec.Command("sh", "-n", "-c", script).CombinedOutput(); err != nil {
+				t.Fatalf("invalid POSIX script: %v %s", err, out)
+			}
+		})
+	}
+}
+
+func TestLoggingDriverPlanAndBootAgree(t *testing.T) {
+	driver := "fluentd"
+	cfg := config.ProxyConfig{}
+	want := configHash(runArgsForDriver(cfg, driver))
+	h := &fakeHost{logDriver: &driver, output: func(string) string { return want + "|true" }}
+	need, _, err := NeedsBoot(context.Background(), h, cfg)
+	if err != nil || need {
+		t.Fatalf("matching effective configuration: need=%v err=%v", need, err)
+	}
+	if err := Boot(context.Background(), h, cfg, nil); err != nil {
+		t.Fatal(err)
+	}
+	if all := strings.Join(h.scripts, "\n"); strings.Contains(all, "docker run") || strings.Contains(all, "docker stop") {
+		t.Fatalf("matching Proxy was recreated: %s", all)
+	}
+}
+
+func TestLegacyLoggingFingerprintDoesNotRecreateProxy(t *testing.T) {
+	want := configHash(runArgs(config.ProxyConfig{}))
+	h := &fakeHost{logErr: errors.New("logging inspection unavailable"), output: func(string) string { return want + "|true" }}
+	need, _, err := NeedsBoot(context.Background(), h, config.ProxyConfig{})
+	if err != nil || need {
+		t.Fatalf("existing matching Proxy: need=%v err=%v", need, err)
+	}
+	if err := Boot(context.Background(), h, config.ProxyConfig{}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if all := strings.Join(h.scripts, "\n"); strings.Contains(all, "LoggingDriver") || strings.Contains(all, "docker run") {
+		t.Fatalf("existing matching Proxy should remain unchanged: %s", all)
+	}
+}
+
+func TestNonRotatingProxySurvivesDaemonDriverChange(t *testing.T) {
+	cfg := config.ProxyConfig{}
+	want := configHash(runArgsForDriver(cfg, "fluentd"))
+	for _, next := range []string{"json-file", "local"} {
+		t.Run(next, func(t *testing.T) {
+			h := &fakeHost{logDriver: &next, output: func(string) string { return want + "|true" }}
+			need, _, err := NeedsBoot(context.Background(), h, cfg)
+			if err != nil || need {
+				t.Fatalf("daemon default change would recreate existing Proxy: need=%v err=%v", need, err)
+			}
+			if err := Boot(context.Background(), h, cfg, nil); err != nil {
+				t.Fatal(err)
+			}
+			if all := strings.Join(h.scripts, "\n"); strings.Contains(all, "LoggingDriver") || strings.Contains(all, "docker run") || strings.Contains(all, "docker stop") {
+				t.Fatalf("matching non-rotating Proxy was changed: %s", all)
+			}
+		})
+	}
+}
+
+func TestLoggingInspectionFailsBeforeProxyMutation(t *testing.T) {
+	cause := errors.New("logging inspection failed")
+	for _, empty := range []bool{false, true} {
+		h := &fakeHost{logErr: cause}
+		if empty {
+			driver := ""
+			h.logDriver, h.logErr = &driver, nil
+		}
+		err := Boot(context.Background(), h, config.ProxyConfig{}, nil)
+		if err == nil || (!empty && !errors.Is(err, cause)) {
+			t.Fatalf("logging error lost: %v", err)
+		}
+		if all := strings.Join(h.scripts, "\n"); strings.Contains(all, "docker run") || strings.Contains(all, "docker stop") || strings.Contains(all, "docker rename") {
+			t.Fatalf("Proxy changed before logging inspection succeeded: %s", all)
+		}
+		if _, _, err := NeedsBoot(context.Background(), h, config.ProxyConfig{}); err == nil {
+			t.Fatal("plan silently ignored failed logging inspection")
+		}
 	}
 }
 

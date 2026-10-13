@@ -35,6 +35,10 @@ Swarm convergence diagnostics report bounded task state metadata from the manage
 
 Defaults are 80/443. If the Server already uses them: `proxy.http_port: 8080`, `proxy.https_port: 0`. Behind Cloudflare Tunnel, no published ports and no TLS are needed; see [Cloudflare Tunnel](cloudflare-tunnel.md).
 
+## Proxy logging
+
+New or recreated Proxy containers inherit the Server's Docker default logging driver. Yoho adds `max-size=10m` only for `json-file` and `local`; it does not pass unsupported rotation options to `fluentd`, `syslog`, `journald`, or other drivers. `plan` and `proxy boot` use the same effective arguments. An already matching Proxy is left unchanged: changing the daemon default does not alter existing containers. App Service logging remains controlled by Compose.
+
 ## Commands
 
 ```sh

@@ -48,6 +48,8 @@ func TestLock(t *testing.T) {
 func respond(proxyErr error) func(string) (string, error) {
 	return func(s string) (string, error) {
 		switch {
+		case strings.Contains(s, "{{.LoggingDriver}}"):
+			return "json-file", nil
 		case strings.Contains(s, "kamal-proxy' 'deploy"):
 			return "", proxyErr
 		case strings.Contains(s, "'--scale'"):

@@ -26,6 +26,8 @@ type fakeState struct {
 
 func (f *fakeState) respond(s string) (string, error) {
 	switch {
+	case strings.Contains(s, "{{.LoggingDriver}}"):
+		return "json-file", nil
 	case strings.Contains(s, "kamal-proxy list --json"):
 		return f.routes, nil
 	case strings.Contains(s, "docker container inspect"):

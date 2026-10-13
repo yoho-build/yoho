@@ -42,6 +42,8 @@ func (s *swarmSim) respond(script string) (string, error) {
 	defer s.mu.Unlock()
 	const stack = "yoho-shop-production"
 	switch {
+	case strings.Contains(script, "{{.LoggingDriver}}"):
+		return "json-file", nil
 	case strings.Contains(script, "{{.Swarm.ControlAvailable}}"):
 		if s.notSwarm {
 			return "inactive|false|node-1", nil
