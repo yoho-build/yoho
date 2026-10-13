@@ -208,6 +208,9 @@ func validate(d *plan.Deploy) error {
 			errs = append(errs, fmt.Errorf("service %s: invalid proxy port %d", name, p))
 		}
 	}
+	if _, err := proxy.ProjectRoutes(d.App, d.Destination, d.Project, d.Ext, "swarm"); err != nil {
+		errs = append(errs, err)
+	}
 	return errors.Join(errs...)
 }
 
@@ -252,6 +255,9 @@ func versioned(image, version string) bool {
 // file references secrets by Swarm secret name (or env_file path) only; it
 // never contains secret values.
 func compile(d *plan.Deploy, in compileInput) (*compiled, error) {
+	if _, err := proxy.ProjectRoutes(d.App, d.Destination, d.Project, d.Ext, "swarm"); err != nil {
+		return nil, err
+	}
 	stack := release.ProjectName(d.App, d.Destination)
 	raw, err := d.Project.MarshalYAML()
 	if err != nil {

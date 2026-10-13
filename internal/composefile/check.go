@@ -10,6 +10,7 @@ import (
 
 	"github.com/yoho-build/yoho/internal/build"
 	"github.com/yoho-build/yoho/internal/config"
+	"github.com/yoho-build/yoho/internal/proxy"
 )
 
 // Finding levels.
@@ -184,6 +185,9 @@ func Check(r *Result, runtime string, secretKeys []string) []Finding {
 		if swarm {
 			checkSwarm(svc, svcAdd)
 		}
+	}
+	if _, err := proxy.ProjectRoutes("App", "Destination", r.Project, r.Ext, runtime); err != nil {
+		add(LevelError, "", "%s; %s", err, proxy.RouteConflictHint)
 	}
 	return out
 }

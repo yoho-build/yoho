@@ -33,7 +33,13 @@ func (h *diagnosticHost) Run(ctx context.Context, c remote.Cmd) error {
 func (h *diagnosticHost) Output(ctx context.Context, c remote.Cmd) (string, error) {
 	h.scripts = append(h.scripts, c.Script)
 	if h.output != nil {
-		return h.output(ctx, c)
+		out, err := h.output(ctx, c)
+		if out != "" || err != nil || !strings.Contains(c.Script, "kamal-proxy list --json") {
+			return out, err
+		}
+	}
+	if strings.Contains(c.Script, "kamal-proxy list --json") {
+		return "null", nil
 	}
 	return "", nil
 }

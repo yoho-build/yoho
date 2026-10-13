@@ -39,7 +39,13 @@ func (f *fakeHost) Output(ctx context.Context, c remote.Cmd) (string, error) {
 		return "", err
 	}
 	if f.respond != nil {
-		return f.respond(ctx, c.Script)
+		out, err := f.respond(ctx, c.Script)
+		if out != "" || err != nil || !strings.Contains(c.Script, "kamal-proxy list --json") {
+			return out, err
+		}
+	}
+	if strings.Contains(c.Script, "kamal-proxy list --json") {
+		return "null", nil // successful fake confirmation that the Proxy is absent
 	}
 	return "", nil
 }

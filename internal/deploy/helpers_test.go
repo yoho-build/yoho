@@ -52,7 +52,13 @@ func (f *dockerHost) Output(ctx context.Context, c remote.Cmd) (string, error) {
 	f.scripts = append(f.scripts, c.Script)
 	f.mu.Unlock()
 	if f.respond != nil {
-		return f.respond(c.Script)
+		out, err := f.respond(c.Script)
+		if out != "" || err != nil || !strings.Contains(c.Script, "kamal-proxy list --json") {
+			return out, err
+		}
+	}
+	if strings.Contains(c.Script, "kamal-proxy list --json") {
+		return "null", nil // the fake has no Proxy unless the responder says otherwise
 	}
 	return "", nil
 }

@@ -276,11 +276,12 @@ func NeedsBoot(ctx context.Context, host remote.Host, cfg config.ProxyConfig) (b
 
 // Route is one kamal-proxy route.
 type Route struct {
-	Service string   `json:"service"`
-	Hosts   []string `json:"hosts,omitempty"`
-	Target  string   `json:"target"` // comma-separated host:port list
-	State   string   `json:"state"`
-	TLS     bool     `json:"tls,omitempty"`
+	Service      string   `json:"service"`
+	Hosts        []string `json:"hosts,omitempty"`
+	PathPrefixes []string `json:"path_prefixes,omitempty"`
+	Target       string   `json:"target"` // comma-separated host:port list
+	State        string   `json:"state"`
+	TLS          bool     `json:"tls,omitempty"`
 }
 
 // ParseRoutes parses `kamal-proxy list --json`.
@@ -290,10 +291,11 @@ func ParseRoutes(out string) ([]Route, error) {
 		return nil, nil
 	}
 	var m map[string]struct {
-		Hosts   []string `json:"hosts"`
-		Targets []string `json:"targets"`
-		State   string   `json:"state"`
-		TLS     bool     `json:"tls"`
+		Hosts        []string `json:"hosts"`
+		PathPrefixes []string `json:"path_prefixes"`
+		Targets      []string `json:"targets"`
+		State        string   `json:"state"`
+		TLS          bool     `json:"tls"`
 	}
 	if err := json.Unmarshal([]byte(out), &m); err != nil {
 		return nil, fmt.Errorf("parse kamal-proxy list: %w", err)
@@ -306,7 +308,7 @@ func ParseRoutes(out string) ([]Route, error) {
 	routes := make([]Route, 0, len(names))
 	for _, n := range names {
 		r := m[n]
-		routes = append(routes, Route{Service: n, Hosts: r.Hosts, Target: strings.Join(r.Targets, ","), State: r.State, TLS: r.TLS})
+		routes = append(routes, Route{Service: n, Hosts: r.Hosts, PathPrefixes: r.PathPrefixes, Target: strings.Join(r.Targets, ","), State: r.State, TLS: r.TLS})
 	}
 	return routes, nil
 }
@@ -315,11 +317,19 @@ func ParseRoutes(out string) ([]Route, error) {
 // that never ran the Proxy (no container) has no routes: nil, nil. An error
 // means the Proxy exists but could not be queried (for example not running).
 func List(ctx context.Context, host remote.Host) ([]Route, error) {
-	script := "docker container inspect " + ContainerName + " >/dev/null 2>&1 || exit 0\n" +
-		"docker exec " + ContainerName + " kamal-proxy list --json"
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	// Listing containers distinguishes an absent Proxy from an unavailable
+	// Docker daemon/API. Never turn an arbitrary inspect failure into no routes.
+	script := "set -eu\nnames=$(docker container ls -a --filter 'name=^/" + ContainerName + "$' --format '{{.Names}}')\n" +
+		"if [ -z \"$names\" ]; then printf 'null\\n'; else docker exec " + ContainerName + " kamal-proxy list --json; fi"
 	out, err := host.Output(ctx, remote.Cmd{Script: script})
 	if err != nil {
 		return nil, fmt.Errorf("list proxy routes: %w", err)
+	}
+	if strings.TrimSpace(out) == "" {
+		return nil, errors.New("list proxy routes: empty response; route reservations could not be verified")
 	}
 	return ParseRoutes(out)
 }

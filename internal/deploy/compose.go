@@ -116,6 +116,17 @@ func (c Compose) Deploy(ctx context.Context, d *plan.Deploy) (_ *release.Release
 		}
 	}()
 
+	// Read-only preflight must precede generated values, env/App files and
+	// Release records as well as runtime operations. The route plan does not
+	// depend on secrets, generation paths, or the Docker healthcheck version.
+	_, preflightPlans, err := compile(d, srv.Name, planGenDir, nil, planKey, "")
+	if err != nil {
+		return nil, err
+	}
+	if err := checkOwnership(ctx, h, d.App, d.Destination, preflightPlans); err != nil {
+		return nil, err
+	}
+
 	r.logf("preparing release %s", d.Version)
 	if err := h.Run(ctx, remote.Cmd{Script: "set -eu\numask 077\nmkdir -p " + remote.QuoteArgs(dir, path.Join(dir, "releases"), path.Join(dir, "secrets"), path.Join(dir, "generated"), relDir)}); err != nil {
 		return nil, fmt.Errorf("prepare %s: %w", dir, err)
@@ -162,9 +173,6 @@ func (c Compose) Deploy(ctx context.Context, d *plan.Deploy) (_ *release.Release
 	}
 	composeYAML, plans, err := compile(d, srv.Name, genDir, svcSecrets, key, DockerServerVersion(ctx, h))
 	if err != nil {
-		return nil, err
-	}
-	if err := checkOwnership(ctx, h, d.App, d.Destination, plans); err != nil {
 		return nil, err
 	}
 	// Redeploying an unchanged Version (e.g. after rotating secrets) reuses
@@ -387,6 +395,9 @@ func (c Compose) Rollback(ctx context.Context, d *plan.Deploy, version string) (
 	if err := recoverReadinessPlans(plans, composeYAML); err != nil {
 		return nil, fmt.Errorf("release %s: readiness metadata: %w", version, err)
 	}
+	if err := checkOwnership(ctx, h, d.App, d.Destination, plans); err != nil {
+		return nil, err
+	}
 	if rel.SecretsGeneration != "" {
 		if err := h.Run(ctx, remote.Cmd{Script: "test -d " + remote.Quote(release.SecretsDir(d.App, d.Destination, rel.SecretsGeneration))}); err != nil {
 			return nil, fmt.Errorf("release %s: secrets generation %s is gone", version, rel.SecretsGeneration)
@@ -400,9 +411,6 @@ func (c Compose) Rollback(ctx context.Context, d *plan.Deploy, version string) (
 	prev, _ := h.Output(ctx, remote.Cmd{Script: "readlink " + remote.Quote(path.Join(dir, "current")) + " 2>/dev/null || true"})
 	prevVersion := path.Base(strings.TrimSpace(prev))
 
-	if err := checkOwnership(ctx, h, d.App, d.Destination, plans); err != nil {
-		return nil, err
-	}
 	r.logf("rolling back to %s (volumes, data and migrations are not reverted)", version)
 	// Retained values can differ from today's secrets. Do not print arbitrary
 	// container text without a complete redaction inventory.

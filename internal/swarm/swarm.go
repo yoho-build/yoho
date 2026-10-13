@@ -198,6 +198,13 @@ func (Runtime) Deploy(ctx context.Context, d *plan.Deploy) (_ *release.Release, 
 	if err != nil {
 		return nil, fmt.Errorf("current Release %s: %w", liveVersion, err)
 	}
+	desiredRoutes, err := proxy.ProjectRoutes(d.App, d.Destination, d.Project, d.Ext, "swarm")
+	if err != nil {
+		return nil, err
+	}
+	if err := preflightRoutes(ctx, d, desiredRoutes); err != nil {
+		return nil, err
+	}
 	r.logf("preparing release %s", d.Version)
 	if err := h.Run(ctx, remote.Cmd{Script: "set -eu\numask 077\nmkdir -p " + remote.QuoteArgs(r.dir, path.Join(r.dir, "releases"), path.Join(r.dir, "secrets"), path.Join(r.dir, "generated"), relDir)}); err != nil {
 		return nil, fmt.Errorf("prepare %s: %w", r.dir, err)
@@ -1210,6 +1217,13 @@ func (Runtime) Rollback(ctx context.Context, d *plan.Deploy, version string) (_ 
 	p, err := readPlan(ctx, h, relDir)
 	if err != nil {
 		return nil, fmt.Errorf("release %s: %w", version, err)
+	}
+	desiredRoutes, err := planRoutes(d.App, d.Destination, *p)
+	if err != nil {
+		return nil, fmt.Errorf("release %s: %w", version, err)
+	}
+	if err := preflightRoutes(ctx, d, desiredRoutes); err != nil {
+		return nil, err
 	}
 	if len(p.Secrets) > 0 {
 		if err := h.Run(ctx, remote.Cmd{Script: "docker secret inspect " + remote.QuoteArgs(p.Secrets...) + " >/dev/null"}); err != nil {

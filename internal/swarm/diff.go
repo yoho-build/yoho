@@ -41,6 +41,13 @@ func (Runtime) Diff(ctx context.Context, d *plan.Deploy) ([]plan.Change, error) 
 	if err := validate(d); err != nil {
 		return nil, err
 	}
+	desiredRoutes, err := proxy.ProjectRoutes(d.App, d.Destination, d.Project, d.Ext, "swarm")
+	if err != nil {
+		return nil, err
+	}
+	if err := preflightRoutes(ctx, d, desiredRoutes); err != nil {
+		return nil, err
+	}
 	h := d.Servers[0].Host
 	dir := release.AppDir(d.App, d.Destination)
 	key, haveKey, err := readHMAC(ctx, h, dir)

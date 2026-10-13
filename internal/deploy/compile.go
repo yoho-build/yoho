@@ -118,6 +118,9 @@ func validate(d *plan.Deploy) error {
 			errs = append(errs, fmt.Errorf("service %s: invalid proxy port %d", name, p))
 		}
 	}
+	if _, err := proxy.ProjectRoutes(d.App, d.Destination, d.Project, d.Ext, "compose"); err != nil {
+		errs = append(errs, err)
+	}
 	return errors.Join(errs...)
 }
 
@@ -164,6 +167,9 @@ func versioned(image, version string) bool {
 // dockerVersion is the server engine version from `docker version`; empty
 // or below 25 skips fast-start healthcheck fields.
 func compile(d *plan.Deploy, server, generationDir string, svcSecrets map[string]map[string]string, hmacKey []byte, dockerVersion string) ([]byte, []servicePlan, error) {
+	if _, err := proxy.ProjectRoutes(d.App, d.Destination, d.Project, d.Ext, "compose"); err != nil {
+		return nil, nil, err
+	}
 	// Deep copy: d.Project stays untouched for the caller.
 	p, err := d.Project.WithServicesTransform(func(_ string, s types.ServiceConfig) (types.ServiceConfig, error) { return s, nil })
 	if err != nil {

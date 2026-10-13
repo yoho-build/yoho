@@ -60,10 +60,16 @@ func (f *fakeHost) Output(ctx context.Context, c remote.Cmd) (string, error) {
 	f.mu.Unlock()
 	if f.respond != nil {
 		out, err := f.respond(c.Script)
+		if out == "" && err == nil && strings.Contains(c.Script, "kamal-proxy list --json") {
+			out = "null" // fake Proxy absence, not an empty successful query
+		}
 		if c.Stdout != nil {
 			io.WriteString(c.Stdout, out)
 		}
 		return out, err
+	}
+	if strings.Contains(c.Script, "kamal-proxy list --json") {
+		return "null", nil
 	}
 	return "", nil
 }

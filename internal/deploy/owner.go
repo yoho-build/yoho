@@ -3,6 +3,7 @@ package deploy
 import (
 	"context"
 	"fmt"
+	"net"
 	"strings"
 
 	"github.com/yoho-build/yoho/internal/proxy"
@@ -51,9 +52,25 @@ func checkOwnership(ctx context.Context, h remote.Host, app, dest string, plans 
 			return &release.OwnershipError{Msg: fmt.Sprintf("compose project %s already runs containers of %s; App %s Destination %s would replace them. Rename the App or Destination", project, o, app, dest)}
 		}
 	}
+	var desired []proxy.Route
+	for _, sp := range plans {
+		if sp.proxied() {
+			rt, err := proxy.DesiredRoute(RouteName(app, dest, sp.Name), sp.Proxy.Hosts)
+			if err != nil {
+				return err
+			}
+			desired = append(desired, rt)
+		}
+	}
+	if err := proxy.CheckRouteConflicts(desired, nil); err != nil {
+		return err
+	}
+	if len(desired) == 0 {
+		return nil
+	}
 	routes, err := proxy.List(ctx, h)
 	if err != nil {
-		return nil // the deploy reports a Proxy that cannot be queried
+		return fmt.Errorf("verify Proxy routes on Server %s before changing the App: %w", h.Name(), err)
 	}
 	byName := map[string]proxy.Route{}
 	for _, rt := range routes {
@@ -67,7 +84,46 @@ func checkOwnership(ctx context.Context, h remote.Host, app, dest string, plans 
 		if !ok {
 			continue
 		}
-		if o, foreign := routeOwner(ctx, h, rt, app, dest); foreign {
+		if err := CheckRouteOwnership(ctx, h, rt, app, dest); err != nil {
+			return err
+		}
+	}
+	return proxy.CheckRouteConflicts(desired, routes)
+}
+
+// CheckRouteOwnership checks labels of existing same-name route targets.
+// Discover exact container names/IDs first so genuinely vanished or external
+// legacy targets remain unclaimed, but Docker/SSH/inspect failures fail closed.
+// Cleanup retains routeOwner's older best-effort policy separately.
+func CheckRouteOwnership(ctx context.Context, h remote.Host, rt proxy.Route, app, dest string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	var names []string
+	for _, target := range strings.Split(rt.Target, ",") {
+		target = strings.TrimSpace(target)
+		name, _, err := net.SplitHostPort(target)
+		if err != nil {
+			name, _, _ = strings.Cut(target, ":")
+		}
+		if name != "" {
+			names = append(names, name)
+		}
+	}
+	if len(names) == 0 {
+		return nil
+	}
+	script := "set -eu\nknown=$(docker ps -a --format '{{.ID}}|{{.Names}}')\nfor want in " + remote.QuoteArgs(names...) + "; do\n" +
+		"  for entry in $known; do\n    id=${entry%%|*}\n    name=${entry#*|}\n" +
+		"    if [ \"$want\" = \"$id\" ] || [ \"$want\" = \"$name\" ]; then\n" +
+		"      docker inspect -f '{{index .Config.Labels \"" + LabelApp + "\"}}|{{index .Config.Labels \"" + LabelDestination + "\"}}' \"$id\"\n" +
+		"    fi\n  done\ndone"
+	out, err := h.Output(ctx, remote.Cmd{Script: script})
+	if err != nil {
+		return fmt.Errorf("verify ownership of Proxy route %s on Server %s: %w", rt.Service, h.Name(), err)
+	}
+	for _, o := range parseOwners(out) {
+		if o.foreign(app, dest) {
 			return &release.OwnershipError{Msg: fmt.Sprintf("proxy route %s already routes to containers of %s; App %s Destination %s would take it over. Rename the App, Destination or Service", rt.Service, o, app, dest)}
 		}
 	}

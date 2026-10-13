@@ -3,6 +3,8 @@ package cli
 import (
 	"bytes"
 	"context"
+	"encoding/json"
+	"fmt"
 	"github.com/yoho-build/yoho/internal/composefile"
 	"github.com/yoho-build/yoho/internal/config"
 	"github.com/yoho-build/yoho/internal/release"
@@ -68,6 +70,42 @@ func TestPlanRejectsInvalidProxyHealthProbeBeforeSSH(t *testing.T) {
 					t.Fatalf("error %v, output %s", err, out.String())
 				}
 			})
+		}
+	}
+}
+
+func TestRouteDuplicateRejectedBeforeSSH(t *testing.T) {
+	oldRoot := release.Root
+	t.Cleanup(func() { release.Root = oldRoot })
+	for _, runtime := range []string{"compose", "swarm"} {
+		for _, command := range []string{"plan", "deploy"} {
+			for _, jsonMode := range []bool{false, true} {
+				t.Run(fmt.Sprintf("%s/%s/json=%v", runtime, command, jsonMode), func(t *testing.T) {
+					src := "services:\n  web:\n    image: nginx\n    healthcheck: {test: ['CMD', 'true']}\n    x-yoho: {proxy: {hosts: [shop.example.com]}}\n  renamed:\n    image: nginx\n    healthcheck: {test: ['CMD', 'true']}\n    x-yoho: {proxy: {hosts: ['other.example.com,shop.example.com']}}\n"
+					g := &globals{configPath: appDir(t, runtime, src), json: jsonMode}
+					c := planCmd(g)
+					if command == "deploy" {
+						c = deployCmd(g)
+					}
+					var out bytes.Buffer
+					c.SetOut(&out)
+					c.SetErr(&out)
+					c.SetArgs([]string{"--version", "v1"})
+					c.SilenceErrors, c.SilenceUsage = true, true
+					err := c.ExecuteContext(context.Background())
+					if err == nil || !strings.Contains(out.String(), "already reserved by different route") || !strings.Contains(out.String(), "maintenance window") || strings.Contains(out.String(), "Connect") {
+						t.Fatalf("error=%v output=%s", err, out.String())
+					}
+					if jsonMode {
+						for _, line := range strings.Split(strings.TrimSpace(out.String()), "\n") {
+							var event map[string]any
+							if err := json.Unmarshal([]byte(line), &event); err != nil {
+								t.Fatalf("invalid NDJSON: %v %q", err, line)
+							}
+						}
+					}
+				})
+			}
 		}
 	}
 }
