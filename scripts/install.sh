@@ -6,6 +6,14 @@
 set -eu
 
 repo=yoho-build/yoho
+verify_provenance=${YOHO_VERIFY_PROVENANCE-0}
+case "$verify_provenance" in
+0 | 1) ;;
+*) echo "yoho: YOHO_VERIFY_PROVENANCE must be 0 or 1" >&2; exit 1 ;;
+esac
+if [ "$verify_provenance" = 1 ]; then
+	command -v gh >/dev/null 2>&1 || { echo "yoho: provenance verification requires GitHub CLI (gh)" >&2; exit 1; }
+fi
 token=${GITHUB_TOKEN:-${GH_TOKEN:-}}
 case "$token" in
 *[[:space:]]* | *\\* | *\"*) echo "yoho: GITHUB_TOKEN contains unsupported characters" >&2; exit 1 ;;
@@ -72,7 +80,44 @@ asset_url() {
 	' "$1"
 }
 
+# Keep gh on github.com even when GH_HOST selects another host. Match curl's
+# GITHUB_TOKEN-before-GH_TOKEN priority without putting a token in argv; with
+# neither token set, gh may use its existing github.com login.
+github_cli() {
+	if [ -n "$token" ]; then
+		GH_HOST=github.com GH_TOKEN="$token" gh "$@"
+	else
+		GH_HOST=github.com gh "$@"
+	fi
+}
+
+validate_provenance_tag() {
+	case "$tag" in
+	"" | null | *..* | *. | [!a-zA-Z0-9]* | *[!a-zA-Z0-9._-]*)
+		echo "yoho: invalid release tag for provenance verification" >&2; exit 1 ;;
+	esac
+}
+
 tag=${YOHO_VERSION:-}
+if [ "$verify_provenance" = 1 ]; then
+	# --hostname does not disable gh's configured API alias. Inspect it offline
+	# before either latest resolution or verification can send credentials.
+	api_host=$(github_cli config get api_host --host github.com 2>/dev/null) || {
+		echo "yoho: cannot check GitHub CLI API host for provenance verification" >&2; exit 1
+	}
+	case "$api_host" in
+	"" | api.github.com) ;;
+	*) echo "yoho: provenance verification refuses a custom GitHub CLI API host" >&2; exit 1 ;;
+	esac
+	if [ -z "$tag" ]; then
+		# Resolve latest once, then use this same concrete tag for every download
+		# and the certificate source-ref check. Never parse JSON with shell regexes.
+		tag=$(github_cli api --hostname github.com "repos/${repo}/releases/latest" --jq .tag_name 2>/dev/null) || {
+			echo "yoho: cannot resolve latest release for provenance verification; check gh authentication and network" >&2; exit 1
+		}
+	fi
+	validate_provenance_tag
+fi
 if [ -n "$token" ]; then
 	auth_setup
 	api="https://api.github.com/repos/${repo}/releases/latest"
@@ -107,6 +152,22 @@ elif command -v shasum >/dev/null 2>&1; then
 else echo "yoho: sha256sum or shasum is required" >&2; exit 1
 fi
 if [ "$got" != "$want" ]; then echo "yoho: checksum mismatch for $asset" >&2; exit 1; fi
+
+if [ "$verify_provenance" = 1 ]; then
+	# gh hashes the exact downloaded file and verifies signed certificate claims,
+	# including the source ref (not a workflow-controlled predicate field).
+	# Use exact certificate identity: gh's --signer-workflow is a prefix match.
+	# An old gh that lacks any policy flag fails here, never silently downgrades.
+	if ! github_cli attestation verify "$tmpdir/$asset" \
+		--hostname github.com --repo "$repo" --digest-alg sha256 \
+		--cert-identity "https://github.com/${repo}/.github/workflows/release.yml@refs/tags/$tag" \
+		--source-ref "refs/tags/$tag" \
+		--predicate-type https://slsa.dev/provenance/v1 \
+		--cert-oidc-issuer https://token.actions.githubusercontent.com >/dev/null 2>&1; then
+		echo "yoho: provenance verification failed; use gh supporting all required verification flags, check authentication/network and the release attestation" >&2
+		exit 1
+	fi
+fi
 
 is_writable_dir() {
 	d=$1

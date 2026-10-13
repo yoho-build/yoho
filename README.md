@@ -42,6 +42,8 @@ curl -fsSL https://yohobuild.com/install.sh | sh
 
 The installer downloads the binary for this OS and architecture from GitHub Releases, verifies the SHA-256 in `checksums.txt`, and installs to `/usr/local/bin` when that directory is writable, otherwise `~/.local/bin`. It does not use sudo. Pin a release with `YOHO_VERSION=v0.1.0` or choose a directory with `YOHO_INSTALL_DIR`.
 
+For optional signed binary provenance verification, install a current GitHub CLI (`gh`) and use `curl -fsSL https://yohobuild.com/install.sh | YOHO_VERIFY_PROVENANCE=1 sh`. This requires a matching release attestation and fails closed; older unattested releases still work in the default checksum-only mode. See [installation verification and authentication](docs/site/getting-started.md#signed-binary-provenance).
+
 From source (Go 1.26): `go install github.com/yoho-build/yoho/cmd/yoho@latest`.
 
 ## 60-second quickstart
