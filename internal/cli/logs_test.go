@@ -4,10 +4,16 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"io"
 	"os"
+	"os/exec"
+	"os/signal"
 	"path/filepath"
+	"runtime"
+	"strconv"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestLogsServices(t *testing.T) {
@@ -71,7 +77,7 @@ func TestStatsScript(t *testing.T) {
 	}{
 		{
 			name: "compose all live", stream: true,
-			want: []string{"ids=$(docker compose -p 'shop-prod' ps -q)\n", `exec docker stats --format 'table {{.Name}}\t{{.CPUPerc}}`, " $ids\n"},
+			want: []string{"ids=$(docker compose -p 'shop-prod' ps -q)\n", `docker stats --format 'table {{.Name}}\t{{.CPUPerc}}`, " $ids </dev/null &\n", "trap 'exit 130' INT"},
 			not:  []string{"--no-stream"},
 		},
 		{
@@ -106,6 +112,112 @@ func TestStatsScript(t *testing.T) {
 				if strings.Contains(s, n) {
 					t.Errorf("unexpected %q in:\n%s", n, s)
 				}
+			}
+		})
+	}
+}
+
+// TestStatsClientProcess is a fake Docker client that ignores interrupts, as
+// affected Docker versions do after cancelling stats collection.
+func TestStatsClientProcess(t *testing.T) {
+	if os.Getenv("YOHO_STATS_TEST_CLIENT") != "1" {
+		return
+	}
+	signal.Ignore(os.Interrupt)
+	_, _ = os.Stdout.WriteString("ready\n")
+	// Bound its lifetime even if the supervisor test fails before cleanup.
+	time.Sleep(10 * time.Second)
+	os.Exit(0)
+}
+
+func statsTestDocker(t *testing.T) string {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("stats scripts require POSIX sh")
+	}
+	dir := t.TempDir()
+	fake := `#!/bin/sh
+if [ "$1" = compose ]; then
+  printf '%s' "${STATS_TEST_IDS-client}"
+  exit 0
+fi
+if [ -n "${STATS_TEST_EXIT-}" ]; then exit "$STATS_TEST_EXIT"; fi
+exec "$STATS_TEST_BINARY" -test.run '^TestStatsClientProcess$'
+`
+	if err := os.WriteFile(filepath.Join(dir, "docker"), []byte(fake), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	binary, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("STATS_TEST_BINARY", binary)
+	t.Setenv("YOHO_STATS_TEST_CLIENT", "1")
+	return statsScript("shop-prod", nil, false, true, false)
+}
+
+func TestStatsScriptInterruptStopsClient(t *testing.T) {
+	script := statsTestDocker(t)
+	// Use a real pipe, not exec's copying goroutine: EOF proves the Docker
+	// child has exited too, rather than only the supervising shell.
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r.Close()
+	defer w.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "sh", "-c", script)
+	cmd.Stdout, cmd.Stderr = w, w
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	_ = w.Close()
+	defer func() { _ = cmd.Process.Kill() }()
+	if err := r.SetReadDeadline(time.Now().Add(3 * time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	buf := make([]byte, 128)
+	n, err := r.Read(buf)
+	if err != nil || string(buf[:n]) != "ready\n" {
+		t.Fatalf("client not ready: %q, %v", buf[:n], err)
+	}
+	if err := cmd.Process.Signal(os.Interrupt); err != nil {
+		t.Fatal(err)
+	}
+	err = cmd.Wait()
+	var ee *exec.ExitError
+	if !errors.As(err, &ee) || ee.ExitCode() != 130 {
+		t.Fatalf("interrupt exit = %v, want 130", err)
+	}
+	if _, err := r.Read(buf); err != io.EOF {
+		t.Fatalf("Docker client survived shell exit: %v", err)
+	}
+}
+
+func TestStatsScriptPreservesExitCode(t *testing.T) {
+	for _, code := range []string{"0", "7", "43"} {
+		t.Run(code, func(t *testing.T) {
+			script := statsTestDocker(t)
+			t.Setenv("STATS_TEST_EXIT", code)
+			if code == "43" {
+				t.Setenv("STATS_TEST_IDS", "")
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			cmd := exec.CommandContext(ctx, "sh", "-c", script)
+			err := cmd.Run()
+			if code == "0" {
+				if err != nil {
+					t.Fatal(err)
+				}
+				return
+			}
+			var ee *exec.ExitError
+			if !errors.As(err, &ee) || strconv.Itoa(ee.ExitCode()) != code {
+				t.Fatalf("exit = %v, want %s", err, code)
 			}
 		})
 	}

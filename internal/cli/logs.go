@@ -180,9 +180,28 @@ func statsScript(project string, services []string, swarm, stream, jsonOut bool)
 	if jsonOut {
 		format = "{{json .}}"
 	}
-	return "set -eu\nids=$(" + find + ")\n" +
-		"if [ -z \"$ids\" ]; then exit " + strconv.Itoa(exitNoContainers) + "; fi\n" +
-		"exec docker stats" + flags + " --format " + remote.Quote(format) + " $ids\n"
+	script := "set -eu\nids=$(" + find + ")\n" +
+		"if [ -z \"$ids\" ]; then exit " + strconv.Itoa(exitNoContainers) + "; fi\n"
+	stats := "docker stats" + flags + " --format " + remote.Quote(format) + " $ids"
+	if !stream {
+		return script + "exec " + stats + "\n"
+	}
+	// Some Docker clients cancel collection on SIGINT but keep rendering when
+	// given container IDs. SSH forwards Ctrl-C to the remote PTY, not our local
+	// signalContext. Keep a shell waiting so it can end this read-only client
+	// even when Docker ignores cancellation. Never signal the containers.
+	return script + `stats_pid=
+trap 'if [ -n "$stats_pid" ]; then kill -KILL "$stats_pid" 2>/dev/null || :; wait "$stats_pid" 2>/dev/null || :; fi' 0
+trap 'exit 130' INT
+trap 'exit 129' HUP
+trap 'exit 143' TERM
+` + stats + ` </dev/null &
+stats_pid=$!
+code=0
+wait "$stats_pid" || code=$?
+stats_pid=
+exit "$code"
+`
 }
 
 func statsCmd(g *globals) *cobra.Command {
