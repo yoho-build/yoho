@@ -31,6 +31,7 @@ Validate with `yoho config check`; print the resolved file with `yoho config sho
 | `transport.mode` | `auto` (pussh, then save/load, then registry), `pussh`, `load`, `registry`. |
 | `registry` | Optional: `server`, `username`, `password_secret`, `prefix` (Yoho-built images become `<prefix>/<app>-<destination>-<service>:<version>`, so Destinations that share a Server never share a tag). |
 | `secrets.providers.<n>` | `type`: `op`, `bw`, `bws`, `command`; `command` (argv, reference appended); `account`. |
+| `secrets.nonempty` | Opt-in list of locally resolved source keys that must exist and not equal `""`; duplicates/invalid names fail. Whitespace is valid; Server-generated keys are unsupported. See [Secrets](secrets.md#requiring-nonempty-values-opt-in). |
 | `secrets.values.<KEY>` | `provider`, `ref`, optional `destinations`. |
 | `proxy.image` | kamal-proxy image, pinned by default. |
 | `proxy.http_port`, `https_port` | Published host ports; default 80/443; `0` disables publishing. |

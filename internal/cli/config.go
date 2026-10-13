@@ -20,7 +20,7 @@ func configCmd(g *globals) *cobra.Command {
 	c := &cobra.Command{Use: "config", Short: "Inspect and check the Yoho file and compose files"}
 	c.AddCommand(&cobra.Command{
 		Use:   "check",
-		Short: "Validate the Yoho file, compose files and secret references (runs no secret commands)",
+		Short: "Validate config and secret references (resolves secrets only with secrets.nonempty)",
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			a, err := g.load(cmd)
 			if err != nil {
@@ -58,6 +58,12 @@ func configCmd(g *globals) *cobra.Command {
 				err := fmt.Errorf("%d error(s)", errCount)
 				step.Fail(err, "")
 				return &silentError{err}
+			}
+			if len(a.cfg.Secrets.Nonempty) > 0 {
+				if _, err := a.loadSecrets(cmd.Context()); err != nil {
+					step.Fail(err, "check the declared source keys in .yoho/secrets and secrets.values")
+					return &silentError{err}
+				}
 			}
 			step.Done(fmt.Sprintf("%d services, %d secret keys, runtime %s", len(r.Project.Services), len(keys), a.dest.Runtime))
 			return nil

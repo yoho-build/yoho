@@ -121,6 +121,9 @@ func readFiles(dir, destination string) ([]fileEntry, error) {
 // keys defined so far (provider values included) in its environment. Load is
 // the only place that happens; use FileKeys for inspection.
 func Load(ctx context.Context, dir, destination string, cfg config.SecretsConfig, opts LoadOptions) (*Store, error) {
+	if err := errors.Join(config.ValidateNonempty(cfg.Nonempty)...); err != nil {
+		return nil, err
+	}
 	if opts.Runner == nil {
 		opts.Runner = ExecRunner{}
 	}
@@ -156,11 +159,33 @@ func Load(ctx context.Context, dir, destination string, cfg config.SecretsConfig
 	for _, e := range entries {
 		v, err := evalEntry(ctx, e, s.values, run, opts.Getenv)
 		if err != nil {
+			if len(cfg.Nonempty) > 0 {
+				return nil, contractResolutionError(ctx, e.key)
+			}
 			return nil, err
 		}
 		s.values[e.key], s.refs[e.key] = v, "file:"+e.file
 	}
+	var errs []error
+	for _, key := range cfg.Nonempty {
+		if value, ok := s.Get(key); !ok || value == "" {
+			errs = append(errs, fmt.Errorf("secret %s: required nonempty source value is missing or empty", key))
+		}
+	}
+	if err := errors.Join(errs...); err != nil {
+		return nil, err
+	}
 	return s, nil
+}
+
+// contractResolutionError deliberately does not wrap a provider/command error:
+// neither stderr nor the error text can be assumed free of unknown credentials.
+// Only a context sentinel is safe to preserve for cancellation-aware callers.
+func contractResolutionError(ctx context.Context, key string) error {
+	if err := ctx.Err(); err != nil {
+		return fmt.Errorf("secret %s: resolution failed: %w", key, err)
+	}
+	return fmt.Errorf("secret %s: resolution failed", key)
 }
 
 func resolveProviders(ctx context.Context, s *Store, destination string, cfg config.SecretsConfig, fileKey map[string]string, run Runner, opts LoadOptions) error {
@@ -208,7 +233,14 @@ func resolveProviders(ctx context.Context, s *Store, destination string, cfg con
 			defer func() { <-sem }()
 			v, err := res.resolve(ctx, j.p, j.ref)
 			if err != nil {
-				jobErrs[i] = fmt.Errorf("secret %s: provider %q (%s) ref %q: %w", j.key, j.provider, j.p.Type, j.ref, err)
+				if len(cfg.Nonempty) > 0 {
+					// Any provider can share a memoized call with a declared key,
+					// or emit credentials not yet known to the Store. Suppress all
+					// command diagnostics while a contract is active.
+					jobErrs[i] = contractResolutionError(ctx, j.key)
+				} else {
+					jobErrs[i] = fmt.Errorf("secret %s: provider %q (%s) ref %q: %w", j.key, j.provider, j.p.Type, j.ref, err)
+				}
 				return
 			}
 			vals[i] = v

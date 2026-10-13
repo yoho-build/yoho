@@ -107,9 +107,13 @@ type Registry struct {
 	Prefix string `json:"prefix,omitempty"`
 }
 
-// SecretsConfig declares password-manager references in addition to the
-// Kamal-style .yoho/secrets dotenv files.
+// SecretsConfig declares password-manager references and optional local value
+// requirements in addition to the Kamal-style .yoho/secrets dotenv files.
 type SecretsConfig struct {
+	// Source keys that must resolve locally to a value other than exactly "".
+	// Opt-in; whitespace and multiline values are valid. Server-generated
+	// keys cannot be declared here. Container aliases are not source keys.
+	Nonempty []string `json:"nonempty,omitempty" jsonschema:"uniqueItems=true,pattern=^[A-Za-z_][A-Za-z0-9_]*$,description=Source secret keys required to resolve locally to a nonempty value; whitespace is valid; Server-generated keys are unsupported"`
 	// Named providers.
 	Providers map[string]SecretProvider `json:"providers,omitempty"`
 	// Secret key -> reference resolved through a provider.

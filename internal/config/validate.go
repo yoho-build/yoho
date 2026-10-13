@@ -96,6 +96,7 @@ func Validate(c *Config) []error {
 	if c.Transport.Mode == "registry" && c.Registry == nil {
 		add("transport.mode registry requires a registry section")
 	}
+	errs = append(errs, ValidateNonempty(c.Secrets.Nonempty)...)
 	for _, n := range sortedKeys(c.Secrets.Values) {
 		v := c.Secrets.Values[n]
 		if _, ok := c.Secrets.Providers[v.Provider]; !ok {
@@ -145,6 +146,27 @@ func Validate(c *Config) []error {
 	}
 	return errs
 }
+
+// ValidateNonempty checks the opt-in source-key declaration without reading
+// values or running providers. Invalid entries are identified by position,
+// never echoed (an accidental value is not safe diagnostic text).
+func ValidateNonempty(keys []string) []error {
+	var errs []error
+	seen := map[string]bool{}
+	for i, key := range keys {
+		if !secretKeyPattern.MatchString(key) {
+			errs = append(errs, fmt.Errorf("secrets.nonempty[%d]: source key must match [A-Za-z_][A-Za-z0-9_]*", i))
+			continue
+		}
+		if seen[key] {
+			errs = append(errs, fmt.Errorf("secrets.nonempty: duplicate source key %s", key))
+		}
+		seen[key] = true
+	}
+	return errs
+}
+
+var secretKeyPattern = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 
 // Dest returns a Destination by name. An empty name selects production when
 // that Destination is defined, otherwise the only Destination.

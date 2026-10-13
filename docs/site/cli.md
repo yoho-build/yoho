@@ -5,7 +5,7 @@ Global flags (every command): `-c, --config FILE`, `-d, --destination NAME` (def
 | Command | Description |
 |---|---|
 | `init` | Create `yoho.yml`, `.yoho/secrets`, sample hooks. |
-| `config check` | Validate Yoho file, compose files, secret references (runs no secret commands). |
+| `config check` | Validate Yoho file, compose files, secret references; resolves local secrets only when `secrets.nonempty` is nonempty. |
 | `config show` | Print the resolved Yoho file with defaults as JSON. |
 | `schema [--ext]` | JSON Schema of the Yoho file, or of `x-yoho` with `--ext`. |
 | `setup [--plan] [-y] [--containerd-image-store]` | Provision the Destination's Servers (interactive). `--plan` only shows the checklist, `-y` applies every needed step. See [Server setup](setup.md). |

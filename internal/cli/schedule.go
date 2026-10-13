@@ -81,12 +81,38 @@ func scheduleInstallCmd(g *globals) *cobra.Command {
 				return err
 			}
 			u.Title("Installing Scheduled Jobs of %s (%s): %s", a.cfg.App, a.destName, strings.Join(names, ", "))
+			var store *secrets.Store
+			if len(a.cfg.Secrets.Nonempty) > 0 {
+				for _, name := range names {
+					target := a.cfg.Backups.Targets[a.cfg.Backups.Jobs[name].Target]
+					if target.PasswordSecret != "" || len(target.EnvSecrets) > 0 {
+						step := u.Step("", "Resolve Scheduled Job secrets")
+						store, err = a.loadSecrets(ctx)
+						if err != nil {
+							step.Fail(err, "check the declared source keys in .yoho/secrets and secrets.values")
+							return &silentError{err}
+						}
+						step.Done()
+						break
+					}
+				}
+				if store == nil {
+					// Credentialless jobs do not resolve local secrets, but invalid
+					// generated-key contracts must still fail before opening SSH.
+					step := u.Step("", "Check Scheduled Job compose contract")
+					if _, err := a.compose(ctx); err != nil {
+						step.Fail(err, "run `yoho config check`")
+						return &silentError{err}
+					}
+					step.Done()
+				}
+			}
 			hosts, closeHosts, err := a.connect(ctx)
 			if err != nil {
 				return err
 			}
 			defer closeHosts()
-			if err := a.installJobs(ctx, hosts, names, binary, nil); err != nil {
+			if err := a.installJobs(ctx, hosts, names, binary, store); err != nil {
 				return err
 			}
 			u.Finished(nil, fmt.Sprintf("Installed %d Scheduled Job(s); check them with `yoho schedule status`", len(names)))

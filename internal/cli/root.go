@@ -153,7 +153,18 @@ func (a *app) root() string {
 func (a *app) project() string { return release.ProjectName(a.cfg.App, a.destName) }
 
 func (a *app) compose(ctx context.Context) (*composefile.Result, error) {
-	return composefile.Load(ctx, a.dir, a.cfg.Compose, a.dest.Env, a.project(), a.destName)
+	r, err := composefile.Load(ctx, a.dir, a.cfg.Compose, a.dest.Env, a.project(), a.destName)
+	if err != nil {
+		return nil, err
+	}
+	for _, key := range a.cfg.Secrets.Nonempty {
+		for _, name := range sortedKeys(r.Ext) {
+			if _, generated := r.Ext[name].Generate[key]; generated {
+				return nil, fmt.Errorf("secrets.nonempty: source key %s is generated on the Server; only locally resolved keys may be declared", key)
+			}
+		}
+	}
+	return r, nil
 }
 
 func destSelectErr(err error) bool {
@@ -193,6 +204,13 @@ func (a *app) secretKeys(r *composefile.Result) ([]string, error) {
 }
 
 func (a *app) loadSecrets(ctx context.Context) (*secrets.Store, error) {
+	// Only opt-in contracts need compose inspection here. Commands that never
+	// resolve secrets retain their existing offline/retained-state behavior.
+	if len(a.cfg.Secrets.Nonempty) > 0 {
+		if _, err := a.compose(ctx); err != nil {
+			return nil, err
+		}
+	}
 	return secrets.Load(ctx, a.dir, a.destName, a.cfg.Secrets, secrets.LoadOptions{
 		Warn: func(msg string) { a.ui.Warn("%s", msg) },
 	})
