@@ -86,7 +86,7 @@ func (r *runner) redact(s string) string {
 		return s
 	}
 	var b bytes.Buffer
-	w := secrets.NewRedactor(&b, r.secretVals...)
+	w := secrets.NewDiagnosticRedactor(&b, r.secretVals...)
 	_, _ = w.Write([]byte(s))
 	_ = w.Flush()
 	return b.String()
@@ -300,7 +300,7 @@ func (Runtime) Deploy(ctx context.Context, d *plan.Deploy) (_ *release.Release, 
 		return nil, err
 	}
 	r.logf("deploying stack %s", r.stack)
-	if err := r.deployStack(ctx, stackFile, r.stack, true, auth); err != nil {
+	if err := r.deployStack(ctx, stackFile, r.stack, true, auth, stackServiceNames(c.Plan)...); err != nil {
 		return nil, err
 	}
 	if err := r.routes(ctx, d, c.Plan); err != nil {
@@ -378,7 +378,7 @@ func (r *runner) restoreStack(ctx context.Context, d *plan.Deploy, relDir string
 				return err
 			}
 			r.logf("restoring the stack to the record of Release %s", path.Base(relDir))
-			if err := r.deployStack(ctx, path.Join(relDir, "compose.yaml"), r.stack, true, registryAuth(d, *p)); err != nil {
+			if err := r.deployStack(ctx, path.Join(relDir, "compose.yaml"), r.stack, true, registryAuth(d, *p), stackServiceNames(*p)...); err != nil {
 				return err
 			}
 			if err := r.routes(ctx, d, *p); err != nil {
@@ -389,13 +389,13 @@ func (r *runner) restoreStack(ctx context.Context, d *plan.Deploy, relDir string
 	}
 	if err == nil {
 		if rerr := r.h.Run(ctx, remote.Cmd{Script: "rm -f " + remote.Quote(marker)}); rerr != nil {
-			r.logf("warning: could not clear %s: %v", marker, rerr)
+			r.logf("warning: could not clear %s; recovery error detail omitted", marker)
 		}
 		return
 	}
-	r.logf("warning: the stack may not match the record of Release %s (%v); the next plan treats every Service as changed", path.Base(relDir), err)
+	r.logf("warning: the stack may not match the record of Release %s; retained-spec recovery failed (arbitrary error text omitted: unverified secret generation); the next plan treats every Service as changed", path.Base(relDir))
 	if werr := r.h.WriteFile(ctx, marker, []byte("a failed redeploy left the stack partly updated\n"), 0o600, false); werr != nil {
-		r.logf("warning: could not write %s: %v", marker, werr)
+		r.logf("warning: could not write %s; recovery error detail omitted", marker)
 	}
 }
 
@@ -545,18 +545,22 @@ func stackDeployCmd(dir, file, stack string, prune, auth, wait bool) string {
 
 // deployStack runs docker stack deploy (waiting for convergence) and then
 // verifies every Service it touched converged without a rollback.
-func (r *runner) deployStack(ctx context.Context, file, stack string, prune, auth bool) error {
+func (r *runner) deployStack(ctx context.Context, file, stack string, prune, auth bool, planned ...string) error {
 	before, err := r.serviceStatus(ctx, stack)
 	if err != nil {
-		return err
+		return preCommandStatusFailure(err, "swarm-stack-preflight-status", stack, planned)
 	}
 	dctx, cancel := context.WithTimeout(ctx, convergeTimeout)
 	defer cancel()
-	var buf bytes.Buffer
-	if err := r.h.Run(dctx, remote.Cmd{Script: stackDeployCmd(r.dir, file, stack, prune, auth, true) + " 2>&1", Stdout: &buf}); err != nil {
-		return fmt.Errorf("docker stack deploy %s: %w\n%s%s", stack, err, r.redact(tailLines(buf.String(), 15)), r.diagnose(context.WithoutCancel(ctx), stack, nil))
+	deployErr := r.h.Run(dctx, remote.Cmd{Script: stackDeployCmd(r.dir, file, stack, prune, auth, true) + " 2>&1", Stdout: io.Discard, Stderr: io.Discard})
+	if deployErr != nil {
+		cause := fmt.Errorf("docker stack deploy %s: %w", stack, deployErr)
+		failure := r.convergenceFailure(cause, unknownServiceStatus(before, stack, planned), r.diagnose(ctx, stack, nil))
+		failure.Phase = "swarm-stack-deploy"
+		failure.Message = "docker stack deploy failed; " + failure.Message
+		return failure
 	}
-	return r.waitConverged(ctx, stack, before)
+	return r.waitConverged(ctx, stack, before, planned...)
 }
 
 // svcStatus is one Service's state as seen by `docker service inspect/ls`.
@@ -570,11 +574,11 @@ type svcStatus struct {
 func (r *runner) serviceStatus(ctx context.Context, stack string) (map[string]svcStatus, error) {
 	f := remote.Quote("label=" + stackLabel + "=" + stack)
 	script := "ids=$(docker service ls -q --filter " + f + ")\n" +
-		`[ -z "$ids" ] || docker service inspect --format 'S|{{.Spec.Name}}|{{with .UpdateStatus}}{{.StartedAt}}|{{.State}}|{{.Message}}{{end}}' $ids` + "\n" +
+		`[ -z "$ids" ] || docker service inspect --format 'S|{{.Spec.Name}}|{{with .UpdateStatus}}{{.StartedAt}}|{{.State}}|{{end}}' $ids` + "\n" +
 		"docker service ls --filter " + f + " --format 'R|{{.Name}}|{{.Replicas}}'"
 	out, err := r.h.Output(ctx, remote.Cmd{Script: script})
 	if err != nil {
-		return nil, fmt.Errorf("inspect services of %s: %w", stack, err)
+		return nil, &deploy.Failure{Cause: fmt.Errorf("inspect services of %s: %w", stack, err), Message: "Service status inspection failed; arbitrary error text omitted because task secret generation is unverified", Phase: "swarm-status"}
 	}
 	return parseStatus(out), nil
 }
@@ -643,47 +647,112 @@ func converged(before, after map[string]svcStatus) (pending, failed []string) {
 	return pending, failed
 }
 
-func (r *runner) waitConverged(ctx context.Context, stack string, before map[string]svcStatus) error {
+func stackServiceNames(p stackPlan) []string {
+	names := make([]string, 0, len(p.Services))
+	for _, sp := range p.Services {
+		names = append(names, sp.Name)
+	}
+	return names
+}
+
+// This lookup precedes this phase's update/job commands. Planned names are
+// known, but neither live convergence nor an update attempt has been observed.
+func preCommandStatusFailure(cause error, phase, stack string, planned []string) *deploy.Failure {
+	names := slices.Clone(planned)
+	slices.Sort(names)
+	names = slices.Compact(names)
+	facts := make([]deploy.ServiceFailure, 0, len(names))
+	metadata := make([]string, 0, len(names))
+	for _, name := range names {
+		service := stack + "_" + name
+		facts = append(facts, deploy.ServiceFailure{Service: service, Convergence: "not-attempted/not-observed", ProxyRoute: "not-attempted"})
+		metadata = append(metadata, service+": not-attempted/not-observed")
+	}
+	message := "Service status inspection failed before this phase's command; this phase issued no update/job command; arbitrary error text omitted because task secret generation is unverified\n" + strings.Join(metadata, "\n")
+	return &deploy.Failure{Cause: cause, Message: message, Phase: phase, Services: facts}
+}
+
+// After an interrupted command or status lookup, old replica counts are not
+// current observations. Include planned creates as well as existing Services.
+func unknownServiceStatus(before map[string]svcStatus, stack string, planned []string) map[string]svcStatus {
+	result := make(map[string]svcStatus, len(before)+len(planned))
+	for name := range before {
+		result[name] = svcStatus{UpdateState: "attempted/unknown", Replicas: "unknown"}
+	}
+	for _, name := range planned {
+		result[stack+"_"+name] = svcStatus{UpdateState: "attempted/unknown", Replicas: "unknown"}
+	}
+	return result
+}
+
+func (r *runner) convergenceFailure(cause error, after map[string]svcStatus, diagnostics ...string) *deploy.Failure {
+	facts := []deploy.ServiceFailure{}
+	var metadata []string
+	for _, name := range sortedKeys(after) {
+		s := after[name]
+		facts = append(facts, deploy.ServiceFailure{Service: name, Convergence: s.UpdateState + " replicas=" + s.Replicas, ProxyRoute: "not-attempted"})
+		metadata = append(metadata, name+": "+s.UpdateState+" replicas="+s.Replicas)
+	}
+	message := "Swarm convergence failed; other Services may already have changed; arbitrary task/update text omitted because secret generation is unverified\n" + strings.Join(metadata, "\n") + strings.Join(diagnostics, "")
+	return &deploy.Failure{Cause: cause, Message: message, Phase: "swarm-convergence", Services: facts}
+}
+
+func (r *runner) waitConverged(ctx context.Context, stack string, before map[string]svcStatus, planned ...string) error {
 	deadline := now().Add(convergeTimeout)
+	observed := before
 	for {
 		after, err := r.serviceStatus(ctx, stack)
 		if err != nil {
-			return err
+			return r.convergenceFailure(err, unknownServiceStatus(observed, stack, planned), r.diagnose(ctx, stack, nil))
 		}
+		observed = after
 		pending, failed := converged(before, after)
 		if len(failed) > 0 {
-			var msgs []string
-			for _, n := range failed {
-				msgs = append(msgs, r.redact(n+": "+after[n].UpdateState+" "+after[n].UpdateMessage))
-			}
-			return fmt.Errorf("update failed and Swarm rolled back (the previous version keeps serving):\n%s%s", strings.Join(msgs, "\n"), r.diagnose(ctx, stack, failed))
+			return r.convergenceFailure(errors.New("Swarm update failed"), after, r.diagnose(ctx, stack, failed))
 		}
 		if len(pending) == 0 {
 			return nil
 		}
 		if now().After(deadline) {
-			return fmt.Errorf("services did not converge within %s: %s%s", convergeTimeout, strings.Join(pending, ", "), r.diagnose(ctx, stack, pending))
+			return r.convergenceFailure(fmt.Errorf("services did not converge within %s", convergeTimeout), after, r.diagnose(ctx, stack, pending))
 		}
 		select {
 		case <-ctx.Done():
-			return ctx.Err()
+			return r.convergenceFailure(ctx.Err(), after, r.diagnose(ctx, stack, pending))
 		case <-time.After(pollInterval):
 		}
 	}
 }
 
-// diagnose returns recent task errors (`docker service ps --no-trunc`) for
-// services (all of the stack when empty). Best effort.
+// diagnose reports bounded task state metadata, never Error or logs: Swarm's
+// task history, rollback and automatic restore may use retained secret values
+// absent from this deploy's inventory. A Service name is not generation proof.
 func (r *runner) diagnose(ctx context.Context, stack string, services []string) string {
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+	defer cancel()
+	if len(services) > 8 {
+		services = services[:8]
+	}
 	sel := remote.QuoteArgs(services...)
 	if len(services) == 0 {
-		sel = "$(docker service ls -q --filter " + remote.Quote("label="+stackLabel+"="+stack) + ")"
+		sel = "$(docker service ls -q --filter " + remote.Quote("label="+stackLabel+"="+stack) + " | head -n 8)"
 	}
-	out, err := r.h.Output(ctx, remote.Cmd{Script: "for s in " + sel + "; do docker service ps --no-trunc --format '{{.Name}} on {{.Node}}: {{.CurrentState}} {{.Error}}' \"$s\" 2>/dev/null | head -n 5; done; true"})
-	if err != nil || strings.TrimSpace(out) == "" {
-		return ""
+	out, _ := deploy.DiagnosticText(ctx, r.h, "set -eu\nfor s in "+sel+"; do docker service ps --no-trunc --format '{{.Name}} on {{.Node}}: {{.CurrentState}}' \"$s\"; done", r.secretVals)
+	var metadata []string
+	for _, line := range lines(out) {
+		identity, current, ok := strings.Cut(line, ": ")
+		fields, state := strings.Fields(identity), strings.Fields(current)
+		if !ok || len(fields) != 3 || fields[1] != "on" || len(state) == 0 {
+			continue
+		}
+		// Emit only the engine's fixed state enum, not free-form trailing text
+		// (including legacy/malformed task-error rows supplied by a Server).
+		if !slices.Contains([]string{"New", "Allocated", "Pending", "Assigned", "Accepted", "Preparing", "Ready", "Starting", "Running", "Complete", "Shutdown", "Failed", "Rejected", "Remove", "Orphaned"}, state[0]) {
+			continue
+		}
+		metadata = append(metadata, fields[0]+" on "+fields[2]+": "+state[0])
 	}
-	return "\ntasks (docker service ps --no-trunc):\n" + r.redact(out)
+	return "\ndiagnostics phase=swarm-convergence task state metadata (limited to 8 Services, 4 KiB; Error/Message/log text omitted: unverified secret generation):\n" + strings.Join(metadata, "\n")
 }
 
 // routes points each proxied Service's Proxy route at its stable Swarm name
@@ -800,7 +869,7 @@ func (r *runner) releaseCommands(ctx context.Context, c *compiled, relDir string
 	}
 	existing, err := r.serviceStatus(ctx, r.stack)
 	if err != nil {
-		return err
+		return preCommandStatusFailure(err, "swarm-release-prerequisites-status", r.stack, stackServiceNames(c.Plan))
 	}
 	var missing []string
 	for _, dep := range deps {
@@ -820,7 +889,7 @@ func (r *runner) releaseCommands(ctx context.Context, c *compiled, relDir string
 		if err := r.h.WriteFile(ctx, f, b, 0o600, false); err != nil {
 			return fmt.Errorf("write dependencies stack file: %w", err)
 		}
-		if err := r.deployStack(ctx, f, r.stack, false, auth); err != nil {
+		if err := r.deployStack(ctx, f, r.stack, false, auth, missing...); err != nil {
 			return fmt.Errorf("start dependencies: %w", err)
 		}
 	}
@@ -897,16 +966,18 @@ func (r *runner) runJob(ctx context.Context, c *compiled, relDir string, sp serv
 	}
 	defer func() { _ = r.h.Run(context.WithoutCancel(ctx), remote.Cmd{Script: rm}) }()
 
+	jobMetadata := ""
 	fail := func(err error) error {
-		logs, _ := r.h.Output(context.WithoutCancel(ctx), remote.Cmd{Script: "docker service logs --raw " + remote.Quote(svc) + " 2>&1 | tail -n 30"})
-		return fmt.Errorf("release command for %s failed, aborting (the previous version keeps running): %w\n%s", sp.Name, err, r.redact(logs))
+		cause := fmt.Errorf("release command for %s failed: %w", sp.Name, err)
+		message := fmt.Sprintf("release command for %s failed; %s task Error/log text omitted because secret generation is unverified%s", sp.Name, jobMetadata, r.diagnose(ctx, rs, []string{svc}))
+		return &deploy.Failure{Cause: cause, Message: message, Phase: "swarm-release-command"}
 	}
 	if err := r.h.Run(ctx, remote.Cmd{Script: stackDeployCmd(r.dir, f, rs, false, auth, false) + " >/dev/null"}); err != nil {
 		return fail(err)
 	}
 	deadline := now().Add(releaseTimeout)
 	script := "t=$(docker service ps -q " + remote.Quote(svc) + " | head -n 1)\n" +
-		`[ -z "$t" ] || docker inspect -f '{{.Status.State}}|{{with .Status.ContainerStatus}}{{.ExitCode}}{{end}}|{{.Status.Err}}' "$t"`
+		`[ -z "$t" ] || docker inspect -f '{{.Status.State}}|{{with .Status.ContainerStatus}}{{.ExitCode}}{{end}}' "$t"`
 	for {
 		out, err := r.h.Output(ctx, remote.Cmd{Script: script})
 		if err != nil {
@@ -917,14 +988,19 @@ func (r *runner) runJob(ctx context.Context, c *compiled, relDir string, sp serv
 		case "complete":
 			return nil
 		case "failed", "rejected", "shutdown", "orphaned", "remove":
-			return fail(fmt.Errorf("task %s (exit code|error: %s)", state, rest))
+			codeText, _, _ := strings.Cut(rest, "|")
+			jobMetadata = "task " + state
+			if code, parseErr := strconv.Atoi(codeText); parseErr == nil {
+				jobMetadata += fmt.Sprintf(" exit_code=%d", code)
+			}
+			return fail(errors.New(jobMetadata))
 		}
 		if now().After(deadline) {
 			return fail(fmt.Errorf("timed out after %s (task state %q)", releaseTimeout, state))
 		}
 		select {
 		case <-ctx.Done():
-			return ctx.Err()
+			return fail(ctx.Err())
 		case <-time.After(pollInterval):
 		}
 	}
@@ -1134,7 +1210,7 @@ func (Runtime) Rollback(ctx context.Context, d *plan.Deploy, version string) (_ 
 			return nil, err
 		}
 	}
-	if err := r.deployStack(ctx, stackFile, r.stack, true, registryAuth(d, *p)); err != nil {
+	if err := r.deployStack(ctx, stackFile, r.stack, true, registryAuth(d, *p), stackServiceNames(*p)...); err != nil {
 		return nil, err
 	}
 	if err := r.routes(ctx, d, *p); err != nil {
@@ -1173,12 +1249,4 @@ func lines(s string) []string {
 		}
 	}
 	return out
-}
-
-func tailLines(s string, n int) string {
-	ls := lines(s)
-	if len(ls) > n {
-		ls = ls[len(ls)-n:]
-	}
-	return strings.Join(ls, "\n")
 }

@@ -5,6 +5,7 @@ package ui
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -234,6 +235,10 @@ func (s *Step) finish(err error, extra string) {
 		f := map[string]any{"step": s.name, "host": s.host, "duration_ms": d.Milliseconds()}
 		if err != nil {
 			f["error"] = err.Error()
+			var facts interface{ FailureFacts() any }
+			if errors.As(err, &facts) {
+				f["failure_facts"] = facts.FailureFacts()
+			}
 			f["hint"] = extra
 			f["output_tail"] = s.tail.lines()
 			u.event("step_fail", f)

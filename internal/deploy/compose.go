@@ -98,6 +98,13 @@ func (c Compose) Deploy(ctx context.Context, d *plan.Deploy) (_ *release.Release
 	relDir := release.Dir(d.App, d.Destination, d.Version)
 	composeFile := path.Join(relDir, "compose.yaml")
 	r := newRunner(d, composeFile)
+	r.phase = "prepare-release"
+	defer func() {
+		var failure *Failure
+		if err != nil && !errors.As(err, &failure) {
+			err = r.failure(ctx, err, "", nil)
+		}
+	}()
 
 	unlock, err := AcquireLock(ctx, h, d.App, d.Destination, LockInfo{Performer: d.Performer, Version: d.Version, Command: "deploy", Time: start})
 	if err != nil {
@@ -194,10 +201,18 @@ func (c Compose) Deploy(ctx context.Context, d *plan.Deploy) (_ *release.Release
 		}
 	}()
 
+	for _, sp := range plans {
+		f := r.fact(sp.Name)
+		if sp.proxied() {
+			f.ProxyRoute = "not-attempted"
+		}
+	}
+	r.phase = "pre-deploy"
 	if err := c.hook(ctx, d, "pre-deploy", nil); err != nil {
 		return nil, err
 	}
 	if needsProxy(plans) {
+		r.phase = "proxy-boot"
 		if err := proxy.Boot(ctx, h, d.Proxy, r.out); err != nil {
 			return nil, err
 		}
@@ -215,12 +230,14 @@ func (c Compose) Deploy(ctx context.Context, d *plan.Deploy) (_ *release.Release
 
 	rel.Status = "deployed"
 	rel.ImageIDs = imageIDs(ctx, h, r.cc.project, rel.Images)
+	r.phase = "record-release"
 	if err := c.finish(ctx, d, r, rel); err != nil {
 		return nil, err
 	}
 	committed = true
 	pruneImages(ctx, r, d)
 	runtime := int(now().Sub(start).Round(time.Second) / time.Second)
+	r.phase = "post-deploy"
 	if err := c.hook(ctx, d, "post-deploy", map[string]string{"YOHO_RUNTIME": strconv.Itoa(runtime)}); err != nil {
 		return rel, err
 	}
@@ -323,6 +340,13 @@ func (c Compose) Rollback(ctx context.Context, d *plan.Deploy, version string) (
 	relDir := release.Dir(d.App, d.Destination, version)
 	composeFile := path.Join(relDir, "compose.yaml")
 	r := newRunner(d, composeFile)
+	r.phase = "prepare-release"
+	defer func() {
+		var failure *Failure
+		if err != nil && !errors.As(err, &failure) {
+			err = r.failure(ctx, err, "", nil)
+		}
+	}()
 
 	unlock, err := AcquireLock(ctx, h, d.App, d.Destination, LockInfo{Performer: d.Performer, Version: version, Command: "rollback", Time: start})
 	if err != nil {
@@ -373,10 +397,14 @@ func (c Compose) Rollback(ctx context.Context, d *plan.Deploy, version string) (
 		return nil, err
 	}
 	r.logf("rolling back to %s (volumes, data and migrations are not reverted)", version)
+	// Retained values can differ from today's secrets. Do not print arbitrary
+	// container text without a complete redaction inventory.
+	r.omitDiagnosticText = rel.SecretsGeneration != "" || len(rel.Secrets) > 0
 	if err := r.pinImages(ctx, rel.Images, rel.ImageIDs, rel.Built, version); err != nil {
 		return nil, err
 	}
 	if needsProxy(plans) {
+		r.phase = "proxy-boot"
 		if err := proxy.Boot(ctx, h, d.Proxy, r.out); err != nil {
 			return nil, err
 		}
@@ -397,6 +425,7 @@ func (c Compose) Rollback(ctx context.Context, d *plan.Deploy, version string) (
 	rel.Status = "deployed"
 	rel.DeployedAt = start
 	rel.Performer = d.Performer
+	r.phase = "record-release"
 	if err := c.finish(ctx, d, r, rel); err != nil {
 		return nil, err
 	}

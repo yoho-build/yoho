@@ -248,7 +248,7 @@ func TestCompileExplicitZeroReplicas(t *testing.T) {
 	}
 }
 
-// Finding 7: release command logs and task errors are redacted in errors.
+// Finding 7: unverified release-task history/logs never join public errors.
 func TestReleaseFailureRedactsSecrets(t *testing.T) {
 	withRoot(t)
 	fastPolling(t)
@@ -264,7 +264,7 @@ func TestReleaseFailureRedactsSecrets(t *testing.T) {
 	}
 	d := testDeploy(t, h, nil)
 	_, err := Runtime{}.Deploy(context.Background(), d)
-	if err == nil || !strings.Contains(err.Error(), "boom") {
+	if err == nil || !strings.Contains(err.Error(), "text omitted") || strings.Contains(err.Error(), "boom") {
 		t.Fatalf("err = %v", err)
 	}
 	if strings.Contains(err.Error(), webSecret) {

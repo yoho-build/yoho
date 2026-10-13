@@ -393,7 +393,7 @@ func (a *app) rollout(ctx context.Context, s *session, d *plan.Deploy) (*release
 		f.Flush()
 	}
 	if err != nil {
-		step.Fail(err, hintFor(err, "previous Release keeps serving; see `yoho releases` and rerun with -v"))
+		step.Fail(err, hintFor(err, "inspect per-Service failure facts, `yoho app ps`, and `yoho releases`; Services may already have changed; no automatic data/migration rollback"))
 		return nil, &silentError{err}
 	}
 	step.Done()

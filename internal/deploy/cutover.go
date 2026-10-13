@@ -57,7 +57,11 @@ type runner struct {
 	cc        composeCLI
 	// secretVals are the resolved and generated secret values of this
 	// deploy, masked in remote output that joins an error.
-	secretVals []string
+	secretVals         []string
+	phase              string
+	facts              []ServiceFailure
+	diagnosed          bool
+	omitDiagnosticText bool // rollback cannot resolve all retained secret values
 }
 
 // redact masks secret values in s.
@@ -73,7 +77,7 @@ func (r *runner) redact(s string) string {
 }
 
 func (r *runner) logf(format string, a ...any) {
-	fmt.Fprintf(r.out, "["+r.server+"] "+format+"\n", a...)
+	fmt.Fprintln(r.out, r.redact(fmt.Sprintf("["+r.server+"] "+format, a...)))
 }
 
 func lines(s string) []string {
@@ -89,8 +93,9 @@ func lines(s string) []string {
 // startDependencies starts (without recreating) what release_command
 // Services depend on, so migrations work on the first deploy too.
 func (r *runner) startDependencies(ctx context.Context, plans []servicePlan) error {
+	r.phase = "release-prerequisites-validation"
 	if err := validateReadinessPlans(plans); err != nil {
-		return err
+		return r.failure(ctx, err, "", nil)
 	}
 	var deps []string
 	hasRelease := false
@@ -118,12 +123,9 @@ func (r *runner) startDependencies(ctx context.Context, plans []servicePlan) err
 		return nil
 	}
 	slices.Sort(deps)
-	r.logf("starting dependencies %s", strings.Join(deps, ", "))
-	if err := r.h.Run(ctx, remote.Cmd{Script: r.cc.cmd(append([]string{"up", "-d", "--no-recreate"}, deps...)...)}); err != nil {
-		return fmt.Errorf("start dependencies: %w", err)
-	}
-	// Compose also starts transitive prerequisites. Gate those before running
-	// a release command with --no-deps, using the same policy as cutover.
+	startup := slices.Clone(deps)
+	// Compose also starts transitive prerequisites. Record their attempted
+	// startup even if Compose fails before the readiness gates can run.
 	for i := 0; i < len(deps); i++ {
 		for _, sp := range plans {
 			if sp.Name == deps[i] {
@@ -135,39 +137,49 @@ func (r *runner) startDependencies(ctx context.Context, plans []servicePlan) err
 			}
 		}
 	}
+	r.logf("starting dependencies %s", strings.Join(startup, ", "))
+	r.phase = "release-prerequisites-start"
+	for _, name := range deps {
+		r.fact(name).Convergence = "prerequisite-start-attempted"
+	}
+	if err := r.h.Run(ctx, remote.Cmd{Script: r.cc.cmd(append([]string{"up", "-d", "--no-recreate"}, startup...)...)}); err != nil {
+		r.logf("deploy failed in phase %s", r.phase)
+		r.diagnosePrerequisites(ctx, deps)
+		r.diagnosed = true
+		return r.failure(ctx, fmt.Errorf("start dependencies: %w", err), "", nil)
+	}
 	for _, sp := range plans {
 		if slices.Contains(deps, sp.Name) {
+			r.phase = "release-prerequisites-readiness"
+			r.fact(sp.Name).Convergence = "prerequisite-readiness-attempted"
 			if err := r.waitService(ctx, sp); err != nil {
 				return fmt.Errorf("start dependencies: %w", err)
 			}
+			r.fact(sp.Name).Convergence = "prerequisite-ready"
 		}
 	}
 	return nil
 }
 
-func tailLines(s string, n int) string {
-	ls := lines(s)
-	if len(ls) > n {
-		ls = ls[len(ls)-n:]
-	}
-	return strings.Join(ls, "\n")
-}
-
 // releaseCommands runs each x-yoho.release_command in a one-off container
-// from the new image. The old version keeps serving if one fails.
+// from the new image, before Proxy switching. Completed migrations and any
+// prerequisite startup are not automatically undone on failure.
 func (r *runner) releaseCommands(ctx context.Context, plans []servicePlan) error {
 	for _, sp := range plans {
 		if len(sp.ReleaseCommand) == 0 {
 			continue
 		}
-		r.logf("release command for %s: %s", sp.Name, strings.Join(sp.ReleaseCommand, " "))
+		r.phase = "release-command"
+		r.logf("release command for %s", sp.Name)
 		args := append([]string{"run", "--rm", "--no-deps", "-T", sp.Name}, sp.ReleaseCommand...)
-		// Output is kept and shown only on failure, so migrations don't flood the deploy log.
-		var buf bytes.Buffer
-		if err := r.h.Run(ctx, remote.Cmd{Script: r.cc.cmd(args...) + " 2>&1", Stdout: &buf}); err != nil {
-			// The output joins the error, which the CLI prints outside the
-			// progress redactor; the command can see every mounted secret.
-			return fmt.Errorf("release command for %s failed, aborting (the previous version keeps running): %w\n%s", sp.Name, err, r.redact(tailLines(buf.String(), 20)))
+		sink := &cappedBuffer{limit: 4096}
+		capture := &logCapture{sink: sink, remaining: 1 << 20, drain: true}
+		capture.redact = secrets.NewRedactor(discardOverflow{sink}, r.secretVals...)
+		if err := r.h.Run(ctx, remote.Cmd{Script: r.cc.cmd(args...) + " 2>&1", Stdout: capture, Stderr: io.Discard}); err != nil {
+			return r.failure(ctx, fmt.Errorf("release command for %s failed: %w\n%s", sp.Name, err, sink.String()), "", nil)
+		}
+		if !capture.cut {
+			_ = capture.redact.Flush()
 		}
 	}
 	return nil
@@ -243,17 +255,35 @@ func dependencyOrder(plans []servicePlan) ([]servicePlan, error) {
 // replacements. Proxy candidates can satisfy downstream startup dependencies,
 // but no route switches until every Service has passed readiness.
 func (r *runner) cutover(ctx context.Context, plans []servicePlan) (err error) {
+	r.phase = "service-plan-validation"
 	if err := validateReadinessPlans(plans); err != nil {
-		return err
+		return r.failure(ctx, err, "", nil)
 	}
 	ordered, err := dependencyOrder(plans)
 	if err != nil {
 		return err
 	}
 	var staged []*stagedProxy
+	var failedService string
+	for _, sp := range plans {
+		f := r.fact(sp.Name)
+		if sp.proxied() {
+			f.ProxyRoute = "not-attempted"
+		}
+	}
 	defer func() {
 		if err == nil {
 			return
+		}
+		if !r.diagnosed {
+			var fresh []string
+			for _, candidate := range staged {
+				if candidate.plan.Name == failedService {
+					fresh = candidate.fresh
+					break
+				}
+			}
+			err = r.failure(ctx, err, failedService, fresh)
 		}
 		cleanup, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
 		defer cancel()
@@ -264,31 +294,46 @@ func (r *runner) cutover(ctx context.Context, plans []servicePlan) (err error) {
 		}
 	}()
 	for _, sp := range ordered {
+		failedService = sp.Name
+		r.phase = "service-prepare"
+		r.fact(sp.Name).Convergence = "attempted"
 		if sp.proxied() {
 			candidate, prepErr := r.prepareProxied(ctx, sp)
 			if candidate != nil {
 				staged = append(staged, candidate)
 			}
 			if prepErr != nil {
-				return prepErr
+				var ids []string
+				if candidate != nil {
+					ids = candidate.fresh
+				}
+				return r.failure(ctx, prepErr, sp.Name, ids)
 			}
 		} else {
 			r.logf("starting %s", sp.Name)
 			if err := r.h.Run(ctx, remote.Cmd{Script: r.cc.cmd("up", "-d", "--no-deps", sp.Name)}); err != nil {
 				return fmt.Errorf("compose up %s: %w", sp.Name, err)
 			}
+			r.phase = "plain-readiness"
 			if err := r.waitService(ctx, sp); err != nil {
 				return err
 			}
 		}
+		r.fact(sp.Name).Convergence = "complete"
 	}
 	for _, candidate := range staged {
+		failedService = candidate.plan.Name
+		r.phase = "proxy-switch"
+		r.fact(failedService).ProxyRoute = "uncertain"
 		// From this point only proxySwitchFailed may decide whether removal is safe.
 		candidate.switchAttempted = true
 		if err := r.switchProxied(ctx, candidate); err != nil {
 			return err
 		}
+		r.fact(failedService).ProxyRoute = "switched"
 	}
+	r.phase = "orphan-cleanup"
+	failedService = ""
 	return r.removeOrphans(ctx, plans)
 }
 
@@ -306,7 +351,7 @@ func (r *runner) removeCandidate(ctx context.Context, stage *stagedProxy) {
 	if len(stage.fresh) == 0 {
 		return
 	}
-	r.logf("removing new %s container(s), previous version keeps serving", stage.plan.Name)
+	r.logf("removing unswitched new %s container(s); other Services may already have changed", stage.plan.Name)
 	if err := r.h.Run(ctx, remote.Cmd{Script: "docker rm -f " + remote.QuoteArgs(stage.fresh...) + " >/dev/null"}); err != nil {
 		r.logf("warning: could not remove new containers: %v", err)
 	}
@@ -364,11 +409,13 @@ done
 		return stage, fmt.Errorf("service %s: expected %d new container(s), compose started %d", sp.Name, sp.Replicas, len(fresh))
 	}
 
+	r.phase = "proxy-readiness"
 	r.logf("waiting for %s to become healthy", sp.Name)
 	if err := r.h.Run(ctx, remote.Cmd{Script: waitHealthyScript(fresh, sp.Proxy.DeployTimeout)}); err != nil {
 		return stage, fmt.Errorf("service %s did not become healthy: %w", sp.Name, err)
 	}
 
+	r.phase = "proxy-targets"
 	out, err = r.h.Output(ctx, remote.Cmd{Script: "docker inspect -f '{{.Name}}' " + remote.QuoteArgs(fresh...)})
 	if err != nil {
 		return stage, fmt.Errorf("inspect new %s containers: %w", sp.Name, err)
@@ -394,6 +441,7 @@ func (r *runner) switchProxied(ctx context.Context, stage *stagedProxy) error {
 	})
 	if err != nil {
 		return r.proxySwitchFailed(ctx, sp.Name, route, targets, err, func(err error) error {
+			err = r.failure(ctx, err, sp.Name, stage.fresh)
 			cleanup, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
 			defer cancel()
 			r.removeCandidate(cleanup, stage)
@@ -427,17 +475,24 @@ func (r *runner) proxySwitchFailed(ctx context.Context, svc, route string, targe
 	defer cancel()
 	routes, lerr := proxy.List(cctx, r.h)
 	switched := false
+	found := false
 	for _, rt := range routes {
 		if rt.Service != route {
 			continue
 		}
+		found = true
 		for _, t := range strings.Split(rt.Target, ",") {
 			switched = switched || slices.Contains(targets, strings.TrimSpace(t))
 		}
 	}
 	if lerr == nil && !switched && ctx.Err() == nil {
+		r.fact(svc).ProxyRoute = "retained"
+		if !found {
+			r.fact(svc).ProxyRoute = "absent"
+		}
 		return fail(err)
 	}
+	r.fact(svc).ProxyRoute = "uncertain"
 	r.logf("warning: proxy route %s may already target the new %s container(s); old and new containers are left running", route, svc)
 	return fmt.Errorf("%w (the new %s containers were kept because the proxy route may use them; run the deploy again to finish)", err, svc)
 }
@@ -455,7 +510,7 @@ func (r *runner) waitService(ctx context.Context, sp servicePlan) error {
 		remote.Quote("Service "+sp.Name+": expected "+strconv.Itoa(sp.Replicas)+" container(s)") + " >&2; exit 1; fi\n" +
 		waitReadyBody(defaultDeployTimeout, completed, true)
 	if err := r.h.Run(ctx, remote.Cmd{Script: script, Stdout: r.out}); err != nil {
-		return fmt.Errorf("Service %s did not become ready: %w", sp.Name, err)
+		return r.failure(ctx, fmt.Errorf("Service %s did not become ready: %w", sp.Name, err), sp.Name, nil)
 	}
 	return nil
 }

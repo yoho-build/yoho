@@ -289,7 +289,7 @@ func TestDeployRolledBack(t *testing.T) {
 	d.Version = "v2"
 	d.Project.Services["web"] = func() (s types.ServiceConfig) { s = d.Project.Services["web"]; s.Image = "shop-web:v2"; return }()
 	_, err := Runtime{}.Deploy(context.Background(), d)
-	if err == nil || !strings.Contains(err.Error(), "rolled back") || !strings.Contains(err.Error(), "non-zero exit") {
+	if err == nil || !strings.Contains(err.Error(), "rollback_completed") || !strings.Contains(err.Error(), "text omitted") || strings.Contains(err.Error(), "non-zero exit") {
 		t.Fatalf("err = %v", err)
 	}
 	r, rerr := Runtime{}.Releases(context.Background(), d)
@@ -305,7 +305,7 @@ func TestReleaseCommandFailureAborts(t *testing.T) {
 	sim.jobState = "failed|1|task: non-zero exit (1)"
 	h := newFake(sim)
 	_, err := Runtime{}.Deploy(context.Background(), testDeploy(t, h, nil))
-	if err == nil || !strings.Contains(err.Error(), "migration exploded") {
+	if err == nil || !strings.Contains(err.Error(), "task failed exit_code=1") || !strings.Contains(err.Error(), "text omitted") || strings.Contains(err.Error(), "migration exploded") {
 		t.Fatalf("err = %v", err)
 	}
 	if indexOf(h, "docker stack deploy", "/compose.yaml") >= 0 {

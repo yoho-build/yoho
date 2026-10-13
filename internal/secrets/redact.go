@@ -51,11 +51,34 @@ func (s *Store) Redactor(w io.Writer) *Redactor {
 	return newRedactor(w, m)
 }
 
+// NewDiagnosticRedactor also masks short values and individual nonempty lines
+// of multiline values. Docker's recent-log window can begin inside a secret.
+// Use only for bounded failure diagnostics, not ordinary progress output.
+func NewDiagnosticRedactor(w io.Writer, values ...string) *Redactor {
+	m := map[string]string{}
+	for _, v := range values {
+		if v == "" {
+			continue
+		}
+		m[v] = "***"
+		for _, line := range strings.Split(v, "\n") {
+			if line != "" {
+				m[line] = "***"
+			}
+		}
+	}
+	return newRedactorMin(w, m, 1)
+}
+
 func newRedactor(w io.Writer, valueLabels map[string]string) *Redactor {
+	return newRedactorMin(w, valueLabels, minRedactLen)
+}
+
+func newRedactorMin(w io.Writer, valueLabels map[string]string, minLen int) *Redactor {
 	r := &Redactor{w: w}
 	seen := map[string]bool{}
 	for v, label := range valueLabels {
-		if len(v) < minRedactLen {
+		if len(v) < minLen {
 			continue
 		}
 		for _, variant := range variants(v) {

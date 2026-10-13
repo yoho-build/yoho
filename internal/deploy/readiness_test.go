@@ -373,8 +373,13 @@ func TestStagedCutoverUncertainSwitchCleanup(t *testing.T) {
 	}
 	r := runner{h: h, out: &bytes.Buffer{}, app: "test", dest: "prod"}
 	plans := []servicePlan{{Name: "a", Replicas: 1, Proxy: proxyWithDefaults(&config.ServiceProxy{})}, {Name: "b", Replicas: 1, Proxy: proxyWithDefaults(&config.ServiceProxy{})}}
-	if err := r.cutover(ctx, plans); err == nil {
-		t.Fatal("switch failure ignored")
+	err := r.cutover(ctx, plans)
+	var failure *Failure
+	if !errors.Is(err, context.Canceled) || !errors.As(err, &failure) {
+		t.Fatalf("switch cancellation cause/facts lost: %v", err)
+	}
+	if failure.Services[0].ProxyRoute != "uncertain" || failure.Services[1].ProxyRoute != "not-attempted" {
+		t.Fatalf("wrong cancelled route facts: %+v", failure.Services)
 	}
 	if strings.Contains(h.all(), "docker rm -f 'new-a'") {
 		t.Fatal("uncertain serving candidate deleted")
