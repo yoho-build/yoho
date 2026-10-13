@@ -52,7 +52,7 @@ func respond(proxyErr error) func(string) (string, error) {
 			return "", proxyErr
 		case strings.Contains(s, "'--scale'"):
 			return "old1\nnew1", nil
-		case strings.Contains(s, "'rm' '-f' 'web'"):
+		case strings.Contains(s, "'ps' '-q' 'web'") && strings.Contains(s, "status=$(docker inspect"):
 			return "old1", nil
 		case strings.Contains(s, "{{.Name}}"):
 			return "/yoho-shop-production-web-3", nil
@@ -114,11 +114,14 @@ func TestDeployEndToEnd(t *testing.T) {
 	order := []string{
 		"docker network create yoho",
 		"'up' '-d' '--no-recreate' 'db'",
+		"'ps' '--all' '-q' 'db'",
 		"'run' '--rm' '--no-deps' '-T' 'web' 'bin/rails' 'db:migrate'",
-		"'up' '-d' '--no-deps' 'cloudflared' 'db'",
-		"'rm' '-f' 'web'",
+		"'up' '-d' '--no-deps' 'cloudflared'",
+		"'ps' '--all' '-q' 'cloudflared'",
+		"'up' '-d' '--no-deps' 'db'",
+		"case \"$status\" in exited|dead|created)",
 		"'up' '-d' '--no-deps' '--no-recreate' '--scale' 'web=2' 'web'",
-		"State.Health",
+		"set -- 'new1'",
 		"'kamal-proxy' 'deploy' 'shop-production-web' '--target' 'yoho-shop-production-web-3:3000' '--host' 'shop.example.com' '--health-check-path' '/up' '--deploy-timeout' '30s' '--drain-timeout' '30s'",
 		"docker stop 'old1'",
 		"docker stop 'w9'",
@@ -259,7 +262,7 @@ func TestFirstDeployNoOldContainers(t *testing.T) {
 		switch {
 		case strings.Contains(s, "'--scale'"):
 			return "new1", nil
-		case strings.Contains(s, "'rm' '-f' 'web'"):
+		case strings.Contains(s, "'ps' '-q' 'web'") && strings.Contains(s, "status=$(docker inspect"):
 			return "", nil
 		}
 		return respond(nil)(s)

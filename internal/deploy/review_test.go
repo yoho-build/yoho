@@ -392,7 +392,7 @@ func TestProxiedServiceScaledToZero(t *testing.T) {
 	if strings.Contains(all, "--scale") || strings.Contains(all, "kamal-proxy' 'deploy") {
 		t.Errorf("scaled-to-zero Service must not get a proxy cutover:\n%s", all)
 	}
-	if !strings.Contains(all, "'up' '-d' '--no-deps' 'cloudflared' 'db' 'web'") {
+	if !strings.Contains(all, "'up' '-d' '--no-deps' 'web'") {
 		t.Errorf("compose must converge web to zero:\n%s", all)
 	}
 	if !strings.Contains(all, "'kamal-proxy' 'remove' 'shop-production-web'") {

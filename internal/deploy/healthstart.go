@@ -61,11 +61,10 @@ func dockerMajor(version string) (int, bool) {
 	return n, true
 }
 
-// HealthGated reports whether Yoho waits on hc before treating a new
-// container or task as ready. Proxied services are waited on in both
-// runtimes. waitOnAll is swarm stack deploy, which waits for every service
-// that defines a healthcheck.
-func HealthGated(ext config.ServiceExt, hc *types.HealthCheckConfig, waitOnAll bool) bool {
+// fastStartEligible retains fast-probe defaults for proxied Compose Services
+// and Swarm Services. Plain Compose readiness gates honor the effective Docker
+// timing instead of changing existing non-Proxy healthcheck behavior.
+func fastStartEligible(ext config.ServiceExt, hc *types.HealthCheckConfig, waitOnAll bool) bool {
 	if hc == nil || hc.Disable {
 		return false
 	}
@@ -79,7 +78,7 @@ func HealthGated(ext config.ServiceExt, hc *types.HealthCheckConfig, waitOnAll b
 // start_period 60s and start_interval 1s. A user-set start_period or
 // start_interval is left unchanged.
 func UseFastStart(ext config.ServiceExt, hc *types.HealthCheckConfig, waitOnAll bool, dockerVersion string) bool {
-	if !SupportsStartInterval(dockerVersion) || !HealthGated(ext, hc, waitOnAll) {
+	if !SupportsStartInterval(dockerVersion) || !fastStartEligible(ext, hc, waitOnAll) {
 		return false
 	}
 	return hc.StartPeriod == nil && hc.StartInterval == nil

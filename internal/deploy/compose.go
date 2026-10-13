@@ -15,6 +15,8 @@ import (
 	"strings"
 	"time"
 
+	"go.yaml.in/yaml/v3"
+
 	"github.com/yoho-build/yoho/internal/plan"
 	"github.com/yoho-build/yoho/internal/proxy"
 	"github.com/yoho-build/yoho/internal/release"
@@ -351,6 +353,9 @@ func (c Compose) Rollback(ctx context.Context, d *plan.Deploy, version string) (
 	if err := json.Unmarshal(planJSON, &plans); err != nil {
 		return nil, fmt.Errorf("release %s: bad plan.json: %w", version, err)
 	}
+	if err := recoverReadinessPlans(plans, composeYAML); err != nil {
+		return nil, fmt.Errorf("release %s: readiness metadata: %w", version, err)
+	}
 	if rel.SecretsGeneration != "" {
 		if err := h.Run(ctx, remote.Cmd{Script: "test -d " + remote.Quote(release.SecretsDir(d.App, d.Destination, rel.SecretsGeneration))}); err != nil {
 			return nil, fmt.Errorf("release %s: secrets generation %s is gone", version, rel.SecretsGeneration)
@@ -405,6 +410,72 @@ func (Compose) Releases(ctx context.Context, d *plan.Deploy) ([]release.Release,
 		return nil, errors.New("no Server")
 	}
 	return listReleases(ctx, d.Servers[0].Host, d.App, d.Destination)
+}
+
+// recoverReadinessPlans handles Releases written before job classification was
+// saved. Only the retained compiled Compose is consulted, never local config.
+func recoverReadinessPlans(plans []servicePlan, composeYAML []byte) error {
+	if !slices.ContainsFunc(plans, func(sp servicePlan) bool { return sp.CompletedSuccessfully == nil }) {
+		return validateReadinessPlans(plans)
+	}
+	var saved struct {
+		Services map[string]struct {
+			DependsOn any `yaml:"depends_on"`
+		} `yaml:"services"`
+	}
+	if err := yaml.Unmarshal(composeYAML, &saved); err != nil {
+		return err
+	}
+	present := map[string]bool{}
+	for _, sp := range plans {
+		present[sp.Name] = true
+	}
+	for i := range plans {
+		sp := &plans[i]
+		if sp.CompletedSuccessfully != nil {
+			continue
+		}
+		svc, ok := saved.Services[sp.Name]
+		if !ok {
+			return fmt.Errorf("Service %s missing from saved Compose", sp.Name)
+		}
+		deps, _ := svc.DependsOn.(map[string]any)
+		kept := make([]string, 0, len(sp.DependsOn))
+		for _, name := range sp.DependsOn {
+			edge, _ := deps[name].(map[string]any)
+			if !present[name] && edge["required"] == false {
+				continue
+			}
+			kept = append(kept, name)
+		}
+		sp.DependsOn = kept
+		sp.CompletedDependencies = nil
+		for _, name := range sortedKeys(deps) {
+			edge, _ := deps[name].(map[string]any)
+			if !present[name] && edge["required"] == false {
+				continue
+			}
+			if edge["condition"] == "service_completed_successfully" {
+				sp.CompletedDependencies = append(sp.CompletedDependencies, name)
+			}
+		}
+	}
+	jobs := map[string]bool{}
+	for _, sp := range plans {
+		if sp.Replicas == 0 {
+			continue
+		}
+		for _, dep := range sp.CompletedDependencies {
+			jobs[dep] = true
+		}
+	}
+	for i := range plans {
+		if plans[i].CompletedSuccessfully == nil {
+			completed := jobs[plans[i].Name]
+			plans[i].CompletedSuccessfully = &completed
+		}
+	}
+	return validateReadinessPlans(plans)
 }
 
 func readRelease(ctx context.Context, h remote.Host, p string) (*release.Release, error) {

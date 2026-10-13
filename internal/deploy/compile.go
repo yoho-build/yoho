@@ -57,6 +57,9 @@ type servicePlan struct {
 	ProxyNetwork   bool                 `json:"proxy_network,omitempty"` // joins the yoho network
 	DependsOn      []string             `json:"depends_on,omitempty"`
 	ReleaseCommand []string             `json:"release_command,omitempty"`
+	// nil identifies older Releases; rollback recovers this from saved Compose.
+	CompletedSuccessfully *bool    `json:"completed_successfully,omitempty"`
+	CompletedDependencies []string `json:"completed_dependencies,omitempty"`
 }
 
 // proxied reports whether the Service is switched through the Proxy: it has
@@ -253,23 +256,50 @@ func compile(d *plan.Deploy, server, generationDir string, svcSecrets map[string
 		if UseFastStart(ext, s.HealthCheck, false, dockerVersion) {
 			fastStart = append(fastStart, name)
 		}
+		// Disabled profile Services can leave optional edges in the loaded
+		// project. Remove only absent optional dependencies, in both the saved
+		// plan and compiled Compose; required missing dependencies still fail.
+		deps := types.DependsOnConfig{}
+		var completedDeps []string
+		for _, depName := range sortedKeys(s.DependsOn) {
+			dep := s.DependsOn[depName]
+			if _, exists := p.Services[depName]; !exists && !dep.Required {
+				continue
+			}
+			deps[depName] = dep
+			if dep.Condition == types.ServiceConditionCompletedSuccessfully {
+				completedDeps = append(completedDeps, depName)
+			}
+		}
+		s.DependsOn = deps
 		p.Services[name] = s
 
 		// deploy.replicas: 0 (or scale: 0) means no containers, as in
 		// compose; a proxied Service then has no route.
 		replicas := max(s.GetScale(), 0)
+		completed := false
+		for _, dependent := range p.Services {
+			if dep, ok := dependent.DependsOn[name]; ok && dependent.GetScale() > 0 && dep.Condition == types.ServiceConditionCompletedSuccessfully {
+				completed = true
+			}
+		}
 		plans = append(plans, servicePlan{
-			Name:           name,
-			Image:          s.Image,
-			Stateful:       ext.Stateful,
-			Replicas:       replicas,
-			Proxy:          proxyWithDefaults(ext.Proxy),
-			ProxyNetwork:   onNet,
-			DependsOn:      sortedKeys(s.DependsOn),
-			ReleaseCommand: slices.Clone(ext.ReleaseCommand),
+			CompletedSuccessfully: &completed,
+			CompletedDependencies: completedDeps,
+			Name:                  name,
+			Image:                 s.Image,
+			Stateful:              ext.Stateful,
+			Replicas:              replicas,
+			Proxy:                 proxyWithDefaults(ext.Proxy),
+			ProxyNetwork:          onNet,
+			DependsOn:             sortedKeys(s.DependsOn),
+			ReleaseCommand:        slices.Clone(ext.ReleaseCommand),
 		})
 	}
 
+	if err := validateReadinessPlans(plans); err != nil {
+		return nil, nil, err
+	}
 	if needNet {
 		if p.Networks == nil {
 			p.Networks = types.Networks{}

@@ -38,7 +38,7 @@ func TestUseFastStart(t *testing.T) {
 		t.Error("proxied healthcheck on Docker 25")
 	}
 	if UseFastStart(plain, hc, false, "25.0.1") {
-		t.Error("compose does not wait on a non-proxied healthcheck")
+		t.Error("plain readiness must preserve existing healthcheck timing")
 	}
 	if !UseFastStart(plain, hc, true, "29.0.0") {
 		t.Error("swarm waits on every healthcheck")
