@@ -73,6 +73,7 @@ Then `yoho app logs web -f`, `yoho app stats`, `yoho releases`, `yoho rollback <
 - Compose (default) or Swarm runtime.
 - Kamal-compatible hooks and secrets-file style.
 - `yoho setup` provisions a Debian/Ubuntu Server.
+- Read-only dashboards: `yoho tui` in the terminal, `yoho ui` in a local browser; nothing runs on the Servers.
 - AI-native: JSON Schema, `--json` NDJSON output, and a built-in agent skill (`yoho skill install`).
 
 ## Compared
@@ -139,6 +140,7 @@ See `examples/basic` for a fuller file.
 | `setup` | provision a Server |
 | `plan`, `apply`, `deploy`, `releases`, `rollback VERSION` | review and release lifecycle |
 | `app ps\|logs\|stats\|exec` | inspect the running App |
+| `tui`, `ui` | read-only dashboards of Servers, Services, Releases and logs, in the terminal or a local browser |
 | `proxy boot\|status\|logs`, `tunnel up\|status\|down` | Proxy and Cloudflare Tunnel |
 | `secrets list\|print` | inspect secrets |
 | `backup run\|list\|restore`, `schedule install\|status\|remove` | Backups and Scheduled Jobs |

@@ -14,7 +14,7 @@
 
 **Windows?** The CLI targets macOS and Linux; Servers must be Linux.
 
-**Is there a web UI?** No. A read-only dashboard API is a later, opt-in item.
+**Is there a web UI?** Yes, read-only and local: `yoho ui` serves a dashboard on `127.0.0.1` from your machine and reads the Servers over SSH; `yoho tui` is the same view in the terminal. Nothing is installed on the Servers. See [Dashboards](dashboards.md). A Server-side dashboard API with alerts is a later, opt-in item.
 
 **Which OS for `yoho setup`?** Debian and Ubuntu.
 

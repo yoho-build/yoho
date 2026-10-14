@@ -14,6 +14,7 @@ const guide = [
   ['Scheduled jobs', 'scheduled-jobs'],
   ['Server setup', 'setup'],
   ['Swarm', 'swarm'],
+  ['Dashboards (tui / ui)', 'dashboards'],
   ['Hooks & env vars', 'hooks'],
   ['CLI reference', 'cli']
 ].map(([text, slug]) => ({ text, link: `/${slug}/` }))

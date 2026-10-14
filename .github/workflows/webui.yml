@@ -1,0 +1,42 @@
+name: webui
+on:
+  push:
+    branches: [main]
+    paths:
+      - "web/**"
+      - "internal/webui/dist/**"
+      - ".github/workflows/webui.yml"
+  pull_request:
+    paths:
+      - "web/**"
+      - "internal/webui/dist/**"
+      - ".github/workflows/webui.yml"
+  workflow_dispatch:
+permissions: {}
+concurrency:
+  group: webui-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
+        with:
+          node-version: "24.21.0" # Node LTS Krypton
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - run: npm --prefix web ci
+      # Typechecks, then rebuilds internal/webui/dist (embedded by go:embed).
+      - run: npm --prefix web run build
+      - name: Embedded build is up to date
+        run: |
+          git add -N internal/webui/dist
+          git diff --exit-code --stat -- internal/webui/dist || {
+            echo "::error::internal/webui/dist is stale: run 'npm --prefix web run build' and commit it"
+            exit 1
+          }

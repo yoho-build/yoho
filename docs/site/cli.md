@@ -18,6 +18,8 @@ Global flags (every command): `-c, --config FILE`, `-d, --destination NAME` (def
 | `app logs [SERVICE...] [--all] [-f] [-n N]` | Logs of the named Services; `-f`/`--follow`, `-n`/`--lines` from the end (default 100). With one Service it is implied; with several, name one or more (the error lists them) or pass `--all` for every Service interleaved (compose only; swarm takes exactly one Service). |
 | `app stats [SERVICE...] [--no-stream]` | CPU, memory, network and block I/O of the App's containers (default: every Service) on the Destination's first Server. Live view in a terminal; one snapshot with `--no-stream`, without a terminal, or when `CI` is set or `TERM=dumb` (use this from scripts and coding agents); `--json` prints docker's JSON object per container. Swarm: only tasks on the first Server. |
 | `app exec SERVICE -- COMMAND...` | Run a command in a running Service container. |
+| `tui [--interval 5s] [-n LINES]` | Live, read-only terminal dashboard: every Server of the Destination (load, memory, disk, Docker), the App's containers with health, CPU and memory, the Proxy, Releases, and container logs. Keys: `tab`/`←→` Server, `↑↓` select, `enter` logs, `r` refresh, `q` quit. Needs a terminal. See [Dashboards](dashboards.md). |
+| `ui [--port 0] [--no-open] [--interval 5s]` | The same view in the browser, served on `127.0.0.1` from this machine with a one-time login link. Read-only; nothing runs on the Servers. See [Dashboards](dashboards.md). |
 | `proxy boot \| status \| logs` | Manage the shared kamal-proxy. |
 | `tunnel up \| status \| down` | Managed Cloudflare Tunnel (cloudflared connector; Quick Tunnel without a token). |
 | `secrets list` | Keys, sources, lengths. |
