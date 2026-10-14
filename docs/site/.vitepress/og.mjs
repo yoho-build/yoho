@@ -1,8 +1,9 @@
 // Renders docs/site/assets/og.svg to the social cards in docs/site/public:
 // og.png (1200x630, Open Graph) and twitter.png (1200x600, X's 2:1 large
-// card, the same design without the top and bottom 15px of background). The docs workflow runs this after installing the Inter
-// font and Playwright's Chromium; locally: `npx playwright install chromium`
-// (and Inter), then `npm run docs:og`. The PNG is generated, not committed.
+// card: the same design without the top and bottom 15px of background).
+// The docs workflow runs this after installing the Inter font and
+// Playwright's Chromium; locally: `npx playwright install chromium` (and
+// Inter), then `npm run docs:og`. The PNGs are generated, not committed.
 import { chromium } from 'playwright'
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
