@@ -22,15 +22,17 @@ uptime=3600.52
 load=0.10 0.20 0.30
 memtotal=8000000
 memavail=4000000
-disk=yoho	/var/lib/yoho	/	100	40	60
+disk=yoho	/var/lib/yoho	/	100000	40000	60000
 docker=29.1.0
-disk=docker	/var/lib/docker	/var/lib/docker	100	40	60
+disk=docker	/var/lib/docker	/var/lib/docker	100000	40010	59990
 disk=docker	/srv/docker	/srv	500	1	499
 @@yoho-ps
 {"ID":"aaa","Names":"yoho-shop-production-web-1","Image":"shop-web:abc","State":"running","Status":"Up 2 hours (healthy)","Ports":"80/tcp","Labels":"com.docker.compose.project=yoho-shop-production,com.docker.compose.service=web","RunningFor":"2 hours ago"}
 {"ID":"bbb","Names":"yoho-shop-production-db-1","Image":"postgres:17","State":"exited","Status":"Exited (1) 3 minutes ago","Ports":"","Labels":"com.docker.compose.service=db","RunningFor":"1 day ago"}
 {"ID":"ccc","Names":"yoho-proxy","Image":"basecamp/kamal-proxy:v0.9","State":"running","Status":"Up 3 days","Ports":"0.0.0.0:80->80/tcp","Labels":"","RunningFor":"3 days ago"}
 {"ID":"ddd","Names":"yoho-shop-production_worker.1.x","Image":"w","State":"running","Status":"Up 1 minute (health: starting)","Labels":"com.docker.stack.namespace=yoho-shop-production,com.docker.swarm.service.name=yoho-shop-production_worker","RunningFor":""}
+{"ID":"eee","Names":"yoho-shop-production_worker.1.old","Image":"w","State":"exited","Status":"Exited (0) 1 hour ago","Labels":"com.docker.stack.namespace=yoho-shop-production,com.docker.swarm.task.id=abc"}
+{"ID":"fff","Names":"yoho-shop-production-migrate-1","Image":"m","State":"exited","Status":"Exited (0) 5 minutes ago","Labels":"com.docker.compose.service=migrate"}
 not json
 @@yoho-stats
 {"ID":"aaa","Name":"yoho-shop-production-web-1","CPUPerc":"12.50%","MemPerc":"3.25%","MemUsage":"100MiB / 7.6GiB","NetIO":"1kB / 2kB","BlockIO":"0B / 0B","PIDs":"9"}
@@ -46,16 +48,19 @@ func TestParse(t *testing.T) {
 	if h.MemTotal != 8000000*1024 || h.MemAvailable != 4000000*1024 || h.DockerVersion != "29.1.0" {
 		t.Errorf("mem/docker: %+v", h)
 	}
-	if len(h.Disks) != 2 || h.Disks[0].Label != "yoho" || h.Disks[0].Used != 40*1024 || h.Disks[1].Mount != "/srv" {
+	if len(h.Disks) != 2 || h.Disks[0].Label != "yoho" || h.Disks[0].Used != 40000*1024 || h.Disks[1].Mount != "/srv" {
 		t.Errorf("disks (docker root on the same mount is folded): %+v", h.Disks)
 	}
 	if p.Proxy == nil || p.Proxy.Service != "proxy" || p.Proxy.CPUPercent != 0.01 {
 		t.Fatalf("proxy: %+v", p.Proxy)
 	}
-	if len(p.Containers) != 3 {
-		t.Fatalf("containers: %+v", p.Containers)
+	if len(p.Containers) != 4 {
+		t.Fatalf("containers (old swarm tasks dropped): %+v", p.Containers)
 	}
-	db, web, worker := p.Containers[0], p.Containers[1], p.Containers[2]
+	db, migrate, web, worker := p.Containers[0], p.Containers[1], p.Containers[2], p.Containers[3]
+	if db.Completed || !migrate.Completed || web.Completed {
+		t.Errorf("completed: db %v migrate %v web %v", db.Completed, migrate.Completed, web.Completed)
+	}
 	if db.Service != "db" || db.State != "exited" || db.Health != "" {
 		t.Errorf("db: %+v", db)
 	}
@@ -144,7 +149,7 @@ func TestCollect(t *testing.T) {
 		t.Fatalf("%+v", snap)
 	}
 	s1, s2 := snap.Servers[0], snap.Servers[1]
-	if s1.Error != "" || len(s1.Containers) != 3 || len(s1.Releases) != 2 || !s1.Releases[0].Current || s1.Releases[1].Current {
+	if s1.Error != "" || len(s1.Containers) != 4 || len(s1.Releases) != 2 || !s1.Releases[0].Current || s1.Releases[1].Current {
 		t.Errorf("web-1: %+v", s1)
 	}
 	if s1.Elapsed <= 0 {
@@ -193,5 +198,24 @@ func TestLiveCachesAndRefreshesForNewContainers(t *testing.T) {
 	}
 	if len(h.scripts) != 2 {
 		t.Errorf("an unknown container must trigger one fresh collection, got %d scripts", len(h.scripts))
+	}
+}
+
+func TestSwarmReleasesFromManagerOnly(t *testing.T) {
+	var asked []string
+	src := &Source{
+		App: "shop", Destination: "production", Runtime: "swarm",
+		Targets: []Target{{Name: "manager", Host: &fakeHost{out: fixture}}, {Name: "worker", Host: &fakeHost{out: fixture}}},
+		Releases: func(_ context.Context, h remote.Host) ([]release.Release, error) {
+			asked = append(asked, "x")
+			return []release.Release{{Version: "v1", Status: "deployed"}}, nil
+		},
+	}
+	snap, err := Collect(context.Background(), src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(asked) != 1 || len(snap.Servers[0].Releases) != 1 || len(snap.Servers[1].Releases) != 0 {
+		t.Errorf("asked %d, manager %d, worker %d", len(asked), len(snap.Servers[0].Releases), len(snap.Servers[1].Releases))
 	}
 }

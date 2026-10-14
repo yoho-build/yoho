@@ -123,3 +123,21 @@ func TestLogScroll(t *testing.T) {
 		t.Error("G returns to the bottom")
 	}
 }
+
+func TestWideCharacters(t *testing.T) {
+	if got := cut("日本語abc", 5); got != "日本" {
+		t.Errorf("cut by columns: %q", got)
+	}
+	if got := pad("日本", 6); got != "日本  " {
+		t.Errorf("pad: %q", got)
+	}
+	m := &Model{Logs: &LogView{Text: strings.Repeat("日志🚀", 80)}}
+	for i, l := range strings.Split(Render(m, 50, 10), "\r\n") {
+		if w := colWidth(strings.TrimSuffix(l, "\x1b[K")); w > 50 {
+			t.Errorf("line %d is %d columns", i, w)
+		}
+	}
+	if s, _ := stateText(dash.Container{State: "exited", Completed: true}); s != "completed" {
+		t.Error(s)
+	}
+}

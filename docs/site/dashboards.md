@@ -18,7 +18,9 @@ Both run on your machine and read the Servers over SSH, like `yoho app ps`. Noth
 
 ## `yoho ui` access
 
-The dashboard listens on `127.0.0.1` only. `yoho ui` prints a one-time login link and opens it unless `--no-open`; the link sets a session cookie for that browser and then stops working. To use another browser, restart `yoho ui`. Requests with a non-loopback `Host` header are refused, and the API answers only `GET`.
+The dashboard listens on `127.0.0.1` only. `yoho ui` prints a one-time login link and opens it unless `--no-open`. The link signs in that browser (new tabs on the same address stay signed in) and then stops working; to use another browser, restart `yoho ui`. Several `yoho ui` instances, one per Destination, can run side by side. Requests with a non-loopback `Host` header are refused, and the API answers only `GET`.
+
+Containers that exited with code 0 (release commands, one-off jobs) are shown as completed, not as failures; Swarm's retained history of replaced tasks is hidden. On Swarm, Release history is read from the manager (the first Server).
 
 To reach it from another machine, forward the port over SSH (`ssh -L 7300:127.0.0.1:7300 laptop`) rather than exposing it.
 

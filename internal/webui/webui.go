@@ -1,11 +1,14 @@
 // Package webui serves `yoho ui`: the embedded React dashboard and a small
 // read-only JSON API over a dash.Live, on a loopback address only.
 //
-// Access: the CLI prints (and opens) a one-time login link. Visiting it
-// trades the code for an HttpOnly, SameSite=Strict session cookie, so the
-// session token never appears in argv, history, or the page. Every request
-// must carry a loopback Host header (DNS-rebinding defence), and only GET and
-// HEAD exist: the UI cannot change anything on a Server.
+// Access: the CLI prints (and opens, through a private redirect file, never
+// argv) a one-time login link. Visiting it redirects to /#session=TOKEN; the
+// page moves the token into its origin's storage, strips it from the URL,
+// and sends it as a Bearer header. Browser storage is scoped by port, unlike
+// cookies, so other services on 127.0.0.1 never receive it and several
+// `yoho ui` instances do not overwrite each other. Every request must carry a
+// loopback Host header (DNS-rebinding defence), and only GET and HEAD exist:
+// the UI cannot change anything on a Server.
 package webui
 
 import (
@@ -52,8 +55,6 @@ type Meta struct {
 	Interval int    `json:"interval_seconds"`
 }
 
-const cookieName = "yoho_ui"
-
 // Server is the HTTP handler of one `yoho ui` session.
 type Server struct {
 	data   Data
@@ -62,7 +63,7 @@ type Server struct {
 
 	mu      sync.Mutex
 	code    string // one-time login code, "" once used
-	session string // session cookie value
+	session string // Bearer token of the API
 	port    string // listener port, for the Host check
 }
 
@@ -148,13 +149,17 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 // loopbackHost accepts only 127.0.0.1, localhost and [::1] on our port.
 func (s *Server) loopbackHost(host string) bool {
-	hn, port, err := net.SplitHostPort(host)
-	if err != nil {
-		return false
-	}
 	s.mu.Lock()
 	want := s.port
 	s.mu.Unlock()
+	hn, port, err := net.SplitHostPort(host)
+	if err != nil {
+		// Browsers omit the default port.
+		if want != "80" || strings.Contains(host, ":") && !strings.HasPrefix(host, "[") {
+			return false
+		}
+		hn, port = strings.Trim(host, "[]"), "80"
+	}
 	if want != "" && port != want {
 		return false
 	}
@@ -175,26 +180,16 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 	session := s.session
 	s.mu.Unlock()
 	if !ok {
-		if s.authorized(r) {
-			http.Redirect(w, r, "/", http.StatusSeeOther)
-			return
-		}
-		http.Error(w, "this login link is invalid or was already used; restart `yoho ui` for a new one", http.StatusForbidden)
+		http.Error(w, "this login link is invalid or was already used; open the dashboard in the browser that used it, or restart `yoho ui` for a new link", http.StatusForbidden)
 		return
 	}
-	http.SetCookie(w, &http.Cookie{
-		Name: cookieName, Value: session, Path: "/",
-		HttpOnly: true, SameSite: http.SameSiteStrictMode,
-	})
-	http.Redirect(w, r, "/", http.StatusSeeOther)
+	w.Header().Set("Cache-Control", "no-store")
+	http.Redirect(w, r, "/#session="+session, http.StatusSeeOther)
 }
 
 func (s *Server) authorized(r *http.Request) bool {
-	c, err := r.Cookie(cookieName)
-	if err != nil {
-		return false
-	}
-	return subtle.ConstantTimeCompare([]byte(c.Value), []byte(s.session)) == 1
+	tok, ok := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
+	return ok && subtle.ConstantTimeCompare([]byte(tok), []byte(s.session)) == 1
 }
 
 func (s *Server) api(w http.ResponseWriter, r *http.Request) {

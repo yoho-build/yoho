@@ -50,6 +50,7 @@ export interface Container {
   service: string
   image: string
   state: string
+  completed: boolean
   health: string
   status: string
   ports: string

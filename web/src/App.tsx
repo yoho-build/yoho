@@ -196,7 +196,8 @@ function SignedOut({ hint }: { hint?: string }) {
           </CardTitle>
         </CardHeader>
         <CardContent className="text-sm text-muted-foreground">
-          {hint ?? "Open the login link printed by `yoho ui`."} Login links work once; restart <code>yoho ui</code> for a new one.
+          {hint ?? "Open the login link printed by `yoho ui`."} Login links work once; this browser stays signed in until{" "}
+          <code>yoho ui</code> stops. Restart it for a new link.
         </CardContent>
       </Card>
     </div>
@@ -215,13 +216,14 @@ function SkeletonGrid() {
 
 function Summary({ snap }: { snap: Snapshot }) {
   const all = snap.servers.flatMap((s) => s.containers)
-  const running = all.filter((c) => c.state === "running").length
-  const unhealthy = all.filter((c) => c.health === "unhealthy" || (c.state !== "running" && c.state !== "")).length
+  const active = all.filter((c) => !c.completed)
+  const running = active.filter((c) => c.state === "running").length
+  const unhealthy = active.filter((c) => c.health === "unhealthy" || c.state !== "running").length
   const failing = snap.servers.filter((s) => s.error).length
   const current = snap.servers.map((s) => s.releases.find((r) => r.current)).find(Boolean)
   const stats = [
     { label: "Servers", value: `${snap.servers.length - failing}/${snap.servers.length}`, sub: failing ? `${failing} unreachable` : "reachable", bad: failing > 0, icon: ServerIcon },
-    { label: "Containers", value: `${running}/${all.length}`, sub: "running", bad: all.length > 0 && running < all.length, icon: BoxIcon },
+    { label: "Containers", value: `${running}/${active.length}`, sub: all.length > active.length ? `running · ${all.length - active.length} completed` : "running", bad: running < active.length, icon: BoxIcon },
     { label: "Attention", value: String(unhealthy), sub: unhealthy ? "unhealthy or stopped" : "all healthy", bad: unhealthy > 0, icon: ActivityIcon },
     { label: "Current Release", value: current ? shortVersion(current.version) : "—", sub: current ? `by ${current.performer || "?"}` : "no Release yet", bad: false, icon: HistoryIcon },
   ]
@@ -363,6 +365,7 @@ function ServerView({ server, now, onLogs }: { server: Server; now: number; onLo
 }
 
 function StateBadge({ c }: { c: Container }) {
+  if (c.completed) return <Badge variant="secondary">completed</Badge>
   if (c.state !== "running") return <Badge variant="destructive">{c.state || "unknown"}</Badge>
   if (c.health === "unhealthy") return <Badge variant="destructive">unhealthy</Badge>
   if (c.health === "starting") return <Badge variant="warning">starting</Badge>

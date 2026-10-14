@@ -4,9 +4,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"html"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"runtime"
+	"sync"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -131,9 +134,11 @@ with a one-time login link (printed, and opened in your browser unless
 			a.ui.Info("Yoho UI for %s · %s on http://%s (read-only, Ctrl-C to stop)", a.cfg.App, a.destName, ln.Addr())
 			a.ui.Info("Open (one-time link): %s", url)
 			if !noOpen && !g.json {
-				if err := openBrowser(url); err != nil {
+				cleanup, err := openBrowser(url)
+				if err != nil {
 					a.ui.Warn("cannot open a browser (%v); open the link above", err)
 				}
+				defer cleanup()
 			}
 			return srv.Serve(cmd.Context(), ln)
 		},
@@ -144,8 +149,12 @@ with a one-time login link (printed, and opened in your browser unless
 	return c
 }
 
-// openBrowser starts the platform's URL opener without waiting for it.
-func openBrowser(url string) error {
+// openBrowser opens url through a private redirect file, so the one-time
+// login code is never in a process argv where other local users can read
+// it. The returned cleanup removes the file; it is also removed after a
+// minute, once the browser has read it.
+func openBrowser(url string) (func(), error) {
+	noop := func() {}
 	var name string
 	switch runtime.GOOS {
 	case "darwin":
@@ -153,16 +162,35 @@ func openBrowser(url string) error {
 	case "linux", "freebsd", "openbsd", "netbsd":
 		name = "xdg-open"
 	default:
-		return errors.New("unsupported OS " + runtime.GOOS)
+		return noop, errors.New("unsupported OS " + runtime.GOOS)
 	}
-	path, err := exec.LookPath(name)
+	bin, err := exec.LookPath(name)
 	if err != nil {
-		return err
+		return noop, err
 	}
-	c := exec.Command(path, url)
+	dir, err := os.MkdirTemp("", "yoho-ui-") // 0700
+	if err != nil {
+		return noop, err
+	}
+	var once sync.Once
+	cleanup := func() { once.Do(func() { os.RemoveAll(dir) }) }
+	file := filepath.Join(dir, "open.html")
+	u := html.EscapeString(url)
+	page := `<!doctype html><meta charset="utf-8"><meta name="referrer" content="no-referrer">` +
+		`<meta http-equiv="refresh" content="0;url=` + u + `"><title>Yoho</title><a href="` + u + `">Open Yoho</a>`
+	if err := os.WriteFile(file, []byte(page), 0o600); err != nil {
+		cleanup()
+		return noop, err
+	}
+	c := exec.Command(bin, file)
 	if err := c.Start(); err != nil {
-		return err
+		cleanup()
+		return noop, err
 	}
-	go c.Wait()
-	return nil
+	go func() {
+		c.Wait()
+		time.Sleep(time.Minute)
+		cleanup()
+	}()
+	return cleanup, nil
 }

@@ -10,8 +10,42 @@ export class ApiError extends Error {
   }
 }
 
+// The login link redirects to /#session=TOKEN. Keep the token in this
+// origin's storage (scoped by port, unlike cookies) and drop it from the URL
+// and history. Storage can be unavailable; then it lives for this page only.
+const KEY = "yoho-session"
+let session = ""
+
+function takeSession(): string {
+  const m = /^#session=([0-9a-f]{64})$/.exec(window.location.hash)
+  if (m) {
+    session = m[1]
+    try {
+      localStorage.setItem(KEY, session)
+    } catch {
+      // keep it in memory
+    }
+    window.history.replaceState(null, "", window.location.pathname + window.location.search)
+    return session
+  }
+  if (!session) {
+    try {
+      session = localStorage.getItem(KEY) ?? ""
+    } catch {
+      // no storage
+    }
+  }
+  return session
+}
+
 async function get<T>(path: string, signal?: AbortSignal): Promise<T> {
-  const res = await fetch(path, { credentials: "same-origin", cache: "no-store", signal })
+  const token = takeSession()
+  const res = await fetch(path, {
+    credentials: "omit",
+    cache: "no-store",
+    signal,
+    headers: token ? { Authorization: `Bearer ${token}` } : {},
+  })
   let body: unknown = null
   try {
     body = await res.json()

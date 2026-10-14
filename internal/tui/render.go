@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"strings"
 	"time"
-	"unicode/utf8"
 
 	"github.com/yoho-build/yoho/internal/dash"
 )
@@ -32,7 +31,7 @@ func (m *Model) paint(l line, width int) string {
 			break
 		}
 		t := cut(s.text, left)
-		left -= utf8.RuneCountInString(t)
+		left -= colWidth(t)
 		if m.Color && s.style != "" {
 			b.WriteString("\x1b[" + s.style + "m" + t + "\x1b[0m")
 		} else {
@@ -42,8 +41,8 @@ func (m *Model) paint(l line, width int) string {
 	return b.String()
 }
 
-// cut truncates s to n runes and strips control characters, so container
-// output cannot move the cursor or change terminal state.
+// cut truncates s to n terminal columns and strips control characters, so
+// container output cannot move the cursor or change terminal state.
 func cut(s string, n int) string {
 	var b strings.Builder
 	i := 0
@@ -54,21 +53,49 @@ func cut(s string, n int) string {
 		if r < 0x20 || r == 0x7f || (r >= 0x80 && r < 0xa0) {
 			continue
 		}
-		if i >= n {
+		w := runeWidth(r)
+		if i+w > n {
 			break
 		}
 		b.WriteRune(r)
-		i++
+		i += w
 	}
 	return b.String()
 }
 
 func pad(s string, n int) string {
 	s = cut(s, n)
-	if c := utf8.RuneCountInString(s); c < n {
+	if c := colWidth(s); c < n {
 		s += strings.Repeat(" ", n-c)
 	}
 	return s
+}
+
+// colWidth is the terminal column count of s (after cut, so no controls).
+func colWidth(s string) int {
+	n := 0
+	for _, r := range s {
+		n += runeWidth(r)
+	}
+	return n
+}
+
+// runeWidth approximates wcwidth: 0 for combining marks and zero-width
+// characters, 2 for East Asian wide and fullwidth characters and emoji.
+func runeWidth(r rune) int {
+	switch {
+	case r == 0x200b || r == 0x200c || r == 0x200d || r == 0xfeff,
+		r >= 0x0300 && r <= 0x036f, r >= 0xfe00 && r <= 0xfe0f:
+		return 0
+	case r >= 0x1100 && r <= 0x115f, r >= 0x2e80 && r <= 0x303e, r >= 0x3041 && r <= 0x33ff,
+		r >= 0x3400 && r <= 0x4dbf, r >= 0x4e00 && r <= 0x9fff, r >= 0xa000 && r <= 0xa4cf,
+		r >= 0xac00 && r <= 0xd7a3, r >= 0xf900 && r <= 0xfaff, r >= 0xfe30 && r <= 0xfe4f,
+		r >= 0xff00 && r <= 0xff60, r >= 0xffe0 && r <= 0xffe6,
+		r >= 0x1f300 && r <= 0x1f64f, r >= 0x1f900 && r <= 0x1f9ff, r >= 0x1fa70 && r <= 0x1faff,
+		r >= 0x20000 && r <= 0x3fffd:
+		return 2
+	}
+	return 1
 }
 
 func bar(pct float64, width int) (string, string) {
@@ -289,6 +316,8 @@ func (m *Model) logLines(height int) []line {
 
 func stateText(c dash.Container) (string, string) {
 	switch {
+	case c.Completed:
+		return "completed", dim
 	case c.State != "running":
 		s := c.State
 		if s == "" {

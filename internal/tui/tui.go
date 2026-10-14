@@ -265,9 +265,12 @@ func Run(ctx context.Context, data Data, in *os.File, out io.Writer, opt Options
 	}
 	snaps := make(chan snapResult, 1)
 	logs := make(chan logResult, 1)
-	collecting := false
+	collecting, pendingFresh := false, false
 	collect := func(fresh bool) {
 		if collecting {
+			// A key press during a timed collection must not be served
+			// from the cache: run a fresh one when this one returns.
+			pendingFresh = pendingFresh || fresh
 			return
 		}
 		collecting = true
@@ -325,6 +328,11 @@ func Run(ctx context.Context, data Data, in *os.File, out io.Writer, opt Options
 		case r := <-snaps:
 			collecting = false
 			m.Loading = false
+			if pendingFresh {
+				pendingFresh = false
+				m.Loading = true
+				collect(true)
+			}
 			if r.err != nil {
 				if ctx.Err() != nil {
 					return nil

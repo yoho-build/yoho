@@ -6,7 +6,6 @@ import (
 	"errors"
 	"io"
 	"net/http"
-	"net/http/cookiejar"
 	"net/url"
 	"strings"
 	"testing"
@@ -60,14 +59,17 @@ func start(t *testing.T) (*Server, string, *fakeData) {
 	return s, s.LoginURL(ln.Addr()), data
 }
 
-func client(t *testing.T) *http.Client {
-	jar, _ := cookiejar.New(nil)
-	return &http.Client{Jar: jar}
+func noRedirect() *http.Client {
+	return &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
 }
 
-func get(t *testing.T, c *http.Client, u string) (*http.Response, string) {
+func get(t *testing.T, u, token string) (*http.Response, string) {
 	t.Helper()
-	res, err := c.Get(u)
+	req, _ := http.NewRequest("GET", u, nil)
+	if token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
+	res, err := noRedirect().Do(req)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -76,35 +78,42 @@ func get(t *testing.T, c *http.Client, u string) (*http.Response, string) {
 	return res, string(b)
 }
 
+// login redeems the link and returns the session token from the redirect.
+func login(t *testing.T, link string) string {
+	t.Helper()
+	res, _ := get(t, link, "")
+	tok, ok := strings.CutPrefix(res.Header.Get("Location"), "/#session=")
+	if res.StatusCode != http.StatusSeeOther || !ok || len(tok) != 64 {
+		t.Fatalf("login: %d %q", res.StatusCode, res.Header.Get("Location"))
+	}
+	if res.Header.Get("Set-Cookie") != "" {
+		t.Error("no cookies: they are shared by every port of 127.0.0.1")
+	}
+	return tok
+}
+
 func TestLoopbackListener(t *testing.T) {
-	_, login, _ := start(t)
-	u, _ := url.Parse(login)
+	_, link, _ := start(t)
+	u, _ := url.Parse(link)
 	if !strings.HasPrefix(u.Host, "127.0.0.1:") {
 		t.Fatalf("must listen on loopback: %s", u.Host)
 	}
 }
 
 func TestLoginIsSingleUseAndGuardsAPI(t *testing.T) {
-	_, login, _ := start(t)
-	base := strings.SplitN(login, "/login", 2)[0]
-	anon := client(t)
-	if res, body := get(t, anon, base+"/api/snapshot"); res.StatusCode != http.StatusUnauthorized || !strings.Contains(body, "login link") {
+	_, link, _ := start(t)
+	base := strings.SplitN(link, "/login", 2)[0]
+	if res, body := get(t, base+"/api/snapshot", ""); res.StatusCode != http.StatusUnauthorized || !strings.Contains(body, "login link") {
 		t.Fatalf("API without session: %d %s", res.StatusCode, body)
 	}
-	if res, _ := get(t, anon, base+"/login?code=wrong"); res.StatusCode != http.StatusForbidden {
+	if res, _ := get(t, base+"/login?code=wrong", ""); res.StatusCode != http.StatusForbidden {
 		t.Fatalf("wrong code: %d", res.StatusCode)
 	}
-
-	user := client(t)
-	res, body := get(t, user, login)
-	if res.StatusCode != http.StatusOK || !strings.Contains(body, "<title>Yoho") {
-		t.Fatalf("login should redirect to the app: %d %s", res.StatusCode, body)
+	tok := login(t, link)
+	if res, _ := get(t, base+"/api/snapshot", "x"+tok[1:]); res.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("wrong token: %d", res.StatusCode)
 	}
-	cookies := user.Jar.Cookies(res.Request.URL)
-	if len(cookies) != 1 || cookies[0].Name != cookieName {
-		t.Fatalf("session cookie: %v", cookies)
-	}
-	res, body = get(t, user, base+"/api/snapshot")
+	res, body := get(t, base+"/api/snapshot", tok)
 	var snap dash.Snapshot
 	if res.StatusCode != 200 || json.Unmarshal([]byte(body), &snap) != nil || snap.App != "shop" {
 		t.Fatalf("snapshot: %d %s", res.StatusCode, body)
@@ -112,40 +121,20 @@ func TestLoginIsSingleUseAndGuardsAPI(t *testing.T) {
 	if cc := res.Header.Get("Cache-Control"); cc != "no-store" {
 		t.Errorf("API responses must not be cached: %q", cc)
 	}
-
-	// The code is consumed: another browser cannot reuse it.
-	if res, _ := get(t, client(t), login); res.StatusCode != http.StatusForbidden {
+	// The code is consumed.
+	if res, _ := get(t, link, ""); res.StatusCode != http.StatusForbidden {
 		t.Fatalf("second use of the login link: %d", res.StatusCode)
-	}
-	// The signed-in browser revisiting the link is sent to the app.
-	if res, _ := get(t, user, login); res.StatusCode != http.StatusOK {
-		t.Fatalf("revisit with session: %d", res.StatusCode)
-	}
-}
-
-func TestSetCookieAttributes(t *testing.T) {
-	_, login, _ := start(t)
-	c := &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
-	res, _ := get(t, c, login)
-	sc := res.Header.Get("Set-Cookie")
-	for _, want := range []string{"HttpOnly", "SameSite=Strict", "Path=/"} {
-		if !strings.Contains(sc, want) {
-			t.Errorf("Set-Cookie %q lacks %s", sc, want)
-		}
-	}
-	if res.StatusCode != http.StatusSeeOther || res.Header.Get("Location") != "/" {
-		t.Errorf("redirect: %d %s", res.StatusCode, res.Header.Get("Location"))
 	}
 }
 
 func TestRejectsForeignHostAndWrites(t *testing.T) {
-	_, login, _ := start(t)
-	u, _ := url.Parse(login)
+	_, link, _ := start(t)
+	u, _ := url.Parse(link)
 	_, port, _ := strings.Cut(u.Host, ":")
-	for _, host := range []string{"evil.example:" + port, "127.0.0.1.nip.io:" + port, "127.0.0.1:1", "localhost"} {
+	for _, host := range []string{"evil.example:" + port, "127.0.0.1.nip.io:" + port, "127.0.0.1:1", "localhost", "127.0.0.1"} {
 		req, _ := http.NewRequest("GET", "http://"+u.Host+"/login?"+u.RawQuery, nil)
 		req.Host = host
-		res, err := http.DefaultClient.Do(req)
+		res, err := noRedirect().Do(req)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -176,19 +165,32 @@ func TestRejectsForeignHostAndWrites(t *testing.T) {
 	}
 }
 
+func TestPort80HostWithoutPort(t *testing.T) {
+	s := New(&fakeData{}, Meta{}, fstest.MapFS{})
+	s.port = "80"
+	for host, want := range map[string]bool{"127.0.0.1": true, "localhost": true, "[::1]": true, "127.0.0.1:80": true, "evil.example": false, "127.0.0.1:81": false} {
+		if got := s.loopbackHost(host); got != want {
+			t.Errorf("%q: %v, want %v", host, got, want)
+		}
+	}
+	s.port = "8080"
+	if s.loopbackHost("127.0.0.1") {
+		t.Error("a missing port means 80")
+	}
+}
+
 func TestStaticAndSecurityHeaders(t *testing.T) {
-	_, login, _ := start(t)
-	base := strings.SplitN(login, "/login", 2)[0]
-	c := client(t)
-	res, body := get(t, c, base+"/assets/app.js")
+	_, link, _ := start(t)
+	base := strings.SplitN(link, "/login", 2)[0]
+	res, body := get(t, base+"/assets/app.js", "")
 	if res.StatusCode != 200 || body != "console.log(1)" || !strings.Contains(res.Header.Get("Cache-Control"), "immutable") {
 		t.Errorf("asset: %d %q %v", res.StatusCode, body, res.Header)
 	}
-	res, body = get(t, c, base+"/some/client/route")
+	res, body = get(t, base+"/some/client/route", "")
 	if res.StatusCode != 200 || !strings.Contains(body, "<title>Yoho") {
 		t.Errorf("SPA fallback: %d %s", res.StatusCode, body)
 	}
-	res, body = get(t, c, base+"/../../etc/passwd")
+	res, body = get(t, base+"/../../etc/passwd", "")
 	if strings.Contains(body, "root:") || res.StatusCode != 200 && res.StatusCode != 400 {
 		t.Errorf("traversal: %d %s", res.StatusCode, body)
 	}
@@ -200,15 +202,14 @@ func TestStaticAndSecurityHeaders(t *testing.T) {
 }
 
 func TestLogsAPI(t *testing.T) {
-	_, login, data := start(t)
-	base := strings.SplitN(login, "/login", 2)[0]
-	c := client(t)
-	get(t, c, login)
-	res, body := get(t, c, base+"/api/logs?server=web-1&container=yoho-proxy&lines=10")
+	_, link, data := start(t)
+	base := strings.SplitN(link, "/login", 2)[0]
+	tok := login(t, link)
+	res, body := get(t, base+"/api/logs?server=web-1&container=yoho-proxy&lines=10", tok)
 	if res.StatusCode != 200 || !strings.Contains(body, "hello") {
 		t.Fatalf("logs: %d %s", res.StatusCode, body)
 	}
-	res, _ = get(t, c, base+"/api/logs?server=web-1&container=postgres")
+	res, _ = get(t, base+"/api/logs?server=web-1&container=postgres", tok)
 	if res.StatusCode != http.StatusBadRequest {
 		t.Errorf("unowned container: %d", res.StatusCode)
 	}

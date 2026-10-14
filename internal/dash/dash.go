@@ -96,11 +96,14 @@ type Disk struct {
 
 // Container is one Yoho-owned container with its latest resource usage.
 type Container struct {
-	ID         string  `json:"id"`
-	Name       string  `json:"name"`
-	Service    string  `json:"service"`
-	Image      string  `json:"image"`
-	State      string  `json:"state"`  // running | exited | ...
+	ID      string `json:"id"`
+	Name    string `json:"name"`
+	Service string `json:"service"`
+	Image   string `json:"image"`
+	State   string `json:"state"` // running | exited | ...
+	// Completed is an exited container that finished with code 0 (a
+	// one-off job or release command), not a failure.
+	Completed  bool    `json:"completed"`
 	Health     string  `json:"health"` // healthy | unhealthy | starting | ""
 	Status     string  `json:"status"`
 	Ports      string  `json:"ports"`
@@ -136,7 +139,9 @@ func Collect(ctx context.Context, src *Source) (*Snapshot, error) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			snap.Servers[i] = collectServer(ctx, src, t)
+			// Swarm records Releases on the manager (the first Server) only.
+			releases := src.Releases != nil && (i == 0 || src.Runtime != "swarm")
+			snap.Servers[i] = collectServer(ctx, src, t, releases)
 		}()
 	}
 	wg.Wait()
@@ -146,7 +151,7 @@ func Collect(ctx context.Context, src *Source) (*Snapshot, error) {
 	return snap, nil
 }
 
-func collectServer(ctx context.Context, src *Source, t Target) (s Server) {
+func collectServer(ctx context.Context, src *Source, t Target, releases bool) (s Server) {
 	start := time.Now()
 	s = Server{Name: t.Name, SSH: t.SSH, Containers: []Container{}, Releases: []Release{}}
 	defer func() { s.Elapsed = time.Since(start).Seconds() }()
@@ -157,7 +162,7 @@ func collectServer(ctx context.Context, src *Source, t Target) (s Server) {
 	}
 	parsed := Parse(out)
 	s.Host, s.Proxy, s.Containers = parsed.Host, parsed.Proxy, parsed.Containers
-	if src.Releases != nil {
+	if releases {
 		rels, err := src.Releases(ctx, t.Host)
 		if err != nil {
 			s.Error = err.Error()
@@ -214,7 +219,7 @@ disk() {
   df -Pk "$d" 2>/dev/null | awk -v l="$1" -v p="$2" 'NR==2 {print "disk=" l "\t" p "\t" $6 "\t" $2 "\t" $3 "\t" $4}' || :
 }
 disk yoho ` + q(root) + `
-if v=$(docker version --format '{{.Server.Version}}' 2>&1); then
+if v=$(docker version --format '{{.Server.Version}}' 2>/dev/null); then
   printf 'docker=%s\n' "$v"
   dr=$(docker info --format '{{.DockerRootDir}}' 2>/dev/null || :)
   if [ -n "$dr" ]; then disk docker "$dr"; fi
@@ -231,7 +236,7 @@ if v=$(docker version --format '{{.Server.Version}}' 2>&1); then
   if [ -n "$ids" ]; then docker stats --no-stream --format '{{json .}}' $ids 2>/dev/null || :; fi
 else
   echo ` + markDocker + `
-  printf '%s\n' "$v" | head -n 3
+  docker version --format '{{.Server.Version}}' 2>&1 | head -n 3 || :
 fi
 `
 }
@@ -292,6 +297,9 @@ func Parse(out string) Parsed {
 		p.Host.DockerError = strings.Join(docker, " ")
 	}
 	for _, l := range ps {
+		if l.State != "running" && strings.Contains(","+l.Labels, ",com.docker.swarm.task.id=") {
+			continue // Swarm's retained history of replaced tasks
+		}
 		c := container(l)
 		if st, ok := stats[c.Name]; ok {
 			c.CPUPercent = percent(st.CPUPerc)
@@ -358,12 +366,21 @@ func hostLine(h *Host, line string) {
 		for _, e := range h.Disks {
 			// The Docker root often shares the Yoho root's filesystem, as a
 			// mount point of its own (bind mounts, overlay roots) or not.
-			if e.Mount == d.Mount || e.Total == d.Total && e.Used == d.Used && e.Avail == d.Avail {
+			if e.Mount == d.Mount || e.Total == d.Total && near(e.Used, d.Used, d.Total/1000) {
 				return
 			}
 		}
 		h.Disks = append(h.Disks, d)
 	}
+}
+
+// near reports whether a and b differ by at most tol (two df calls on one
+// filesystem see slightly different usage).
+func near(a, b, tol uint64) bool {
+	if a > b {
+		a, b = b, a
+	}
+	return b-a <= tol
 }
 
 func kib(s string) uint64 {
@@ -400,6 +417,7 @@ func container(l psLine) Container {
 		c.Service = "proxy"
 	}
 	st := strings.ToLower(l.Status)
+	c.Completed = c.State == "exited" && strings.HasPrefix(st, "exited (0)")
 	switch {
 	case strings.Contains(st, "(healthy)"):
 		c.Health = "healthy"
