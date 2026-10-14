@@ -4,7 +4,6 @@ on:
     branches: [main]
     paths:
       - "docs/site/**"
-      - ".gitattributes"
       - "package.json"
       - "package-lock.json"
       - ".github/workflows/docs.yml"
@@ -15,7 +14,6 @@ on:
   pull_request:
     paths:
       - "docs/site/**"
-      - ".gitattributes"
       - "package.json"
       - "package-lock.json"
       - ".github/workflows/docs.yml"
@@ -30,14 +28,13 @@ concurrency:
   cancel-in-progress: true
 jobs:
   build:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions:
       contents: read
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-          lfs: true # docs/site/public/og.png (social card)
       - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
         with:
           node-version: "24.21.0" # Node LTS Krypton
@@ -46,6 +43,12 @@ jobs:
         with:
           go-version-file: go.mod
       - run: npm ci
+      # Social card: render docs/site/assets/og.svg with the font it is designed for.
+      - name: Install Inter font
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends fonts-inter
+      - name: Install Chromium for Playwright
+        run: npx playwright install --with-deps chromium
+      - run: npm run docs:og
       - run: npm run docs:build
       - uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
         if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'

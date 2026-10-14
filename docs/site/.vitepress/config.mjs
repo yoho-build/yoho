@@ -31,7 +31,7 @@ export default defineConfig({
   ignoreDeadLinks: false,
   head: [
     ['link', { rel: 'icon', type: 'image/svg+xml', href: '/assets/logo.svg' }],
-    // Social card: docs/site/assets/og.svg rendered to public/og.png (Git LFS).
+    // Social card: docs/site/assets/og.svg, rendered to public/og.png by `npm run docs:og`.
     ['meta', { property: 'og:type', content: 'website' }],
     ['meta', { property: 'og:site_name', content: 'Yoho' }],
     ['meta', { property: 'og:image', content: `${site}/og.png` }],

@@ -1,1 +1,0 @@
-docs/site/public/*.png filter=lfs diff=lfs merge=lfs -text

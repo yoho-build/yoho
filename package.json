@@ -7,10 +7,12 @@
   },
   "scripts": {
     "docs:dev": "node docs/site/.vitepress/prepare.mjs && vitepress dev docs/site",
+    "docs:og": "node docs/site/.vitepress/og.mjs",
     "docs:build": "node docs/site/.vitepress/prepare.mjs && vitepress build docs/site && node docs/site/.vitepress/check.mjs && node --test docs/site/.vitepress/server.test.mjs",
     "docs:preview": "node docs/site/.vitepress/preview.mjs"
   },
   "devDependencies": {
+    "playwright": "1.56.1",
     "vitepress": "1.6.4"
   }
 }
