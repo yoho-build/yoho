@@ -31,7 +31,7 @@ export default defineConfig({
   ignoreDeadLinks: false,
   head: [
     ['link', { rel: 'icon', type: 'image/svg+xml', href: '/assets/logo.svg' }],
-    // Social card: docs/site/assets/og.svg, rendered to public/og.png by `npm run docs:og`.
+    // Social card: docs/site/assets/og.svg, rendered to public/og.png and public/twitter.png by `npm run docs:og`.
     ['meta', { property: 'og:type', content: 'website' }],
     ['meta', { property: 'og:site_name', content: 'Yoho' }],
     ['meta', { property: 'og:image', content: `${site}/og.png` }],
@@ -39,7 +39,8 @@ export default defineConfig({
     ['meta', { property: 'og:image:height', content: '630' }],
     ['meta', { property: 'og:image:alt', content: 'Yoho: deploy Docker Compose apps to your own servers. compose.yaml to SSH to your Server.' }],
     ['meta', { name: 'twitter:card', content: 'summary_large_image' }],
-    ['meta', { name: 'twitter:image', content: `${site}/og.png` }]
+    ['meta', { name: 'twitter:image', content: `${site}/twitter.png` }],
+    ['meta', { name: 'twitter:image:alt', content: 'Yoho: deploy Docker Compose apps to your own servers. compose.yaml to SSH to your Server.' }]
   ],
   markdown: {
     anchor: { slugify: headingSlug },

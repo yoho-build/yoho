@@ -1,5 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="1200" height="630" viewBox="0 0 1200 630">
-  <!-- Source of /og.png (Open Graph / social card). Render with:
+  <!-- Source of /og.png (1200x630) and /twitter.png (1200x600: y 15-615, keep
+       content inside it). Render with:
        npm run docs:og   (the docs workflow does this on every build) -->
   <title>Yoho: deploy Docker Compose apps to your own servers</title>
   <defs>
