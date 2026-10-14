@@ -30,6 +30,8 @@ Edit Markdown under `docs/site`; keep relative `.md` links for GitHub readers. T
 
 `docs:dev` and `docs:build` copy the current `scripts/install.sh` and generate both JSON Schemas with the current Go CLI, without connecting to a Server. They serve `/install.sh`, `/schema/yoho.schema.json`, `/schema/x-yoho.schema.json`, and `/assets/logo.svg` from the ignored generated files in `docs/site/public`. Rerun the command after changing the installer or schema structs. `docs:build` emits `docs/site/.vitepress/dist`, checks strict links, legacy paths/anchors, downloads and local-search coverage, and runs local server-security regressions. GitHub Pages publishes that directory with `public/CNAME` preserving `yohobuild.com`.
 
+The landing page is `docs/site/index.md` (VitePress `layout: home`). The social card `/og.png` (1200×630, used for `og:image` and `twitter:image` on every page) is rendered from `docs/site/assets/og.svg` and stored with Git LFS: install Git LFS (`git lfs install`) before cloning or after (`git lfs pull`). After editing the SVG, re-render and commit the PNG with `npx -y -p playwright@1.56.1 node docs/site/.vitepress/og.mjs`. `docs:build` fails if `og.png` is an LFS pointer or not 1200×630.
+
 ## Go vulnerability scanning
 
 The [Go vulnerability scan workflow](https://github.com/yoho-build/yoho/blob/main/.github/workflows/vulnerability.yml) runs weekly on Tuesdays at 06:23 UTC against the default branch, and manually from **Actions → Go vulnerability scan → Run workflow**. GitHub may delay scheduled runs. View the run status and findings in that workflow's Actions logs; it does not create issues or send custom notifications.

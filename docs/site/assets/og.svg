@@ -1,0 +1,55 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="630" viewBox="0 0 1200 630">
+  <!-- Source of /og.png (Open Graph / social card). Render with:
+       node docs/site/.vitepress/og.mjs   (needs Playwright's Chromium) -->
+  <title>Yoho: deploy Docker Compose apps to your own servers</title>
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#0d1c17"/>
+      <stop offset="1" stop-color="#123329"/>
+    </linearGradient>
+    <radialGradient id="glow" cx="0.82" cy="0.18" r="0.6">
+      <stop offset="0" stop-color="#14bba6" stop-opacity="0.28"/>
+      <stop offset="1" stop-color="#14bba6" stop-opacity="0"/>
+    </radialGradient>
+    <pattern id="grid" width="40" height="40" patternUnits="userSpaceOnUse">
+      <path d="M40 0H0V40" fill="none" stroke="#ffffff" stroke-opacity="0.035" stroke-width="1"/>
+    </pattern>
+  </defs>
+
+  <rect width="1200" height="630" fill="url(#bg)"/>
+  <rect width="1200" height="630" fill="url(#grid)"/>
+  <rect width="1200" height="630" fill="url(#glow)"/>
+
+  <!-- Logo mark (from assets/logo.svg) on a light tile -->
+  <g transform="translate(80 78)">
+    <rect width="112" height="112" rx="24" fill="#e0eee8"/>
+    <g transform="translate(6 6) scale(0.0798)">
+      <path fill="#0c4d33" d="M111 986 284 625 329 574 369 597 443 431 474 406 526 287 618 179 661 305 690 327 709 367 737 386V424L657 468 648 903 273 986Z"/>
+      <path fill="#0c4d33" d="M695 483 760 447 775 408 816 368 938 632 980 661 1142 986H985L800 926 707 904Z"/>
+      <path fill="#14bba6" d="M273 986 550 926H800L985 986 743 1069H511Z"/>
+    </g>
+  </g>
+  <text x="220" y="156" fill="#e0eee8" font-family="Inter, -apple-system, 'Segoe UI', sans-serif" font-size="64" font-weight="800" letter-spacing="-2">Yoho</text>
+  <text x="1120" y="148" text-anchor="end" fill="#7ce4cf" font-family="Inter, -apple-system, 'Segoe UI', sans-serif" font-size="24" font-weight="600">yohobuild.com</text>
+
+  <text fill="#ffffff" font-family="Inter, -apple-system, 'Segoe UI', sans-serif" font-size="60" font-weight="800" letter-spacing="-2">
+    <tspan x="80" y="300">Deploy Docker Compose apps</tspan>
+    <tspan x="80" y="372">to your own servers.</tspan>
+  </text>
+  <text x="80" y="432" fill="#a8beb4" font-family="Inter, -apple-system, 'Segoe UI', sans-serif" font-size="28" font-weight="500">One command, zero downtime, no platform to run. One static Go binary.</text>
+
+  <!-- compose.yaml → SSH → your Server -->
+  <g font-family="'SFMono-Regular', 'DejaVu Sans Mono', Consolas, monospace" font-size="24" font-weight="700">
+    <rect x="80" y="486" width="214" height="60" rx="12" fill="#14bba6" fill-opacity="0.14" stroke="#14bba6" stroke-opacity="0.6"/>
+    <text x="187" y="524" text-anchor="middle" fill="#7ce4cf">compose.yaml</text>
+    <path d="M310 516h52" stroke="#59d6bd" stroke-width="3" stroke-linecap="round"/>
+    <path d="M354 506l12 10-12 10" fill="none" stroke="#59d6bd" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+    <rect x="382" y="486" width="104" height="60" rx="12" fill="#14bba6" fill-opacity="0.14" stroke="#14bba6" stroke-opacity="0.6"/>
+    <text x="434" y="524" text-anchor="middle" fill="#7ce4cf">SSH</text>
+    <path d="M502 516h52" stroke="#59d6bd" stroke-width="3" stroke-linecap="round"/>
+    <path d="M546 506l12 10-12 10" fill="none" stroke="#59d6bd" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+    <rect x="574" y="486" width="214" height="60" rx="12" fill="#e0eee8"/>
+    <text x="681" y="524" text-anchor="middle" fill="#0c4d33">your Server</text>
+  </g>
+  <text x="1120" y="524" text-anchor="end" fill="#a8beb4" font-family="Inter, -apple-system, 'Segoe UI', sans-serif" font-size="22" font-weight="500">Open source · MIT</text>
+</svg>

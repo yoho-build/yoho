@@ -2,6 +2,8 @@ import { defineConfig } from 'vitepress'
 import { relative } from 'node:path'
 import { siteDir, rewrites, sourceLink, headingSlug } from './routes.mjs'
 
+const site = 'https://yohobuild.com'
+
 const guide = [
   ['Getting started', 'getting-started'],
   ['Set up with your AI agent', 'agents'],
@@ -27,14 +29,28 @@ export default defineConfig({
   cleanUrls: true,
   rewrites,
   ignoreDeadLinks: false,
-  head: [['link', { rel: 'icon', type: 'image/svg+xml', href: '/assets/logo.svg' }]],
+  head: [
+    ['link', { rel: 'icon', type: 'image/svg+xml', href: '/assets/logo.svg' }],
+    // Social card: docs/site/assets/og.svg rendered to public/og.png (Git LFS).
+    ['meta', { property: 'og:type', content: 'website' }],
+    ['meta', { property: 'og:site_name', content: 'Yoho' }],
+    ['meta', { property: 'og:image', content: `${site}/og.png` }],
+    ['meta', { property: 'og:image:width', content: '1200' }],
+    ['meta', { property: 'og:image:height', content: '630' }],
+    ['meta', { property: 'og:image:alt', content: 'Yoho: deploy Docker Compose apps to your own servers. compose.yaml to SSH to your Server.' }],
+    ['meta', { name: 'twitter:card', content: 'summary_large_image' }],
+    ['meta', { name: 'twitter:image', content: `${site}/og.png` }]
+  ],
   markdown: {
     anchor: { slugify: headingSlug },
     headers: { slugify: headingSlug },
     config(md) {
       // Keep repo-friendly .md links in source; resolve them before VP validates links.
       md.core.ruler.push('yoho-source-links', state => {
-        const source = relative(siteDir, state.env.realPath || state.env.path).replaceAll('\\', '/')
+        // Inline title parsing (frontmatter title) has no file: nothing to resolve.
+        const file = state.env?.realPath || state.env?.path
+        if (!file) return
+        const source = relative(siteDir, file).replaceAll('\\', '/')
         for (const block of state.tokens) {
           for (const token of block.children || []) {
             if (token.type === 'link_open') {
@@ -46,11 +62,18 @@ export default defineConfig({
     }
   },
   transformPageData(page) {
+    const url = `${site}/` + page.relativePath.replace(/index\.md$/, '').replace(/\.md$/, '.html')
+    const title = page.relativePath === 'index.md' ? 'Yoho: deploy Docker Compose apps to your own servers' : `${page.title} | Yoho`
+    const description = page.description || page.frontmatter.hero?.tagline || 'Deploy Docker Compose apps to your own servers with zero downtime.'
     page.frontmatter.head ??= []
-    page.frontmatter.head.push(['link', {
-      rel: 'canonical',
-      href: 'https://yohobuild.com/' + page.relativePath.replace(/index\.md$/, '').replace(/\.md$/, '.html')
-    }])
+    page.frontmatter.head.push(
+      ['link', { rel: 'canonical', href: url }],
+      ['meta', { property: 'og:url', content: url }],
+      ['meta', { property: 'og:title', content: title }],
+      ['meta', { property: 'og:description', content: description }],
+      ['meta', { name: 'twitter:title', content: title }],
+      ['meta', { name: 'twitter:description', content: description }]
+    )
   },
   themeConfig: {
     logo: { src: '/assets/logo.svg', alt: 'Yoho' },

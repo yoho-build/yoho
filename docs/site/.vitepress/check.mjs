@@ -57,10 +57,21 @@ for (const name of ['yoho', 'x-yoho']) {
 }
 assert.equal(readFileSync(join(outDir, 'CNAME'), 'utf8').trim(), 'yohobuild.com')
 assert.equal(readFileSync(join(outDir, 'assets/logo.svg'), 'utf8'), readFileSync(join(siteDir, 'assets/logo.svg'), 'utf8'))
+// og.png is stored in Git LFS: a checkout without LFS publishes a pointer file.
+const og = readFileSync(join(outDir, 'og.png'))
+assert.ok(og.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])),
+  'og.png is not a PNG (Git LFS pointer? check out with LFS, e.g. actions/checkout lfs: true)')
+assert.deepEqual([og.readUInt32BE(16), og.readUInt32BE(20)], [1200, 630], 'og.png must be 1200x630')
+for (const source of sourcePaths) {
+  const html = readFileSync(join(outDir, routePath(source).replace(/\.md$/, '.html')), 'utf8')
+  for (const tag of ['property="og:image" content="https://yohobuild.com/og.png"', 'name="twitter:card" content="summary_large_image"', 'property="og:title"', 'property="og:url"']) {
+    assert.ok(html.includes(tag), `${source}: missing <meta ${tag}>`)
+  }
+}
 const searchFile = files(join(outDir, 'assets')).find(file => /localSearchIndex.*\.js$/.test(file))
 assert.ok(searchFile, 'Missing local search index')
 const searchIndex = JSON.parse((await import(pathToFileURL(searchFile).href)).default)
 for (const source of sourcePaths) {
   assert.ok(Object.values(searchIndex.documentIds).some(id => id.startsWith(pageURL(source) + '#')), `${source}: missing from local search`)
 }
-console.log(`Docs checks passed: ${sourcePaths.length} directory pages, preserved heading anchors, ${links} local links, installer, schemas, logo, CNAME and local search.`)
+console.log(`Docs checks passed: ${sourcePaths.length} directory pages, preserved heading anchors, ${links} local links, installer, schemas, logo, social card, CNAME and local search.`)
