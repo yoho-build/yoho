@@ -79,6 +79,11 @@ func AssetName(platform string) (string, error) {
 // file is reused when its sha256 matches checksums.txt. version "dev" or
 // empty returns ErrDevBuild.
 //
+// Every call, for a fresh or cached file, then verifies signed build
+// provenance for the sha256 digest (see verifyReleaseProvenance). A failure
+// returns an error wrapping ErrProvenance and never the path; there is no
+// checksum-only fallback.
+//
 // With a token (GITHUB_TOKEN, else GH_TOKEN, else `gh auth token`), the
 // bytes come from the GitHub REST API. Otherwise the public release URLs
 // are used.
@@ -111,7 +116,20 @@ func Download(ctx context.Context, version, platform, cacheDir string) (string, 
 	if err != nil {
 		return "", err
 	}
+	digest, err := hex.DecodeString(sum)
+	if err != nil {
+		return "", fmt.Errorf("release %s: invalid checksum for %s", version, asset)
+	}
+	provenance := func() error {
+		if err := verifyProvenance(ctx, token, version, digest); err != nil {
+			return fmt.Errorf("%w for %s %s: %w", ErrProvenance, asset, version, err)
+		}
+		return nil
+	}
 	if ok, _ := fileSumMatches(dest, sum); ok {
+		if err := provenance(); err != nil {
+			return "", err
+		}
 		if err := os.Chmod(dest, 0o755); err != nil {
 			return "", err
 		}
@@ -129,6 +147,9 @@ func Download(ctx context.Context, version, platform, cacheDir string) (string, 
 	got := sha256.Sum256(body)
 	if hex.EncodeToString(got[:]) != sum {
 		return "", fmt.Errorf("checksum mismatch for %s", asset)
+	}
+	if err := provenance(); err != nil {
+		return "", err
 	}
 	if err := os.MkdirAll(filepath.Dir(dest), 0o755); err != nil {
 		return "", err
@@ -288,6 +309,10 @@ func getAsset(ctx context.Context, token, rawURL string, notFound error) ([]byte
 }
 
 func get(ctx context.Context, rawURL, token, accept string) ([]byte, error) {
+	return getLimit(ctx, rawURL, token, accept, maxAsset)
+}
+
+func getLimit(ctx context.Context, rawURL, token, accept string, limit int) ([]byte, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
 	if err != nil {
 		return nil, err
@@ -310,12 +335,12 @@ func get(ctx context.Context, rawURL, token, accept string) ([]byte, error) {
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("download %s: HTTP %s", rawURL, resp.Status)
 	}
-	body, err := io.ReadAll(io.LimitReader(resp.Body, maxAsset+1))
+	body, err := io.ReadAll(io.LimitReader(resp.Body, int64(limit)+1))
 	if err != nil {
 		return nil, fmt.Errorf("download %s: %w", rawURL, err)
 	}
-	if len(body) > maxAsset {
-		return nil, fmt.Errorf("download %s: response exceeds %d bytes", rawURL, maxAsset)
+	if len(body) > limit {
+		return nil, fmt.Errorf("download %s: response exceeds %d bytes", rawURL, limit)
 	}
 	return body, nil
 }

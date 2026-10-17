@@ -49,6 +49,7 @@ func TestDownloadSuccessMismatch404AndCache(t *testing.T) {
 	good := hex.EncodeToString(sum[:])
 	var assetHits atomic.Int32
 	useToken(t, "")
+	verified := stubProvenance(t, nil)
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/"+version+"/"+asset, func(w http.ResponseWriter, r *http.Request) {
@@ -107,6 +108,9 @@ func TestDownloadSuccessMismatch404AndCache(t *testing.T) {
 	if n := assetHits.Load(); n != 1 {
 		t.Fatalf("asset downloads = %d, want 1 (cache reuse)", n)
 	}
+	if got := *verified; len(got) != 2 || got[0] != version+" "+good || got[1] != got[0] {
+		t.Fatalf("provenance checks = %q, want fresh and cached", got)
+	}
 
 	_, err = Download(context.Background(), "v9.9.9", "linux/amd64", cache)
 	const hint = "release v9.9.9 not found; if the repo is private set GITHUB_TOKEN or log in with gh"
@@ -137,6 +141,12 @@ func TestTokenAPIRedirectStripsAuthorization(t *testing.T) {
 	good := hex.EncodeToString(sum[:])
 	checksumFile := good + "  " + asset + "\n"
 	useToken(t, token)
+	stubProvenance(t, func(_ context.Context, tok, _ string, _ []byte) error {
+		if tok != token {
+			t.Errorf("provenance token %q", tok)
+		}
+		return nil
+	})
 
 	var apiURL string
 	// [::1] is a different host from the API's 127.0.0.1, and it is loopback.
@@ -313,6 +323,79 @@ func TestDiscoverToken(t *testing.T) {
 	if elapsed := time.Since(start); elapsed > 8*time.Second {
 		t.Fatalf("gh auth token timed out too slowly: %s", elapsed)
 	}
+}
+
+// TestDownloadProvenanceFailure: a failed provenance check returns no path,
+// for a fresh download (nothing is left in the cache) and for a cached file
+// whose checksum still matches.
+func TestDownloadProvenanceFailure(t *testing.T) {
+	const version = "v0.1.4"
+	const asset = "yoho-linux-amd64"
+	payload := []byte("yoho-binary-bytes")
+	sum := sha256.Sum256(payload)
+	good := hex.EncodeToString(sum[:])
+	useToken(t, "")
+	var calls atomic.Int32
+	stubProvenance(t, func(_ context.Context, tok, v string, digest []byte) error {
+		calls.Add(1)
+		if tok != "" || v != version || hex.EncodeToString(digest) != good {
+			t.Errorf("provenance args %q %q %x", tok, v, digest)
+		}
+		return errors.New("no attestation")
+	})
+	mux := http.NewServeMux()
+	mux.HandleFunc("/"+version+"/"+asset, func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write(payload)
+	})
+	mux.HandleFunc("/"+version+"/checksums.txt", func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(good + "  " + asset + "\n"))
+	})
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+	prev := ReleaseBase
+	ReleaseBase = srv.URL
+	t.Cleanup(func() { ReleaseBase = prev })
+
+	cache := t.TempDir()
+	dest := filepath.Join(cache, version, asset)
+	path, err := Download(context.Background(), version, "linux/amd64", cache)
+	if !errors.Is(err, ErrProvenance) || path != "" || !strings.Contains(err.Error(), "no attestation") {
+		t.Fatalf("fresh: %q %v", path, err)
+	}
+	if _, statErr := os.Stat(dest); !os.IsNotExist(statErr) {
+		t.Fatalf("unverified download left a file: %v", statErr)
+	}
+
+	if err := os.MkdirAll(filepath.Dir(dest), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(dest, payload, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	path, err = Download(context.Background(), version, "linux/amd64", cache)
+	if !errors.Is(err, ErrProvenance) || path != "" {
+		t.Fatalf("cached: %q %v", path, err)
+	}
+	if n := calls.Load(); n != 2 {
+		t.Fatalf("provenance checks = %d, want 2", n)
+	}
+}
+
+// stubProvenance replaces the Sigstore check. With fn nil it accepts and
+// records "<version> <hex digest>" per call.
+func stubProvenance(t *testing.T, fn func(context.Context, string, string, []byte) error) *[]string {
+	t.Helper()
+	var seen []string
+	if fn == nil {
+		fn = func(_ context.Context, _, version string, digest []byte) error {
+			seen = append(seen, version+" "+hex.EncodeToString(digest))
+			return nil
+		}
+	}
+	prev := verifyProvenance
+	verifyProvenance = fn
+	t.Cleanup(func() { verifyProvenance = prev })
+	return &seen
 }
 
 func useToken(t *testing.T, token string) {

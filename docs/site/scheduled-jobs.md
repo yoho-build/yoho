@@ -46,10 +46,12 @@ Reinstall with `schedule install` or use `yoho apply` after changing retries/del
 
 1. `--binary` (`yoho schedule install` only), when you pass one.
 2. This binary, when it already matches the Server.
-3. The GitHub Release for this version (`release v0.1.0`), except for a dev build.
+3. The GitHub Release for this version (`release v0.1.0`), except for a dev build. The download is checked against `checksums.txt` and then against signed build provenance (see below).
 4. A cross-build from the Yoho source tree.
 
 The step detail names the source: `release v0.1.0`, `cross-built from source`, or `this binary`.
+
+Release downloads verify [signed build provenance](getting-started.md#signed-binary-provenance) by default, on every install, including a binary reused from the local cache (`~/.cache/yoho/bin` or the OS equivalent). Yoho fetches the Release attestation for the binary's SHA-256 from the GitHub API and verifies it with Sigstore: the public-good trusted root (refreshed through Sigstore's TUF repository, cached under the user cache directory in `yoho/sigstore`), a transparency log entry, GitHub's Actions OIDC issuer, the `yoho-build/yoho` `.github/workflows/release.yml` workflow at exactly `refs/tags/<version>`, and an SLSA v1 provenance predicate. A missing attestation, a policy mismatch, or an unreachable GitHub or Sigstore service fails the download and never falls back to checksum-only; Yoho then tries a cross-build from source, or stops with a `--binary` hint. Releases before v0.1.5 have no attestations, so with those use `--binary` (or a source checkout). There is no opt-out; `--binary` is the explicit way to install a binary you vouch for.
 
 ## Apply
 

@@ -328,6 +328,9 @@ func linuxBinary(ctx context.Context, explicit, platform string, out interface{ 
 		}
 		dlErr = err
 		fmt.Fprintf(out, "release download failed: %v\n", err)
+		if errors.Is(err, dist.ErrProvenance) {
+			fmt.Fprintf(out, "hint: releases before v0.1.5 have no signed provenance; pass --binary with a yoho binary you trust\n")
+		}
 	}
 	src := yohoSourceDir()
 	gobin, gerr := exec.LookPath("go")
