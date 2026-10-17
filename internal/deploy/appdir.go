@@ -155,7 +155,11 @@ yoho_marked() {
  [ -n "$(find "$yoho_m" -prune -user "$yoho_uid" ! -perm -0020 ! -perm -0002 ! -links +1 -print)" ] || return 1
  [ "$(cat "$yoho_m")" = "$yoho_appmark" ]
 }
-yoho_empty() { [ -d "$1" ] && [ ! -L "$1" ] && [ -z "$(ls -A "$1")" ]; }
+yoho_empty() {
+ [ -d "$1" ] && [ ! -L "$1" ] || return 1
+ yoho_ls=$(ls -A "$1") || yoho_refuse "cannot list $1" "app_dir must be readable by the deploy user"
+ [ -z "$yoho_ls" ]
+}
 yoho_vacant() { ! yoho_exists "$1" || yoho_empty "$1"; }
 yoho_parent() { yoho_pp=${1%/*}; [ -n "$yoho_pp" ] || yoho_pp=/; printf '%s\n' "$yoho_pp"; }
 yoho_safe() {
@@ -205,6 +209,15 @@ yoho_candidate() {
  yoho_r=$(cd -P "$root" && pwd -P) || yoho_refuse "cannot resolve the Yoho root $root"
  case "$yoho_c/" in "$yoho_r/"*) yoho_refuse "$1 resolves to $yoho_c, inside the Yoho root $yoho_r" "choose an app_dir outside servers.<name>.root";; esac
  case "$yoho_r/" in "$yoho_c/"*) yoho_refuse "$1 resolves to $yoho_c, which contains the Yoho root $yoho_r" "choose an app_dir outside servers.<name>.root";; esac
+ # Another App's directory (any Yoho file) owns everything below it; moving
+ # it would carry this one along.
+ yoho_a=$yoho_c
+ while [ -n "$yoho_a" ] && [ "$yoho_a" != / ]; do
+  yoho_a=${yoho_a%/*}
+  if [ -e "${yoho_a:-}/.yoho-app.json" ] || [ -L "${yoho_a:-}/.yoho-app.json" ]; then
+   yoho_refuse "$1 is inside the App directory ${yoho_a:-/} of another App or Destination" "choose an app_dir outside every App directory"
+  fi
+ done
 }
 yoho_private_dir() {
  yoho_trusted yoho_private "$1" && return 0
@@ -217,8 +230,12 @@ yoho_samedev() {
  [ "$(yoho_dev "$1")" = "$(yoho_dev "$2")" ] || yoho_refuse "$1 and $2 are on different filesystems" "Yoho moves an App directory only within one filesystem (a rename keeps running containers' bind mounts); see Moving app_dir across filesystems in the configuration docs"
 }
 yoho_nested() {
- case "$2/" in "$1/"*) yoho_refuse "$2 is inside $1";; esac
- case "$1/" in "$2/"*) yoho_refuse "$1 is inside $2";; esac
+ yoho_n1=$(yoho_resolve "$1"); yoho_n2=$(yoho_resolve "$2")
+ for yoho_np in "$1|$2" "$yoho_n1|$yoho_n2"; do
+  yoho_na=${yoho_np%%|*}; yoho_nb=${yoho_np#*|}
+  case "$yoho_nb/" in "$yoho_na/"*) yoho_refuse "$2 is inside $1";; esac
+  case "$yoho_na/" in "$yoho_nb/"*) yoho_refuse "$1 is inside $2";; esac
+ done
 }
 yoho_app_gate() {
  [ -z "${yoho_have_appgate:-}" ] || return 0
@@ -288,10 +305,12 @@ yoho_resume_forward() {
   yoho_make "$(yoho_parent "$yoho_jt")" ancestor
   yoho_idle "$canon"
   yoho_samedev "$canon" "$(yoho_parent "$yoho_jt")"
+  yoho_samedev "$meta" "$appparent"
   yoho_do_forward "$yoho_jt"
  elif ! yoho_exists "$canon"; then
   yoho_marked "$yoho_jt" || yoho_unlisted
   yoho_candidate "$yoho_jt"
+  yoho_samedev "$meta" "$appparent"
   yoho_publish "$yoho_jt"
   rm -f "$journal"
  elif [ -L "$canon" ] && [ "$(readlink "$canon")" = "$yoho_jt" ] && (yoho_linkok "$canon") 2>/dev/null; then
@@ -307,6 +326,7 @@ yoho_resume_back() {
   yoho_owned_link "$canon" && [ "$(readlink "$canon")" = "$yoho_jf" ] && yoho_marked "$yoho_jf" || yoho_unlisted
   yoho_candidate "$yoho_jf"
   yoho_idle "$yoho_jf"
+  yoho_samedev "$yoho_jf" "$appparent"
   rm -f "$canon"
  fi
  if ! yoho_exists "$canon"; then
@@ -326,6 +346,7 @@ yoho_resume_retarget() {
  if yoho_marked "$yoho_jf" && yoho_vacant "$yoho_jt" && yoho_owned_link "$canon" && [ "$(readlink "$canon")" = "$yoho_jf" ]; then
   yoho_candidate "$yoho_jf"
   yoho_candidate "$yoho_jt"
+  yoho_nested "$yoho_jf" "$yoho_jt"
   yoho_make "$(yoho_parent "$yoho_jt")" ancestor
   yoho_idle "$yoho_jf"
   yoho_samedev "$yoho_jf" "$(yoho_parent "$yoho_jt")"
@@ -447,9 +468,13 @@ if [ -L "$canon" ]; then
  elif [ "$yoho_cur" != "$want" ]; then
   yoho_retarget "$yoho_cur" "$want"
  else
+  yoho_candidate "$yoho_cur"
   yoho_private_dir "$canon"
  fi
 elif [ -d "$canon" ]; then
+ # Validate before marking a directory that is about to move. Without
+ # app_dir nothing moves, so existing layouts keep working as before.
+ if [ -n "$want" ]; then yoho_private_dir "$canon"; fi
  yoho_mark "$canon"
  if [ -n "$want" ]; then yoho_forward; fi
 elif yoho_exists "$canon"; then

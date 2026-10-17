@@ -446,6 +446,11 @@ func TestAppDirRefusals(t *testing.T) {
 			e.mkdir(e.path("shared"), 0o777)
 			return e.path("shared/engine")
 		}, "", "not trusted (unsafe: "},
+		{"inside another App directory", false, func(e *adEnv) string {
+			e.mkdir(e.path("other"), 0o700)
+			e.write(e.path("other/.yoho-app.json"), `{"app":"other","destination":"production"}`)
+			return e.path("other/child")
+		}, "", "inside the App directory"},
 		{"forward source under group-writable root", true, func(e *adEnv) string {
 			os.Chmod(e.root, 0o770)
 			return e.path("apps/engine")
@@ -741,4 +746,41 @@ func TestReadAndPlanAppDir(t *testing.T) {
 		t.Fatalf("journal: %+v", ch)
 	}
 	e.noGates()
+}
+
+// Review fixes for v0.1.8: refusals that used to happen only after the
+// journal was written (leaving the Destination stuck) now happen before it.
+func TestAppDirRefusesBeforeJournal(t *testing.T) {
+	t.Run("unreadable non-empty target", func(t *testing.T) {
+		if os.Geteuid() == 0 {
+			t.Skip("root can list any directory")
+		}
+		e := newADEnv(t)
+		e.seed()
+		w := e.path("locked")
+		e.write(filepath.Join(w, "userfile"), "keep")
+		e.mkdir(w, 0o300)
+		t.Cleanup(func() { os.Chmod(w, 0o700) })
+		if _, err := e.ensure(w); err == nil || !strings.Contains(err.Error(), "cannot list") {
+			t.Fatalf("got %v", err)
+		}
+		e.noJournal()
+		e.noGates()
+	})
+	t.Run("retarget physically nested through an alias", func(t *testing.T) {
+		e := newADEnv(t)
+		real, err := filepath.EvalSymlinks(e.base)
+		if err != nil || real == e.base {
+			t.Skip("needs a root-owned alias in the temp path (macOS /var -> /private/var)")
+		}
+		e.seed()
+		a := e.path("a")
+		e.mustEnsure(a, "forward")
+		alias := filepath.Join(real, "a", "inner")
+		if _, err := e.ensure(alias); err == nil || !strings.Contains(err.Error(), "is inside") {
+			t.Fatalf("got %v", err)
+		}
+		e.noJournal()
+		e.linked(a)
+	})
 }

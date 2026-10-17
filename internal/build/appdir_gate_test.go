@@ -2,6 +2,7 @@ package build
 
 import (
 	"context"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -47,5 +48,40 @@ func TestServerBuildSourceGate(t *testing.T) {
 	}
 	if _, err := os.Stat(o.runDir); !os.IsNotExist(err) {
 		t.Fatal("source.run created during a migration")
+	}
+}
+
+// The gate is held only for creating source.run-* and for the renames, not
+// for the slow cp -a / rm -rf, so concurrent lock takers don't time out.
+// source.run-* still exists during those steps, which keeps migration out.
+func TestServerBuildGateNotHeldForSlowSteps(t *testing.T) {
+	old := release.Root
+	release.Root = t.TempDir()
+	t.Cleanup(func() { release.Root = old })
+	h := &recHost{}
+	o := Options{App: "shop", Destination: "prod", Host: h, Out: io.Discard}
+	o.cacheDir = o.sourceDir()
+	o.runDir = o.cacheDir + ".run-g1"
+	o.SourceDir = filepath.Join(o.runDir, "source")
+	_ = syncSource(context.Background(), o, &sourcePlan{root: t.TempDir()})
+	for _, ok := range []bool{true, false} {
+		finishSource(o, ok)
+	}
+	if len(h.cmds) < 3 {
+		t.Fatalf("want sync and two cleanup scripts, got %d", len(h.cmds))
+	}
+	for i, c := range h.cmds[:3] {
+		for _, slow := range []string{"cp -a ", "rm -rf "} {
+			// The last one: an rm -rf of a leftover .old from a killed run
+			// may still run inside the cache swap.
+			j := strings.LastIndex(c.Script, slow)
+			if j < 0 {
+				continue
+			}
+			d := strings.Index(c.Script, "yoho_gate_drop\n")
+			if d < 0 || d > j {
+				t.Fatalf("script %d runs %q before dropping the gate:\n%s", i, slow, c.Script)
+			}
+		}
 	}
 }

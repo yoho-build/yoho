@@ -179,3 +179,20 @@ Implemented as specified. Code map: `internal/safepath` (trust functions moved f
 - `schedule install` prepares the binary first (it can cross-build), then holds `AcquireLock` across `EnsureHMACKey` (once, not per job) and `schedule.Install`.
 - Not done: no command removes a Destination today, so the removal rule has no call site; read-only dashboards do not show a "migrating" state (optional); there is no `yoho status`, the "App directory" step prints the physical path instead. The E2E scenario was not run; `mv -T` and `stat -c` are exercised only on Linux (macOS tests run the fallbacks).
 
+
+## Code review of v0.1.7 (fixed in v0.1.8)
+
+oai-sol-review (gpt-6.1-sol) on commit 8c68490:
+
+- P2 An `app_dir` inside another App's directory, configured in a different Yoho file, was accepted. Fixed: `yoho_candidate` refuses when any physical ancestor holds a `.yoho-app.json`.
+- P2 Server builds held the Destination gate across `cp -a`, so concurrent lock takers could time out. Fixed: the gate covers only creating `source.run-*` and the cache renames. `cp -a` and the final `rm -rf` run after `yoho_gate_drop`. Migration still refuses while `source.run-*` exists.
+
+agy-review (gemini-4-argon-medium, effort medium). The subagent checked every finding against the source; no P1 survived:
+
+- P3 An unreadable non-empty target counted as empty, and the migration then failed after writing the journal. Fixed: `yoho_empty` refuses when `ls` fails.
+- P3 `yoho_nested` compared paths lexically only, so a retarget nested through a root-owned alias failed after writing the journal. Fixed: it compares both the lexical and the physical paths, and resume checks it too.
+- P3 An already-correct link skipped root containment. Fixed: the use state runs `yoho_candidate` on the target.
+- P3 Ordering: forward now validates the directory before writing the marker (only when `app_dir` is set, so default layouts are unchanged). Resume back checks the device before removing the link. Resume forward checks that `meta` and the canonical parent share a device before publishing.
+- P2 Rollback read Releases before converging the App directory. Fixed: `ensureAppDirs` runs right after connecting.
+- P3 The retention scan script lacked `set -eu`. Fixed.
+- Not changed: `mv` without `-T`/`-h` aborting after the directory moved (resume recovers), apply's read-only plan running before ensure (by design: the plan must show the change), and the same-UID races outside the threat model.

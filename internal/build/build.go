@@ -501,7 +501,13 @@ func finishSource(o Options, ok bool) {
 	defer cancel()
 	run, src, cache := remote.Quote(o.runDir), remote.Quote(o.SourceDir), remote.Quote(o.cacheDir)
 	gate := o.sourceGate("build cleanup")
-	script := "set -eu\n" + gate + "rm -rf " + run + "\n"
+	// Hold the gate only for the renames. run and run.old match
+	// source.run-*, so migration still refuses until rm -rf finishes.
+	drop := ""
+	if gate != "" {
+		drop = "yoho_gate_drop\n"
+	}
+	script := "set -eu\n" + gate + drop + "rm -rf " + run + "\n"
 	if ok {
 		old, lock := remote.Quote(o.runDir+".old"), remote.Quote(o.cacheDir+".lock")
 		script = "set -eu\n" + gate +
@@ -511,7 +517,7 @@ func finishSource(o Options, ok bool) {
 			"  if [ -e " + cache + " ]; then mv " + cache + " " + old + " || true; fi\n" +
 			"  if [ ! -e " + cache + " ] && chmod 0700 " + src + "; then mv " + src + " " + cache + " || true; fi\n" +
 			"  rmdir " + lock + " || true\n" +
-			"fi\n" +
+			"fi\n" + drop +
 			"rm -rf " + run + " " + old + "\n"
 	}
 	if err := o.Host.Run(ctx, remote.Cmd{Script: script}); err != nil {
@@ -642,6 +648,11 @@ func syncSource(ctx context.Context, o Options, plan *sourcePlan) error {
 	run, src := remote.Quote(o.runDir), remote.Quote(o.sourceDir())
 	script := "set -eu\n" + o.sourceGate("build") + "umask 077\nmkdir -p " + remote.Quote(path.Dir(o.runDir)) + "\nmkdir -m 0700 " + run + "\n" +
 		privateDirCheck(o.runDir) + "mkdir " + src + "\n"
+	if gate := o.sourceGate("build"); gate != "" {
+		// The run dir now exists, and migration refuses while any
+		// source.run-* does, so the slow copy needs no gate.
+		script += "yoho_gate_drop\n"
+	}
 	if o.cacheDir != "" {
 		// Seed from the last build's source so rsync only transfers changes.
 		script += "if [ -d " + remote.Quote(o.cacheDir) + " ]; then cp -a " + remote.Quote(o.cacheDir) + "/. " + src + "/ 2>/dev/null || true; fi\n"

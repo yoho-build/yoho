@@ -611,6 +611,12 @@ func rollbackCmd(g *globals) *cobra.Command {
 				return err
 			}
 			defer closeHosts()
+			// Converge (or resume a migration of) the App directory first: the
+			// Release lookup reads it through the canonical path.
+			if err := a.ensureAppDirs(ctx, hosts); err != nil {
+				a.ui.Finished(err, "")
+				return err
+			}
 			d := &plan.Deploy{App: a.cfg.App, Destination: a.destName, Performer: performer(), Servers: hosts,
 				Proxy: a.proxyConfig(), Registry: a.cfg.Registry, RetainReleases: a.cfg.RetainReleases, Out: a.ui.Progress()}
 			target, err := a.resolveVersion(ctx, d, args[0])
@@ -619,10 +625,6 @@ func rollbackCmd(g *globals) *cobra.Command {
 			}
 			a.ui.Title("Rolling back %s on %s to %s", a.cfg.App, a.destName, shortVersion(target))
 			a.ui.Warn("volumes and database migrations are not reverted")
-			if err := a.ensureAppDirs(ctx, hosts); err != nil {
-				a.ui.Finished(err, "")
-				return err
-			}
 			step := a.ui.Step(hosts[0].Name, "Redeploy %s", shortVersion(target))
 			rel, err := a.runtime().Rollback(ctx, d, target)
 			if err != nil {

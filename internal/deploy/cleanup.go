@@ -162,7 +162,7 @@ func RetainedImageRefs(ctx context.Context, h remote.Host, app string) (map[stri
 	appMeta := path.Join(release.AppDirsDir(), app)
 	gate := safepath.AppGateDir(app)
 	info, _ := json.Marshal(LockInfo{Performer: "yoho", Command: "image retention scan", Time: time.Now().UTC()})
-	script := "umask 077\n" + safepath.Gate() +
+	script := "set -eu\numask 077\n" + safepath.Gate() +
 		"yoho_gate_info=" + remote.Quote(string(info)) + "\n" +
 		"mkdir -p " + remote.Quote(path.Join(appMeta, "d")) + "\n" +
 		"yoho_gate_take " + remote.Quote(gate) + " || { printf '%s\\t%s\\n' " + migratingLine + " " + remote.Quote("the App gate "+gate+" is held (an app_dir migration is running)") + "; exit 0; }\n" +
