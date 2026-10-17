@@ -130,6 +130,12 @@ func (a *app) collectChanges(ctx context.Context, s *session) (changes []plan.Ch
 		return nil, false, err
 	}
 	step := a.ui.Step("", "Read state of %s", s.hosts[0].Name)
+	ac, err := a.planAppDirs(ctx, s.hosts)
+	if err != nil {
+		step.Fail(err, "check that the Server is reachable")
+		return nil, false, &silentError{err}
+	}
+	changes = append(changes, ac...)
 	deployNeeded = true
 	if p, ok := a.runtime().(plan.Planner); ok {
 		rc, perr := p.Diff(ctx, d)
@@ -315,6 +321,11 @@ func (a *app) apply(ctx context.Context, o applyOptions) (err error) {
 		}
 	}
 
+	// Converge app_dir (and finish an interrupted move) before building:
+	// Server builds write into the App directory.
+	if err = a.ensureAppDirs(ctx, s.hosts); err != nil {
+		return err
+	}
 	urls := a.urls(s.r, s.hosts)
 	version := ver
 	if deployNeeded {

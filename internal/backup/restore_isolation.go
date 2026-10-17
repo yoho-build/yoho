@@ -62,7 +62,7 @@ func restorePrerequisites(ctx context.Context, h remote.Host, app, dest, runtime
 		Conditions map[string]string `json:"dependency_conditions"`
 	}
 	base := path.Join(release.AppDir(app, dest), "current")
-	if err := h.Run(ctx, remote.Cmd{Script: safeCurrentFile(release.AppDir(app, dest), "plan.json")}); err != nil {
+	if err := h.Run(ctx, remote.Cmd{Script: appLink(app, dest) + safeCurrentFile(release.AppDir(app, dest), "plan.json")}); err != nil {
 		return nil, nil, fmt.Errorf("restore isolation: unsafe deployed prerequisite plan: %w", err)
 	}
 	data, err := h.ReadFile(ctx, path.Join(base, "plan.json"), false)
@@ -109,7 +109,7 @@ func restorePrerequisites(ctx context.Context, h remote.Host, app, dest, runtime
 			return c, nil
 		}
 		if !composeRead {
-			if err := h.Run(ctx, remote.Cmd{Script: safeCurrentFile(release.AppDir(app, dest), "compose.yaml")}); err != nil {
+			if err := h.Run(ctx, remote.Cmd{Script: appLink(app, dest) + safeCurrentFile(release.AppDir(app, dest), "compose.yaml")}); err != nil {
 				return "", fmt.Errorf("restore isolation: unsafe deployed dependency conditions: %w", err)
 			}
 			data, err := h.ReadFile(ctx, path.Join(base, "compose.yaml"), false)

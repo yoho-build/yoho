@@ -18,6 +18,7 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -35,6 +36,7 @@ import (
 	"github.com/yoho-build/yoho/internal/config"
 	"github.com/yoho-build/yoho/internal/release"
 	"github.com/yoho-build/yoho/internal/remote"
+	"github.com/yoho-build/yoho/internal/safepath"
 )
 
 // Command is a local process invocation.
@@ -498,10 +500,11 @@ func finishSource(o Options, ok bool) {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
 	defer cancel()
 	run, src, cache := remote.Quote(o.runDir), remote.Quote(o.SourceDir), remote.Quote(o.cacheDir)
-	script := "set -eu\nrm -rf " + run + "\n"
+	gate := o.sourceGate("build cleanup")
+	script := "set -eu\n" + gate + "rm -rf " + run + "\n"
 	if ok {
 		old, lock := remote.Quote(o.runDir+".old"), remote.Quote(o.cacheDir+".lock")
-		script = "set -eu\n" +
+		script = "set -eu\n" + gate +
 			"if [ -d " + lock + " ]; then find " + lock + " -prune -mmin +60 -exec rmdir {} \\; 2>/dev/null || true; fi\n" +
 			"if mkdir " + lock + " 2>/dev/null; then\n" +
 			"  rm -rf " + old + "\n" +
@@ -514,6 +517,19 @@ func finishSource(o Options, ok bool) {
 	if err := o.Host.Run(ctx, remote.Cmd{Script: script}); err != nil {
 		fmt.Fprintf(o.Out, "warning: could not clean up %s on %s: %v\n", o.SourceDir, o.Host.Name(), err)
 	}
+}
+
+// sourceGate is the App directory gate prelude for writes under the
+// canonical App directory (source.run-*, publishing source/): take the
+// Destination gate for this script and refuse while an app_dir migration
+// journal exists. Empty when App/Destination are unknown (tests, or a
+// SourceDir set by the caller outside the App directory layout).
+func (o Options) sourceGate(what string) string {
+	if o.App == "" || o.Destination == "" {
+		return ""
+	}
+	info, _ := json.Marshal(map[string]any{"performer": "yoho", "command": what, "time": time.Now().UTC()})
+	return safepath.LockTaker(o.App, o.Destination, string(info), false)
 }
 
 func (o Options) sourceDir() string {
@@ -624,7 +640,7 @@ func syncSource(ctx context.Context, o Options, plan *sourcePlan) error {
 	// for rsync. The private dir is never an rsync destination, so -a cannot
 	// widen its mode.
 	run, src := remote.Quote(o.runDir), remote.Quote(o.sourceDir())
-	script := "set -eu\numask 077\nmkdir -p " + remote.Quote(path.Dir(o.runDir)) + "\nmkdir -m 0700 " + run + "\n" +
+	script := "set -eu\n" + o.sourceGate("build") + "umask 077\nmkdir -p " + remote.Quote(path.Dir(o.runDir)) + "\nmkdir -m 0700 " + run + "\n" +
 		privateDirCheck(o.runDir) + "mkdir " + src + "\n"
 	if o.cacheDir != "" {
 		// Seed from the last build's source so rsync only transfers changes.

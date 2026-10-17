@@ -526,7 +526,7 @@ func volumeName(ctx context.Context, h remote.Host, project, vol, runtime string
 
 // currentVersion reads the current Release version; empty when unknown.
 func currentVersion(ctx context.Context, h remote.Host, app, dest string) string {
-	if err := h.Run(ctx, remote.Cmd{Script: safeCurrentFile(release.AppDir(app, dest), "release.json")}); err != nil {
+	if err := h.Run(ctx, remote.Cmd{Script: appLink(app, dest) + safeCurrentFile(release.AppDir(app, dest), "release.json")}); err != nil {
 		return ""
 	}
 	b, err := h.ReadFile(ctx, path.Join(release.AppDir(app, dest), "current", "release.json"), false)

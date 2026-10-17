@@ -478,7 +478,9 @@ func lingerStep(user string) *Step {
 
 func dirsStep(user string) *Step {
 	root := release.Root
-	dirs := []string{root, path.Join(root, "apps"), path.Join(root, "backups"), path.Join(root, "jobs")}
+	// appdirs holds App directory gates and app_dir migration journals; it
+	// gets the same owner and mode as apps.
+	dirs := []string{root, path.Join(root, "apps"), path.Join(root, "appdirs"), path.Join(root, "backups"), path.Join(root, "jobs")}
 	return &Step{
 		ID: "dirs", Needs: []string{"user"}, Title: "Yoho directories under " + root + " (owner " + user + ", 0700)",
 		check: func(ctx context.Context, h remote.Host) (bool, string, error) {

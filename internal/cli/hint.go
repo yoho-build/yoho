@@ -3,6 +3,7 @@ package cli
 import (
 	"errors"
 
+	"github.com/yoho-build/yoho/internal/deploy"
 	"github.com/yoho-build/yoho/internal/proxy"
 	"github.com/yoho-build/yoho/internal/release"
 )
@@ -17,6 +18,14 @@ func hintFor(err error, def string) string {
 	var oe *release.OwnershipError
 	if errors.As(err, &oe) {
 		return "rename the App or Destination (names join App and Destination with '-', so another App's resources collide)"
+	}
+	var me *deploy.MigrationPendingError
+	if errors.As(err, &me) {
+		return "rerun `yoho deploy` or `yoho apply` to finish the app_dir migration"
+	}
+	var ae *deploy.AppDirError
+	if errors.As(err, &ae) && ae.Hint != "" {
+		return ae.Hint
 	}
 	return def
 }

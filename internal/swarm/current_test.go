@@ -57,7 +57,7 @@ func TestDeployAbortsWhenCurrentCannotBeRead(t *testing.T) {
 		t.Fatal(err)
 	}
 	h.scripts = nil
-	fh := &flakyHost{fakeHost: h, fail: func(s string) bool { return strings.Contains(s, "readlink") }}
+	fh := &flakyHost{fakeHost: h, fail: func(s string) bool { return strings.Contains(s, "readlink") && !strings.Contains(s, "echo acquired") }}
 	d := testDeploy(t, fh, nil)
 	d.Version = "v2"
 	_, err := (Runtime{}).Deploy(ctx, d)

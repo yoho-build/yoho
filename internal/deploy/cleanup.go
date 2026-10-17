@@ -7,11 +7,13 @@ import (
 	"path"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/yoho-build/yoho/internal/plan"
 	"github.com/yoho-build/yoho/internal/proxy"
 	"github.com/yoho-build/yoho/internal/release"
 	"github.com/yoho-build/yoho/internal/remote"
+	"github.com/yoho-build/yoho/internal/safepath"
 )
 
 // removeStaleRoutes deletes Proxy routes of this App Destination whose
@@ -133,15 +135,46 @@ func imageKeepSet(ctx context.Context, h remote.Host, app string, opts PruneOpti
 	return RetainedImageRefs(ctx, h, app)
 }
 
+// AppDirMigratingError means an App directory of another Destination is
+// being moved (app_dir), so the retained-Release scan could be incomplete.
+// Image pruning is skipped; the deploy itself still succeeds.
+type AppDirMigratingError struct{ Detail string }
+
+func (e *AppDirMigratingError) Error() string {
+	return "not pruning images: " + e.Detail + "; pruning resumes on a later deploy"
+}
+
+// migratingLine starts the scan output when pruning must be skipped.
+const migratingLine = "yoho-appdir-migrating"
+
 // RetainedImageRefs returns image refs referenced by retained Release
 // records of app on h. Release directories are already pruned, so only
 // retained records remain. Keys are canonical image refs. The map is
 // non-nil when err is nil.
+//
+// The glob follows canonical App directory symlinks (app_dir). The scan
+// holds the App gate (<root>/appdirs/<app>/app.gate) so no migration moves a
+// Destination's Releases mid-scan. When the gate stays held or any
+// Destination has a migration journal, it returns *AppDirMigratingError
+// instead of a partial keep set.
 func RetainedImageRefs(ctx context.Context, h remote.Host, app string) (map[string]bool, error) {
 	appRoot := path.Join(release.Root, "apps", app)
-	rels, err := h.Output(ctx, remote.Cmd{Script: "for f in " + remote.Quote(appRoot) + "/*/releases/*/release.json; do [ -f \"$f\" ] && cat \"$f\"; done; true"})
+	appMeta := path.Join(release.AppDirsDir(), app)
+	gate := safepath.AppGateDir(app)
+	info, _ := json.Marshal(LockInfo{Performer: "yoho", Command: "image retention scan", Time: time.Now().UTC()})
+	script := "umask 077\n" + safepath.Gate() +
+		"yoho_gate_info=" + remote.Quote(string(info)) + "\n" +
+		"mkdir -p " + remote.Quote(path.Join(appMeta, "d")) + "\n" +
+		"yoho_gate_take " + remote.Quote(gate) + " || { printf '%s\\t%s\\n' " + migratingLine + " " + remote.Quote("the App gate "+gate+" is held (an app_dir migration is running)") + "; exit 0; }\n" +
+		"for j in " + remote.Quote(appMeta) + "/d/*/migrate.json; do if [ -e \"$j\" ] || [ -L \"$j\" ]; then d=${j%/migrate.json}; printf '%s\\tDestination %s is moving its App directory (app_dir)\\n' " + migratingLine + " \"${d##*/}\"; exit 0; fi; done\n" +
+		"for f in " + remote.Quote(appRoot) + "/*/releases/*/release.json; do [ -f \"$f\" ] && cat \"$f\"; done; true"
+	rels, err := h.Output(ctx, remote.Cmd{Script: script})
 	if err != nil {
 		return nil, fmt.Errorf("list releases: %w", err)
+	}
+	if detail, ok := strings.CutPrefix(rels, migratingLine+"\t"); ok {
+		detail, _, _ = strings.Cut(detail, "\n")
+		return nil, &AppDirMigratingError{Detail: detail}
 	}
 	keep := map[string]bool{}
 	dec := json.NewDecoder(strings.NewReader(rels))

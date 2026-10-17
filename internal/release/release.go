@@ -2,7 +2,8 @@
 //
 // Layout (owned by the deploy user, dirs 0700):
 //
-//	<root>/apps/<app>/<destination>/
+//	<root>/apps/<app>/<destination>/    the canonical App directory (AppDir)
+//	  .yoho-app.json                ownership marker {"app","destination"} (0600)
 //	  lock/                         deploy/backup lock (mkdir-based), lock/info.json
 //	  releases/<version>/compose.yaml   compiled, contains no secret values
 //	  releases/<version>/release.json   this Release record
@@ -13,10 +14,21 @@
 //	  hmac.key                      audit fingerprint key (0600)
 //	  source/                       seed copy of the last synced build inputs (builder.location=server, 0700)
 //	  source.run-<id>/source/       one build's synced inputs, inside a private 0700 dir
+//	<root>/appdirs/<app>/app.gate/         App gate: app_dir migrations, retention scans
+//	<root>/appdirs/<app>/d/<destination>/  App directory coordination (never moves):
+//	  gate/                         Destination gate, held briefly by every lock taker
+//	  migrate.json                  app_dir migration journal {"kind","from","to"} (0600)
+//	  link.tmp                      temporary symlink published over the canonical path
 //	<root>/backups/<app>/<destination>/   local Backup spool (0700)
 //	<root>/jobs/<app>-<destination>-<job>.json   Scheduled Job specs
 //
 // <root> is Root, /var/lib/yoho by default.
+//
+// With a Destination's app_dir set, the canonical App directory is a
+// symlink to app_dir (owned by the deploy user, app_dir marked with
+// .yoho-app.json), and the files above live in app_dir. Every path builder
+// here, Release records and compiled compose files keep the canonical path,
+// so readers that glob <root>/apps/<app>/* still see every Destination.
 package release
 
 import (
@@ -55,6 +67,10 @@ func Dir(app, destination, version string) string {
 func SecretsDir(app, destination, generation string) string {
 	return path.Join(AppDir(app, destination), "secrets", generation)
 }
+
+// AppDirsDir is <root>/appdirs: App directory coordination (gates, the
+// app_dir migration journal). Never inside a Destination directory.
+func AppDirsDir() string { return path.Join(Root, "appdirs") }
 
 // BackupDir is the local Backup spool.
 func BackupDir(app, destination string) string {

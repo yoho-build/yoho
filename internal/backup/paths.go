@@ -8,75 +8,20 @@ import (
 	"path"
 
 	"github.com/yoho-build/yoho/internal/remote"
+	"github.com/yoho-build/yoho/internal/safepath"
 )
 
-// pathSafety is deliberately POSIX sh; find's numeric -user and -perm work on
-// GNU, BSD and BusyBox. Never repair permissions or ownership of existing paths.
-// A root/user-owned sticky ancestor (e.g. /tmp) is allowed, but never the leaf.
-// Checks reduce exposure to other UIDs, not races against root or our own UID.
-const pathSafety = `set -eu
-umask 077
-yoho_uid=$(id -u)
-yoho_bad() { printf 'unsafe Backup path: %s\n' "$1" >&2; exit 1; }
-yoho_owner() { [ -n "$(find "$1" -prune \( -user 0 -o -user "$yoho_uid" \) -print)" ] || yoho_bad "$1"; }
-yoho_dir() {
- [ -d "$1" ] && [ ! -L "$1" ] || yoho_bad "$1"
- yoho_owner "$1"
- yoho_mode=$(find "$1" -prune \( -perm -0020 -o -perm -0002 \) -print) || yoho_bad "$1"
- if [ -n "$yoho_mode" ]; then
-  [ "$2" = ancestor ] && [ -n "$(find "$1" -prune -perm -1000 -print)" ] || yoho_bad "$1"
- fi
-}
-yoho_path() {
- case "$1" in /*) ;; *) yoho_bad "$1";; esac
- yoho_p=$1
- while :; do
-  if [ -e "$yoho_p" ] || [ -L "$yoho_p" ]; then
-   yoho_kind=ancestor; [ "$yoho_p" != "$1" ] || yoho_kind=${2:-leaf}
-   if [ -L "$yoho_p" ]; then
-    # Permit admin-owned filesystem aliases such as macOS /var, but never
-    # a configured leaf or a deploy-user-created link. Check physical parents.
-    [ "$yoho_kind" = ancestor ] && [ -n "$(find "$yoho_p" -prune -user 0 -print)" ] || yoho_bad "$yoho_p"
-    yoho_real=$(cd -P "$yoho_p" && pwd -P) || yoho_bad "$yoho_p"
-    (yoho_path "$yoho_real" ancestor)
-   else
-    yoho_dir "$yoho_p" "$yoho_kind"
-   fi
-  fi
-  [ "$yoho_p" != / ] || break
-  yoho_p=${yoho_p%/*}; [ -n "$yoho_p" ] || yoho_p=/
- done
-}
-yoho_private() {
- yoho_path "$1"
- [ -d "$1" ] && [ ! -L "$1" ] || yoho_bad "$1"
- [ -n "$(find "$1" -prune -user "$yoho_uid" ! -perm -0040 ! -perm -0020 ! -perm -0010 ! -perm -0004 ! -perm -0002 ! -perm -0001 -print)" ] || yoho_bad "$1"
-}
-yoho_file() {
- yoho_path "${1%/*}"
- [ -f "$1" ] && [ ! -L "$1" ] || yoho_bad "$1"
- yoho_owner "$1"
- yoho_mode=$(find "$1" -prune \( -perm -0020 -o -perm -0002 -o -links +1 \) -print) || yoho_bad "$1"
- [ -z "$yoho_mode" ] || yoho_bad "$1"
-}
-yoho_secret() {
- yoho_file "$1"
- [ -n "$(find "$1" -prune -user "$yoho_uid" ! -perm -0040 ! -perm -0010 ! -perm -0004 ! -perm -0001 -print)" ] || yoho_bad "$1"
-}
-`
+// pathSafety and pathCreation are the shared Server path trust functions
+// (internal/safepath), labelled for Backup refusals. Behaviour is unchanged
+// unless a script also sets yoho_applink (see appLink).
+var (
+	pathSafety   = safepath.Script("Backup")
+	pathCreation = safepath.Creation
+)
 
-// Never mkdir -p through missing components under a shared sticky ancestor:
-// another UID could insert a link after the initial check. Create one component
-// exclusively, validate it, then descend. A collision is a refusal, not reuse.
-const pathCreation = `yoho_make() {
- yoho_path "$1" "${2:-leaf}"
- if [ -d "$1" ]; then return; fi
- yoho_parent=${1%/*}; [ -n "$yoho_parent" ] || yoho_parent=/
- (yoho_make "$yoho_parent" ancestor)
- mkdir -m 0700 "$1" || yoho_bad "$1"
- yoho_path "$1" "${2:-leaf}"
-}
-`
+// appLink enables the one trusted link: the canonical App directory of
+// app/dest when it is a Yoho-owned symlink to a marked app_dir.
+func appLink(app, dest string) string { return safepath.AppLink(app, dest) }
 
 func safeDir(dir string, private bool, create bool) string {
 	fn := "yoho_path"

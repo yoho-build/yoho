@@ -21,6 +21,7 @@ Validate with `yoho config check`; print the resolved file with `yoho config sho
 | `destinations.<name>.runtime` | `compose` (default) or `swarm`. Switching causes downtime. |
 | `destinations.<name>.env` | Non-secret variables for compose interpolation (image tags, ports). |
 | `destinations.<name>.proxy` | Overrides the top-level `proxy` for this Destination. |
+| `destinations.<name>.app_dir` | Optional absolute directory on the Server for this Destination's App directory, outside `root`. See [App directory](#app-directory-app_dir). |
 | `builder.location` | `local` (default), `remote` (dedicated build Server), `server` (build on the Destination's Server). |
 | `builder.engine` | `auto` (Apple `container` on Apple silicon if installed, else Docker), `docker`, `container`. |
 | `builder.remote` | SSH target; required when `location: remote`. |
@@ -58,6 +59,48 @@ Resolution order:
 An optional overlay next to the Yoho file, `yoho.<destination>.<ext>` (`yml`, `yaml`, `toml`, `json`, or `jsonc`), is deep-merged over the base before decoding. Maps merge recursively; scalars and lists replace. More than one overlay for the same Destination is an error. `yoho config show` prints the selected Destination and overlay path to stderr. The secrets file `.yoho/secrets.<destination>` is layered over `.yoho/secrets` the same way.
 
 Compose files follow the same idea. After the base files are resolved, Yoho also loads `name.<destination>.ext` when it exists (`compose.yaml` and `compose.staging.yaml` for `-d staging`) and appends those overlays so they override.
+
+### App directory (`app_dir`)
+
+Each Destination keeps its Releases, secrets generations, generated secrets, `hmac.key`, Scheduled Job credentials and Server build source in its App directory, `<root>/apps/<app>/<destination>` by default. `app_dir` moves that directory somewhere else, for example to keep one directory per project on the Server:
+
+```yaml
+destinations:
+  staging:
+    servers: [small-deb]
+    app_dir: /home/deb/apps/elpoca-engine
+```
+
+Nothing else changes: the compose project `yoho-<app>-<destination>`, volume names (volume data never moves), Proxy routes, Scheduled Job units and `<root>/backups`, `<root>/jobs`, `<root>/bin`, `<root>/proxy` stay where they are.
+
+How it works: `<root>/apps/<app>/<destination>` stays the path Yoho uses everywhere (Release records, compiled compose files, image retention, `yoho schedule run`, Yoho output), and becomes a symlink to `app_dir`. Retained Releases keep working after a later move, because their compiled files name the canonical path. The "App directory" step of deploy, apply and rollback prints the physical directory.
+
+Rules (checked by `yoho config check` and again on the Server):
+
+- An absolute, clean path (no trailing slash, `//`, `.` or `..`) of letters, digits, `_`, `.`, `/` and `-`, not `/`.
+- Outside the Server `root`: not equal to it, inside it, or containing it. The Server also compares the resolved physical paths, so a symlinked parent cannot sneak `app_dir` into `root`. A sibling such as `/home/deb/apps/elpoca-engine` next to `/home/deb/apps/yoho` is fine.
+- No two Destinations sharing a Server may use the same or nested `app_dir`.
+- The Destination name must match the App name pattern (`^[a-z0-9][a-z0-9-]*$`), and `root` must use the same safe characters.
+- Every existing parent must be owned by root or the deploy user and not group- or other-writable (owned sticky directories such as `/tmp` are allowed as parents). Missing parents are created one at a time with mode 0700. `app_dir` itself must not be a symlink.
+- `app_dir` must not exist yet, or be an empty directory. Yoho owns it completely and marks it with `.yoho-app.json` (`{"app","destination"}`). A non-empty directory without that marker (a git checkout, someone's files) or with another App's or Destination's marker is refused. Yoho writes the marker into default App directories too.
+- The canonical symlink is trusted only when the deploy user owns it, it points at a clean absolute path that passes the parent rules, and that directory holds this App and Destination's marker. Otherwise every command refuses, including Backups.
+
+**Changing `app_dir` moves the directory.** `yoho plan` shows `app_dir: <old> → <new>`, and `yoho apply` asks for confirmation like any other change. The move runs in `yoho deploy`, `yoho apply` (before the build step), `yoho rollback` and `yoho schedule install`, on every Server of the Destination. Setting `app_dir` on a deployed Destination moves the existing directory into it; changing it moves it again; removing it moves it back to `<root>/apps/<app>/<destination>`. It never starts empty and never copies. Running containers are not recreated: a same-filesystem rename keeps their bind mounts.
+
+The move waits for nothing and refuses when the App directory is in use: a `lock/` directory (a deploy, rollback, Backup or Scheduled Job running, or a crashed one) or a `source.run-*` directory (a Server build). The refusal names the path; remove stale ones by hand and rerun. Coordination lives outside the moving tree, in `<root>/appdirs/<app>/` (created by `yoho setup`, otherwise on first use): a gate that every lock taker passes through, and a migration journal `migrate.json` written before the first rename. While a journal exists, deploys, rollbacks, Backups, Scheduled Jobs and Server builds refuse ("migration in progress or interrupted"); the next `yoho deploy` or `yoho apply` resumes it from whatever state it finds, and refuses with the journal and the observed paths when the state is not one it expects. A gate left by a killed run is named in the error; remove it by hand. Image pruning is skipped with a warning while another Destination of the App is moving.
+
+**Upgrade every CLI first.** Older Yoho binaries do not know the gate. Upgrade every machine that deploys this App before you set or change `app_dir`. After the move, older binaries still work through the symlink, but a move racing an older binary is unsupported.
+
+#### Same filesystem only
+
+Yoho moves the App directory with a rename, so `app_dir` (its parent, for a new directory) must be on the same filesystem as the current App directory, and `<root>/appdirs` on the same filesystem as `<root>/apps/<app>`. Otherwise it refuses ("on different filesystems") and changes nothing. It never copies and deletes automatically. To move across filesystems, in a maintenance window:
+
+1. Stop traffic or accept downtime: containers bind-mount files from the App directory.
+2. On the Server, with no deploy, Backup or Scheduled Job running, copy the current App directory into a new empty `app_dir`, preserving modes and ownership (`cp -a <root>/apps/<app>/<destination>/. /new/app_dir/`), and check the copy.
+3. Replace the canonical path with a symlink: `mv <root>/apps/<app>/<destination> <root>/apps/<app>/<destination>.old && ln -s /new/app_dir <root>/apps/<app>/<destination>`. The new directory must hold `.yoho-app.json`, be owned by the deploy user and have mode 0700.
+4. Restart (or recreate) the containers of the compose project `yoho-<app>-<destination>`: a running container keeps the bind mounts it resolved when it started, which still point into the old copy.
+5. Set `app_dir: /new/app_dir` and run `yoho plan`: it shows no `app_dir` change, because the link already points at `app_dir`.
+6. Remove `<root>/apps/<app>/<destination>.old` once everything works.
 
 ## x-yoho
 

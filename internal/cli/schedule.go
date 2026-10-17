@@ -112,6 +112,9 @@ func scheduleInstallCmd(g *globals) *cobra.Command {
 				return err
 			}
 			defer closeHosts()
+			if err := a.ensureAppDirs(ctx, hosts); err != nil {
+				return err
+			}
 			if err := a.installJobs(ctx, hosts, names, binary, store); err != nil {
 				return err
 			}
@@ -135,6 +138,9 @@ func (a *app) installJobs(ctx context.Context, hosts []plan.NamedHost, names []s
 	}
 	u := a.ui
 	var jobs []schedule.Job
+	// Jobs with Backup Target credentials record fingerprints keyed by
+	// hmac.key, which is written under the deploy lock below.
+	needKey := map[int]*backupJob{}
 	var loaded bool
 	for _, n := range names {
 		jc, ok := a.cfg.Backups.Jobs[n]
@@ -176,21 +182,14 @@ func (a *app) installJobs(ctx context.Context, hosts []plan.NamedHost, names []s
 		for k, v := range j.env {
 			sec[k] = v
 		}
-		var fps map[string]string
 		if len(sec) > 0 {
-			// Created on first use so even a never-deployed Destination records
-			// fingerprints; later plans compare against them.
-			key, kerr := deploy.EnsureHMACKey(ctx, hosts[0].Host, release.AppDir(a.cfg.App, a.destName))
-			if kerr != nil {
-				return fmt.Errorf("credential fingerprint key: %w", kerr)
-			}
-			fps = targetFingerprints(key, j)
+			needKey[len(jobs)] = j
 		}
 		jobs = append(jobs, schedule.Job{
 			App: a.cfg.App, Destination: a.destName, Name: n, Project: a.project(),
 			Services: j.services, TargetName: j.targetName, Target: j.target,
 			Schedule: j.cfg.Schedule, Secrets: sec, Runtime: a.dest.Runtime,
-			SecretFingerprints: fps, Retries: j.cfg.Retries, RetryDelaySec: j.cfg.RetryDelaySec,
+			Retries: j.cfg.Retries, RetryDelaySec: j.cfg.RetryDelaySec,
 		})
 	}
 
@@ -221,6 +220,32 @@ func (a *app) installJobs(ctx context.Context, hosts []plan.NamedHost, names []s
 
 	mode := a.scheduleMode()
 	step = u.Step(h.Name, "Install timers (%s)", map[bool]string{true: "system units, sudo", false: "user units"}[mode.Sudo])
+	// Every App directory write (hmac.key, scheduled/, credentials, the job
+	// spec) happens under the deploy lock, which passes through the app_dir
+	// gate, so a migration can never move the directory mid-install.
+	unlock, err := deploy.AcquireLock(ctx, h.Host, a.cfg.App, a.destName, deploy.LockInfo{Performer: performer(), Command: "schedule install"})
+	if err != nil {
+		step.Fail(err, appDirHint(err))
+		return &silentError{err}
+	}
+	defer func() {
+		if uerr := unlock(ctx); uerr != nil {
+			u.Warn("%v", uerr)
+		}
+	}()
+	if len(needKey) > 0 {
+		// Created on first use so even a never-deployed Destination records
+		// fingerprints; later plans compare against them.
+		key, kerr := deploy.EnsureHMACKey(ctx, h.Host, release.AppDir(a.cfg.App, a.destName))
+		if kerr != nil {
+			kerr = fmt.Errorf("credential fingerprint key: %w", kerr)
+			step.Fail(kerr, "check the App directory on the Server")
+			return &silentError{kerr}
+		}
+		for i, j := range needKey {
+			jobs[i].SecretFingerprints = targetFingerprints(key, j)
+		}
+	}
 	res, err := schedule.Install(ctx, h.Host, schedule.InstallOptions{
 		Jobs: jobs, YohoBinaryLocalPath: binary, Mode: mode, Out: step.Output(),
 	})

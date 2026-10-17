@@ -63,6 +63,15 @@ type Destination struct {
 	Env map[string]string `json:"env,omitempty"`
 	// Overrides for this Destination's Proxy.
 	Proxy *ProxyConfig `json:"proxy,omitempty"`
+	// Absolute directory on the Server holding this Destination's App
+	// directory (releases, secrets, generated secrets, hmac.key), for example
+	// /home/deb/apps/elpoca-engine. Default: <root>/apps/<app>/<destination>.
+	// When set, that canonical path becomes a symlink to app_dir; compose
+	// project, volume, route and job names do not change. app_dir must be
+	// outside root, not exist yet or be empty, and Yoho owns it completely.
+	// Changing it moves the directory (same filesystem only) on the next
+	// deploy or apply.
+	AppDir string `json:"app_dir,omitempty"`
 }
 
 // Builder controls where images are built.

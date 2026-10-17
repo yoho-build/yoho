@@ -619,6 +619,10 @@ func rollbackCmd(g *globals) *cobra.Command {
 			}
 			a.ui.Title("Rolling back %s on %s to %s", a.cfg.App, a.destName, shortVersion(target))
 			a.ui.Warn("volumes and database migrations are not reverted")
+			if err := a.ensureAppDirs(ctx, hosts); err != nil {
+				a.ui.Finished(err, "")
+				return err
+			}
 			step := a.ui.Step(hosts[0].Name, "Redeploy %s", shortVersion(target))
 			rel, err := a.runtime().Rollback(ctx, d, target)
 			if err != nil {

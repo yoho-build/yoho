@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"path"
 	"regexp"
 	"sort"
 	"strings"
@@ -78,7 +79,11 @@ func Validate(c *Config) []error {
 		if (rt == "" || rt == "compose") && len(d.Servers) > 1 {
 			add("destinations.%s: %s", n, RolesMessage)
 		}
+		if d.AppDir != "" {
+			errs = append(errs, validateAppDir(c, n, d)...)
+		}
 	}
+	errs = append(errs, validateAppDirOverlap(c)...)
 	switch c.Builder.Location {
 	case "", "local", "server":
 	case "remote":
@@ -234,4 +239,103 @@ func (p ServiceProxy) ValidateHealthCheck() error {
 		}
 	}
 	return nil
+}
+
+// safePathPattern is the set of characters Yoho accepts in Server paths it
+// writes into scripts and journals (same as internal/schedule).
+var safePathPattern = regexp.MustCompile(`^/[A-Za-z0-9_./-]+$`)
+
+// destRoot is the root shared by a Destination's Servers (the first known).
+func destRoot(c *Config, d Destination) string {
+	for _, s := range d.Servers {
+		if sv, ok := c.Servers[s]; ok {
+			return rootOrDefault(sv.Root)
+		}
+	}
+	return rootOrDefault("")
+}
+
+// pathWithin reports whether p equals dir or lies inside it (lexically).
+func pathWithin(p, dir string) bool {
+	return p == dir || dir == "/" || strings.HasPrefix(p, dir+"/")
+}
+
+// validateAppDir checks one Destination's app_dir. The Server re-checks
+// ownership, modes and physical containment before using it.
+func validateAppDir(c *Config, n string, d Destination) []error {
+	var errs []error
+	add := func(f string, a ...any) { errs = append(errs, fmt.Errorf(f, a...)) }
+	p := d.AppDir
+	switch {
+	case !strings.HasPrefix(p, "/"):
+		add("destinations.%s.app_dir %q must be an absolute path", n, p)
+		return errs
+	case p == "/":
+		add("destinations.%s.app_dir must not be /", n)
+		return errs
+	case path.Clean(p) != p:
+		add("destinations.%s.app_dir %q must be a clean path (no trailing slash, //, . or ..); use %q", n, p, path.Clean(p))
+		return errs
+	case !safePathPattern.MatchString(p):
+		add("destinations.%s.app_dir %q may only use letters, digits, _ . / and -", n, p)
+		return errs
+	}
+	if !appPattern.MatchString(n) {
+		add("destinations.%s: the Destination name must match %s when app_dir is set", n, appPattern)
+	}
+	root := destRoot(c, d)
+	if !safePathPattern.MatchString(root) {
+		add("destinations.%s.app_dir: the Server root %q may only use letters, digits, _ . / and - when app_dir is set", n, root)
+	}
+	root = path.Clean(root)
+	switch {
+	case pathWithin(p, root):
+		add("destinations.%s.app_dir %q must be outside the Server root %s", n, p, root)
+	case pathWithin(root, p):
+		add("destinations.%s.app_dir %q must not contain the Server root %s", n, p, root)
+	}
+	return errs
+}
+
+// validateAppDirOverlap refuses the same or nested app_dir on Destinations
+// that share a Server (by name or SSH target).
+func validateAppDirOverlap(c *Config) []error {
+	var errs []error
+	names := sortedKeys(c.Destinations)
+	for i, a := range names {
+		da := c.Destinations[a]
+		if da.AppDir == "" || !strings.HasPrefix(da.AppDir, "/") {
+			continue
+		}
+		for _, b := range names[i+1:] {
+			db := c.Destinations[b]
+			if db.AppDir == "" || !strings.HasPrefix(db.AppDir, "/") || !shareServer(c, da, db) {
+				continue
+			}
+			pa, pb := path.Clean(da.AppDir), path.Clean(db.AppDir)
+			switch {
+			case pa == pb:
+				errs = append(errs, fmt.Errorf("destinations.%s.app_dir and destinations.%s.app_dir are the same directory on a shared Server", a, b))
+			case pathWithin(pa, pb) || pathWithin(pb, pa):
+				errs = append(errs, fmt.Errorf("destinations.%s.app_dir and destinations.%s.app_dir are nested on a shared Server", a, b))
+			}
+		}
+	}
+	return errs
+}
+
+func shareServer(c *Config, a, b Destination) bool {
+	for _, x := range a.Servers {
+		for _, y := range b.Servers {
+			if x == y {
+				return true
+			}
+			sx, okx := c.Servers[x]
+			sy, oky := c.Servers[y]
+			if okx && oky && sx.SSH != "" && sx.SSH == sy.SSH {
+				return true
+			}
+		}
+	}
+	return false
 }

@@ -254,7 +254,7 @@ func Restore(ctx context.Context, o RestoreOptions) (res *RestoreResult, err err
 	if len(m.GeneratedSecrets) > 0 {
 		// Preflight existing destinations without creating or changing App files.
 		d := generatedDir(o.App, o.Destination)
-		pre := safeDir(d, false, false) + "if [ -d " + remote.Quote(d) + " ]; then yoho_private " + remote.Quote(d) + "; fi\n"
+		pre := appLink(o.App, o.Destination) + safeDir(d, false, false) + "if [ -d " + remote.Quote(d) + " ]; then yoho_private " + remote.Quote(d) + "; fi\n"
 		for _, name := range m.GeneratedSecrets {
 			f := path.Join(d, name)
 			pre += "if [ -e " + remote.Quote(f) + " ] || [ -L " + remote.Quote(f) + " ]; then yoho_secret " + remote.Quote(f) + "; fi\n"

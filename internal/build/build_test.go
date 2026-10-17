@@ -420,7 +420,11 @@ func TestServerBuildFailureRemovesPrivateSourceDir(t *testing.T) {
 		t.Fatal("want rsync failure")
 	}
 	last := h.cmds[len(h.cmds)-1].Script
-	if last != "set -eu\nrm -rf '/var/lib/yoho/apps/shop/prod/source.run-zzz'\n" {
+	// Cleanup passes through the App directory gate and refuses during an
+	// app_dir migration before it removes the private dir.
+	gate, body, ok := strings.Cut(last, "yoho_gate_take '/var/lib/yoho/appdirs/shop/d/prod/gate'")
+	if !ok || !strings.HasPrefix(gate, "set -eu\n") || !strings.Contains(body, "/var/lib/yoho/appdirs/shop/d/prod/migrate.json") ||
+		!strings.HasSuffix(body, "\nrm -rf '/var/lib/yoho/apps/shop/prod/source.run-zzz'\n") {
 		t.Errorf("cleanup %q", last)
 	}
 }
