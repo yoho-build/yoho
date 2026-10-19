@@ -8,7 +8,7 @@
 
 Yoho ist eine einzelne statische Go-Binärdatei. Deine `compose.yaml` bleibt die maßgebliche Quelle; Yoho ergänzt einen `x-yoho`-Block pro Service und eine kleine `yoho.yml`. Es baut Images auf deinem Rechner, überträgt sie über SSH (keine Registry erforderlich), schaltet den Datenverkehr über kamal-proxy um, bewahrt Secrets in deinem Passwortmanager auf und sichert Volumes.
 
-Status: **Alpha**. Rechne mit inkompatiblen Änderungen. Lizenz: MIT.
+Status: **Beta**. Rechne mit inkompatiblen Änderungen. Lizenz: MIT.
 
 ## Einrichtung mit deinem KI-Agenten
 

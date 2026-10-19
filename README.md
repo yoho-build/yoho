@@ -8,7 +8,7 @@
 
 Yoho is one static Go binary. Your `compose.yaml` stays the source of truth; Yoho adds an `x-yoho` block per Service and a small `yoho.yml`. It builds images on your machine, ships them over SSH (no registry needed), switches traffic through kamal-proxy, keeps secrets in your password manager, and backs up volumes.
 
-Status: **alpha**. Expect breaking changes. License: MIT.
+Status: **beta**. Expect breaking changes. License: MIT.
 
 ## Set up with your AI agent
 
