@@ -188,12 +188,15 @@ Inputs:
 | `yoho-version` | `v0.2.0` | Release to install, or `latest`. |
 | `runs-on` | `["ubuntu-latest"]` | JSON for `runs-on`, for example `["self-hosted","macOS","ARM64"]`. |
 | `environment` | empty | GitHub environment, for approvals and protection rules. |
-| `ssh-host` | empty | Host name or IP of the Server. |
+| `ssh-host` | empty | Host name or IP of the Server. Optional with `ssh.via: cloudflare` when `ssh-known-hosts` is set. |
 | `ssh-alias` | empty | The alias in `servers.*.ssh` when it has no `user@host` form (see below). |
-| `ssh-known-hosts` | empty | known_hosts line for the Server. Without it the workflow runs `ssh-keyscan` and trusts the first answer. |
+| `ssh-known-hosts` | empty | known_hosts line for the Server. The workflow rewrites its name column to `ssh-alias` (or `ssh-host`). Without it the workflow runs `ssh-keyscan` and trusts the first answer. |
+| `install-cloudflared` | `false` | Install a pinned `cloudflared` (Linux or macOS, amd64 or arm64) and put it on `PATH`. Needed for `ssh.via: cloudflare`. |
+| `cloudflared-version` | `2026.3.0` | cloudflared release to install. The sha256 values of `2026.3.0` are pinned in the workflow (from the release notes). |
+| `cloudflared-sha256` | empty | sha256 of the asset for the runner (`cloudflared-linux-amd64`, `cloudflared-linux-arm64`, `cloudflared-darwin-amd64.tgz`, `cloudflared-darwin-arm64.tgz`). Required for any other `cloudflared-version`. |
 | `verify-url` | empty | URL fetched with `curl -fsS`, retried for about two minutes. |
 
-Secrets: `ssh-private-key` (required), and `cloudflare-service-token-id` and `cloudflare-service-token-secret` for a Destination with `ssh: {via: cloudflare}` (exported as `TUNNEL_SERVICE_TOKEN_ID` and `TUNNEL_SERVICE_TOKEN_SECRET`).
+Secrets: `ssh-private-key` (required), and `cloudflare-service-token-id` and `cloudflare-service-token-secret` for a Destination with `ssh: {via: cloudflare}`. They are exported as `TUNNEL_SERVICE_TOKEN_ID` and `TUNNEL_SERVICE_TOKEN_SECRET` to the `yoho` steps only, and masked in the log.
 
 Things to know:
 
@@ -205,9 +208,32 @@ Things to know:
 - **Secrets and environments.** A job that calls a reusable workflow cannot set `environment`, so `secrets.YOHO_GATE_KEY` and `vars.*` in the caller come from the repository or organization, not from an environment. The `environment` input protects the deploy job itself (required reviewers, branch rules).
 - **Concurrency.** Deploys of one `working-directory` and `destination` queue; a running deploy is never cancelled.
 
+#### GitHub-hosted runners for LAN-only Servers (Cloudflare Tunnel)
+
+Put the Server behind a [Cloudflare Tunnel](#servers-without-a-public-ip-cloudflare-tunnel) and deploy from a plain `ubuntu-latest` runner (native amd64, no cross-build). Set `ssh: {via: cloudflare, hostname: ssh-deploy.example.com}` on the Destination (in the CI Yoho file too), create a Service Auth token, and store it as two secrets:
+
+```yaml
+jobs:
+  deploy:
+    uses: yoho-build/yoho/.github/workflows/deploy.yml@v0.2.0
+    with:
+      working-directory: .
+      destination: production
+      runs-on: '["ubuntu-latest"]'
+      install-cloudflared: true
+      ssh-alias: small-deb                              # servers.*.ssh
+      ssh-known-hosts: ${{ vars.SMALL_DEB_KNOWN_HOSTS }} # ssh-keyscan -t ed25519 192.168.3.183
+    secrets:
+      ssh-private-key: ${{ secrets.YOHO_GATE_KEY }}
+      cloudflare-service-token-id: ${{ secrets.CF_ACCESS_CLIENT_ID }}
+      cloudflare-service-token-secret: ${{ secrets.CF_ACCESS_CLIENT_SECRET }}
+```
+
+Host key checking: Yoho adds `-o ProxyCommand=cloudflared access ssh --hostname …`, so ssh never resolves the Server name and looks the host key up under the name it was given (the alias, or `HostName` if set). The workflow writes `HostKeyAlias <ssh-alias>` into the `Host` block, omits `HostName` when `ssh-host` is empty, and rewrites the name column of `ssh-known-hosts` to the alias. You can paste the plain `ssh-keyscan` output of the LAN address. Hashed or `@cert-authority` lines are not supported. Do not set `ssh-host` here unless you want `HostName` for a direct (non-Cloudflare) connection.
+
 #### Self-hosted runners for LAN-only Servers
 
-GitHub-hosted runners cannot reach a Server on a private address such as `192.168.3.183`. Register a self-hosted runner on a machine that can (a Mac or a Linux box on the same network), give it Docker, and select it with `runs-on: '["self-hosted","macOS","ARM64"]'`. Use a runner that only serves repositories you trust, because a workflow that runs on it can use the machine and the key. Alternatively, put the Server behind a [Cloudflare Tunnel](#servers-without-a-public-ip-cloudflare-tunnel) and use a hosted runner.
+GitHub-hosted runners cannot reach a Server on a private address such as `192.168.3.183`. Register a self-hosted runner on a machine that can (a Mac or a Linux box on the same network), give it Docker, and select it with `runs-on: '["self-hosted","macOS","ARM64"]'`. Use a runner that only serves repositories you trust, because a workflow that runs on it can use the machine and the key. Or use the Cloudflare Tunnel variant above with a hosted runner.
 
 ## Servers without a public IP (Cloudflare Tunnel)
 

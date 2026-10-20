@@ -92,7 +92,8 @@ Checks before you wire it:
 - Yoho connects as `yoho-gate@<host of servers.*.ssh>`. If `servers.*.ssh` is an ssh config alias (`small-deb`), set `ssh-alias` and `ssh-host` so the runner gets a `Host` block for it.
 - The runner builds the images, so it needs Docker, and `builder.location` must be `local` (scoped access refuses `server` and `remote`; there is no env override). Keep an operator Yoho file and a CI file (`config: yoho.ci.yml`) if the operator builds on the Server.
 - `secrets.*` and `vars.*` in the caller are repository or organization level; a calling job cannot use an environment. The `environment` input gates the deploy job.
-- A LAN-only Server needs a self-hosted runner on that network (`runs-on: '["self-hosted","macOS","ARM64"]'`) or a Cloudflare Tunnel.
+- LAN-only Server on a hosted runner: Cloudflare Tunnel (section 4) plus `install-cloudflared: true`, `ssh-alias` (no `ssh-host`), `ssh-known-hosts` (keyscan of the LAN address; the workflow rewrites the name to the alias and sets `HostKeyAlias`), and secrets `cloudflare-service-token-id` / `-secret`. They reach only the `yoho` steps.
+- Otherwise a LAN-only Server needs a self-hosted runner on that network (`runs-on: '["self-hosted","macOS","ARM64"]'`).
 
 GitLab: `glab variable set YOHO_GATE_KEY -R GROUP/PROJECT --masked --protected < ci-github`, then write the key to a file, add the host to `known_hosts`, install Yoho, and run `YOHO_ACCESS=scoped yoho deploy -d production`.
 

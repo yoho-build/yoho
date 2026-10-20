@@ -39,17 +39,41 @@ on:
         type: string
         default: ""
       ssh-host:
-        description: Host name or IP of the Server. Used for ssh-keyscan and as HostName of ssh-alias.
+        description: >-
+          Host name or IP of the Server. Used for ssh-keyscan and as HostName of ssh-alias.
+          Leave it empty for a Destination with ssh.via cloudflare when ssh-known-hosts is set:
+          the ProxyCommand does the connecting and no HostName is needed.
         type: string
         default: ""
       ssh-alias:
         description: >-
           The name in servers.*.ssh when it is an ssh config alias such as small-deb (no user@).
-          The workflow writes a Host block that maps it to ssh-host.
+          The workflow writes a Host block for it (HostName from ssh-host when set) and uses it
+          as HostKeyAlias, so the host key is always looked up under this name.
         type: string
         default: ""
       ssh-known-hosts:
-        description: known_hosts line(s) for the Server (preferred). Without it the workflow runs ssh-keyscan on ssh-host, which trusts the first answer.
+        description: >-
+          known_hosts line(s) for the Server (preferred), for example the output of
+          ssh-keyscan -t ed25519 HOST. Only the key type and key are used: the workflow
+          rewrites the name column to ssh-alias (or ssh-host). Without it the workflow runs
+          ssh-keyscan on ssh-host, which trusts the first answer.
+        type: string
+        default: ""
+      install-cloudflared:
+        description: Install a pinned cloudflared on the runner (Linux or macOS). Needed for Destinations with ssh.via cloudflare.
+        type: boolean
+        default: false
+      cloudflared-version:
+        description: cloudflared release to install (a tag of github.com/cloudflare/cloudflared, such as 2026.3.0).
+        type: string
+        default: "2026.3.0"
+      cloudflared-sha256:
+        description: >-
+          sha256 of the cloudflared asset for this runner (cloudflared-linux-amd64, cloudflared-linux-arm64,
+          cloudflared-darwin-amd64.tgz or cloudflared-darwin-arm64.tgz). Required when cloudflared-version is
+          not the default; the release notes list the checksums. Ignored for the default version, whose
+          checksums are pinned in this workflow.
         type: string
         default: ""
       verify-url:
@@ -95,6 +119,9 @@ jobs:
           HOST: ${{ inputs.ssh-host }}
           ALIAS: ${{ inputs.ssh-alias }}
           KNOWN: ${{ inputs.ssh-known-hosts }}
+          CF_INSTALL: ${{ inputs.install-cloudflared }}
+          CF_VERSION: ${{ inputs.cloudflared-version }}
+          CF_SHA: ${{ inputs.cloudflared-sha256 }}
         run: |
           set -eu
           case "$ACCESS" in scoped | operator) ;; *) echo "::error::access must be scoped or operator"; exit 1 ;; esac
@@ -103,8 +130,12 @@ jobs:
           if [ -z "$KNOWN" ] && [ -z "$HOST" ]; then
             echo "::error::set ssh-known-hosts, or ssh-host for ssh-keyscan"; exit 1
           fi
-          if [ -n "$ALIAS" ] && [ -z "$HOST" ]; then
-            echo "::error::ssh-alias needs ssh-host"; exit 1
+          if [ "$CF_INSTALL" = true ]; then
+            case "$CF_VERSION" in '' | *[!A-Za-z0-9._-]*) echo "::error::invalid cloudflared-version"; exit 1 ;; esac
+            case "$CF_SHA" in *[!0-9a-fA-F]*) echo "::error::cloudflared-sha256 must be hex"; exit 1 ;; esac
+            if [ "$CF_VERSION" != "2026.3.0" ] && [ -z "$CF_SHA" ]; then
+              echo "::error::cloudflared-version $CF_VERSION has no pinned checksum; set cloudflared-sha256"; exit 1
+            fi
           fi
 
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -116,6 +147,46 @@ jobs:
       - uses: yoho-build/yoho/.github/actions/setup-yoho@v0.2.0
         with:
           version: ${{ inputs.yoho-version }}
+
+      - name: Install cloudflared
+        if: inputs.install-cloudflared
+        env:
+          CF_VERSION: ${{ inputs.cloudflared-version }}
+          CF_SHA: ${{ inputs.cloudflared-sha256 }}
+        run: |
+          set -eu
+          case "$(uname -s)-$(uname -m)" in
+            Linux-x86_64)  asset=cloudflared-linux-amd64;      sha=4a9e50e6d6d798e90fcd01933151a90bf7edd99a0a55c28ad18f2e16263a5c30 ;;
+            Linux-aarch64 | Linux-arm64) asset=cloudflared-linux-arm64; sha=0755ba4cbab59980e6148367fcf53a8f3ec85a97deefd63c2420cf7850769bee ;;
+            Darwin-x86_64) asset=cloudflared-darwin-amd64.tgz; sha=b91dbec79a3e3809d5508b96d8b0bdfbf3ad7d51f858200228fa3e57100580d9 ;;
+            Darwin-arm64)  asset=cloudflared-darwin-arm64.tgz; sha=633cee0fd41fd2020e17498beecc54811bf4fc99f891c080dc9343eb0f449c60 ;;
+            *) echo "::error::no cloudflared build for $(uname -s) $(uname -m)"; exit 1 ;;
+          esac
+          # Pinned checksums belong to 2026.3.0 (from its release notes); another version brings its own.
+          if [ "$CF_VERSION" != "2026.3.0" ]; then sha=$CF_SHA; fi
+          dir="$RUNNER_TEMP/cloudflared-$CF_VERSION"
+          mkdir -p "$dir/bin"
+          curl -fsSL --retry 3 -o "$dir/$asset" "https://github.com/cloudflare/cloudflared/releases/download/$CF_VERSION/$asset"
+          if command -v sha256sum > /dev/null 2>&1; then got=$(sha256sum "$dir/$asset" | awk '{print $1}'); else got=$(shasum -a 256 "$dir/$asset" | awk '{print $1}'); fi
+          want=$(printf '%s' "$sha" | tr 'A-F' 'a-f')
+          [ "$got" = "$want" ] || { echo "::error::cloudflared checksum mismatch for $asset"; exit 1; }
+          case "$asset" in
+            *.tgz) tar -xzf "$dir/$asset" -C "$dir/bin" cloudflared ;;
+            *) cp "$dir/$asset" "$dir/bin/cloudflared" ;;
+          esac
+          chmod 755 "$dir/bin/cloudflared"
+          echo "$dir/bin" >> "$GITHUB_PATH"
+          "$dir/bin/cloudflared" --version
+
+      - name: Mask Cloudflare token
+        env:
+          CF_ID: ${{ secrets.cloudflare-service-token-id }}
+          CF_SECRET: ${{ secrets.cloudflare-service-token-secret }}
+        run: |
+          set -eu
+          # Registered secrets are masked already; this also covers the id in any derived form.
+          if [ -n "$CF_ID" ]; then echo "::add-mask::$CF_ID"; fi
+          if [ -n "$CF_SECRET" ]; then echo "::add-mask::$CF_SECRET"; fi
 
       - name: Configure ssh
         env:
@@ -131,13 +202,24 @@ jobs:
           # Key and known_hosts live outside the checkout (a dirty tree changes the version).
           printf '%s\n' "$SSH_KEY" > "$dir/id"
           chmod 600 "$dir/id"
+          # ssh looks the host key up under HostKeyAlias (the alias when set, else the host name).
+          # With a ProxyCommand (ssh.via cloudflare) the name in servers.*.ssh is not resolvable and
+          # the scanned IP is not what ssh asks for, so rewrite the name column of every key to it.
+          name=${ALIAS:-$HOST}
           if [ -n "$KNOWN" ]; then
-            printf '%s\n' "$KNOWN" > "$dir/known_hosts"
+            printf '%s\n' "$KNOWN" > "$dir/known_hosts.in"
           else
             echo "::warning::no ssh-known-hosts: trusting the host key that ssh-keyscan returns now"
-            ssh-keyscan -T 10 -t ed25519,ecdsa,rsa "$HOST" > "$dir/known_hosts" 2>/dev/null
-            [ -s "$dir/known_hosts" ] || { echo "::error::ssh-keyscan found no host key for $HOST"; exit 1; }
+            ssh-keyscan -T 10 -t ed25519,ecdsa,rsa "$HOST" > "$dir/known_hosts.in" 2>/dev/null
+            [ -s "$dir/known_hosts.in" ] || { echo "::error::ssh-keyscan found no host key for $HOST"; exit 1; }
           fi
+          if [ -n "$name" ]; then
+            awk -v n="$name" '$1 !~ /^[#@]/ && NF >= 3 { print n, $2, $3 }' "$dir/known_hosts.in" > "$dir/known_hosts"
+          else
+            cp "$dir/known_hosts.in" "$dir/known_hosts"
+          fi
+          rm -f "$dir/known_hosts.in"
+          [ -s "$dir/known_hosts" ] || { echo "::error::ssh-known-hosts holds no host key"; exit 1; }
           # yoho runs the system ssh, so the entry goes into ~/.ssh/config, at the top (the first
           # value wins) between markers that the cleanup step removes. A per-run known_hosts file
           # keeps the runner user's own known_hosts untouched.
@@ -148,7 +230,8 @@ jobs:
           {
             echo "# BEGIN $marker"
             echo "Host $pattern"
-            if [ -n "$ALIAS" ]; then echo "  HostName $HOST"; fi
+            if [ -n "$ALIAS" ] && [ -n "$HOST" ]; then echo "  HostName $HOST"; fi
+            if [ -n "$name" ]; then echo "  HostKeyAlias $name"; fi
             echo "  IdentityFile $dir/id"
             echo "  IdentitiesOnly yes"
             echo "  UserKnownHostsFile $dir/known_hosts"
@@ -164,8 +247,12 @@ jobs:
       - name: Releases before
         id: before
         working-directory: ${{ inputs.working-directory }}
+        env:
+          TUNNEL_SERVICE_TOKEN_ID: ${{ secrets.cloudflare-service-token-id }}
+          TUNNEL_SERVICE_TOKEN_SECRET: ${{ secrets.cloudflare-service-token-secret }}
         run: |
           set -u
+          if [ -z "$TUNNEL_SERVICE_TOKEN_ID" ]; then unset TUNNEL_SERVICE_TOKEN_ID TUNNEL_SERVICE_TOKEN_SECRET; fi
           set +e
           yoho releases -d "$DEST" ${YOHO_CONFIG:+-c "$YOHO_CONFIG"} > "$RUNNER_TEMP/releases-before.txt" 2>&1
           rc=$?
