@@ -141,7 +141,11 @@ func TestShort(t *testing.T) {
 	}
 	// A mistyped token names its kind but echoes none of its characters.
 	b := []byte(tok)
-	b[len(b)-1] ^= 1
+	if b[len(b)-1] == '0' {
+		b[len(b)-1] = '1'
+	} else {
+		b[len(b)-1] = '0'
+	}
 	if got := Short(string(b)); got != InvalidShort {
 		t.Errorf("Short(typo) = %q", got)
 	}
