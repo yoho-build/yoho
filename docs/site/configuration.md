@@ -102,6 +102,20 @@ Yoho moves the App directory with a rename, so `app_dir` (its parent, for a new 
 5. Set `app_dir: /new/app_dir` and run `yoho plan`: it shows no `app_dir` change, because the link already points at `app_dir`.
 6. Remove `<root>/apps/<app>/<destination>.old` once everything works.
 
+### Scoped access and SSH routing (`access`, `gate_user`, `ssh`)
+
+```yaml
+destinations:
+  production:
+    servers: [home]
+    access: scoped                                   # operator (default) | scoped
+    gate_user: yoho-gate                             # default
+    ssh: {via: cloudflare, hostname: ssh.example.com}
+```
+
+- `access: scoped` sends `deploy`, `rollback`, `releases`, `app ps/logs/stats`, `tui` and `ui` through the Gate as the `gate_user`, and makes every other command that connects fail fast. `YOHO_ACCESS=operator|scoped` overrides it per shell. This option needs the compose runtime. See [Sharing one App with a team](team-access.md).
+- `ssh.via: cloudflare` reaches the Destination's only Server through a Cloudflare Tunnel `ssh://` ingress (`cloudflared access ssh --hostname …` as ssh's ProxyCommand), on the operator path and the scoped path. `hostname` must be a plain DNS name.
+
 ## x-yoho
 
 | Key | Description |

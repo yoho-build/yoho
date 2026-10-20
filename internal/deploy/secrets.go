@@ -6,7 +6,9 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
+	"os"
 	"path"
+	"path/filepath"
 	"regexp"
 	"sort"
 	"strings"
@@ -222,4 +224,110 @@ func sortedKeys[V any](m map[string]V) []string {
 	}
 	sort.Strings(keys)
 	return keys
+}
+
+// WriteSecretsGeneration writes svcSecrets as a new secrets generation of
+// the App Destination, named like the runtime's (<UTC time>-<suffix>), and
+// returns its name. `yoho access secrets push` stores the operator's values
+// this way; scoped deploys reuse the newest generation.
+func WriteSecretsGeneration(ctx context.Context, h remote.Host, app, dest, suffix string, svcSecrets map[string]map[string]string, asEnv map[string]bool) (string, error) {
+	if !versionRe.MatchString(suffix) {
+		return "", fmt.Errorf("invalid generation suffix %q", suffix)
+	}
+	for svc, m := range svcSecrets {
+		for name := range m {
+			if !secretNameRe.MatchString(name) {
+				return "", fmt.Errorf("service %s: invalid secret name %q (letters, digits, underscore)", svc, name)
+			}
+		}
+	}
+	generation := now().Format("20060102T150405Z") + "-" + suffix
+	if err := writeSecrets(ctx, h, release.SecretsDir(app, dest, generation), svcSecrets, asEnv); err != nil {
+		return "", err
+	}
+	return generation, nil
+}
+
+// generationRe matches generation directory names (time first, so the
+// newest sorts last).
+var generationRe = regexp.MustCompile(`^[0-9]{8}T[0-9]{6}Z-[A-Za-z0-9][A-Za-z0-9._-]*$`)
+
+// ValidGeneration reports whether g names a secrets generation directory.
+func ValidGeneration(g string) bool { return generationRe.MatchString(g) }
+
+// ReadSecretsGeneration reads a generation directory on this machine back
+// into Service -> container name -> value (the inverse of writeSecrets).
+func ReadSecretsGeneration(dir string) (map[string]map[string]string, error) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil, err
+	}
+	out := map[string]map[string]string{}
+	for _, e := range entries {
+		name := e.Name()
+		p := filepath.Join(dir, name)
+		switch {
+		case e.IsDir():
+			files, err := os.ReadDir(p)
+			if err != nil {
+				return nil, err
+			}
+			m := map[string]string{}
+			for _, f := range files {
+				if !f.Type().IsRegular() || !secretNameRe.MatchString(f.Name()) {
+					continue
+				}
+				b, err := os.ReadFile(filepath.Join(p, f.Name()))
+				if err != nil {
+					return nil, err
+				}
+				m[f.Name()] = string(b)
+			}
+			out[name] = m
+		case e.Type().IsRegular() && strings.HasSuffix(name, ".env"):
+			b, err := os.ReadFile(p)
+			if err != nil {
+				return nil, err
+			}
+			m, err := parseEnvFile(b)
+			if err != nil {
+				return nil, fmt.Errorf("%s: %w", p, err)
+			}
+			out[strings.TrimSuffix(name, ".env")] = m
+		}
+	}
+	return out, nil
+}
+
+// parseEnvFile reverses envFile.
+func parseEnvFile(b []byte) (map[string]string, error) {
+	out := map[string]string{}
+	for i, line := range strings.Split(string(b), "\n") {
+		if line == "" {
+			continue
+		}
+		k, v, ok := strings.Cut(line, "=")
+		if !ok || !secretNameRe.MatchString(k) || len(v) < 2 || v[0] != '"' || v[len(v)-1] != '"' {
+			return nil, fmt.Errorf("line %d: not a Yoho env_file line", i+1)
+		}
+		v = v[1 : len(v)-1]
+		var sb strings.Builder
+		for j := 0; j < len(v); j++ {
+			if v[j] != '\\' || j+1 == len(v) {
+				sb.WriteByte(v[j])
+				continue
+			}
+			j++
+			switch v[j] {
+			case 'n':
+				sb.WriteByte('\n')
+			case 'r':
+				sb.WriteByte('\r')
+			default:
+				sb.WriteByte(v[j])
+			}
+		}
+		out[k] = sb.String()
+	}
+	return out, nil
 }

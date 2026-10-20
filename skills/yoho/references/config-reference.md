@@ -39,6 +39,8 @@ An optional overlay next to the Yoho file, `yoho.<destination>.<ext>` (`yml`, `y
 
 Compose files follow the same idea. After the base files are resolved, Yoho also loads `name.<destination>.ext` when it exists (`compose.yaml` and `compose.staging.yaml` for `-d staging`) and appends those overlays so they override.
 
+Scoped access (sharing one App Destination with teammates or CI, see https://yohobuild.com/team-access/): `access: scoped` routes `deploy`, `rollback`, `releases`, `app ps/logs/stats`, `tui`, `ui` through the Gate as `gate_user` (default `yoho-gate`); every other connecting command fails fast. `YOHO_ACCESS=operator|scoped` overrides it. `ssh: {via: cloudflare, hostname: ssh.example.com}` reaches the Destination's only Server through a Cloudflare Tunnel with `cloudflared access ssh` as ProxyCommand (CI: `TUNNEL_SERVICE_TOKEN_ID`/`TUNNEL_SERVICE_TOKEN_SECRET`).
+
 ## x-yoho (per compose Service)
 
 | Key | Notes |

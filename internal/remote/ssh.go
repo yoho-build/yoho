@@ -35,6 +35,12 @@ type SSHOptions struct {
 	ExtraArgs []string
 	// Binary, default "ssh".
 	Binary string
+	// CloudflareHostname reaches the Server through a Cloudflare Tunnel
+	// `ssh://` ingress: ssh runs `cloudflared access ssh --hostname H` as its
+	// ProxyCommand. cloudflared reads TUNNEL_SERVICE_TOKEN_ID and
+	// TUNNEL_SERVICE_TOKEN_SECRET from the environment (CI), which ssh passes
+	// through untouched; they never appear in argv.
+	CloudflareHostname string
 	// Exec runs local processes. Default: os/exec.
 	Exec ExecFunc
 }
@@ -77,6 +83,16 @@ func NewSSH(name, target string, sudo bool, opts SSHOptions) (*SSH, error) {
 	if opts.Binary == "" {
 		opts.Binary = "ssh"
 	}
+	if opts.CloudflareHostname != "" {
+		if !ValidHostname(opts.CloudflareHostname) {
+			return nil, fmt.Errorf("ssh.hostname %q is not a valid DNS hostname", opts.CloudflareHostname)
+		}
+		if opts.Exec == nil {
+			if _, err := lookPath("cloudflared"); err != nil {
+				return nil, fmt.Errorf("cloudflared is not installed; it is needed to reach %s through Cloudflare Access\nhint: install cloudflared (https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/downloads/) and make sure it is on PATH", opts.CloudflareHostname)
+			}
+		}
+	}
 	ttyExec := opts.Exec
 	if opts.Exec == nil {
 		opts.Exec = osExec
@@ -86,7 +102,12 @@ func NewSSH(name, target string, sudo bool, opts SSHOptions) (*SSH, error) {
 	if s.name == "" {
 		s.name = host
 	}
-	s.controlPath, err = controlPath(opts.ControlDir, target)
+	// A master opened through another ProxyCommand must not be reused.
+	key := target
+	if opts.CloudflareHostname != "" {
+		key += "|cloudflare=" + opts.CloudflareHostname
+	}
+	s.controlPath, err = controlPath(opts.ControlDir, key)
 	if err != nil {
 		return nil, err
 	}
@@ -124,6 +145,48 @@ func ParseTarget(target string) (user, host string, port int, err error) {
 		return "", "", 0, fmt.Errorf("ssh target %q: invalid host", target)
 	}
 	return user, host, port, nil
+}
+
+// lookPath is exec.LookPath, replaceable in tests.
+var lookPath = exec.LookPath
+
+// ValidHostname reports whether h is a DNS hostname: dot-separated labels of
+// letters, digits and inner dashes, at most 253 bytes, with at least one dot.
+func ValidHostname(h string) bool {
+	if len(h) == 0 || len(h) > 253 || !strings.Contains(h, ".") {
+		return false
+	}
+	for _, label := range strings.Split(h, ".") {
+		if len(label) == 0 || len(label) > 63 || label[0] == '-' || label[len(label)-1] == '-' {
+			return false
+		}
+		for i := 0; i < len(label); i++ {
+			c := label[i]
+			if !(c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || c == '-') {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+// WithUser returns target ([user@]host[:port]) with its user replaced.
+func WithUser(target, user string) (string, error) {
+	_, host, port, err := ParseTarget(target)
+	if err != nil {
+		return "", err
+	}
+	if strings.Contains(host, ":") {
+		host = "[" + host + "]"
+	}
+	t := user + "@" + host
+	if port != 0 {
+		t += ":" + strconv.Itoa(port)
+	}
+	if _, _, _, err := ParseTarget(t); err != nil {
+		return "", err
+	}
+	return t, nil
 }
 
 // controlPath picks a short socket path: macOS limits unix sockets to 104 bytes.
@@ -183,6 +246,11 @@ func (s *SSH) SSHArgs() []string {
 	}
 	if s.port != 0 {
 		a = append(a, "-p", strconv.Itoa(s.port))
+	}
+	if h := s.opts.CloudflareHostname; h != "" {
+		// Validated by NewSSH: letters, digits, dots and dashes only, so the
+		// shell ssh runs the ProxyCommand with sees no metacharacters.
+		a = append(a, "-o", "ProxyCommand=cloudflared access ssh --hostname "+h)
 	}
 	return append(a, s.opts.ExtraArgs...)
 }

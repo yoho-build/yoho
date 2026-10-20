@@ -53,12 +53,16 @@ func (a *app) connect(ctx context.Context) ([]plan.NamedHost, func(), error) {
 	for _, name := range a.dest.Servers {
 		srv := a.cfg.Servers[name]
 		step := a.ui.Step(name, "Connect %s", srv.SSH)
-		h, err := remote.NewSSH(name, srv.SSH, srv.Sudo, remote.SSHOptions{})
+		h, err := remote.NewSSH(name, srv.SSH, srv.Sudo, a.sshOptions())
 		if err == nil {
 			_, err = h.Output(ctx, remote.Cmd{Script: "docker version --format '{{.Server.Version}}'"})
 		}
 		if err != nil {
-			step.Fail(err, "check `ssh "+srv.SSH+"` works without a password and the user can run docker (run `yoho setup`)")
+			hint := "check `ssh " + srv.SSH + "` works without a password and the user can run docker (run `yoho setup`)"
+			if a.dest.SSH != nil {
+				hint += "; through Cloudflare, log in to Cloudflare Access or set TUNNEL_SERVICE_TOKEN_ID/TUNNEL_SERVICE_TOKEN_SECRET"
+			}
+			step.Fail(err, hint)
 			closeAll()
 			return nil, nil, &silentError{err}
 		}
@@ -113,6 +117,9 @@ func deployCmd(g *globals) *cobra.Command {
 			a, err := g.load(cmd)
 			if err != nil {
 				return err
+			}
+			if a.scoped {
+				return a.scopedDeploy(cmd.Context(), ver, skipBuild)
 			}
 			err = a.deploy(cmd.Context(), ver, skipBuild)
 			return err
@@ -330,6 +337,11 @@ func deploymentPlatform(ctx context.Context, hosts []plan.NamedHost, platforms [
 			return "", fmt.Errorf("Servers have different platforms: %s is %s, %s is %s; use separate Destinations for each architecture", hosts[0].Name, platform, h.Name, p)
 		}
 	}
+	return pickPlatform(platform, platforms)
+}
+
+// pickPlatform selects the builder platform for a Server's platform.
+func pickPlatform(platform string, platforms []string) (string, error) {
 	if len(platforms) == 0 {
 		return platform, nil
 	}
@@ -574,19 +586,7 @@ func sortedKeys[V any](m map[string]V) []string {
 	return out
 }
 
-func shortVersion(v string) string {
-	if i := strings.Index(v, version.UncommittedMarker); i >= 0 {
-		base := v[:i]
-		if len(base) > 12 {
-			base = base[:12]
-		}
-		return base + v[i:]
-	}
-	if len(v) > 12 {
-		return v[:12]
-	}
-	return v
-}
+func shortVersion(v string) string { return version.Short(v) }
 
 func runtimeName(d config.Destination) string {
 	if d.Runtime == "" {
@@ -606,6 +606,9 @@ func rollbackCmd(g *globals) *cobra.Command {
 				return err
 			}
 			ctx := cmd.Context()
+			if a.scoped {
+				return a.scopedRollback(ctx, args[0])
+			}
 			hosts, closeHosts, err := a.connect(ctx)
 			if err != nil {
 				return err
@@ -698,14 +701,20 @@ func releasesCmd(g *globals) *cobra.Command {
 				return err
 			}
 			ctx := cmd.Context()
-			hosts, closeHosts, err := a.connect(ctx)
-			if err != nil {
-				return err
-			}
-			defer closeHosts()
-			rels, err := a.runtime().Releases(ctx, &plan.Deploy{App: a.cfg.App, Destination: a.destName, Servers: hosts, Out: io.Discard})
-			if err != nil {
-				return err
+			var rels []release.Release
+			if a.scoped {
+				if err := a.gateCall(ctx, "releases", nil, nil, nil, &rels); err != nil {
+					return err
+				}
+			} else {
+				hosts, closeHosts, err := a.connect(ctx)
+				if err != nil {
+					return err
+				}
+				defer closeHosts()
+				if rels, err = a.runtime().Releases(ctx, &plan.Deploy{App: a.cfg.App, Destination: a.destName, Servers: hosts, Out: io.Discard}); err != nil {
+					return err
+				}
 			}
 			var rows [][]string
 			for i, r := range rels {
@@ -763,6 +772,9 @@ func appCmds(g *globals) *cobra.Command {
 			if err != nil {
 				return err
 			}
+			if a.scoped {
+				return a.gateCall(cmd.Context(), "ps", nil, nil, cmd.OutOrStdout(), nil)
+			}
 			if a.dest.Runtime == "swarm" {
 				return a.remoteRun(cmd, "docker stack ps --no-trunc --format 'table {{.Name}}\\t{{.Node}}\\t{{.CurrentState}}\\t{{.Image}}\\t{{.Error}}' "+remote.Quote(a.project()))
 			}
@@ -806,7 +818,7 @@ func (a *app) swarmExec(cmd *cobra.Command, svc string, command []string) error 
 	var tried []string
 	for _, name := range a.dest.Servers {
 		srv := a.cfg.Servers[name]
-		h, err := remote.NewSSH(name, srv.SSH, srv.Sudo, remote.SSHOptions{})
+		h, err := remote.NewSSH(name, srv.SSH, srv.Sudo, a.sshOptions())
 		if err != nil {
 			return err
 		}
@@ -836,7 +848,7 @@ func remoteShow(g *globals, use, short, script string) *cobra.Command {
 
 func (a *app) remoteRun(cmd *cobra.Command, script string) error {
 	srv := a.cfg.Servers[a.dest.Servers[0]]
-	h, err := remote.NewSSH(a.dest.Servers[0], srv.SSH, srv.Sudo, remote.SSHOptions{})
+	h, err := remote.NewSSH(a.dest.Servers[0], srv.SSH, srv.Sudo, a.sshOptions())
 	if err != nil {
 		return err
 	}

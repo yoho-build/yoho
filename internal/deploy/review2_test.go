@@ -142,3 +142,36 @@ func TestOwnershipErrorType(t *testing.T) {
 		t.Fatalf("want OwnershipError, got %v", err)
 	}
 }
+
+// The generation `yoho access secrets push` stored for scoped deploys
+// survives retention however many deploys follow it (QA: a run of scoped
+// deploys pruned it, and the next one had no secrets).
+func TestPruneKeepsAccessSecretsGeneration(t *testing.T) {
+	root := withRoot(t)
+	ctx := context.Background()
+	h := &dockerHost{local: &remote.Local{}, respond: respond(nil)}
+	clock := time.Date(2026, 10, 8, 12, 0, 0, 0, time.UTC)
+	oldNow := now
+	now = func() time.Time { clock = clock.Add(time.Minute); return clock }
+	t.Cleanup(func() { now = oldNow })
+
+	appDir := filepath.Join(root, "apps", "shop", "production")
+	pushed := "20200101T000000Z-access-push"
+	if err := os.MkdirAll(filepath.Join(appDir, "secrets", pushed, "web"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(appDir, "access-secrets"), []byte(pushed+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, v := range []string{"v1", "v2", "v3", "v4"} {
+		d := testDeploy(t, h, nil)
+		d.Version = v
+		d.RetainReleases = 1
+		if _, err := (Compose{}).Deploy(ctx, d); err != nil {
+			t.Fatalf("%s: %v", v, err)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(appDir, "secrets", pushed)); err != nil {
+		t.Fatalf("pushed generation pruned: %v", err)
+	}
+}

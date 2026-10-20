@@ -38,6 +38,10 @@ yoho tunnel down     # remove the connector(s) and the token file
 
 These commands take no flags besides the global ones. `yoho apply` and `yoho deploy` also converge the Tunnel, and `yoho plan` shows it. `yoho setup` opens no Proxy ports in the firewall when a Tunnel is configured. Set `x-yoho.proxy.tls` off for tunneled Services.
 
+## SSH through the tunnel
+
+A remotely managed tunnel can also carry SSH to the Server, for Servers without a public IP. Add a public hostname with service `ssh://host.docker.internal:22` (token connectors map `host.docker.internal` to the Server), protect it with a Cloudflare Access application, and set `ssh: {via: cloudflare, hostname: ssh.example.com}` on the Destination. See [Sharing one App with a team](team-access.md#servers-without-a-public-ip-cloudflare-tunnel).
+
 ## Alternative: your own cloudflared Service
 
 See `examples/basic`: a `cloudflared` Service in compose joined to the `yoho` network, with `secrets: [TUNNEL_TOKEN]` and `secrets_as_env: true`.

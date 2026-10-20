@@ -28,6 +28,9 @@ func init() { extraCommands = append(extraCommands, tuiCmd, uiCmd) }
 // dashSource connects to every Server of the Destination and returns the
 // read-only collector the dashboards share.
 func (a *app) dashSource(cmd *cobra.Command, interval time.Duration) (*dash.Live, func(), error) {
+	if a.scoped {
+		return a.scopedDashSource(cmd, interval)
+	}
 	hosts, closeHosts, err := a.connect(cmd.Context())
 	if err != nil {
 		return nil, nil, err

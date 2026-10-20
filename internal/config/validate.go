@@ -82,6 +82,29 @@ func Validate(c *Config) []error {
 		if d.AppDir != "" {
 			errs = append(errs, validateAppDir(c, n, d)...)
 		}
+		switch d.Access {
+		case "", "operator":
+		case "scoped":
+			if rt == "swarm" {
+				add("destinations.%s: access: scoped supports the compose runtime only", n)
+			}
+		default:
+			add("destinations.%s.access %q must be operator or scoped", n, d.Access)
+		}
+		if d.GateUser != "" && !unixUserPattern.MatchString(d.GateUser) {
+			add("destinations.%s.gate_user %q must be a Unix user name", n, d.GateUser)
+		}
+		if d.SSH != nil {
+			if d.SSH.Via != "cloudflare" {
+				add("destinations.%s.ssh.via %q must be cloudflare", n, d.SSH.Via)
+			}
+			if !hostnamePattern.MatchString(d.SSH.Hostname) || len(d.SSH.Hostname) > 253 {
+				add("destinations.%s.ssh.hostname %q must be a DNS hostname such as ssh.example.com", n, d.SSH.Hostname)
+			}
+			if len(d.Servers) > 1 {
+				add("destinations.%s.ssh: one hostname reaches one Server; the Destination lists %d", n, len(d.Servers))
+			}
+		}
 	}
 	errs = append(errs, validateAppDirOverlap(c)...)
 	switch c.Builder.Location {
@@ -172,6 +195,13 @@ func ValidateNonempty(keys []string) []error {
 }
 
 var secretKeyPattern = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
+
+var (
+	unixUserPattern = regexp.MustCompile(`^[a-z_][a-z0-9_-]{0,31}$`)
+	// hostnamePattern: dot-separated DNS labels (letters, digits, inner
+	// dashes), at least two. It ends up in an ssh ProxyCommand.
+	hostnamePattern = regexp.MustCompile(`^(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)+[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?$`)
+)
 
 // Dest returns a Destination by name. An empty name selects production when
 // that Destination is defined, otherwise the only Destination.

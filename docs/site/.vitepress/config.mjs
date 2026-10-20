@@ -17,6 +17,7 @@ const guide = [
   ['Server setup', 'setup'],
   ['Swarm', 'swarm'],
   ['Dashboards (tui / ui)', 'dashboards'],
+  ['Sharing one App with a team', 'team-access'],
   ['Hooks & env vars', 'hooks'],
   ['CLI reference', 'cli']
 ].map(([text, slug]) => ({ text, link: `/${slug}/` }))

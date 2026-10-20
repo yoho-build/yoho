@@ -379,6 +379,9 @@ func labelArgs(o Options, service string, b *types.BuildConfig) []string {
 		labels[k] = v
 	}
 	labels["yoho.app"] = o.App
+	if o.Destination != "" {
+		labels["yoho.destination"] = o.Destination
+	}
 	labels["yoho.service"] = service
 	labels["yoho.version"] = o.Version
 	var a []string

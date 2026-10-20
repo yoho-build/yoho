@@ -141,9 +141,6 @@ func variants(v string) []string {
 func (r *Redactor) Write(p []byte) (int, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if len(r.pats) == 0 {
-		return r.w.Write(p)
-	}
 	r.buf = append(r.buf, p...)
 	out, rest := r.process(r.buf, false)
 	r.buf = append(r.buf[:0], rest...)
@@ -176,8 +173,15 @@ func (r *Redactor) process(data []byte, final bool) (out, rest []byte) {
 	i := 0
 	for i < len(data) {
 		j, pat := r.find(data, i)
-		if pat == nil {
+		ts, te := findAccessToken(data, i)
+		if pat == nil && ts < 0 {
 			break
+		}
+		if ts >= 0 && (pat == nil || ts < j || (ts == j && te-ts > len(pat.text))) {
+			out = append(out, data[i:ts]...)
+			out = append(out, accessTokenLabel(data[ts:te])...)
+			i = te
+			continue
 		}
 		// A longer pattern might still match at j once more data arrives.
 		if !final && r.couldExtend(data[j:], len(pat.text)) {
@@ -191,7 +195,7 @@ func (r *Redactor) process(data []byte, final bool) (out, rest []byte) {
 	if final {
 		return append(out, data[i:]...), nil
 	}
-	hold := r.holdBack(data[i:])
+	hold := max(r.holdBack(data[i:]), accessTokenHold(data[i:]))
 	cut := len(data) - hold
 	return append(out, data[i:cut]...), data[cut:]
 }
@@ -250,5 +254,5 @@ func redactString(s string, values []string) string {
 	for _, v := range vals {
 		s = strings.ReplaceAll(s, v, "***")
 	}
-	return s
+	return redactAccessTokens(s)
 }

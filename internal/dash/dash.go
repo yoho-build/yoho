@@ -30,6 +30,17 @@ type Target struct {
 	Name string
 	SSH  string
 	Host remote.Host
+	// Reader, when set, collects this Server instead of running Script on
+	// Host: scoped access reads through the Gate's dash and logs verbs.
+	Reader Reader
+}
+
+// Reader collects one Server without a shell.
+type Reader interface {
+	// Server returns the Server's facts, containers and Releases.
+	Server(ctx context.Context) (Server, error)
+	// Logs returns the last lines of one of the App's containers.
+	Logs(ctx context.Context, container string, lines int) (string, error)
 }
 
 // Source identifies what to collect.
@@ -155,6 +166,21 @@ func collectServer(ctx context.Context, src *Source, t Target, releases bool) (s
 	start := time.Now()
 	s = Server{Name: t.Name, SSH: t.SSH, Containers: []Container{}, Releases: []Release{}}
 	defer func() { s.Elapsed = time.Since(start).Seconds() }()
+	if t.Reader != nil {
+		got, err := t.Reader.Server(ctx)
+		if err != nil {
+			s.Error = err.Error()
+			return s
+		}
+		got.Name, got.SSH = t.Name, t.SSH
+		if got.Containers == nil {
+			got.Containers = []Container{}
+		}
+		if got.Releases == nil || !releases {
+			got.Releases = []Release{}
+		}
+		return got
+	}
 	out, err := t.Host.Output(ctx, remote.Cmd{Script: Script(src.Project(), src.Root)})
 	if err != nil {
 		s.Error = err.Error()
@@ -467,6 +493,9 @@ func Logs(ctx context.Context, src *Source, snap *Snapshot, server, name string,
 	}
 	for _, t := range src.Targets {
 		if t.Name == server {
+			if t.Reader != nil {
+				return t.Reader.Logs(ctx, name, lines)
+			}
 			return t.Host.Output(ctx, remote.Cmd{Script: LogsScript(name, lines)})
 		}
 	}

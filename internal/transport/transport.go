@@ -296,6 +296,45 @@ func (p *pusher) pussh(ctx context.Context, h remote.Host, imgs []string) error 
 	return nil
 }
 
+// save writes `docker save imgs | gzip` to w.
+func (p *pusher) save(ctx context.Context, imgs []string, w io.Writer) error {
+	gz, _ := gzip.NewWriterLevel(w, gzip.BestSpeed)
+	var stderr bytes.Buffer
+	err := p.o.Exec(ctx, Command{Argv: p.saveArgv(ctx, imgs), Stdout: gz, Stderr: &stderr})
+	if cerr := gz.Close(); err == nil {
+		err = cerr
+	}
+	if err != nil {
+		err = fmt.Errorf("docker save: %w %s", err, strings.TrimSpace(stderr.String()))
+	}
+	return err
+}
+
+// LocalFingerprints returns the Fingerprint of each image in the local
+// Docker for platform (scoped deploys ask the Gate which ones it lacks).
+func LocalFingerprints(ctx context.Context, images []string, platform string) (map[string]string, error) {
+	p := &pusher{o: PushOptions{Images: images, Platform: platform, Exec: osExec}}
+	return p.localIDs(ctx)
+}
+
+// SaveArchive writes the gzipped `docker save` archive of images (for
+// platform) to w: the stream a scoped deploy sends the Gate.
+func SaveArchive(ctx context.Context, images []string, platform string, w io.Writer) error {
+	p := &pusher{o: PushOptions{Images: images, Platform: platform, Exec: osExec}}
+	return p.save(ctx, images, w)
+}
+
+// PushRegistry pushes images from the local Docker to their registry with
+// the local docker login (scoped deploys: the Gate then pulls them).
+func PushRegistry(ctx context.Context, images []string, out io.Writer) error {
+	for _, img := range images {
+		if err := osExec(ctx, Command{Argv: []string{"docker", "push", "-q", img}, Stdout: out, Stderr: out}); err != nil {
+			return fmt.Errorf("docker push %s: %w", img, err)
+		}
+	}
+	return nil
+}
+
 // LoadScript is the Server side of save|load. docker load detects gzip.
 const LoadScript = "docker load"
 
@@ -306,15 +345,7 @@ func (p *pusher) load(ctx context.Context, h remote.Host, imgs []string) error {
 	pr, pw := io.Pipe()
 	saveErr := make(chan error, 1)
 	go func() {
-		gz, _ := gzip.NewWriterLevel(pw, gzip.BestSpeed)
-		var stderr bytes.Buffer
-		err := p.o.Exec(ctx, Command{Argv: p.saveArgv(ctx, imgs), Stdout: gz, Stderr: &stderr})
-		if cerr := gz.Close(); err == nil {
-			err = cerr
-		}
-		if err != nil {
-			err = fmt.Errorf("docker save: %w %s", err, strings.TrimSpace(stderr.String()))
-		}
+		err := p.save(ctx, imgs, pw)
 		pw.CloseWithError(err)
 		saveErr <- err
 	}()

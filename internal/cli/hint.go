@@ -6,6 +6,7 @@ import (
 	"github.com/yoho-build/yoho/internal/deploy"
 	"github.com/yoho-build/yoho/internal/proxy"
 	"github.com/yoho-build/yoho/internal/release"
+	"github.com/yoho-build/yoho/internal/remote"
 )
 
 // hintFor returns the failure hint for err: ownership collisions get their
@@ -26,6 +27,11 @@ func hintFor(err error, def string) string {
 	var ae *deploy.AppDirError
 	if errors.As(err, &ae) && ae.Hint != "" {
 		return ae.Hint
+	}
+	// The Gate knows why it refused; its hint beats the generic one.
+	var ge *remote.GateError
+	if errors.As(err, &ge) && ge.Hint != "" {
+		return ge.Hint
 	}
 	return def
 }

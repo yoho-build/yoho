@@ -59,3 +59,25 @@ _Avoid_: Snapshot, dump
 **Backup Target**:
 A place Backups are stored, such as a local directory, S3, B2, SFTP, or an rclone remote.
 _Avoid_: Destination, repository, bucket
+
+### Access
+
+**Operator**:
+Whoever runs Yoho with full SSH to a Server: every command, including setup and `yoho access`.
+_Avoid_: Admin, owner, root user
+
+**Member**:
+A teammate or CI job given scoped access to one App Destination: fixed verbs through the Gate, no shell, no Docker. Yoho never hands a Member secret values, but code a Member deploys runs with the App's secrets.
+_Avoid_: User, collaborator, deployer
+
+**Gate**:
+`yoho gate`, run by sshd from a Member key's forced command; it reads one request, checks the Member's verbs and the deploy policy, runs it, audits it and exits.
+_Avoid_: Daemon, agent, API server, proxy
+
+**Access Token**:
+A `yoho_token_…` secret that CI exchanges for a short-lived Gate certificate; stored on the Server only as a hash.
+_Avoid_: API key, deploy key, password
+
+**Access Service**:
+The opt-in, resident `yoho access serve` that signs short-lived SSH certificates for Members; it can only mint Gate certificates.
+_Avoid_: Auth server, login server, CA

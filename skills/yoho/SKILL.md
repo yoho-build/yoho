@@ -100,6 +100,8 @@ yoho releases ; yoho rollback VERSION
 yoho app ps | logs [SERVICE...] [--all] [-f] [-n N] | stats [SERVICE...] [--no-stream] | exec SERVICE -- CMD...
 yoho proxy boot | status | logs
 yoho tunnel up | status | down    # Cloudflare Tunnel (Quick Tunnel when no token)
+yoho access install | secrets push | add MEMBER --verbs all|read|deploy,... | rm MEMBER | ls | audit   # operator: share one App via the Gate
+yoho access key add MEMBER KEY.pub | key rm MEMBER   # restricted Gate keys (forced command `yoho gate`)
 yoho backup run [JOB] | list [JOB] | restore ID [--job JOB] [-y]   # ID may be "latest"
 yoho backup check [JOB] [--id ID | --read-data]   # integrity only, not restore proof
 yoho schedule install [JOB...] [--binary PATH] | status [--max-age 48h] | remove [JOB...]
@@ -121,6 +123,7 @@ Global flags: `-c/--config`, `-d/--destination` (default `$YOHO_DESTINATION`, th
 - Scheduled Backup `retries` is opt-in (0–5, default 0), `retry_delay_sec` is bounded (0/unset = 30s, max 300s). Only volume-only Backups without dump/pre_backup commands may retry; no post hooks or arbitrary commands. A whole-run timeout/cancellation bounds attempts and delays. No retry after storage starts, uncertain unpause, cancellation or timeout. Reinstall/apply policy changes; failed runs retain last success and record redacted attempt outcomes.
 - Parse output with `--json`, never by scraping human output.
 - Switching a Destination between `compose` and `swarm` runtime causes downtime.
+- With `access: scoped` (a Member, not the operator) only deploy/rollback/releases/app ps|logs|stats/tui/ui work; the Gate refuses privileged, host namespaces, cap_add, devices, bind mounts, Docker-socket mounts, external networks (including `yoho`; Yoho attaches proxied Services to the Proxy over the App's own network), other Apps' images, and host ports or resource limits the operator did not allow (`settings.json` `limits`). Rollback works only to Releases the Gate deployed. Do not try to work around it; ask the operator. Members never hold secret values (the operator runs `yoho access secrets push`), but deployed code runs with the App's secrets.
 
 ## Minimal config
 
@@ -163,5 +166,6 @@ Fetch with `curl -sL <url>` (not a summarizing fetch tool). Relative paths are u
 - `references/migrate-kamal.md`: https://raw.githubusercontent.com/yoho-build/yoho/main/skills/yoho/references/migrate-kamal.md
 - `references/migrate-coolify.md`: https://raw.githubusercontent.com/yoho-build/yoho/main/skills/yoho/references/migrate-coolify.md
 - Skill `yoho-migrate-coolify` (full Coolify playbook: inventory, secrets, shared Server, cutover, tunnel): https://raw.githubusercontent.com/yoho-build/yoho/main/skills/yoho-migrate-coolify/SKILL.md
+- Skill `yoho-team-access` (share one App with teammates and CI through the Gate: operator setup, Member use, CI keys, Cloudflare Tunnel, Gate refusals): https://raw.githubusercontent.com/yoho-build/yoho/main/skills/yoho-team-access/SKILL.md
 - `references/migrate-dokploy.md`: https://raw.githubusercontent.com/yoho-build/yoho/main/skills/yoho/references/migrate-dokploy.md
 - `references/migrate-ansible.md`: https://raw.githubusercontent.com/yoho-build/yoho/main/skills/yoho/references/migrate-ansible.md

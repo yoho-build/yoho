@@ -72,6 +72,28 @@ type Destination struct {
 	// Changing it moves the directory (same filesystem only) on the next
 	// deploy or apply.
 	AppDir string `json:"app_dir,omitempty"`
+	// Access: operator (default) runs every command over full SSH. scoped
+	// reaches this one App through the Gate on the Server (`yoho access`):
+	// deploy, rollback, releases, app ps/logs/stats, tui and ui only, no
+	// shell, no Docker, no secret values. YOHO_ACCESS overrides it.
+	Access string `json:"access,omitempty" jsonschema:"enum=operator,enum=scoped"`
+	// Unix user of the Gate on the Server for access: scoped. Default yoho-gate.
+	GateUser string `json:"gate_user,omitempty" jsonschema:"pattern=^[a-z_][a-z0-9_-]{0,31}$"`
+	// How the CLI reaches the Destination's Server when it has no direct
+	// SSH address, e.g. through a Cloudflare Tunnel. Applies to the operator
+	// and the scoped path.
+	SSH *DestinationSSH `json:"ssh,omitempty"`
+}
+
+// DestinationSSH routes SSH to a Destination's Server.
+type DestinationSSH struct {
+	// cloudflare: ssh runs `cloudflared access ssh --hostname HOSTNAME` as
+	// its ProxyCommand (a Cloudflare Tunnel ssh:// ingress to the Server's
+	// sshd). In CI cloudflared reads TUNNEL_SERVICE_TOKEN_ID and
+	// TUNNEL_SERVICE_TOKEN_SECRET.
+	Via string `json:"via" jsonschema:"required,enum=cloudflare"`
+	// Public hostname of the tunnel's ssh:// ingress, e.g. ssh.example.com.
+	Hostname string `json:"hostname" jsonschema:"required"`
 }
 
 // Builder controls where images are built.

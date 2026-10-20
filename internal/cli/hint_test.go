@@ -12,6 +12,7 @@ import (
 	"github.com/yoho-build/yoho/internal/ui"
 
 	"github.com/yoho-build/yoho/internal/release"
+	"github.com/yoho-build/yoho/internal/remote"
 )
 
 func TestRouteConflictHintHumanAndNDJSON(t *testing.T) {
@@ -44,5 +45,12 @@ func TestHintForOwnership(t *testing.T) {
 	}
 	if got := hintFor(fmt.Errorf("boom"), "check that Docker is running"); got != "check that Docker is running" {
 		t.Errorf("hint %q", got)
+	}
+}
+
+func TestHintForGateError(t *testing.T) {
+	err := fmt.Errorf("rollback: %w", &remote.GateError{Message: "no", Hint: "ask the operator to roll back"})
+	if got := hintFor(err, "see `yoho releases`"); got != "ask the operator to roll back" {
+		t.Fatalf("hint %q", got)
 	}
 }

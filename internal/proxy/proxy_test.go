@@ -456,3 +456,14 @@ func TestServiceDeployOptionsHealthProbe(t *testing.T) {
 		t.Fatal("invalid timeout accepted")
 	}
 }
+
+// A recreated Proxy rejoins the scoped Apps' own networks.
+func TestBootReattachesAppNetworks(t *testing.T) {
+	h := &fakeHost{}
+	if err := Boot(context.Background(), h, config.ProxyConfig{}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if all := strings.Join(h.scripts, "\n"); !strings.Contains(all, "docker network ls -q --filter label="+LabelAttach+"=1") {
+		t.Errorf("no reattach:\n%s", all)
+	}
+}

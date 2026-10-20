@@ -1,5 +1,7 @@
 # CLI reference
 
+With `access: scoped` (or `YOHO_ACCESS=scoped`) only `deploy`, `rollback`, `releases`, `app ps/logs/stats`, `tui`, `ui` and `config check/show` run, through the Gate; see [Sharing one App with a team](team-access.md).
+
 Global flags (every command): `-c, --config FILE`, `-d, --destination NAME` (default: `$YOHO_DESTINATION`, then `production`, then the only Destination), `--json` (NDJSON events), `-v, --verbose` (stream remote output).
 
 | Command | Description |
@@ -20,6 +22,11 @@ Global flags (every command): `-c, --config FILE`, `-d, --destination NAME` (def
 | `app exec SERVICE -- COMMAND...` | Run a command in a running Service container. |
 | `tui [--interval 5s] [-n LINES]` | Live, read-only terminal dashboard: every Server of the Destination (load, memory, disk, Docker), the App's containers with health, CPU and memory, the Proxy, Releases, and container logs. Keys: `tab`/`←→` Server, `↑↓` select, `enter` logs, `r` refresh, `q` quit. Needs a terminal. See [Dashboards](dashboards.md). |
 | `ui [--port 0] [--no-open] [--interval 5s]` | The same view in the browser, served on `127.0.0.1` from this machine with a one-time login link. Read-only; nothing runs on the Servers. See [Dashboards](dashboards.md). |
+| `access install [--binary PATH]` | Operator: set up the Gate on the Server (yoho-gate user, sudoers rule, root-owned `/usr/local/bin/yoho`). Idempotent; needs root or sudo. See [Sharing one App with a team](team-access.md). |
+| `access secrets push` | Operator: resolve secrets locally and store them, with Proxy, Registry and hostname settings, for scoped deploys. |
+| `access add MEMBER [--verbs all\|read\|deploy,logs,...]` / `access rm MEMBER` / `access ls` | Operator: grant, revoke and list Members' verbs on the App Destination. |
+| `access key add MEMBER PUBKEY_FILE` / `access key rm MEMBER` | Operator: authorize or remove a Member's restricted SSH key (forced command `yoho gate`). |
+| `access audit [-n 50]` | Operator: last Gate requests (JSON lines). |
 | `proxy boot \| status \| logs` | Manage the shared kamal-proxy. |
 | `tunnel up \| status \| down` | Managed Cloudflare Tunnel (cloudflared connector; Quick Tunnel without a token). |
 | `secrets list` | Keys, sources, lengths. |

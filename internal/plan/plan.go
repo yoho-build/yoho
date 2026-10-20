@@ -55,6 +55,25 @@ type Deploy struct {
 
 	// Out receives progress output. Already wrapped by the secrets redactor.
 	Out io.Writer
+
+	// Scoped is set by the Gate for a Member's deploy or rollback (ADR
+	// 0011); nil for the operator.
+	Scoped *Scoped
+}
+
+// Scoped is what the Gate adds to a runtime deploy or rollback.
+type Scoped struct {
+	// PID and Boot (the kernel boot id) identify the Gate process in the
+	// lock, so a later Gate run can clear the lock of one that died.
+	PID  int
+	Boot string
+	// ProxyNetwork replaces the shared Proxy network: the App's proxied
+	// Services join this network of their own, which the runtime creates
+	// and connects the Proxy to, instead of the network every App shares.
+	ProxyNetwork string
+	// Vet re-checks a Release before a rollback, inside the lock: its
+	// compiled compose.yaml and Release record. An error refuses it.
+	Vet func(compose []byte, rel *release.Release) error
 }
 
 // NamedHost pairs a Server's config with an open Host.

@@ -106,7 +106,7 @@ func (c Compose) Deploy(ctx context.Context, d *plan.Deploy) (_ *release.Release
 		}
 	}()
 
-	unlock, err := AcquireLock(ctx, h, d.App, d.Destination, LockInfo{Performer: d.Performer, Version: d.Version, Command: "deploy", Time: start})
+	unlock, err := AcquireLock(ctx, h, d.App, d.Destination, lockInfo(d, LockInfo{Performer: d.Performer, Version: d.Version, Command: "deploy", Time: start}))
 	if err != nil {
 		return nil, err
 	}
@@ -222,6 +222,9 @@ func (c Compose) Deploy(ctx context.Context, d *plan.Deploy) (_ *release.Release
 	if needsProxy(plans) {
 		r.phase = "proxy-boot"
 		if err := proxy.Boot(ctx, h, d.Proxy, r.out); err != nil {
+			return nil, err
+		}
+		if err := ensureScopedNetwork(ctx, h, d); err != nil {
 			return nil, err
 		}
 	}
@@ -356,7 +359,7 @@ func (c Compose) Rollback(ctx context.Context, d *plan.Deploy, version string) (
 		}
 	}()
 
-	unlock, err := AcquireLock(ctx, h, d.App, d.Destination, LockInfo{Performer: d.Performer, Version: version, Command: "rollback", Time: start})
+	unlock, err := AcquireLock(ctx, h, d.App, d.Destination, lockInfo(d, LockInfo{Performer: d.Performer, Version: version, Command: "rollback", Time: start}))
 	if err != nil {
 		return nil, err
 	}
@@ -376,6 +379,14 @@ func (c Compose) Rollback(ctx context.Context, d *plan.Deploy, version string) (
 	}
 	if rel.ComposeSHA256 != "" && sha256Hex(composeYAML) != rel.ComposeSHA256 {
 		return nil, fmt.Errorf("release %s: compose.yaml does not match its recorded sha256", version)
+	}
+	if d.Scoped != nil {
+		if d.Scoped.Vet == nil {
+			return nil, errors.New("scoped rollback without a Release check")
+		}
+		if err := d.Scoped.Vet(composeYAML, rel); err != nil {
+			return nil, err
+		}
 	}
 	planJSON, err := h.ReadFile(ctx, path.Join(relDir, "plan.json"), false)
 	if err != nil {
@@ -421,6 +432,9 @@ func (c Compose) Rollback(ctx context.Context, d *plan.Deploy, version string) (
 	if needsProxy(plans) {
 		r.phase = "proxy-boot"
 		if err := proxy.Boot(ctx, h, d.Proxy, r.out); err != nil {
+			return nil, err
+		}
+		if err := ensureScopedNetwork(ctx, h, d); err != nil {
 			return nil, err
 		}
 	}
@@ -589,6 +603,14 @@ func prune(ctx context.Context, r *runner, d *plan.Deploy, current string) error
 		`[ -z "$ids" ] || docker inspect -f '{{range .Mounts}}{{.Source}}{{"\n"}}{{end}}' $ids`})
 	if err != nil {
 		return err
+	}
+	// The generation scoped deploys read stays until the next push.
+	src, err := r.h.Output(ctx, remote.Cmd{Script: "cat " + remote.Quote(release.AccessSecretsFile(d.App, d.Destination)) + " 2>/dev/null || true"})
+	if err != nil {
+		return err
+	}
+	if g := strings.TrimSpace(src); g != "" {
+		keepGen[g] = true
 	}
 	secretsRoot := path.Join(dir, "secrets") + "/"
 	filesRoot := path.Join(dir, "files") + "/"

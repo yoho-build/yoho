@@ -196,3 +196,19 @@ func gitEnv() []string {
 	}
 	return append(env, "GIT_PAGER=cat", "PAGER=cat", "NO_COLOR=1", "GIT_CONFIG_NOSYSTEM=1")
 }
+
+// Short is the display form of a version: the first 12 characters, keeping
+// an uncommitted suffix whole ("04f59b245603_uncommitted_4a61b760").
+func Short(v string) string {
+	if i := strings.Index(v, UncommittedMarker); i >= 0 {
+		base := v[:i]
+		if len(base) > 12 {
+			base = base[:12]
+		}
+		return base + v[i:]
+	}
+	if len(v) > 12 {
+		return v[:12]
+	}
+	return v
+}

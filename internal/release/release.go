@@ -123,3 +123,17 @@ type SecretAudit struct {
 	Ref         string `json:"ref,omitempty"`
 	Fingerprint string `json:"fingerprint"`
 }
+
+// AccessDir holds the scoped-access state of an App Destination: Members
+// and their verbs, operator settings for Gate deploys, and the audit log.
+// Root-owned; the Gate reads it as root, Members cannot.
+func AccessDir(app, destination string) string {
+	return path.Join(AppDir(app, destination), "access")
+}
+
+// AccessSecretsFile names the secrets generation scoped deploys read (the
+// last `yoho access secrets push`). Owned by the deploy user so pruning,
+// which runs as that user, keeps the generation it names.
+func AccessSecretsFile(app, destination string) string {
+	return path.Join(AppDir(app, destination), "access-secrets")
+}

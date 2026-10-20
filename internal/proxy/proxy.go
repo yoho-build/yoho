@@ -34,6 +34,9 @@ const (
 
 	stateDir    = "/home/kamal-proxy/.config/kamal-proxy"
 	configLabel = "yoho.proxy.config"
+	// LabelAttach marks a Docker network the Proxy joins besides Network: a
+	// scoped App's own network (ADR 0011). A recreated Proxy rejoins them.
+	LabelAttach = "yoho.proxy.attach"
 )
 
 // runArgs preserves the original json-file configuration fingerprint.
@@ -114,6 +117,10 @@ func EnsureNetwork(ctx context.Context, host remote.Host) error {
 	}
 	return nil
 }
+
+// reattachScript connects a new Proxy container to the scoped Apps' own
+// networks (LabelAttach) again.
+const reattachScript = "for n in $(docker network ls -q --filter label=" + LabelAttach + "=1); do docker network connect \"$n\" " + ContainerName + " >/dev/null 2>&1 || true; done\n"
 
 // Boot ensures the network and a running Proxy matching cfg. Idempotent. When
 // the configuration changed the container is recreated, which interrupts
@@ -209,6 +216,9 @@ func BootWith(ctx context.Context, host remote.Host, cfg config.ProxyConfig, out
 	b.WriteString("else\n")
 	b.WriteString("  " + run + "\n")
 	b.WriteString("fi\n")
+	if !opts.SkipNetwork {
+		b.WriteString(reattachScript)
+	}
 	if err := host.Run(ctx, remote.Cmd{Script: b.String()}); err != nil {
 		return fmt.Errorf("boot proxy: %w", err)
 	}

@@ -321,12 +321,16 @@ func compile(d *plan.Deploy, server, generationDir string, svcSecrets map[string
 		if p.Networks == nil {
 			p.Networks = types.Networks{}
 		}
+		netName := proxyNetworkName(d)
 		if n, ok := p.Networks[proxy.Network]; ok {
 			if !n.External {
 				return nil, nil, fmt.Errorf("network %q must be external (shared with the Server's proxy)", proxy.Network)
 			}
+			if n.Name != netName {
+				return nil, nil, fmt.Errorf("network %q must be the Proxy network %s", proxy.Network, netName)
+			}
 		} else {
-			p.Networks[proxy.Network] = types.NetworkConfig{Name: proxy.Network, External: true}
+			p.Networks[proxy.Network] = types.NetworkConfig{Name: netName, External: true}
 		}
 	}
 

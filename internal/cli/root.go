@@ -105,9 +105,38 @@ type app struct {
 	destName string
 	dest     config.Destination
 	ui       *ui.UI
+	// scoped: the Destination is reached through the Gate (ADR 0011).
+	scoped bool
 }
 
+// load loads the App for cmd. With scoped access only the commands the Gate
+// serves run; the rest fail before connecting.
 func (g *globals) load(cmd *cobra.Command) (*app, error) {
+	a, err := g.loadApp(cmd)
+	if err != nil {
+		return nil, err
+	}
+	if a.scoped && !scopedCommand(cmd) {
+		return nil, a.fail(&hintError{
+			fmt.Sprintf("`%s` is not available with scoped access to %s/%s", cmd.CommandPath(), a.cfg.App, a.destName),
+			"scoped access serves deploy, rollback, releases, app ps/logs/stats, tui and ui; ask the operator for the rest",
+		})
+	}
+	return a, nil
+}
+
+// loadOperator loads the App for operator-only commands (`yoho access`),
+// which always use full SSH whatever the Destination's access says.
+func (g *globals) loadOperator(cmd *cobra.Command) (*app, error) {
+	a, err := g.loadApp(cmd)
+	if err != nil {
+		return nil, err
+	}
+	a.scoped = false
+	return a, nil
+}
+
+func (g *globals) loadApp(cmd *cobra.Command) (*app, error) {
 	path := g.configPath
 	if path == "" {
 		wd, err := os.Getwd()
@@ -138,6 +167,9 @@ func (g *globals) load(cmd *cobra.Command) (*app, error) {
 	}
 	a := &app{g: g, dir: filepath.Dir(path), path: path, overlay: overlay, cfg: cfg, destName: name, dest: dest, ui: g.ui(cmd)}
 	release.Root = a.root()
+	if a.scoped, err = scopedAccess(dest, os.Getenv); err != nil {
+		return nil, err
+	}
 	return a, nil
 }
 

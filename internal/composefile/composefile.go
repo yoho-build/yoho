@@ -216,3 +216,54 @@ func StripBuild(p *types.Project, images map[string]string) {
 		p.Services[name] = svc
 	}
 }
+
+// LoadResolved loads a project the CLI already resolved and marshalled
+// (the Gate's deploy request): no interpolation, includes, extends, env or
+// label files, so nothing on this machine is read. workingDir only anchors
+// relative paths, which a resolved project does not have.
+func LoadResolved(ctx context.Context, content []byte, workingDir, projectName string) (*Result, error) {
+	p, err := loader.LoadWithContext(ctx, types.ConfigDetails{
+		WorkingDir:  workingDir,
+		ConfigFiles: []types.ConfigFile{{Filename: "compose.yaml", Content: content}},
+		Environment: types.Mapping{},
+	}, func(o *loader.Options) {
+		o.SetProjectName(projectName, true)
+		o.SkipInterpolation = true
+		o.SkipInclude = true
+		o.SkipExtends = true
+		o.SkipResolveEnvironment = true
+		o.SkipResolveLabels = true
+		o.ResolvePaths = false
+	})
+	if err != nil {
+		return nil, err
+	}
+	res := &Result{Project: p, Ext: map[string]config.ServiceExt{}}
+	for name, svc := range p.Services {
+		raw, ok := svc.Extensions["x-yoho"]
+		if !ok {
+			res.Ext[name] = config.ServiceExt{}
+			continue
+		}
+		e, err := config.DecodeServiceExt(raw)
+		if err != nil {
+			return nil, fmt.Errorf("service %q: x-yoho: %w", name, err)
+		}
+		res.Ext[name] = e
+	}
+	return res, nil
+}
+
+// Resolved marshals p for LoadResolved: env_file and label_file entries are
+// dropped (compose-go already merged them into environment and labels).
+func Resolved(p *types.Project) ([]byte, error) {
+	q, err := p.WithServicesTransform(func(_ string, s types.ServiceConfig) (types.ServiceConfig, error) {
+		s.EnvFiles = nil
+		s.LabelFiles = nil
+		return s, nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return q.MarshalYAML()
+}

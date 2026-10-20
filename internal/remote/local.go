@@ -12,10 +12,35 @@ import (
 )
 
 // Local runs commands on this machine. Used when yoho runs on the Server
-// (Scheduled Jobs) and in tests. Sudo is honored only when UseSudo is true.
+// (Scheduled Jobs, the Gate) and in tests. Sudo is honored only when UseSudo
+// is true.
 type Local struct {
 	HostName string
 	UseSudo  bool
+	// As runs every command, file write and file read as this user instead
+	// of the current one. The Gate runs as root and acts as the owner of the
+	// App directory, so files it creates stay the deploy user's. Its
+	// commands get a fixed minimal environment, not the caller's.
+	As *User
+	// Group runs each command in its own process group and kills the whole
+	// group when ctx ends, so a cancelled `docker logs -f` under `sh -c`
+	// does not outlive the request. Implied by As.
+	Group bool
+}
+
+// User is a local account commands run as.
+type User struct {
+	Name   string
+	UID    uint32
+	GID    uint32
+	Groups []uint32
+	Home   string
+}
+
+// shellFiles reports whether file operations must go through sh (another
+// user, or sudo) instead of this process.
+func (l *Local) shellFiles(sudo bool) bool {
+	return l.As != nil || sudo && l.UseSudo && os.Geteuid() != 0
 }
 
 var _ Host = (*Local)(nil)
@@ -34,6 +59,12 @@ func (l *Local) Run(ctx context.Context, cmd Cmd) error {
 	}
 	c := exec.CommandContext(ctx, "sh", "-c", script)
 	c.Env = os.Environ()
+	if l.As != nil {
+		runAs(c, l.As)
+	}
+	if l.Group || l.As != nil {
+		ownGroup(c)
+	}
 	for k, v := range cmd.Env {
 		c.Env = append(c.Env, k+"="+v)
 	}
@@ -63,10 +94,8 @@ func (l *Local) Output(ctx context.Context, cmd Cmd) (string, error) {
 }
 
 func (l *Local) WriteFile(ctx context.Context, path string, data []byte, mode os.FileMode, sudo bool) error {
-	if sudo && l.UseSudo && os.Geteuid() != 0 {
-		script := fmt.Sprintf("mkdir -p -m 0700 %s && t=$(mktemp %s.XXXXXX) && cat > \"$t\" && chmod %o \"$t\" && mv -f \"$t\" %s",
-			Quote(filepath.Dir(path)), Quote(path), mode.Perm(), Quote(path))
-		return l.Run(ctx, Cmd{Script: script, Stdin: bytes.NewReader(data), Sudo: true})
+	if l.shellFiles(sudo) {
+		return l.Run(ctx, Cmd{Script: writeFileScript(path, mode), Stdin: bytes.NewReader(data), Sudo: sudo})
 	}
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return err
@@ -92,9 +121,15 @@ func (l *Local) WriteFile(ctx context.Context, path string, data []byte, mode os
 }
 
 func (l *Local) ReadFile(ctx context.Context, path string, sudo bool) ([]byte, error) {
-	if sudo && l.UseSudo && os.Geteuid() != 0 {
-		out, err := l.Output(ctx, Cmd{Script: "cat " + Quote(path), Sudo: true})
-		return []byte(out), err
+	if l.shellFiles(sudo) {
+		var out bytes.Buffer
+		script := fmt.Sprintf("if [ -e %s ]; then exec cat %s; else exit %d; fi", Quote(path), Quote(path), exitNotExist)
+		err := l.Run(ctx, Cmd{Script: script, Stdout: &out, Sudo: sudo})
+		var ee *ExitError
+		if errors.As(err, &ee) && ee.Code == exitNotExist {
+			return nil, fmt.Errorf("read %s on %s: %w", path, l.Name(), os.ErrNotExist)
+		}
+		return out.Bytes(), err
 	}
 	b, err := os.ReadFile(path)
 	if err != nil {

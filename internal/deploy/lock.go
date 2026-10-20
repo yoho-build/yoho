@@ -20,6 +20,10 @@ type LockInfo struct {
 	Version   string    `json:"version,omitempty"`
 	Command   string    `json:"command,omitempty"` // e.g. "deploy", "rollback", "backup"
 	Time      time.Time `json:"time"`
+	// PID and Boot (kernel boot id) of a Gate holder, so a later Gate run
+	// can tell that the holder died (see gate.ClearStaleLock).
+	PID  int    `json:"pid,omitempty"`
+	Boot string `json:"boot,omitempty"`
 }
 
 // LockedError reports a lock held by someone else.

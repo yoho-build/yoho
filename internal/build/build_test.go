@@ -428,3 +428,12 @@ func TestServerBuildFailureRemovesPrivateSourceDir(t *testing.T) {
 		t.Errorf("cleanup %q", last)
 	}
 }
+
+// Images carry their App Destination, so the Gate can tell whose an
+// existing tag is (shop/prod-web and shop-prod/web share image names).
+func TestLabelArgsDestination(t *testing.T) {
+	got := strings.Join(labelArgs(Options{App: "shop", Destination: "production", Version: "v1"}, "web", &types.BuildConfig{}), " ")
+	if !strings.Contains(got, "--label yoho.destination=production") {
+		t.Fatalf("labels %q", got)
+	}
+}

@@ -1,9 +1,12 @@
 package deploy
 
 import (
+	"context"
 	"strings"
 	"testing"
 
+	"github.com/compose-spec/compose-go/v2/loader"
+	"github.com/compose-spec/compose-go/v2/types"
 	"go.yaml.in/yaml/v3"
 
 	"github.com/yoho-build/yoho/internal/config"
@@ -299,5 +302,59 @@ func TestValidateProxyHealthProbe(t *testing.T) {
 	}
 	if h.all() != "" {
 		t.Fatal("validation performed Server actions")
+	}
+}
+
+// A scoped deploy's compose arrives resolved (no interpolation on the
+// Server's side of the load). Every `$` in it must stay literal when docker
+// compose interpolates the compiled file again with the Server's
+// environment (QA: values like ${HOME} expanded on the Server).
+func TestCompileKeepsDollarsLiteral(t *testing.T) {
+	src := `services:
+  web:
+    image: shop-web:v1
+    command: ["sh", "-c", "echo $LEAK ${LEAK} $${LEAK}"]
+    environment:
+      A: "${LEAK}"
+      B: "${LEAK:-x}${LEAK:?boom}"
+      "${LEAK}": key
+    labels:
+      team: "$LEAK"
+    healthcheck: {test: ["CMD-SHELL", "test $LEAK"]}
+    working_dir: /srv/$LEAK
+    x-custom: "${LEAK}"
+configs:
+  motd: {content: "hi $LEAK"}
+`
+	p, err := loader.LoadWithContext(context.Background(), types.ConfigDetails{
+		WorkingDir:  t.TempDir(),
+		ConfigFiles: []types.ConfigFile{{Filename: "compose.yaml", Content: []byte(src)}},
+		Environment: types.Mapping{},
+	}, func(o *loader.Options) {
+		o.SetProjectName("yoho-shop-production", true)
+		o.SkipInterpolation = true
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	d := testDeploy(t, nil, nil)
+	d.Project = p
+	d.Ext = nil
+	d.ServiceSecrets = nil
+	out, _, _ := compileTest(t, d)
+	again, err := loader.LoadWithContext(context.Background(), types.ConfigDetails{
+		WorkingDir:  t.TempDir(),
+		ConfigFiles: []types.ConfigFile{{Filename: "compose.yaml", Content: out}},
+		Environment: types.Mapping{"LEAK": "leaked"},
+	}, func(o *loader.Options) { o.SetProjectName("yoho-shop-production", true); o.SkipConsistencyCheck = true })
+	if err != nil {
+		t.Fatalf("docker compose would fail to load the compiled file: %v\n%s", err, out)
+	}
+	b, _ := again.MarshalYAML()
+	if strings.Contains(string(b), "leaked") {
+		t.Fatalf("a value was interpolated on the Server:\n%s", b)
+	}
+	if !strings.Contains(string(b), "echo $LEAK ${LEAK} $${LEAK}") {
+		t.Fatalf("command changed:\n%s", b)
 	}
 }

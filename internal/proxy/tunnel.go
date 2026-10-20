@@ -118,7 +118,9 @@ func tunnelRunArgs(name, image, hash, owner string, quick bool) []string {
 	if quick {
 		return append(args, image, "tunnel", "--no-autoupdate", "--url", TunnelOrigin)
 	}
-	args = append(args, "--env-file", TokenEnvPath())
+	// A remotely managed tunnel may also route ssh://host.docker.internal:22
+	// to the Server's sshd (Servers without a public IP, ADR 0011).
+	args = append(args, "--add-host", "host.docker.internal:host-gateway", "--env-file", TokenEnvPath())
 	return append(args, image, "tunnel", "--no-autoupdate", "run")
 }
 

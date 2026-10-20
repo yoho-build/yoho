@@ -78,7 +78,7 @@ Supports Debian and Ubuntu.`,
 				u.Title("Setup %s (%s)", name, srv.SSH)
 				// No docker check here: setup is what installs Docker.
 				step := u.Step(name, "Connect %s", srv.SSH)
-				h, cerr := remote.NewSSH(name, srv.SSH, srv.Sudo, remote.SSHOptions{})
+				h, cerr := remote.NewSSH(name, srv.SSH, srv.Sudo, a.sshOptions())
 				if cerr == nil {
 					_, cerr = h.Output(ctx, remote.Cmd{Script: "true"})
 				}

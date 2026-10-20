@@ -13,6 +13,7 @@ import (
 	"golang.org/x/term"
 
 	"github.com/yoho-build/yoho/internal/composefile"
+	"github.com/yoho-build/yoho/internal/gate"
 	"github.com/yoho-build/yoho/internal/remote"
 )
 
@@ -123,6 +124,13 @@ func logsCmd(g *globals) *cobra.Command {
 			svcs, err := logsServices(names, args, all, swarm)
 			if err != nil {
 				return a.fail(err)
+			}
+			if a.scoped {
+				err := a.gateCall(cmd.Context(), "logs", gate.LogsArgs{ServicesArgs: gate.ServicesArgs{Services: svcs}, Lines: tail, Follow: follow}, nil, cmd.OutOrStdout(), nil)
+				if follow && cmd.Context().Err() != nil {
+					return nil // Ctrl-C ends a follow
+				}
+				return err
 			}
 			if swarm {
 				s := fmt.Sprintf("docker service logs --tail %d", tail)
@@ -236,12 +244,15 @@ terminal, or when CI is set or TERM=dumb. Scripts and coding agents should use
 			}
 			swarm := a.dest.Runtime == "swarm"
 			live := liveStats(noStream, g.json, cmd.InOrStdin(), cmd.OutOrStdout(), os.Getenv)
+			if a.scoped {
+				return a.scopedStats(cmd, args, live)
+			}
 			name := a.dest.Servers[0]
 			if swarm {
 				a.ui.Info("swarm: only tasks running on %s (the Destination's first Server)", name)
 			}
 			srv := a.cfg.Servers[name]
-			h, err := remote.NewSSH(name, srv.SSH, srv.Sudo, remote.SSHOptions{})
+			h, err := remote.NewSSH(name, srv.SSH, srv.Sudo, a.sshOptions())
 			if err != nil {
 				return err
 			}
