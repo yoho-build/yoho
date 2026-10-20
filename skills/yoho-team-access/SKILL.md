@@ -66,11 +66,35 @@ Builds run on the Member's machine with Docker (`builder.location: local`, `buil
 ssh-keygen -t ed25519 -N '' -C ci-github -f ci-github
 yoho access add ci-github --verbs deploy,releases,rollback -d production   # operator
 yoho access key add ci-github ci-github.pub -d production                  # operator
-gh secret set YOHO_GATE_KEY -R OWNER/REPO --env production < ci-github     # value on stdin
-rm ci-github
+gh secret set YOHO_GATE_KEY -R OWNER/REPO < ci-github                      # value on stdin
+rm ci-github ci-github.pub
 ```
 
-In the workflow: write `$YOHO_GATE_KEY` to `~/.ssh/id_ed25519` (mode 600), add the Server to `known_hosts`, install yoho, run `YOHO_ACCESS=scoped yoho deploy -d production`. GitLab: `glab variable set YOHO_GATE_KEY -R GROUP/PROJECT --masked --protected < ci-github`.
+Use the reusable workflow rather than hand-writing the steps. It installs a checksum- and attestation-verified Yoho, writes the key to a temp file (removed at the end), pins the host key, runs `yoho releases`, `yoho deploy`, `yoho releases`, optionally curls `verify-url`, and on failure prints the previous version and the `yoho rollback` command in the job summary.
+
+```yaml
+jobs:
+  deploy:
+    uses: yoho-build/yoho/.github/workflows/deploy.yml@v0.2.0
+    with:
+      working-directory: .
+      destination: production
+      ssh-host: 203.0.113.10
+      ssh-known-hosts: ${{ vars.SERVER_KNOWN_HOSTS }}   # from: ssh-keyscan -t ed25519 HOST
+      verify-url: https://app.example.com/up
+    secrets:
+      ssh-private-key: ${{ secrets.YOHO_GATE_KEY }}
+```
+
+Other inputs: `access` (`scoped` default, `operator`), `config` (`-c` file), `yoho-version`, `runs-on` (JSON), `environment`, `ssh-alias`. Cloudflare secrets: `cloudflare-service-token-id` and `-secret`.
+
+Checks before you wire it:
+- Yoho connects as `yoho-gate@<host of servers.*.ssh>`. If `servers.*.ssh` is an ssh config alias (`small-deb`), set `ssh-alias` and `ssh-host` so the runner gets a `Host` block for it.
+- The runner builds the images, so it needs Docker, and `builder.location` must be `local` (scoped access refuses `server` and `remote`; there is no env override). Keep an operator Yoho file and a CI file (`config: yoho.ci.yml`) if the operator builds on the Server.
+- `secrets.*` and `vars.*` in the caller are repository or organization level; a calling job cannot use an environment. The `environment` input gates the deploy job.
+- A LAN-only Server needs a self-hosted runner on that network (`runs-on: '["self-hosted","macOS","ARM64"]'`) or a Cloudflare Tunnel.
+
+GitLab: `glab variable set YOHO_GATE_KEY -R GROUP/PROJECT --masked --protected < ci-github`, then write the key to a file, add the host to `known_hosts`, install Yoho, and run `YOHO_ACCESS=scoped yoho deploy -d production`.
 
 ## 4. Server without a public IP (Cloudflare Tunnel)
 

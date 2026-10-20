@@ -1,0 +1,283 @@
+name: yoho deploy
+
+# Reusable workflow: deploy one Yoho Destination from CI through the Gate
+# (scoped access, docs/site/team-access.md). Call it as
+#   uses: yoho-build/yoho/.github/workflows/deploy.yml@v0.2.0
+#
+# The Yoho install step below is pinned to the same tag as this file. `uses:`
+# cannot take an expression, and a reusable workflow cannot read the ref it was
+# called at, so the pin is a literal. Bump it with every release tag.
+on:
+  workflow_call:
+    inputs:
+      working-directory:
+        description: Directory with the Yoho file, relative to the repository root.
+        type: string
+        required: true
+      destination:
+        description: Destination to deploy (yoho -d).
+        type: string
+        required: true
+      config:
+        description: Yoho file to use (yoho -c), relative to working-directory. Empty uses the default Yoho file.
+        type: string
+        default: ""
+      access:
+        description: scoped (through the Gate) or operator (full SSH).
+        type: string
+        default: scoped
+      yoho-version:
+        description: Yoho release to install (a tag such as v0.2.0, or latest).
+        type: string
+        default: v0.2.0
+      runs-on:
+        description: JSON for runs-on, for example '["self-hosted","macOS","ARM64"]'.
+        type: string
+        default: '["ubuntu-latest"]'
+      environment:
+        description: GitHub environment for the deploy job (approvals, protection rules). Optional.
+        type: string
+        default: ""
+      ssh-host:
+        description: Host name or IP of the Server. Used for ssh-keyscan and as HostName of ssh-alias.
+        type: string
+        default: ""
+      ssh-alias:
+        description: >-
+          The name in servers.*.ssh when it is an ssh config alias such as small-deb (no user@).
+          The workflow writes a Host block that maps it to ssh-host.
+        type: string
+        default: ""
+      ssh-known-hosts:
+        description: known_hosts line(s) for the Server (preferred). Without it the workflow runs ssh-keyscan on ssh-host, which trusts the first answer.
+        type: string
+        default: ""
+      verify-url:
+        description: URL to fetch with curl -fsS after the deploy (retried for about two minutes). Optional.
+        type: string
+        default: ""
+    secrets:
+      ssh-private-key:
+        description: Private key of the Member (access key add). Never printed.
+        required: true
+      cloudflare-service-token-id:
+        description: Cloudflare Access service token id (TUNNEL_SERVICE_TOKEN_ID), for ssh.via cloudflare.
+        required: false
+      cloudflare-service-token-secret:
+        description: Cloudflare Access service token secret (TUNNEL_SERVICE_TOKEN_SECRET).
+        required: false
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    name: deploy ${{ inputs.destination }}
+    runs-on: ${{ fromJSON(inputs.runs-on) }}
+    environment: ${{ inputs.environment || null }}
+    timeout-minutes: 60
+    concurrency:
+      group: yoho-deploy-${{ inputs.working-directory }}-${{ inputs.destination }}
+      cancel-in-progress: false
+    defaults:
+      run:
+        shell: bash
+    env:
+      YOHO_ACCESS: ${{ inputs.access }}
+      YOHO_NO_UPDATE_CHECK: "1"
+      DEST: ${{ inputs.destination }}
+      YOHO_CONFIG: ${{ inputs.config }}
+    steps:
+      - name: Check inputs
+        env:
+          ACCESS: ${{ inputs.access }}
+          DEST_IN: ${{ inputs.destination }}
+          HOST: ${{ inputs.ssh-host }}
+          ALIAS: ${{ inputs.ssh-alias }}
+          KNOWN: ${{ inputs.ssh-known-hosts }}
+        run: |
+          set -eu
+          case "$ACCESS" in scoped | operator) ;; *) echo "::error::access must be scoped or operator"; exit 1 ;; esac
+          case "$DEST_IN" in '' | -* | *[!A-Za-z0-9._-]*) echo "::error::invalid destination"; exit 1 ;; esac
+          case "$HOST$ALIAS" in *[!A-Za-z0-9._:@-]*) echo "::error::ssh-host and ssh-alias may only hold letters, digits and . _ : @ -"; exit 1 ;; esac
+          if [ -z "$KNOWN" ] && [ -z "$HOST" ]; then
+            echo "::error::set ssh-known-hosts, or ssh-host for ssh-keyscan"; exit 1
+          fi
+          if [ -n "$ALIAS" ] && [ -z "$HOST" ]; then
+            echo "::error::ssh-alias needs ssh-host"; exit 1
+          fi
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # Yoho derives the Release version from git.
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: yoho-build/yoho/.github/actions/setup-yoho@v0.2.0
+        with:
+          version: ${{ inputs.yoho-version }}
+
+      - name: Configure ssh
+        env:
+          SSH_KEY: ${{ secrets.ssh-private-key }}
+          HOST: ${{ inputs.ssh-host }}
+          ALIAS: ${{ inputs.ssh-alias }}
+          KNOWN: ${{ inputs.ssh-known-hosts }}
+        run: |
+          set -eu
+          umask 077
+          dir="$RUNNER_TEMP/yoho-ssh-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          mkdir -p "$dir"
+          # Key and known_hosts live outside the checkout (a dirty tree changes the version).
+          printf '%s\n' "$SSH_KEY" > "$dir/id"
+          chmod 600 "$dir/id"
+          if [ -n "$KNOWN" ]; then
+            printf '%s\n' "$KNOWN" > "$dir/known_hosts"
+          else
+            echo "::warning::no ssh-known-hosts: trusting the host key that ssh-keyscan returns now"
+            ssh-keyscan -T 10 -t ed25519,ecdsa,rsa "$HOST" > "$dir/known_hosts" 2>/dev/null
+            [ -s "$dir/known_hosts" ] || { echo "::error::ssh-keyscan found no host key for $HOST"; exit 1; }
+          fi
+          # yoho runs the system ssh, so the entry goes into ~/.ssh/config, at the top (the first
+          # value wins) between markers that the cleanup step removes. A per-run known_hosts file
+          # keeps the runner user's own known_hosts untouched.
+          pattern=${ALIAS:-$HOST}
+          [ -n "$pattern" ] || pattern='*'
+          mkdir -p "$HOME/.ssh"; chmod 700 "$HOME/.ssh"
+          marker="yoho-ci-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          {
+            echo "# BEGIN $marker"
+            echo "Host $pattern"
+            if [ -n "$ALIAS" ]; then echo "  HostName $HOST"; fi
+            echo "  IdentityFile $dir/id"
+            echo "  IdentitiesOnly yes"
+            echo "  UserKnownHostsFile $dir/known_hosts"
+            echo "  StrictHostKeyChecking yes"
+            echo "# END $marker"
+            echo
+            if [ -f "$HOME/.ssh/config" ]; then cat "$HOME/.ssh/config"; fi
+          } > "$dir/config.new"
+          cp "$dir/config.new" "$HOME/.ssh/config"
+          chmod 600 "$HOME/.ssh/config"
+          rm -f "$dir/config.new"
+
+      - name: Releases before
+        id: before
+        working-directory: ${{ inputs.working-directory }}
+        run: |
+          set -u
+          set +e
+          yoho releases -d "$DEST" ${YOHO_CONFIG:+-c "$YOHO_CONFIG"} > "$RUNNER_TEMP/releases-before.txt" 2>&1
+          rc=$?
+          set -e
+          cat "$RUNNER_TEMP/releases-before.txt"
+          if [ "$rc" -ne 0 ]; then
+            echo "::warning::could not list Releases before the deploy; no rollback target is known"
+            echo "prev=" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          # Table: CURRENT VERSION STATUS ... ; the current row starts with "*".
+          cur=$(awk '$1 == "*" { print $2; exit }' "$RUNNER_TEMP/releases-before.txt")
+          echo "prev=$cur" >> "$GITHUB_OUTPUT"
+
+      - name: Deploy
+        id: deploy
+        working-directory: ${{ inputs.working-directory }}
+        env:
+          TUNNEL_SERVICE_TOKEN_ID: ${{ secrets.cloudflare-service-token-id }}
+          TUNNEL_SERVICE_TOKEN_SECRET: ${{ secrets.cloudflare-service-token-secret }}
+        run: |
+          set -eu
+          if [ -z "$TUNNEL_SERVICE_TOKEN_ID" ]; then unset TUNNEL_SERVICE_TOKEN_ID TUNNEL_SERVICE_TOKEN_SECRET; fi
+          started=$(date +%s)
+          yoho deploy -d "$DEST" ${YOHO_CONFIG:+-c "$YOHO_CONFIG"}
+          echo "seconds=$(( $(date +%s) - started ))" >> "$GITHUB_OUTPUT"
+
+      - name: Releases after
+        id: after
+        working-directory: ${{ inputs.working-directory }}
+        env:
+          TUNNEL_SERVICE_TOKEN_ID: ${{ secrets.cloudflare-service-token-id }}
+          TUNNEL_SERVICE_TOKEN_SECRET: ${{ secrets.cloudflare-service-token-secret }}
+        run: |
+          set -eu
+          if [ -z "$TUNNEL_SERVICE_TOKEN_ID" ]; then unset TUNNEL_SERVICE_TOKEN_ID TUNNEL_SERVICE_TOKEN_SECRET; fi
+          yoho releases -d "$DEST" ${YOHO_CONFIG:+-c "$YOHO_CONFIG"} | tee "$RUNNER_TEMP/releases-after.txt"
+          cur=$(awk '$1 == "*" { print $2; exit }' "$RUNNER_TEMP/releases-after.txt")
+          echo "version=$cur" >> "$GITHUB_OUTPUT"
+
+      - name: Verify URL
+        if: inputs.verify-url != ''
+        env:
+          URL: ${{ inputs.verify-url }}
+        run: |
+          set -eu
+          i=1
+          while [ "$i" -le 12 ]; do
+            if curl -fsS -o /dev/null --max-time 15 "$URL"; then echo "$URL is up (try $i)"; exit 0; fi
+            i=$((i + 1)); sleep 10
+          done
+          echo "::error::$URL did not answer with a success status after 12 tries"
+          exit 1
+
+      - name: Summary
+        env:
+          WORKDIR: ${{ inputs.working-directory }}
+          VERSION: ${{ steps.after.outputs.version }}
+          SECONDS_TAKEN: ${{ steps.deploy.outputs.seconds }}
+          URL: ${{ inputs.verify-url }}
+        run: |
+          {
+            echo "### yoho deploy: succeeded"
+            echo
+            echo "- Destination: \`$DEST\` (\`$WORKDIR\`, access \`$YOHO_ACCESS\`)"
+            echo "- Version: \`${VERSION:-unknown}\`"
+            echo "- Commit: \`$GITHUB_SHA\` (ref \`$GITHUB_REF_NAME\`)"
+            echo "- Duration: ${SECONDS_TAKEN:-?}s"
+            if [ -n "$URL" ]; then echo "- Verified: $URL"; fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Rollback hint
+        if: failure()
+        env:
+          PREV: ${{ steps.before.outputs.prev }}
+          WORKDIR: ${{ inputs.working-directory }}
+        run: |
+          {
+            echo "### yoho deploy: failed"
+            echo
+            echo "- Destination: \`$DEST\` (\`$WORKDIR\`)"
+            if [ -n "$PREV" ]; then
+              echo "- Previous version: \`$PREV\`"
+              echo
+              echo "Roll back with (the Gate only returns to Releases it deployed itself):"
+              echo
+              echo '```sh'
+              echo "cd $WORKDIR"
+              echo "YOHO_ACCESS=$YOHO_ACCESS yoho rollback $PREV -d $DEST${YOHO_CONFIG:+ -c $YOHO_CONFIG}"
+              echo '```'
+            else
+              echo "- Previous version: unknown (the Releases list failed or was empty). Run \`yoho releases -d $DEST\`."
+            fi
+            echo
+            echo "A failed deploy may already have started the new Release. Check \`yoho releases -d $DEST\` before you roll back."
+          } >> "$GITHUB_STEP_SUMMARY"
+          if [ -n "$PREV" ]; then echo "::error::deploy failed; roll back with: yoho rollback $PREV -d $DEST"; fi
+
+      - name: Remove ssh key
+        if: always()
+        run: |
+          set +e
+          marker="yoho-ci-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          if [ -f "$HOME/.ssh/config" ]; then
+            awk -v b="# BEGIN $marker" -v e="# END $marker" '
+              $0 == b { skip = 1; next }
+              $0 == e { skip = 0; blank = 1; next }
+              blank && $0 == "" { blank = 0; next }
+              { blank = 0 }
+              !skip { print }
+            ' "$HOME/.ssh/config" > "$RUNNER_TEMP/ssh-config.clean" && cp "$RUNNER_TEMP/ssh-config.clean" "$HOME/.ssh/config"
+            rm -f "$RUNNER_TEMP/ssh-config.clean"
+          fi
+          rm -rf "$RUNNER_TEMP/yoho-ssh-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          exit 0

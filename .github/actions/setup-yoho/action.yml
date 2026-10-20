@@ -1,0 +1,54 @@
+name: Setup Yoho
+description: Install a Yoho release binary (checksum verified, optional Sigstore attestation) and add it to PATH.
+inputs:
+  version:
+    description: Release tag to install, for example v0.2.0, or "latest".
+    required: true
+  verify-attestation:
+    description: >-
+      Verify the release's build provenance with `gh attestation verify`.
+      "auto" verifies when gh is installed, "true" requires gh, "false" skips it.
+    required: false
+    default: auto
+  token:
+    description: GitHub token for API downloads and gh. The default is the workflow token.
+    required: false
+    default: ${{ github.token }}
+outputs:
+  path:
+    description: Absolute path of the installed yoho binary.
+    value: ${{ steps.install.outputs.path }}
+runs:
+  using: composite
+  steps:
+    - id: install
+      shell: sh
+      env:
+        INPUT_VERSION: ${{ inputs.version }}
+        INPUT_VERIFY: ${{ inputs.verify-attestation }}
+        INPUT_TOKEN: ${{ inputs.token }}
+      run: |
+        set -eu
+        case "$INPUT_VERSION" in
+          latest) unset YOHO_VERSION ;;
+          v[0-9]*) YOHO_VERSION=$INPUT_VERSION; export YOHO_VERSION ;;
+          *) echo "setup-yoho: version must be a tag like v0.2.0 or latest" >&2; exit 1 ;;
+        esac
+        case "$INPUT_VERIFY" in
+          auto) if command -v gh >/dev/null 2>&1; then verify=1; else verify=0; echo "setup-yoho: gh not found, skipping attestation verification" >&2; fi ;;
+          true) verify=1 ;;
+          false) verify=0 ;;
+          *) echo "setup-yoho: verify-attestation must be auto, true or false" >&2; exit 1 ;;
+        esac
+        # No sudo, and nothing outside the job: RUNNER_TEMP is cleaned between jobs
+        # on self-hosted runners, so a stale binary never leaks into the next job.
+        dir="${RUNNER_TEMP:-${HOME}/.local}/yoho-bin"
+        mkdir -p "$dir"
+        export YOHO_INSTALL_DIR="$dir" YOHO_VERIFY_PROVENANCE="$verify"
+        if [ -n "$INPUT_TOKEN" ]; then GH_TOKEN=$INPUT_TOKEN; export GH_TOKEN; fi
+        # The release tag of this action ships the installer that checks the
+        # sha256 against checksums.txt and, with YOHO_VERIFY_PROVENANCE=1, the
+        # attestation (certificate identity release.yml@refs/tags/<tag>).
+        sh "${GITHUB_ACTION_PATH}/../../../scripts/install.sh"
+        echo "$dir" >> "$GITHUB_PATH"
+        echo "path=$dir/yoho" >> "$GITHUB_OUTPUT"

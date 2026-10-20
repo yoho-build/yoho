@@ -144,7 +144,7 @@ With scoped access, the CLI connects as `yoho-gate@<host from servers.*.ssh>` wi
 
 An operator who shares the Yoho file sets `YOHO_ACCESS=operator` to use full SSH. The `yoho access …` commands always use full SSH.
 
-### CI
+### Deploy from CI
 
 Generate a key for the CI job, authorize it, and store the private key as a CI secret:
 
@@ -152,19 +152,62 @@ Generate a key for the CI job, authorize it, and store the private key as a CI s
 ssh-keygen -t ed25519 -N '' -C ci-github -f ci-github
 yoho access add ci-github --verbs deploy,releases,rollback -d production
 yoho access key add ci-github ci-github.pub -d production
+gh secret set YOHO_GATE_KEY -R OWNER/REPO < ci-github    # value on stdin
+rm ci-github ci-github.pub
 ```
 
+Yoho ships a reusable GitHub Actions workflow. It installs a pinned release (sha256 from `checksums.txt`, and the Sigstore build attestation when `gh` exists), writes the key to a temporary file, runs `yoho releases`, `yoho deploy` and `yoho releases` as the `yoho-gate` Member, optionally checks a URL, and removes the key at the end. When a deploy fails, the job summary lists the previous version and the exact `yoho rollback` command.
+
 ```yaml
-# .github/workflows/deploy.yml (excerpt)
-- run: |
-    install -m 700 -d ~/.ssh
-    printf '%s\n' "$YOHO_GATE_KEY" > ~/.ssh/id_ed25519 && chmod 600 ~/.ssh/id_ed25519
-    ssh-keyscan -H "$SERVER_HOST" >> ~/.ssh/known_hosts
-    YOHO_ACCESS=scoped yoho deploy -d production
-  env:
-    YOHO_GATE_KEY: ${{ secrets.YOHO_GATE_KEY }}
-    SERVER_HOST: 203.0.113.10
+# .github/workflows/deploy.yml in your repository
+name: deploy
+on:
+  push:
+    tags: ["v*"]
+jobs:
+  deploy:
+    uses: yoho-build/yoho/.github/workflows/deploy.yml@v0.2.0
+    with:
+      working-directory: .
+      destination: production
+      ssh-host: 203.0.113.10
+      ssh-known-hosts: ${{ vars.SERVER_KNOWN_HOSTS }}   # ssh-keyscan -t ed25519 203.0.113.10
+      verify-url: https://app.example.com/up
+    secrets:
+      ssh-private-key: ${{ secrets.YOHO_GATE_KEY }}
 ```
+
+Inputs:
+
+| Input | Default | Meaning |
+| --- | --- | --- |
+| `working-directory` | required | Directory with the Yoho file. |
+| `destination` | required | The Destination (`-d`). |
+| `access` | `scoped` | `scoped` or `operator`. Sets `YOHO_ACCESS`. |
+| `config` | empty | Yoho file for `-c`, for a CI-only file (see below). |
+| `yoho-version` | `v0.2.0` | Release to install, or `latest`. |
+| `runs-on` | `["ubuntu-latest"]` | JSON for `runs-on`, for example `["self-hosted","macOS","ARM64"]`. |
+| `environment` | empty | GitHub environment, for approvals and protection rules. |
+| `ssh-host` | empty | Host name or IP of the Server. |
+| `ssh-alias` | empty | The alias in `servers.*.ssh` when it has no `user@host` form (see below). |
+| `ssh-known-hosts` | empty | known_hosts line for the Server. Without it the workflow runs `ssh-keyscan` and trusts the first answer. |
+| `verify-url` | empty | URL fetched with `curl -fsS`, retried for about two minutes. |
+
+Secrets: `ssh-private-key` (required), and `cloudflare-service-token-id` and `cloudflare-service-token-secret` for a Destination with `ssh: {via: cloudflare}` (exported as `TUNNEL_SERVICE_TOKEN_ID` and `TUNNEL_SERVICE_TOKEN_SECRET`).
+
+Things to know:
+
+- **The Gate host.** Yoho takes `servers.*.ssh`, replaces the user with `yoho-gate` (`gate_user` changes it) and keeps host and port, so `small-deb` becomes `yoho-gate@small-deb`. A runner has no `small-deb` in `~/.ssh/config`, so pass `ssh-alias: small-deb` and `ssh-host: 192.168.3.183`: the workflow adds a `Host small-deb` block (`HostName`, the key, `IdentitiesOnly yes`, and a per-run `known_hosts` file) at the top of the runner user's `~/.ssh/config`, and removes it afterwards. If `servers.*.ssh` is already a host name or IP, pass `ssh-host` only.
+- **Builds run on the runner.** The Gate only receives finished images, so the runner needs Docker, and Yoho refuses `builder.location: server` or `remote` with scoped access. There is no environment override for the builder: put `builder.location: local` (and `builder.engine: docker` where Apple `container` would otherwise win) in the Yoho file, or keep an operator file and a second CI file and pass `config: yoho.ci.yml`. `builder.platforms` defaults to the Server's platform, so an arm64 runner cross-builds with buildx and QEMU.
+- **Secrets.** Secret values stay on the Server (the operator pushed them). The runner never resolves `.yoho/secrets`.
+- **Versions.** Yoho derives the Release version from git, so the workflow checks out the full history.
+- **The workflow and the install action are pinned to one tag.** The reusable workflow calls `yoho-build/yoho/.github/actions/setup-yoho` at the same tag it was released with. You can use that action on its own to install Yoho in any job.
+- **Secrets and environments.** A job that calls a reusable workflow cannot set `environment`, so `secrets.YOHO_GATE_KEY` and `vars.*` in the caller come from the repository or organization, not from an environment. The `environment` input protects the deploy job itself (required reviewers, branch rules).
+- **Concurrency.** Deploys of one `working-directory` and `destination` queue; a running deploy is never cancelled.
+
+#### Self-hosted runners for LAN-only Servers
+
+GitHub-hosted runners cannot reach a Server on a private address such as `192.168.3.183`. Register a self-hosted runner on a machine that can (a Mac or a Linux box on the same network), give it Docker, and select it with `runs-on: '["self-hosted","macOS","ARM64"]'`. Use a runner that only serves repositories you trust, because a workflow that runs on it can use the machine and the key. Alternatively, put the Server behind a [Cloudflare Tunnel](#servers-without-a-public-ip-cloudflare-tunnel) and use a hosted runner.
 
 ## Servers without a public IP (Cloudflare Tunnel)
 
