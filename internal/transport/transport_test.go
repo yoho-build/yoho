@@ -143,12 +143,15 @@ func TestAutoSkipsAndLoads(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if res[0] != (Result{"up", MethodSkip}) || res[1] != (Result{"partial", MethodLoad}) {
+	if res[0].Host != "up" || res[0].Method != MethodSkip || res[0].Bytes != 0 || res[1].Host != "partial" || res[1].Method != MethodLoad {
 		t.Fatalf("results %v", res)
 	}
 	li := partial.ran(LoadScript)
 	if len(li) != 1 {
 		t.Fatalf("scripts %v", partial.scripts)
+	}
+	if want := int64(len(partial.stdins[li[0]])); res[1].Bytes != want || want == 0 || res[1].Duration <= 0 {
+		t.Fatalf("Bytes %d Duration %v, want %d bytes (the gzip stream)", res[1].Bytes, res[1].Duration, want)
 	}
 	if got := gunzip(t, partial.stdins[li[0]]); got != "TAR:--platform,linux/amd64,yoho/app-worker:v1" {
 		t.Fatalf("loaded %q", got)

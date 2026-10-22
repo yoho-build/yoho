@@ -245,7 +245,7 @@ func backupCmd(g *globals) *cobra.Command {
 		Long: `Backups copy the volumes and dumps declared in x-yoho.backup to a Backup
 Target defined in the Yoho file (backups.targets / backups.jobs).`,
 	}
-	c.AddCommand(backupRunCmd(g), backupListCmd(g), backupRestoreCmd(g), backupCheckCmd(g))
+	c.AddCommand(backupRunCmd(g), backupListCmd(g), backupPullCmd(g), backupRestoreCmd(g), backupCheckCmd(g))
 	return c
 }
 
@@ -376,6 +376,130 @@ func backupListCmd(g *globals) *cobra.Command {
 			return nil
 		},
 	}
+}
+
+// pullRoot resolves the local mirror directory: --to, $YOHO_BACKUP_PULL_DIR,
+// then ~/yoho-backups.
+func pullRoot(flag string) (string, error) {
+	if flag != "" {
+		return flag, nil
+	}
+	if v := os.Getenv("YOHO_BACKUP_PULL_DIR"); v != "" {
+		return v, nil
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", fmt.Errorf("no home directory for the default --to: %w", err)
+	}
+	return path.Join(home, "yoho-backups"), nil
+}
+
+// reportPull emits one backup_pull event per archive and a summary event.
+func reportPull(u *ui.UI, results []backup.PulledArchive) (copied, skipped, conflicts, failed int, bytes int64) {
+	for _, r := range results {
+		switch r.Status {
+		case backup.PullCopied:
+			copied++
+			bytes += r.Size
+		case backup.PullSkipped:
+			skipped++
+		case backup.PullConflict:
+			conflicts++
+		default:
+			failed++
+		}
+		f := map[string]any{"id": r.ID, "server": r.Server, "status": r.Status, "size": r.Size, "sha256": r.SHA256, "path": r.Path}
+		if r.Error != "" {
+			f["error"] = r.Error
+		}
+		u.Event("backup_pull", fmt.Sprintf("%s %s (%s)", r.Status, r.Path, humanBytes(r.Size)), f)
+	}
+	return
+}
+
+func backupPullCmd(g *globals) *cobra.Command {
+	var to string
+	var limit int
+	c := &cobra.Command{
+		Use:   "pull [JOB]",
+		Short: "Copy new archives of an archive Backup Target to a local directory",
+		Long: `Mirror the archives of an archive Backup Target from the Destination's
+Servers to a local directory: Dir/<app>/<destination>[/<server>]/. It reads
+over plain SSH (no rsync on the Server), writes to a .part file, verifies size
+and SHA-256 against the Server's copy, and renames it into place. It never
+deletes anything and skips archives already present. Encrypted archives are
+copied as they are; no password is read. restic repositories and rclone
+remotes are not files on the Server and are refused.
+
+--to defaults to $YOHO_BACKUP_PULL_DIR, then ~/yoho-backups.`,
+		Args: cobra.MaximumNArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) (err error) {
+			name := ""
+			if len(args) > 0 {
+				name = args[0]
+			}
+			if limit < 0 {
+				return errors.New("--limit cannot be negative")
+			}
+			a, err := g.loadForJob(cmd, name)
+			if err != nil {
+				return err
+			}
+			ctx := cmd.Context()
+			u := a.ui
+			defer func() {
+				if err != nil {
+					u.Finished(err, "")
+				}
+			}()
+			j, err := a.selectBackupJob(name)
+			if err != nil {
+				return err
+			}
+			if perr := backup.CheckPullable(j.target); perr != nil {
+				u.Error(perr, "backup pull mirrors archive targets whose repository is a directory on the Server")
+				return &silentError{perr}
+			}
+			root, err := pullRoot(to)
+			if err != nil {
+				return err
+			}
+			u.Title("Pulling Backups of %s (%s) from %s to %s", a.cfg.App, a.destName, j.targetName, root)
+			hosts, closeHosts, err := a.connect(ctx)
+			if err != nil {
+				return err
+			}
+			defer closeHosts()
+			var all []backup.PulledArchive
+			var errs []error
+			for _, h := range hosts {
+				step := u.Step(h.Name, "Pull Backups from %s", j.targetName)
+				res, perr := backup.Pull(ctx, backup.PullOptions{
+					App: a.cfg.App, Destination: a.destName, Project: a.project(),
+					Target: j.target, Host: h.Host, Server: h.Name, Dir: root,
+					ServerSubdir: len(hosts) > 1, Limit: limit,
+				})
+				all = append(all, res...)
+				if perr != nil {
+					step.Fail(perr, "rerun `yoho backup pull` (finished archives are skipped); see `yoho backup list`")
+					errs = append(errs, perr)
+					continue
+				}
+				step.Done(fmt.Sprintf("%d archives", len(res)))
+			}
+			copied, skipped, conflicts, failed, n := reportPull(u, all)
+			u.Event("summary", fmt.Sprintf("copied %d (%s), skipped %d, conflicts %d, failed %d", copied, humanBytes(n), skipped, conflicts, failed),
+				map[string]any{"copied": copied, "skipped": skipped, "conflicts": conflicts, "failed": failed, "bytes": n, "dir": root})
+			if len(errs) > 0 {
+				return &silentError{errors.Join(errs...)}
+			}
+			u.Finished(nil, fmt.Sprintf("Pulled %d new archives of %s (%s) to %s", copied, a.cfg.App, a.destName, root))
+			return nil
+		},
+	}
+	c.Flags().StringVar(&to, "to", "", "local directory (default $YOHO_BACKUP_PULL_DIR, else ~/yoho-backups)")
+	c.Flags().IntVar(&limit, "limit", 0, "pull only the newest N archives (default all)")
+	return c
 }
 
 func backupRestoreCmd(g *globals) *cobra.Command {

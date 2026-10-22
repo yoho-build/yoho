@@ -12,6 +12,7 @@ import (
 	"runtime"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/compose-spec/compose-go/v2/types"
 	"github.com/spf13/cobra"
@@ -309,13 +310,35 @@ func (a *app) buildAndShip(ctx context.Context, s *session, skipBuild bool) (map
 			step.Fail(perr, "try `transport: {mode: load}` or configure a registry")
 			return nil, &silentError{perr}
 		}
-		var methods []string
-		for _, r := range res {
-			methods = append(methods, r.Host+" via "+r.Method)
-		}
-		step.Done(strings.Join(methods, ", "))
+		detail, fields := shipSummary(res)
+		step.DoneWith(detail, fields)
 	}
 	return images, nil
+}
+
+// shipSummary renders the Ship step result: per Server the method, and for
+// transfers that sent bytes, the size, duration and throughput so slow links
+// are visible. fields["transfers"] lists the same for --json.
+func shipSummary(res []transport.Result) (string, map[string]any) {
+	var parts []string
+	transfers := make([]map[string]any, 0, len(res))
+	for _, r := range res {
+		part := r.Host + " via " + r.Method
+		if r.Bytes > 0 && r.Duration > 0 {
+			part += ", " + humanBytes(r.Bytes) + " in " + roundDur(r.Duration) +
+				" (" + humanBytes(int64(float64(r.Bytes)/r.Duration.Seconds())) + "/s)"
+		}
+		parts = append(parts, part)
+		transfers = append(transfers, map[string]any{"host": r.Host, "method": r.Method, "bytes": r.Bytes, "duration_ms": r.Duration.Milliseconds()})
+	}
+	return strings.Join(parts, ", "), map[string]any{"transfers": transfers}
+}
+
+func roundDur(d time.Duration) string {
+	if d < 10*time.Second {
+		return d.Round(100 * time.Millisecond).String()
+	}
+	return d.Round(time.Second).String()
 }
 
 // deploymentPlatform selects the image to ship from the Servers, not the order

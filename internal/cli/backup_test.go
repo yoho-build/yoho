@@ -91,3 +91,48 @@ func TestLinuxBinaryRefusesNonLinux(t *testing.T) {
 		t.Fatalf("explicit binary: %q %v", p, err)
 	}
 }
+
+func TestPullRootResolution(t *testing.T) {
+	t.Setenv("YOHO_BACKUP_PULL_DIR", "/env/dir")
+	if got, _ := pullRoot("/flag"); got != "/flag" {
+		t.Fatalf("flag wins: %s", got)
+	}
+	if got, _ := pullRoot(""); got != "/env/dir" {
+		t.Fatalf("env: %s", got)
+	}
+	t.Setenv("YOHO_BACKUP_PULL_DIR", "")
+	t.Setenv("HOME", "/home/op")
+	if got, _ := pullRoot(""); got != "/home/op/yoho-backups" {
+		t.Fatalf("default: %s", got)
+	}
+}
+
+func TestReportPullJSONEvents(t *testing.T) {
+	var b strings.Builder
+	u := ui.New(&b, ui.JSON, false)
+	copied, skipped, conflicts, failed, n := reportPull(u, []backup.PulledArchive{
+		{ID: "a.tar.gz", Server: "s1", Status: backup.PullCopied, Size: 10, SHA256: "ab", Path: "/m/a.tar.gz"},
+		{ID: "b.tar.gz", Server: "s1", Status: backup.PullSkipped, Size: 5},
+		{ID: "c.tar.gz", Server: "s1", Status: backup.PullConflict, Error: "differs"},
+	})
+	if copied != 1 || skipped != 1 || conflicts != 1 || failed != 0 || n != 10 {
+		t.Fatalf("counts %d %d %d %d %d", copied, skipped, conflicts, failed, n)
+	}
+	lines := strings.Split(strings.TrimSpace(b.String()), "\n")
+	if len(lines) != 3 || !strings.Contains(lines[0], `"event":"backup_pull"`) || !strings.Contains(lines[0], `"sha256":"ab"`) ||
+		!strings.Contains(lines[0], `"status":"copied"`) || !strings.Contains(lines[2], `"error":"differs"`) {
+		t.Fatalf("events:\n%s", b.String())
+	}
+}
+
+func TestBackupPullFlags(t *testing.T) {
+	c := backupPullCmd(&globals{})
+	for _, f := range []string{"to", "limit"} {
+		if c.Flags().Lookup(f) == nil {
+			t.Errorf("missing --%s", f)
+		}
+	}
+	if c.Flags().Lookup("delete") != nil {
+		t.Error("pull must have no delete flag")
+	}
+}

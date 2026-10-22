@@ -44,6 +44,7 @@ Generated secrets (`x-yoho.generate`, on the Server as `generated/<NAME>`) are i
 ```sh
 yoho backup run [JOB]                      # take a Backup now
 yoho backup list [JOB]                     # stored Backups, newest first
+yoho backup pull [JOB] [--to DIR]          # mirror archives to a local directory
 yoho backup check [JOB]                    # integrity only; never a restore proof
 yoho backup check [JOB] --read-data        # restic: also read all data packs
 yoho backup check [JOB] --id ID            # archive: selected ID (default latest)
@@ -51,6 +52,63 @@ yoho backup restore ID [--job JOB] [-y]    # restore; confirmation required unle
 ```
 
 `JOB` defaults to the Destination's only Backup job (several jobs: name one; `restore` takes `--job`). Pass `-d` to pick the Destination. `ID` is the id shown by `backup list`; `latest` selects the newest. Hooks `pre-backup`, `post-backup`, `pre-restore`, `post-restore` run on your machine and also get `YOHO_BACKUP_JOB`, `YOHO_BACKUP_TARGET` and (after the Backup, or for a restore) `YOHO_BACKUP_ID`.
+
+## Mirror archives locally (`backup pull`)
+
+`yoho backup pull [JOB] [--to DIR] [--limit N]` copies the archives of an `archive` Backup Target from the Destination's Servers to your machine, so you keep an off-Server copy. `--to` defaults to `$YOHO_BACKUP_PULL_DIR`, then `~/yoho-backups`; files land in `DIR/<app>/<destination>/` (with a `<server>/` level when the Destination has several Servers, since Swarm writes the archive on the node that ran the job).
+
+- It reads over the same SSH connection as every other command. The Server needs no `rsync`.
+- Each archive is written to `.<name>.part`, checked against the Server's size and SHA-256 (`sha256sum`, `shasum` or `openssl` on the Server), then renamed. An interrupted run leaves only `.part` files, which the next run overwrites.
+- It never deletes. Archives already present with the same size are skipped; a same-name file of a different size is reported as a conflict (the command exits non-zero) and left alone. Pruning on the Server (`keep_last`) does not touch the mirror.
+- Encrypted `zip`/`7z` archives are copied as ciphertext; no password is read.
+- restic repositories and rclone remotes are not files on the Server and are refused. Use `restic copy` or `rclone sync` for those.
+- `--json` prints one `backup_pull` event per archive (`id`, `server`, `status` of `copied`, `skipped`, `conflict` or `failed`, `size`, `sha256`, `path`) and a `summary` event (`copied`, `skipped`, `conflicts`, `failed`, `bytes`).
+
+### Run it daily
+
+macOS (launchd): save as `~/Library/LaunchAgents/com.yohobuild.backup-pull.plist`, set the project path, then `launchctl load ~/Library/LaunchAgents/com.yohobuild.backup-pull.plist`.
+
+```xml
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>Label</key><string>com.yohobuild.backup-pull</string>
+  <key>ProgramArguments</key><array>
+    <string>/usr/local/bin/yoho</string><string>backup</string><string>pull</string>
+    <string>-d</string><string>production</string><string>--to</string><string>/Users/me/yoho-backups</string>
+  </array>
+  <key>WorkingDirectory</key><string>/Users/me/code/myapp</string>
+  <key>StartCalendarInterval</key><dict><key>Hour</key><integer>4</integer><key>Minute</key><integer>30</integer></dict>
+  <key>StandardOutPath</key><string>/Users/me/yoho-backups/pull.log</string>
+  <key>StandardErrorPath</key><string>/Users/me/yoho-backups/pull.log</string>
+</dict></plist>
+```
+
+Linux (systemd user timer): `~/.config/systemd/user/yoho-backup-pull.service` and `.timer`, then `systemctl --user enable --now yoho-backup-pull.timer`.
+
+```ini
+# yoho-backup-pull.service
+[Unit]
+Description=Mirror Yoho Backups
+
+[Service]
+Type=oneshot
+WorkingDirectory=%h/code/myapp
+ExecStart=/usr/local/bin/yoho backup pull -d production --to %h/yoho-backups
+
+# yoho-backup-pull.timer
+[Unit]
+Description=Mirror Yoho Backups daily
+
+[Timer]
+OnCalendar=*-*-* 04:30:00
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+```
+
+The job needs the same SSH access and secrets as an interactive `yoho` run (an agent or key without a passphrase prompt). The local Mac or Linux box is not a Scheduled Job: those stay on the Server (ADR 0003).
 
 ## Read-only integrity checking
 

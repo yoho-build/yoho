@@ -255,6 +255,25 @@ func (s *SSH) SSHArgs() []string {
 	return append(a, s.opts.ExtraArgs...)
 }
 
+// HopArgs returns ssh argv (binary + options, no destination) and the
+// destination for a machine other than the operator's to open its own
+// connection to this Server (for example a remote Builder). It shares no
+// ControlMaster socket and never accepts or learns host keys: BatchMode and
+// StrictHostKeyChecking=yes mean a missing key or known_hosts entry fails.
+// ok is false when the Server is only reachable through this machine's
+// Cloudflare Tunnel setup, which the other machine does not have.
+func (s *SSH) HopArgs() (args []string, dest string, ok bool) {
+	if s.opts.CloudflareHostname != "" {
+		return nil, "", false
+	}
+	args = []string{"ssh", "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=yes",
+		"-o", "ConnectTimeout=" + strconv.Itoa(s.opts.ConnectTimeout)}
+	if s.port != 0 {
+		args = append(args, "-p", strconv.Itoa(s.port))
+	}
+	return args, s.Destination(), true
+}
+
 // RshCommand is SSHArgs as one string for rsync -e.
 func (s *SSH) RshCommand() string { return QuoteArgs(s.SSHArgs()...) }
 
