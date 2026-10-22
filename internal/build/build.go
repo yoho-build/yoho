@@ -444,12 +444,14 @@ func buildLocal(ctx context.Context, o Options, service string, svc types.Servic
 	if err != nil {
 		return "", err
 	}
-	argv := []string{"docker", "buildx", "build"}
-	if !o.Direct {
-		argv = append(argv, "--load")
-	}
+	argv := []string{"docker", "buildx", "build", "--load"}
 	if builder != "" {
 		argv = append(argv, "--builder", builder)
+	}
+	if o.Direct {
+		// buildx refuses a context name as --builder; select the context so its
+		// default docker-driver builder writes into the remote Docker.
+		argv = []string{"docker", "--context", builder, "buildx", "build"}
 	}
 	if len(o.Platforms) > 0 {
 		argv = append(argv, "--platform", strings.Join(o.Platforms, ","))
