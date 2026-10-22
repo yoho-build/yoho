@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"net/netip"
 	"path"
 	"regexp"
 	"sort"
@@ -90,6 +91,14 @@ func Validate(c *Config) []error {
 			}
 		default:
 			add("destinations.%s.access %q must be operator or scoped", n, d.Access)
+		}
+		if d.Subnet != "" && rt == "swarm" {
+			add("destinations.%s.subnet supports the compose runtime only; remove it or pin the subnet in the compose file's networks.default.ipam", n)
+		}
+		if d.Subnet != "" {
+			if p, err := netip.ParsePrefix(d.Subnet); err != nil || !p.Addr().Is4() || p != p.Masked() {
+				add("destinations.%s.subnet %q must be an IPv4 network in CIDR form, like 10.200.3.0/24", n, d.Subnet)
+			}
 		}
 		if d.GateUser != "" && !unixUserPattern.MatchString(d.GateUser) {
 			add("destinations.%s.gate_user %q must be a Unix user name", n, d.GateUser)

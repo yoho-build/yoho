@@ -259,6 +259,8 @@ type Failure struct {
 	Message  string
 	Phase    string
 	Services []ServiceFailure
+	// Network is set when Docker ran out of address pools.
+	Network *NetworkHint
 }
 type ServiceFailure struct {
 	Service     string `json:"service"`
@@ -279,7 +281,11 @@ func (e *Failure) FailureFacts() any {
 	if services == nil {
 		services = []ServiceFailure{}
 	}
-	return map[string]any{"phase": e.Phase, "services": services}
+	facts := map[string]any{"phase": e.Phase, "services": services}
+	if e.Network != nil {
+		facts["network"] = map[string]any{"name": e.Network.Network, "default": e.Network.Default, "suggested_subnet": e.Network.SuggestedSubnet}
+	}
+	return facts
 }
 func (r *runner) failure(ctx context.Context, err error, service string, ids []string) error {
 	if !r.diagnosed {

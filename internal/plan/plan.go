@@ -46,6 +46,8 @@ type Deploy struct {
 
 	// Non-secret interpolation env for compose (Destination.env).
 	Env map[string]string
+	// Subnet pins the compose default network (Destination.subnet).
+	Subnet string
 
 	// Registry, when configured (swarm: --with-registry-auth).
 	Registry       *config.Registry

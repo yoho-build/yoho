@@ -87,9 +87,9 @@ func scheduleInstallCmd(g *globals) *cobra.Command {
 					target := a.cfg.Backups.Targets[a.cfg.Backups.Jobs[name].Target]
 					if target.PasswordSecret != "" || len(target.EnvSecrets) > 0 {
 						step := u.Step("", "Resolve Scheduled Job secrets")
-						store, err = a.loadSecrets(ctx)
+						store, err = a.loadSecrets(ctx, step)
 						if err != nil {
-							step.Fail(err, "check the declared source keys in .yoho/secrets and secrets.values")
+							step.Fail(err, secretsHint(err, "check the declared source keys in .yoho/secrets and secrets.values"))
 							return &silentError{err}
 						}
 						step.Done()
@@ -167,7 +167,7 @@ func (a *app) installJobs(ctx context.Context, hosts []plan.NamedHost, names []s
 				jerr = a.resolveTargetSecrets(ctx, j)
 			}
 			if jerr != nil {
-				step.Fail(jerr, "check .yoho/secrets and that op / bw / bws are signed in")
+				step.Fail(jerr, secretsHint(jerr, "check .yoho/secrets and that op / bw / bws are signed in"))
 				return &silentError{jerr}
 			}
 			step.Done()

@@ -197,7 +197,8 @@ func (r *runner) releaseCommands(ctx context.Context, plans []servicePlan) error
 		sink := &cappedBuffer{limit: 4096}
 		capture := &logCapture{sink: sink, remaining: 1 << 20, drain: true}
 		capture.redact = secrets.NewRedactor(discardOverflow{sink}, r.secretVals...)
-		if err := r.h.Run(ctx, remote.Cmd{Script: r.cc.cmd(args...) + " 2>&1", Stdout: capture, Stderr: io.Discard}); err != nil {
+		tail := &OutputTail{Redact: r.redact}
+		if err := tail.Annotate(r.h.Run(ctx, remote.Cmd{Script: r.cc.cmd(args...) + " 2>&1", Stdout: io.MultiWriter(capture, tail), Stderr: io.Discard})); err != nil {
 			return r.failure(ctx, fmt.Errorf("release command for %s failed: %w\n%s", sp.Name, err, sink.String()), "", nil)
 		}
 		if !capture.cut {

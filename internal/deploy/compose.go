@@ -104,6 +104,7 @@ func (c Compose) Deploy(ctx context.Context, d *plan.Deploy) (_ *release.Release
 		if err != nil && !errors.As(err, &failure) {
 			err = r.failure(ctx, err, "", nil)
 		}
+		err = AnnotatePoolExhausted(ctx, h, release.ProjectName(d.App, d.Destination), poolKnownNetworks(d), err)
 	}()
 
 	unlock, err := AcquireLock(ctx, h, d.App, d.Destination, lockInfo(d, LockInfo{Performer: d.Performer, Version: d.Version, Command: "deploy", Time: start}))
@@ -119,11 +120,18 @@ func (c Compose) Deploy(ctx context.Context, d *plan.Deploy) (_ *release.Release
 	// Read-only preflight must precede generated values, env/App files and
 	// Release records as well as runtime operations. The route plan does not
 	// depend on secrets, generation paths, or the Docker healthcheck version.
-	_, preflightPlans, err := compile(d, srv.Name, planGenDir, nil, planKey, "")
+	preflightYAML, preflightPlans, err := compile(d, srv.Name, planGenDir, nil, planKey, "")
 	if err != nil {
 		return nil, err
 	}
 	if err := checkOwnership(ctx, h, d.App, d.Destination, preflightPlans); err != nil {
+		return nil, err
+	}
+	curSubnet, hasCurrent, err := currentSubnet(ctx, h, d.App, d.Destination)
+	if err != nil {
+		return nil, err
+	}
+	if err := checkSubnetChange(release.ProjectName(d.App, d.Destination), preflightYAML, curSubnet, hasCurrent); err != nil {
 		return nil, err
 	}
 

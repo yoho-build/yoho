@@ -11,6 +11,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/yoho-build/yoho/internal/config"
 )
@@ -60,8 +61,19 @@ type LoadOptions struct {
 	Concurrency int
 	// Environment lookup for $VAR fallback and BWS_ACCESS_TOKEN. Default os.LookupEnv.
 	Getenv func(string) (string, bool)
-	// Warn receives non-fatal notices (overridden keys). Default: dropped.
+	// Warn receives non-fatal notices (overridden keys, retries). Default: dropped.
 	Warn func(msg string)
+	// OnWait is called once for each provider or $(...) command that runs
+	// longer than WaitAfter, usually an approval prompt nobody answered yet.
+	// It may run on another goroutine. Events carry names, never values.
+	OnWait func(WaitEvent)
+	// WaitAfter is how long a command runs before OnWait fires. Default 3 s.
+	WaitAfter time.Duration
+	// Retries is how many times a provider call that failed with
+	// ApprovalTimeout is run again. Default 0.
+	Retries int
+	// Clock times provider calls for classification. Default time.Now.
+	Clock func() time.Time
 }
 
 // FileNames returns the secrets files read for destination, in precedence
@@ -136,6 +148,9 @@ func Load(ctx context.Context, dir, destination string, cfg config.SecretsConfig
 	if opts.Warn == nil {
 		opts.Warn = func(string) {}
 	}
+	if opts.WaitAfter <= 0 {
+		opts.WaitAfter = 3 * time.Second
+	}
 	run := &memoRunner{r: opts.Runner, calls: map[string]*memoCall{}}
 
 	entries, err := readFiles(dir, destination)
@@ -157,7 +172,7 @@ func Load(ctx context.Context, dir, destination string, cfg config.SecretsConfig
 
 	// Files are evaluated in order so later entries can expand earlier ones.
 	for _, e := range entries {
-		v, err := evalEntry(ctx, e, s.values, run, opts.Getenv)
+		v, err := evalEntry(ctx, e, s.values, run, opts)
 		if err != nil {
 			if len(cfg.Nonempty) > 0 {
 				return nil, contractResolutionError(ctx, e.key)
@@ -220,30 +235,39 @@ func resolveProviders(ctx context.Context, s *Store, destination string, cfg con
 		return errors.Join(errs...)
 	}
 
-	res := &providerResolver{run: run, getenv: opts.Getenv}
+	res := &providerResolver{run: run, getenv: opts.Getenv, clock: opts.Clock, retries: opts.Retries,
+		onWait: opts.OnWait, waitAfter: opts.WaitAfter, warn: opts.Warn}
 	vals := make([]string, len(jobs))
 	jobErrs := make([]error, len(jobs))
+	resolve := func(i int) {
+		j := jobs[i]
+		v, err := res.resolve(ctx, j.key, j.p, j.ref)
+		if err != nil {
+			jobErrs[i] = providerJobError(cfg, j.key, j.provider, j.p.Type, j.ref, err, ctx)
+			return
+		}
+		vals[i] = v
+	}
+	// The first call runs alone: if the provider needs an approval, one
+	// prompt then covers the rest instead of several at once. When that
+	// call shows the provider is unusable (no session, unanswered prompt),
+	// the rest would only repeat it, so stop.
+	if len(jobs) > 0 {
+		resolve(0)
+		var pe *ProviderError
+		if errors.As(jobErrs[0], &pe) && (pe.Class == ApprovalTimeout || pe.Class == NotSignedIn) {
+			return jobErrs[0]
+		}
+	}
 	sem := make(chan struct{}, opts.Concurrency)
 	var wg sync.WaitGroup
-	for i, j := range jobs {
+	for i := 1; i < len(jobs); i++ {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
 			sem <- struct{}{}
 			defer func() { <-sem }()
-			v, err := res.resolve(ctx, j.p, j.ref)
-			if err != nil {
-				if len(cfg.Nonempty) > 0 {
-					// Any provider can share a memoized call with a declared key,
-					// or emit credentials not yet known to the Store. Suppress all
-					// command diagnostics while a contract is active.
-					jobErrs[i] = contractResolutionError(ctx, j.key)
-				} else {
-					jobErrs[i] = fmt.Errorf("secret %s: provider %q (%s) ref %q: %w", j.key, j.provider, j.p.Type, j.ref, err)
-				}
-				return
-			}
-			vals[i] = v
+			resolve(i)
 		}()
 	}
 	wg.Wait()
@@ -256,7 +280,23 @@ func resolveProviders(ctx context.Context, s *Store, destination string, cfg con
 	return nil
 }
 
-func evalEntry(ctx context.Context, e fileEntry, defined map[string]string, run Runner, getenv func(string) (string, bool)) (string, error) {
+// providerJobError wraps a failed provider call. Under a secrets.nonempty
+// contract all command diagnostics are suppressed, because a provider can
+// share a memoized call with a declared key or emit credentials not yet known
+// to the Store; only the fixed text of a classified ProviderError survives.
+func providerJobError(cfg config.SecretsConfig, key, provider, typ, ref string, err error, ctx context.Context) error {
+	if len(cfg.Nonempty) == 0 {
+		return fmt.Errorf("secret %s: provider %q (%s) ref %q: %w", key, provider, typ, ref, err)
+	}
+	var pe *ProviderError
+	if errors.As(err, &pe) && pe.Class != Other {
+		return fmt.Errorf("secret %s: resolution failed: %w", key, pe)
+	}
+	return contractResolutionError(ctx, key)
+}
+
+func evalEntry(ctx context.Context, e fileEntry, defined map[string]string, run Runner, opts LoadOptions) (string, error) {
+	getenv := opts.Getenv
 	var b strings.Builder
 	for _, p := range e.parts {
 		switch p.kind {
@@ -276,7 +316,9 @@ func evalEntry(ctx context.Context, e fileEntry, defined map[string]string, run 
 				known = append(known, v)
 			}
 			sort.Strings(env)
+			stop := watchWait(opts.OnWait, opts.WaitAfter, WaitEvent{Provider: "command", Key: e.key})
 			out, stderr, err := run.Run(ctx, []string{"sh", "-c", p.s}, env)
+			stop()
 			if err != nil {
 				return "", fmt.Errorf("%s:%d: %s: %w", e.file, e.line, e.key, commandError("$(...)", err, out, stderr, known))
 			}

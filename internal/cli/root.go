@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -27,6 +28,8 @@ type globals struct {
 	destination string
 	json        bool
 	verbose     bool
+	// secretsRetries is --secrets-retries; negative means unset.
+	secretsRetries int
 }
 
 // Execute runs the CLI and returns the process exit code.
@@ -46,6 +49,7 @@ kamal-proxy, keeps secrets in your password manager, and backs up volumes.`,
 	pf.StringVarP(&g.destination, "destination", "d", "", "Destination (default: $YOHO_DESTINATION, then production, then the only one)")
 	pf.BoolVar(&g.json, "json", false, "Emit NDJSON events instead of human output")
 	pf.BoolVarP(&g.verbose, "verbose", "v", false, "Stream remote command output")
+	pf.IntVar(&g.secretsRetries, "secrets-retries", -1, "Times to rerun a secrets provider call whose approval prompt timed out (default: $YOHO_SECRETS_RETRIES, then 1 on a terminal, else 0)")
 
 	root.AddCommand(
 		initCmd(g),
@@ -235,7 +239,25 @@ func (a *app) secretKeys(r *composefile.Result) ([]string, error) {
 	return out, nil
 }
 
-func (a *app) loadSecrets(ctx context.Context) (*secrets.Store, error) {
+// resolveSecretsRetries picks the retry count: the flag, then the
+// environment, then one retry on a terminal (someone can approve again) and
+// none otherwise, so agents and CI never wait twice silently.
+func resolveSecretsRetries(flag int, env string, tty bool) int {
+	if flag >= 0 {
+		return flag
+	}
+	if n, err := strconv.Atoi(strings.TrimSpace(env)); err == nil && n >= 0 {
+		return n
+	}
+	if tty {
+		return 1
+	}
+	return 0
+}
+
+// loadSecrets resolves the Destination's secrets. step, when not nil, is the
+// "Resolve secrets" step that shows a provider approval wait.
+func (a *app) loadSecrets(ctx context.Context, step *ui.Step) (*secrets.Store, error) {
 	// Only opt-in contracts need compose inspection here. Commands that never
 	// resolve secrets retain their existing offline/retained-state behavior.
 	if len(a.cfg.Secrets.Nonempty) > 0 {
@@ -244,7 +266,17 @@ func (a *app) loadSecrets(ctx context.Context) (*secrets.Store, error) {
 		}
 	}
 	return secrets.Load(ctx, a.dir, a.destName, a.cfg.Secrets, secrets.LoadOptions{
-		Warn: func(msg string) { a.ui.Warn("%s", msg) },
+		Warn:    func(msg string) { a.ui.Warn("%s", msg) },
+		Retries: resolveSecretsRetries(a.g.secretsRetries, os.Getenv("YOHO_SECRETS_RETRIES"), stdinIsTTY()),
+		OnWait: func(ev secrets.WaitEvent) {
+			msg := "waiting for secrets provider approval… (" + ev.Provider + ")"
+			fields := map[string]any{"provider": ev.Provider, "key": ev.Key, "elapsed_ms": ev.Elapsed.Milliseconds()}
+			if step != nil {
+				step.Waiting(msg, fields)
+			} else {
+				a.ui.Waiting(msg, fields)
+			}
+		},
 	})
 }
 

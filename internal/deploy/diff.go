@@ -267,6 +267,14 @@ func (c Compose) Diff(ctx context.Context, d *plan.Deploy) ([]plan.Change, error
 		return nil, err
 	}
 
+	curSubnet, hasCurrent, err := currentSubnet(ctx, h, d.App, d.Destination)
+	if err != nil {
+		return nil, err
+	}
+	if err := checkSubnetChange(project, composeYAML, curSubnet, hasCurrent); err != nil {
+		return nil, err
+	}
+
 	// Proxy container.
 	if needsProxy(plans) {
 		need, why, err := proxy.NeedsBoot(ctx, h, d.Proxy)

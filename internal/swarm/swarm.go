@@ -168,6 +168,9 @@ func (Runtime) Deploy(ctx context.Context, d *plan.Deploy) (_ *release.Release, 
 	r := newRunner(d)
 	relDir := release.Dir(d.App, d.Destination, d.Version)
 	stackFile := path.Join(relDir, "compose.yaml")
+	defer func() {
+		err = deploy.AnnotatePoolExhausted(ctx, h, r.stack, []string{proxy.Network}, err)
+	}()
 
 	unlock, err := deploy.AcquireLock(ctx, h, d.App, d.Destination, deploy.LockInfo{Performer: d.Performer, Version: d.Version, Command: "deploy", Time: start})
 	if err != nil {
@@ -566,7 +569,9 @@ func (r *runner) deployStack(ctx context.Context, file, stack string, prune, aut
 	}
 	dctx, cancel := context.WithTimeout(ctx, convergeTimeout)
 	defer cancel()
-	deployErr := r.h.Run(dctx, remote.Cmd{Script: stackDeployCmd(r.dir, file, stack, prune, auth, true) + " 2>&1", Stdout: io.Discard, Stderr: io.Discard})
+	tail := &deploy.OutputTail{Redact: r.redact}
+	deployErr := r.h.Run(dctx, remote.Cmd{Script: stackDeployCmd(r.dir, file, stack, prune, auth, true) + " 2>&1", Stdout: tail, Stderr: io.Discard})
+	deployErr = tail.Annotate(deployErr)
 	if deployErr != nil {
 		cause := fmt.Errorf("docker stack deploy %s: %w", stack, deployErr)
 		failure := r.convergenceFailure(cause, unknownServiceStatus(before, stack, planned), r.diagnose(ctx, stack, nil))

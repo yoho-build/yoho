@@ -234,6 +234,37 @@ func (s *Step) Fail(err error, hint string) {
 	s.finish(err, hint)
 }
 
+// Waiting reports that the step is blocked on something outside Yoho, such as
+// a password manager approval prompt. fields (names only, never values) join
+// the JSON step_wait event.
+func (s *Step) Waiting(msg string, fields map[string]any) {
+	s.u.waiting(s, msg, fields)
+}
+
+// Waiting is Step.Waiting for work that has no step of its own.
+func (u *UI) Waiting(msg string, fields map[string]any) { u.waiting(nil, msg, fields) }
+
+func (u *UI) waiting(s *Step, msg string, fields map[string]any) {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	if s != nil && s.done {
+		return
+	}
+	if u.mode == JSON {
+		f := map[string]any{"message": msg}
+		if s != nil {
+			f["step"], f["host"] = s.name, s.host
+		}
+		for k, v := range fields {
+			f[k] = v
+		}
+		u.event("step_wait", f)
+		return
+	}
+	fmt.Fprintln(u.w, u.indent()+"  "+u.paint(yellow, "… "+msg))
+	u.stamp()
+}
+
 // Skip marks the step as skipped with a reason.
 func (s *Step) Skip(reason string) {
 	u := s.u
@@ -267,6 +298,12 @@ func (s *Step) finish(err error, extra string) {
 			var facts interface{ FailureFacts() any }
 			if errors.As(err, &facts) {
 				f["failure_facts"] = facts.FailureFacts()
+			}
+			var coded interface{ ErrorCode() string }
+			if errors.As(err, &coded) {
+				if code := coded.ErrorCode(); code != "" {
+					f["code"] = code
+				}
 			}
 			f["hint"] = extra
 			f["output_tail"] = s.tail.lines()

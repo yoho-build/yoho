@@ -40,7 +40,7 @@ func tunnelCmd(g *globals) *cobra.Command {
 			token := ""
 			if cfg.TokenSecret != "" {
 				step := a.ui.Step("", "Resolve tunnel token")
-				store, err := a.loadSecrets(ctx)
+				store, err := a.loadSecrets(ctx, step)
 				if err == nil {
 					token, err = tunnelToken(store, &cfg)
 				}
