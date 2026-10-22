@@ -53,9 +53,6 @@ sudo loginctl enable-linger <user>).`,
 func (a *app) scheduleMode() schedule.Mode {
 	srv := a.cfg.Servers[a.dest.Servers[0]]
 	m := schedule.Mode{Sudo: srv.Sudo, User: a.cfg.Setup.User}
-	if user, _, _, err := remote.ParseTarget(srv.SSH); err == nil && user == "root" {
-		m.Sudo = true
-	}
 	// The SSH user runs deploys and owns the Server root, so it runs jobs too.
 	if user, _, _, err := remote.ParseTarget(srv.SSH); err == nil && user != "" && user != "root" {
 		m.User = user
