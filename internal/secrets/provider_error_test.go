@@ -229,7 +229,7 @@ func TestOnWaitFiresOnceForSlowCall(t *testing.T) {
 	}
 	mu.Lock()
 	defer mu.Unlock()
-	if len(events) != 1 || events[0].Provider != "op" || events[0].Ref != "op://v/slow/f" || events[0].Elapsed < 30*time.Millisecond {
+	if len(events) != 1 || events[0].Provider != "op" || events[0].Key != "A" || events[0].Elapsed < 30*time.Millisecond {
 		t.Fatalf("events %+v", events)
 	}
 }
@@ -246,4 +246,45 @@ type runnerFunc func(argv []string) ([]byte, []byte, error)
 
 func (f runnerFunc) Run(_ context.Context, argv []string, _ []string) ([]byte, []byte, error) {
 	return f(argv)
+}
+
+func TestSharedMemoRetryRunsOncePerRound(t *testing.T) {
+	// Four keys share one ref, so one memoized call; all of them see the
+	// approval timeout and retry, but the runner must run only twice.
+	var mu sync.Mutex
+	calls := 0
+	r := runnerFunc(func(argv []string) ([]byte, []byte, error) {
+		mu.Lock()
+		calls++
+		n := calls
+		mu.Unlock()
+		time.Sleep(30 * time.Millisecond)
+		if n == 1 {
+			return nil, []byte("authorization timeout"), errors.New("exit status 1")
+		}
+		return []byte("v"), nil, nil
+	})
+	cfg := opCfg("op://same", "op://same", "op://same", "op://same")
+	// The first key resolves alone and retries before the rest start, so
+	// make every key's first attempt concurrent via the lower-level resolver.
+	run := &memoRunner{r: r, calls: map[string]*memoCall{}}
+	res := &providerResolver{run: run, getenv: noEnv, retries: 1}
+	var wg sync.WaitGroup
+	errs := make([]error, 4)
+	for i := range errs {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_, errs[i] = res.resolve(context.Background(), "K", cfg.Providers["v"], "op://same")
+		}()
+	}
+	wg.Wait()
+	for i, e := range errs {
+		if e != nil {
+			t.Errorf("caller %d: %v", i, e)
+		}
+	}
+	if calls != 2 {
+		t.Fatalf("runner ran %d times, want 2 (one failure, one retry)", calls)
+	}
 }

@@ -241,7 +241,7 @@ func resolveProviders(ctx context.Context, s *Store, destination string, cfg con
 	jobErrs := make([]error, len(jobs))
 	resolve := func(i int) {
 		j := jobs[i]
-		v, err := res.resolve(ctx, j.p, j.ref)
+		v, err := res.resolve(ctx, j.key, j.p, j.ref)
 		if err != nil {
 			jobErrs[i] = providerJobError(cfg, j.key, j.provider, j.p.Type, j.ref, err, ctx)
 			return
@@ -316,7 +316,7 @@ func evalEntry(ctx context.Context, e fileEntry, defined map[string]string, run 
 				known = append(known, v)
 			}
 			sort.Strings(env)
-			stop := watchWait(opts.OnWait, opts.WaitAfter, WaitEvent{Provider: "command", Ref: e.key})
+			stop := watchWait(opts.OnWait, opts.WaitAfter, WaitEvent{Provider: "command", Key: e.key})
 			out, stderr, err := run.Run(ctx, []string{"sh", "-c", p.s}, env)
 			stop()
 			if err != nil {

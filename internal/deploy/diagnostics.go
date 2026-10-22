@@ -283,7 +283,7 @@ func (e *Failure) FailureFacts() any {
 	}
 	facts := map[string]any{"phase": e.Phase, "services": services}
 	if e.Network != nil {
-		facts["network"] = map[string]any{"name": e.Network.Network, "suggested_subnet": e.Network.SuggestedSubnet}
+		facts["network"] = map[string]any{"name": e.Network.Network, "default": e.Network.Default, "suggested_subnet": e.Network.SuggestedSubnet}
 	}
 	return facts
 }

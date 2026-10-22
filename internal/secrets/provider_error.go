@@ -81,10 +81,11 @@ func (e *ProviderError) ErrorCode() string {
 }
 
 // WaitEvent reports a provider call that has run longer than expected, most
-// likely waiting for an approval. Ref is a name, never a value.
+// likely waiting for an approval. Key is the secret's name; the provider
+// reference is deliberately absent because refs can hold credentials.
 type WaitEvent struct {
 	Provider string
-	Ref      string
+	Key      string
 	Elapsed  time.Duration
 }
 

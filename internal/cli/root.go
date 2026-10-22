@@ -270,7 +270,7 @@ func (a *app) loadSecrets(ctx context.Context, step *ui.Step) (*secrets.Store, e
 		Retries: resolveSecretsRetries(a.g.secretsRetries, os.Getenv("YOHO_SECRETS_RETRIES"), stdinIsTTY()),
 		OnWait: func(ev secrets.WaitEvent) {
 			msg := "waiting for secrets provider approval… (" + ev.Provider + ")"
-			fields := map[string]any{"provider": ev.Provider, "ref": ev.Ref, "elapsed_ms": ev.Elapsed.Milliseconds()}
+			fields := map[string]any{"provider": ev.Provider, "key": ev.Key, "elapsed_ms": ev.Elapsed.Milliseconds()}
 			if step != nil {
 				step.Waiting(msg, fields)
 			} else {

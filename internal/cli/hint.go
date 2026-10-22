@@ -2,6 +2,7 @@ package cli
 
 import (
 	"errors"
+	"strconv"
 
 	"github.com/yoho-build/yoho/internal/deploy"
 	"github.com/yoho-build/yoho/internal/proxy"
@@ -29,6 +30,10 @@ func hintFor(err error, def string) string {
 	if errors.As(err, &ae) && ae.Hint != "" {
 		return ae.Hint
 	}
+	var sc *deploy.SubnetChangeError
+	if errors.As(err, &sc) {
+		return subnetChangeHint(sc)
+	}
 	var df *deploy.Failure
 	if errors.As(err, &df) && df.Network != nil {
 		return poolHint(df.Network)
@@ -42,7 +47,24 @@ func hintFor(err error, def string) string {
 }
 
 // poolHint explains Docker address pool exhaustion with the subnet found free
-// on the Server and the compose snippet that pins it.
+// on the Server. Only the compose default network has a Yoho setting; the
+// shared Proxy network and named networks get their own remedy.
+func poolHint(n *deploy.NetworkHint) string {
+	free := "a free subnet is " + n.SuggestedSubnet
+	switch {
+	case n.Default:
+		return "Docker has no free address pool; add networks.default.ipam.config[].subnet: " + n.SuggestedSubnet +
+			" to compose, or set destinations.<name>.subnet\n" + deploy.SnippetFor(n.SuggestedSubnet)
+	case n.Network == proxy.Network:
+		return "Docker has no free address pool for the shared " + proxy.Network + " network; create it yourself on the Server, then rerun: docker network create --subnet " +
+			n.SuggestedSubnet + " " + proxy.Network
+	case n.Network != "":
+		return "Docker has no free address pool for network " + n.Network + "; add networks." + n.Key + ".ipam.config[].subnet: " + n.SuggestedSubnet +
+			" to compose (destinations.<name>.subnet covers only the default network)\n" + deploy.SnippetFor(n.SuggestedSubnet, n.Key)
+	}
+	return "Docker has no free address pool; " + free + ". Pin it on the network that failed with ipam.config[].subnet, or free up unused Docker networks"
+}
+
 // secretsHint maps a failed secrets resolution to its own hint; def is the
 // caller's text for failures Yoho cannot place.
 func secretsHint(err error, def string) string {
@@ -61,7 +83,7 @@ func secretsHint(err error, def string) string {
 	return def
 }
 
-func poolHint(n *deploy.NetworkHint) string {
-	return "Docker has no free address pool; add networks.default.ipam.config[].subnet: " + n.SuggestedSubnet +
-		" to compose, or set destinations.<name>.subnet\n" + n.Snippet
+func subnetChangeHint(e *deploy.SubnetChangeError) string {
+	return "restore destinations.<name>.subnet (or the compose ipam) to " + strconv.Quote(e.Old) +
+		", or stop the App on the Server with `docker compose -p " + e.Project + " down` (volumes are kept), then deploy again so the network is created with the new subnet"
 }

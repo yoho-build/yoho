@@ -102,6 +102,7 @@ type currentState struct {
 	rel      *release.Release
 	services map[string]map[string]any // normalized service entries
 	plans    map[string]servicePlan
+	subnet   string // default network subnet of the compiled file
 }
 
 func loadCurrent(ctx context.Context, h remote.Host, app, dest string) (*currentState, error) {
@@ -122,7 +123,7 @@ func loadCurrent(ctx context.Context, h remote.Host, app, dest string) (*current
 	if rel.SecretsGeneration != "" {
 		raw = bytes.ReplaceAll(raw, []byte(release.SecretsDir(app, dest, rel.SecretsGeneration)), []byte(planGenDir))
 	}
-	st := &currentState{rel: rel, plans: map[string]servicePlan{}}
+	st := &currentState{rel: rel, plans: map[string]servicePlan{}, subnet: defaultSubnet(raw)}
 	if st.services, err = serviceEntries(raw); err != nil {
 		return nil, nil
 	}
@@ -264,6 +265,10 @@ func (c Compose) Diff(ctx context.Context, d *plan.Deploy) ([]plan.Change, error
 	}
 	cur, err := loadCurrent(ctx, h, d.App, d.Destination)
 	if err != nil {
+		return nil, err
+	}
+
+	if err := checkSubnetChange(project, composeYAML, cur); err != nil {
 		return nil, err
 	}
 

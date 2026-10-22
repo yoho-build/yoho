@@ -5,9 +5,14 @@ import (
 	"errors"
 	"fmt"
 	"net/netip"
+	"regexp"
 	"strings"
 	"time"
 
+	"go.yaml.in/yaml/v3"
+
+	"github.com/yoho-build/yoho/internal/plan"
+	"github.com/yoho-build/yoho/internal/proxy"
 	"github.com/yoho-build/yoho/internal/remote"
 )
 
@@ -43,26 +48,68 @@ func IsPoolExhausted(err error) bool {
 
 // NetworkHint is the actionable part of a pool exhaustion failure.
 type NetworkHint struct {
-	// Network is the default network that could not be created.
-	Network         string `json:"name"`
+	// Network is the network that could not be created; empty when Docker's
+	// message and the failing command do not say.
+	Network string `json:"name"`
+	// Default is true for the App's compose default network, the only one
+	// destinations.<name>.subnet configures.
+	Default         bool   `json:"default"`
 	SuggestedSubnet string `json:"suggested_subnet"`
-	// Snippet is the compose override that pins the subnet.
-	Snippet string `json:"-"`
+	// Key is the compose network key (Network without the project prefix).
+	Key string `json:"-"`
 }
 
-// SnippetFor is the compose YAML that pins the default network's subnet.
-func SnippetFor(subnet string) string {
-	return "networks:\n  default:\n    ipam:\n      config:\n        - subnet: " + subnet + "\n"
+// SnippetFor is the compose YAML that pins the subnet of the network with
+// the given compose key ("default" or a named network).
+func SnippetFor(subnet string, key ...string) string {
+	k := "default"
+	if len(key) > 0 {
+		k = key[0]
+	}
+	return "networks:\n  " + k + ":\n    ipam:\n      config:\n        - subnet: " + subnet + "\n"
 }
 
+var (
+	composeNetErr = regexp.MustCompile(`(?i)network\s+([^\s:]+)\s+error`)
+	stackNetErr   = regexp.MustCompile(`(?i)failed to create (?:network )?"?([A-Za-z0-9][A-Za-z0-9_.-]*)"?:`)
+)
+
+// failedNetwork names the network behind a pool exhaustion error: from
+// Docker's or Compose's message, else from a `docker network create` of a
+// known network in the failing script, else the compose default network
+// (a plain `up`). Empty when a create failed and nothing says which.
+func failedNetwork(err error, project string, known []string) string {
+	var ee *remote.ExitError
+	if !errors.As(err, &ee) {
+		return ""
+	}
+	for _, re := range []*regexp.Regexp{composeNetErr, stackNetErr} {
+		if m := re.FindStringSubmatch(ee.Stderr); m != nil {
+			return m[1]
+		}
+	}
+	if strings.Contains(ee.Script, "network create") {
+		for _, k := range known {
+			if k != "" && strings.Contains(ee.Script, k) {
+				return k
+			}
+		}
+		return ""
+	}
+	return project + "_default"
+}
+
+// usedSubnetsScript fails when any inventory command fails, so an incomplete
+// list never produces a suggestion.
 const usedSubnetsScript = `set -eu
-ids=$(docker network ls -q 2>/dev/null || true)
+ids=$(docker network ls -q)
 if [ -n "$ids" ]; then
   # shellcheck disable=SC2086
-  docker network inspect -f '{{range .IPAM.Config}}{{.Subnet}} {{end}}' $ids 2>/dev/null || true
+  docker network inspect -f '{{range .IPAM.Config}}{{.Subnet}} {{end}}' $ids
 fi
 if command -v ip >/dev/null 2>&1; then
-  ip -4 -o route 2>/dev/null | while read -r dst rest; do echo "$dst"; done || true
+  routes=$(ip -4 -o route)
+  printf '%s\n' "$routes" | while read -r dst rest; do echo "$dst"; done
 fi
 `
 
@@ -115,9 +162,11 @@ func firstFree(rng netip.Prefix, used []netip.Prefix) (netip.Prefix, error) {
 }
 
 // AnnotatePoolExhausted turns a pool exhaustion error into a *Failure that
-// carries a suggested subnet for network (the default network that failed).
-// Anything else, and a failed probe, returns err unchanged.
-func AnnotatePoolExhausted(ctx context.Context, h remote.Host, network string, err error) error {
+// carries a suggested subnet and the network it is for. project is the
+// compose project (or stack) name; known lists other networks Yoho creates
+// itself (the shared Proxy network, a scoped App's own). Anything else, and a
+// failed probe, returns err unchanged.
+func AnnotatePoolExhausted(ctx context.Context, h remote.Host, project string, known []string, err error) error {
 	if err == nil || !IsPoolExhausted(err) {
 		return err
 	}
@@ -127,11 +176,71 @@ func AnnotatePoolExhausted(ctx context.Context, h remote.Host, network string, e
 	if perr != nil {
 		return err
 	}
-	nh := &NetworkHint{Network: network, SuggestedSubnet: p.String(), Snippet: SnippetFor(p.String())}
+	name := failedNetwork(err, project, known)
+	nh := &NetworkHint{Network: name, Default: name == project+"_default", SuggestedSubnet: p.String(), Key: strings.TrimPrefix(name, project+"_")}
 	var f *Failure
 	if errors.As(err, &f) {
 		f.Network = nh
 		return err
 	}
-	return &Failure{Cause: err, Message: "Docker has no free address pool for network " + network, Phase: "create-network", Network: nh}
+	msg := "Docker has no free address pool"
+	if name != "" {
+		msg += " for network " + name
+	}
+	return &Failure{Cause: err, Message: msg, Phase: "create-network", Network: nh}
+}
+
+// poolKnownNetworks lists the non-default networks Yoho creates for d.
+func poolKnownNetworks(d *plan.Deploy) []string {
+	known := []string{proxy.Network}
+	if d.Scoped != nil && d.Scoped.ProxyNetwork != "" {
+		known = append([]string{d.Scoped.ProxyNetwork}, known...)
+	}
+	return known
+}
+
+// SubnetChangeError refuses to change the subnet of the default network of a
+// deployed App: Docker cannot alter a network's subnet in place, Compose
+// would have to recreate it (stopping every attached container), and the
+// Service-only plan diff would not show that.
+type SubnetChangeError struct {
+	Project  string
+	Old, New string
+}
+
+func (e *SubnetChangeError) Error() string {
+	return fmt.Sprintf("the default network subnet of %s would change from %q to %q, which Docker only does by recreating the network", e.Project, e.Old, e.New)
+}
+
+// defaultSubnet is the first ipam subnet of the compiled file's default
+// network, "" when none.
+func defaultSubnet(composeYAML []byte) string {
+	var doc struct {
+		Networks map[string]struct {
+			Ipam struct {
+				Config []struct {
+					Subnet string `yaml:"subnet"`
+				} `yaml:"config"`
+			} `yaml:"ipam"`
+		} `yaml:"networks"`
+	}
+	if err := yaml.Unmarshal(composeYAML, &doc); err != nil {
+		return ""
+	}
+	if n, ok := doc.Networks["default"]; ok && len(n.Ipam.Config) > 0 {
+		return n.Ipam.Config[0].Subnet
+	}
+	return ""
+}
+
+// checkSubnetChange compares the wanted compiled compose with the current
+// Release's. A first subnet on an App without a current Release is fine.
+func checkSubnetChange(project string, want []byte, cur *currentState) error {
+	if cur == nil {
+		return nil
+	}
+	if o, n := cur.subnet, defaultSubnet(want); o != n {
+		return &SubnetChangeError{Project: project, Old: o, New: n}
+	}
+	return nil
 }

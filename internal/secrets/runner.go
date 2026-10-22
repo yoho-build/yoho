@@ -46,8 +46,19 @@ type memoCall struct {
 	err         error
 }
 
+func memoKey(argv []string, env []string) string {
+	return strings.Join(argv, "\x00") + "\x01" + strings.Join(env, "\x00")
+}
+
 func (m *memoRunner) Run(ctx context.Context, argv []string, env []string) ([]byte, []byte, error) {
-	k := strings.Join(argv, "\x00") + "\x01" + strings.Join(env, "\x00")
+	out, stderr, err, _ := m.run(ctx, argv, env)
+	return out, stderr, err
+}
+
+// run is Run that also returns the cache entry that answered, so a caller can
+// retry exactly that entry with forget.
+func (m *memoRunner) run(ctx context.Context, argv []string, env []string) ([]byte, []byte, error, *memoCall) {
+	k := memoKey(argv, env)
 	m.mu.Lock()
 	c, ok := m.calls[k]
 	if !ok {
@@ -60,18 +71,19 @@ func (m *memoRunner) Run(ctx context.Context, argv []string, env []string) ([]by
 		m.mu.Unlock()
 		<-c.done
 	}
-	return c.out, c.stderr, c.err
+	return c.out, c.stderr, c.err, c
 }
 
-// forget drops a cached call so a retry runs the command again.
-func (m *memoRunner) forget(argv []string) {
-	prefix := strings.Join(argv, "\x00") + "\x01"
+// forget drops the cache entry c, only if it is still the current one for
+// argv. Callers that shared a failed entry all forget it, but the first one
+// to retry creates the replacement and the rest join that, so the command
+// runs once per retry round.
+func (m *memoRunner) forget(argv []string, c *memoCall) {
+	k := memoKey(argv, nil)
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	for k := range m.calls {
-		if strings.HasPrefix(k, prefix) {
-			delete(m.calls, k)
-		}
+	if m.calls[k] == c {
+		delete(m.calls, k)
 	}
 }
 
