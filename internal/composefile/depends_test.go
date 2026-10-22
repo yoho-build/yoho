@@ -97,20 +97,19 @@ services:
 
 func TestSlowFirstProbeWarning(t *testing.T) {
 	svc := func(hc string) string {
-		return "services:\n  db:\n    image: pg\n    healthcheck: {test: ['CMD', 'true'], " + hc + "}\n    x-yoho: {stateful: true}\n"
+		return "services:\n  db:\n    image: pg\n    healthcheck: {" + hc + "}\n    x-yoho: {stateful: true}\n"
 	}
-	if w := msgs(checkSrc(t, svc("interval: 10s"), "compose"), LevelWarning); !strings.Contains(w, "healthcheck interval 10s sets the first probe time") {
-		t.Errorf("want slow-interval warning:\n%s", w)
+	// Timing-only override: the image check is inherited and Yoho cannot add fast-start probes.
+	if w := msgs(checkSrc(t, svc("interval: 10s"), "compose"), LevelWarning); !strings.Contains(w, "healthcheck sets interval 10s without test") || !strings.Contains(w, "start_interval needs Docker 25+") {
+		t.Errorf("want timing-only slow-interval warning:\n%s", w)
 	}
-	if w := msgs(checkSrc(t, svc("interval: 10s"), "compose"), LevelWarning); !strings.Contains(w, "start_interval needs Docker 25+") || strings.Contains(w, "older engines need start_interval") {
-		t.Errorf("older engines must not be told to set start_interval:\n%s", w)
-	}
-	for _, hc := range []string{"interval: 5s", "interval: 10s, start_interval: 1s", "interval: 10s, start_period: 30s"} {
+	// With a test, Yoho injects start_period/start_interval on Docker 25+, so a warning is noise.
+	for _, hc := range []string{"test: ['CMD', 'true'], interval: 10s", "interval: 5s", "interval: 10s, start_interval: 1s", "interval: 10s, start_period: 30s"} {
 		if w := msgs(checkSrc(t, svc(hc), "compose"), LevelWarning); strings.Contains(w, "first probe") {
 			t.Errorf("%s must not warn:\n%s", hc, w)
 		}
 	}
-	plain := "services:\n  w:\n    image: w\n    healthcheck: {test: ['CMD', 'true'], interval: 10s}\n"
+	plain := "services:\n  w:\n    image: w\n    healthcheck: {interval: 10s}\n"
 	if w := msgs(checkSrc(t, plain, "compose"), LevelWarning); strings.Contains(w, "first probe") {
 		t.Errorf("plain Service must not warn:\n%s", w)
 	}

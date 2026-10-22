@@ -171,7 +171,7 @@ func Check(r *Result, runtime string, secretKeys []string) []Finding {
 		}
 
 		if (ext.Stateful || ext.Proxy != nil) && slowFirstProbe(svc.HealthCheck) {
-			svcAdd(LevelWarning, "healthcheck interval %s sets the first probe time, so the deploy waits that long; Docker 25+ gets start_interval automatically; set start_period and start_interval together (start_interval needs Docker 25+ and only applies with start_period > 0), or shorten interval on older engines", time.Duration(*svc.HealthCheck.Interval))
+			svcAdd(LevelWarning, "healthcheck sets interval %s without test, so it inherits the image check and Yoho adds no fast-start probes: the deploy waits that long for the first probe; set test, or set start_period and start_interval together (start_interval needs Docker 25+), or shorten interval", time.Duration(*svc.HealthCheck.Interval))
 		}
 
 		// Stateful guard (ADR 0005): data must not silently diverge across Servers.
@@ -298,9 +298,10 @@ func sortedMapKeys(m map[string]string) []string {
 	return k
 }
 
-// slowFirstProbe reports a healthcheck whose long interval would delay the
-// first probe: no start_period or start_interval to shorten it.
+// slowFirstProbe reports a timing-only healthcheck (no test, so the image's
+// check is inherited and Yoho injects no fast-start fields) whose long
+// interval delays the first probe.
 func slowFirstProbe(hc *types.HealthCheckConfig) bool {
-	return hc != nil && !hc.Disable && hc.Interval != nil && time.Duration(*hc.Interval) > 5*time.Second &&
+	return hc != nil && !hc.Disable && len(hc.Test) == 0 && hc.Interval != nil && time.Duration(*hc.Interval) > 5*time.Second &&
 		hc.StartPeriod == nil && hc.StartInterval == nil
 }
