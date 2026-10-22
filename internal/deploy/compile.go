@@ -96,7 +96,7 @@ func validate(d *plan.Deploy) error {
 		if ext.Proxy == nil {
 			continue
 		}
-		if err := ext.Proxy.ValidateHealthCheck(); err != nil {
+		if err := ext.Proxy.Validate(); err != nil {
 			errs = append(errs, fmt.Errorf("service %s: %w", name, err))
 		}
 		if ext.Stateful {
@@ -110,9 +110,6 @@ func validate(d *plan.Deploy) error {
 		}
 		if s.NetworkMode != "" {
 			errs = append(errs, fmt.Errorf("service %s: proxied services cannot set network_mode", name))
-		}
-		if ext.Proxy.TLS && len(ext.Proxy.Hosts) == 0 {
-			errs = append(errs, fmt.Errorf("service %s: x-yoho.proxy.tls requires hosts", name))
 		}
 		if p := ext.Proxy.Port; p < 0 || p > 65535 {
 			errs = append(errs, fmt.Errorf("service %s: invalid proxy port %d", name, p))
@@ -138,6 +135,10 @@ func proxyWithDefaults(p *config.ServiceProxy) *config.ServiceProxy {
 	if p.HealthTimeout != nil {
 		v := *p.HealthTimeout
 		c.HealthTimeout = &v
+	}
+	if p.CustomDomains != nil {
+		v := *p.CustomDomains
+		c.CustomDomains = &v
 	}
 	if c.Port == 0 {
 		c.Port = defaultProxyPort

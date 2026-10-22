@@ -306,6 +306,72 @@ func (p ServiceProxy) ValidateHealthCheck() error {
 	return nil
 }
 
+// Validate checks Proxy HTTP probes and custom-domain / TLS routing against
+// pinned kamal-proxy v0.10.2: --tls-on-demand-url requires --tls, forbids
+// --host, and accepts a path or an absolute http(s) URL.
+func (p ServiceProxy) Validate() error {
+	if err := p.ValidateHealthCheck(); err != nil {
+		return err
+	}
+	return p.ValidateRouting()
+}
+
+// CustomDomainsAllow is the on-demand TLS check endpoint, or empty.
+func (p ServiceProxy) CustomDomainsAllow() string {
+	if p.CustomDomains == nil {
+		return ""
+	}
+	return strings.TrimSpace(p.CustomDomains.Allow)
+}
+
+// ValidateRouting checks TLS hosts versus custom_domains.allow.
+func (p ServiceProxy) ValidateRouting() error {
+	if p.CustomDomains != nil {
+		if p.CustomDomainsAllow() == "" {
+			return fmt.Errorf("x-yoho.proxy.custom_domains.allow is required")
+		}
+		if !p.TLS {
+			return fmt.Errorf("x-yoho.proxy.custom_domains requires tls: true")
+		}
+		if len(p.Hosts) > 0 {
+			return fmt.Errorf("x-yoho.proxy.custom_domains cannot be set with proxy.hosts (kamal-proxy on-demand TLS is a catch-all route; put known hostnames on another Service or check them in the allow endpoint)")
+		}
+		if err := validateTLSOnDemandAllow(p.CustomDomainsAllow()); err != nil {
+			return err
+		}
+		return nil
+	}
+	if p.TLS && len(p.Hosts) == 0 {
+		return fmt.Errorf("x-yoho.proxy.tls requires hosts or custom_domains.allow")
+	}
+	return nil
+}
+
+// validateTLSOnDemandAllow mirrors kamal-proxy v0.10.2 parseTLSOnDemandURL
+// (internal/server/tls_on_demand.go): a path or an absolute http(s) URL.
+func validateTLSOnDemandAllow(allow string) error {
+	if strings.HasPrefix(allow, "//") {
+		return fmt.Errorf("x-yoho.proxy.custom_domains.allow must be a path or an absolute http(s) URL")
+	}
+	if strings.HasPrefix(allow, "/") {
+		if _, err := url.Parse(allow); err != nil {
+			return fmt.Errorf("x-yoho.proxy.custom_domains.allow is not a valid path")
+		}
+		return nil
+	}
+	u, err := url.ParseRequestURI(allow)
+	if err != nil {
+		return fmt.Errorf("x-yoho.proxy.custom_domains.allow must be a path or an absolute http(s) URL")
+	}
+	if u.Scheme != "http" && u.Scheme != "https" {
+		return fmt.Errorf("x-yoho.proxy.custom_domains.allow must use http or https")
+	}
+	if u.Host == "" {
+		return fmt.Errorf("x-yoho.proxy.custom_domains.allow URL is missing a host")
+	}
+	return nil
+}
+
 // safePathPattern is the set of characters Yoho accepts in Server paths it
 // writes into scripts and journals (same as internal/schedule).
 var safePathPattern = regexp.MustCompile(`^/[A-Za-z0-9_./-]+$`)

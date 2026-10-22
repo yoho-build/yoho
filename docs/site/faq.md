@@ -4,7 +4,7 @@
 
 **Does it run anything on my Server?** Only Docker, kamal-proxy, and your App. Scheduled Jobs (systemd timers) and the tunnel connector are opt-in.
 
-**Multiple Servers?** Use the Swarm runtime. Roles (Kamal-style placement) are planned.
+**Customer domains?** Yes. `x-yoho.proxy.custom_domains.allow` tells kamal-proxy to issue a Let's Encrypt certificate only after the App (or an HTTP URL) returns 200 for that hostname. No redeploy per domain. Cloudflare for SaaS is the alternative when TLS stays at Cloudflare; see [Customer-owned domains](custom-domains.md).
 
 **Can I still use `docker compose up` locally?** Yes. `x-yoho` is an ordinary compose extension.
 

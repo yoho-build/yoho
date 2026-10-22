@@ -252,4 +252,21 @@ func TestRoutes(t *testing.T) {
 	if got != ",a.example.com,b.example.com" {
 		t.Fatalf("routes %q", got)
 	}
+	cd := load(t, "services: {web: {image: x, x-yoho: {proxy: {tls: true, custom_domains: {allow: /allow}}}}}")
+	if got := Routes(cd.Ext); len(got) != 1 || got[0] != "" {
+		t.Fatalf("custom_domains routes %#v", got)
+	}
+}
+
+func TestPolicyCustomDomainsCatchAll(t *testing.T) {
+	yml := "services: {a: {image: x, x-yoho: {proxy: {tls: true, custom_domains: {allow: /allow}}}}}"
+	r := load(t, yml)
+	deny := Policy{Project: project, Routes: []string{"shop.example.com"}}
+	if err := deny.Check(r.Project, r.Ext); err == nil || !strings.Contains(err.Error(), "catch-all custom_domains") {
+		t.Fatalf("denied: %v", err)
+	}
+	allow := Policy{Project: project, Routes: []string{"shop.example.com", ""}}
+	if err := allow.Check(r.Project, r.Ext); err != nil {
+		t.Fatal(err)
+	}
 }

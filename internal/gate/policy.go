@@ -618,7 +618,11 @@ func (pol Policy) checkRoutes(e config.ServiceExt, add func(string, ...any)) {
 			continue
 		}
 		if h == "" {
-			add("the catch-all Proxy route (x-yoho.proxy without hosts) is not allowed for this App")
+			if e.Proxy.CustomDomainsAllow() != "" {
+				add("the catch-all custom_domains Proxy route is not allowed for this App")
+			} else {
+				add("the catch-all Proxy route (x-yoho.proxy without hosts) is not allowed for this App")
+			}
 		} else {
 			add("Proxy host %s is not allowed for this App; the operator allows: %s", h, routeList(pol.Routes))
 		}

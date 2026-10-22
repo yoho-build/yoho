@@ -56,7 +56,7 @@ The Member never sends or sees secret values through Yoho. Before Members deploy
 yoho access secrets push -d production
 ```
 
-This writes a secrets generation and names it in `<root>/apps/<app>/<destination>/access-secrets`. Every scoped deploy reads that generation, whatever later deploys wrote, and retention keeps it. The push also writes the settings that scoped deploys use instead of the Member's Yoho file: the Proxy configuration, the Registry (without its password), `retain_releases`, and the Proxy hostnames the App may claim (the `x-yoho.proxy.hosts` of today's compose files). Run `yoho access secrets push` again after you rotate a secret, add a secret to a Service, or add a hostname.
+This writes a secrets generation and names it in `<root>/apps/<app>/<destination>/access-secrets`. Every scoped deploy reads that generation, whatever later deploys wrote, and retention keeps it. The push also writes the settings that scoped deploys use instead of the Member's Yoho file: the Proxy configuration, the Registry (without its password), `retain_releases`, and the Proxy hostnames the App may claim (the `x-yoho.proxy.hosts` of today's compose files, including the catch-all when a Service has `custom_domains` or no hosts). Run `yoho access secrets push` again after you rotate a secret, add a secret to a Service, add a hostname, or enable `custom_domains`.
 
 Keeping the values on the Server keeps them off Member laptops and CI logs. It does not keep them from the App's code: a Member who can deploy can ship code that reads its secrets (`/run/secrets/…` or the environment) and sends them anywhere. Grant `deploy` only to people and CI jobs you would trust with that App's secrets. The secrets of other Apps stay out of reach.
 

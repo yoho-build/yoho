@@ -36,7 +36,7 @@ yoho tunnel status   # connector state, connections, mode, Quick Tunnel URL
 yoho tunnel down     # remove the connector(s) and the token file
 ```
 
-These commands take no flags besides the global ones. `yoho apply` and `yoho deploy` also converge the Tunnel, and `yoho plan` shows it. `yoho setup` opens no Proxy ports in the firewall when a Tunnel is configured. Set `x-yoho.proxy.tls` off for tunneled Services.
+These commands take no flags besides the global ones. `yoho apply` and `yoho deploy` also converge the Tunnel, and `yoho plan` shows it. `yoho setup` opens no Proxy ports in the firewall when a Tunnel is configured. Set `x-yoho.proxy.tls` off for tunneled Services. Customer domains that should terminate TLS at Cloudflare use Cloudflare for SaaS, not `custom_domains`; see [Customer-owned domains](custom-domains.md).
 
 ## SSH through the tunnel
 
