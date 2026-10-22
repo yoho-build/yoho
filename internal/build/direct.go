@@ -7,8 +7,10 @@ import (
 	"io"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
+	"github.com/yoho-build/yoho/internal/config"
 	"github.com/yoho-build/yoho/internal/remote"
 )
 
@@ -16,6 +18,14 @@ import (
 // caller falls back to shipping from the operator's machine. It is never a
 // build failure.
 var ErrDirectUnavailable = errors.New("builder cannot reach the Server directly")
+
+// Fingerprint identifies image content across image stores. Image IDs
+// differ between a containerd store (manifest/index digest) and a classic
+// overlay2 store (config digest), but platform, creation time and layer diff
+// IDs are the same. range, not join: Docker 27's CLI decodes RootFS.Layers
+// as []interface{} and join fails ("wrong type for value"). Apple container
+// images get the same string from ParseContainerInspect.
+const Fingerprint = `{{.Os}}/{{.Architecture}}|{{.Created}}|{{range .RootFS.Layers}}{{.}},{{end}}`
 
 // Stats reports one image transfer.
 type Stats struct {
@@ -112,3 +122,115 @@ func Direct(ctx context.Context, src, dst remote.Host, refs []string, platform s
 	}
 	return st, nil
 }
+
+// UseDirect decides, before the build, whether a builder.location=remote
+// build stays in the Builder's own Docker and ships from there (ShipDirect)
+// instead of coming back to this machine. It needs one platform, a
+// save|load transport and a Builder that reaches every Server (DirectProbe).
+// When direct is not used, reason says why for auto; with builder.direct:
+// true the same conditions are an error. src is the Builder host.
+func UseDirect(ctx context.Context, b config.Builder, transportMode string, platforms []string, src remote.Host, dsts []remote.Host) (use bool, reason string, err error) {
+	mode := b.Direct.Mode()
+	if b.Location != "remote" || mode == config.DirectOff {
+		return false, "", nil
+	}
+	why := ""
+	switch {
+	case len(platforms) > 1:
+		why = fmt.Sprintf("%d platforms; a direct build holds one", len(platforms))
+	case transportMode == "pussh" || transportMode == "registry":
+		why = "transport.mode " + transportMode
+	case src == nil:
+		why = "no Builder host"
+	}
+	for _, d := range dsts {
+		if why != "" {
+			break
+		}
+		if perr := DirectProbe(ctx, src, d); perr != nil {
+			why = perr.Error()
+		}
+	}
+	if why == "" {
+		return true, "", nil
+	}
+	if mode == config.DirectOn {
+		return false, "", fmt.Errorf("builder.direct is true but %s", why)
+	}
+	return false, why, nil
+}
+
+// DirectResult is ShipDirect's outcome for one Server.
+type DirectResult struct {
+	Host string
+	// Skipped: the Server already had every image with the same content.
+	Skipped bool
+	Stats   Stats
+}
+
+// ShipDirect streams refs from the Builder host src (built into its Docker
+// with Options.Direct) to every Server in parallel. Servers that already
+// hold an image with the same Fingerprint skip it. Results are in dsts
+// order; errors from all Servers are joined.
+func ShipDirect(ctx context.Context, src remote.Host, dsts []remote.Host, refs []string, platform string, out io.Writer) ([]DirectResult, error) {
+	if out == nil {
+		out = io.Discard
+	}
+	fp := func(h remote.Host, ref string) string {
+		s, _ := h.Output(ctx, remote.Cmd{Script: "docker image inspect --format " + remote.Quote(Fingerprint) + " " + remote.Quote(ref) + " 2>/dev/null || true"})
+		return strings.TrimSpace(s)
+	}
+	want := map[string]string{}
+	for _, ref := range refs {
+		if want[ref] = fp(src, ref); want[ref] == "" {
+			return nil, fmt.Errorf("image %s is missing on the Builder %s", ref, src.Name())
+		}
+	}
+	// docker save --platform needs Docker 28+ on the Builder; the image is
+	// single-platform there, so older Docker saves it without the flag.
+	if platform != "" {
+		help, _ := src.Output(ctx, remote.Cmd{Script: "docker save --help 2>&1 || true"})
+		if !strings.Contains(help, "--platform") {
+			platform = ""
+		}
+	}
+	res := make([]DirectResult, len(dsts))
+	errs := make([]error, len(dsts))
+	var mu sync.Mutex
+	w := writerFunc(func(b []byte) (int, error) {
+		mu.Lock()
+		defer mu.Unlock()
+		return out.Write(b)
+	})
+	var wg sync.WaitGroup
+	for i, d := range dsts {
+		res[i].Host = d.Name()
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			var need []string
+			for _, ref := range refs {
+				if fp(d, ref) != want[ref] {
+					need = append(need, ref)
+				}
+			}
+			if len(need) == 0 {
+				res[i].Skipped = true
+				fmt.Fprintf(w, "%s: images already present\n", d.Name())
+				return
+			}
+			fmt.Fprintf(w, "%s: streaming %d image(s) from %s\n", d.Name(), len(need), src.Name())
+			st, err := Direct(ctx, src, d, need, platform, w)
+			res[i].Stats = st
+			if err != nil {
+				errs[i] = err
+			}
+		}()
+	}
+	wg.Wait()
+	return res, errors.Join(errs...)
+}
+
+type writerFunc func([]byte) (int, error)
+
+func (f writerFunc) Write(b []byte) (int, error) { return f(b) }

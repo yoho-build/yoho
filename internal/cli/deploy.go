@@ -254,9 +254,24 @@ func (a *app) buildAndShip(ctx context.Context, s *session, skipBuild bool) (map
 	if len(platforms) == 0 {
 		platforms = []string{platform}
 	}
+	var builder *remote.SSH
+	var derr error
+	for _, svc := range r.Project.Services {
+		if svc.Build != nil {
+			builder, derr = a.directBuilder(ctx, hosts, platforms)
+			break
+		}
+	}
+	if derr != nil {
+		step.Fail(derr, "give the Builder its own SSH key and known_hosts entry for each Server, or set builder.direct: auto")
+		return nil, &silentError{derr}
+	}
+	if builder != nil {
+		defer builder.Close()
+	}
 	imgs, berr := build.Images(ctx, build.Options{
 		Dir: a.dir, App: a.cfg.App, Destination: a.destName, Version: ver,
-		Project: r.Project, Builder: a.cfg.Builder, Registry: a.cfg.Registry,
+		Project: r.Project, Builder: a.cfg.Builder, Registry: a.cfg.Registry, Direct: builder != nil,
 		Platforms: platforms, BuildEnv: benv, BuildSecretArgs: bargs,
 		Out: store.Redactor(step.Output()), Host: hosts[0].Host,
 		OnSource: func(src build.SourceSummary) {
@@ -292,7 +307,20 @@ func (a *app) buildAndShip(ctx context.Context, s *session, skipBuild bool) (map
 		}
 		step.Done(fmt.Sprintf("%d loaded, %d already present", len(shipped), len(others)-len(shipped)))
 	}
-	if len(built) > 0 && a.cfg.Builder.Location != "server" {
+	if len(built) > 0 && builder != nil {
+		step = u.Step("", "Ship %d image(s) from %s", len(built), a.cfg.Builder.Remote)
+		var hs []remote.Host
+		for _, h := range hosts {
+			hs = append(hs, h.Host)
+		}
+		dres, serr := build.ShipDirect(ctx, builder, hs, built, platform, step.Output())
+		if serr != nil {
+			step.Fail(serr, "check that the Builder can ssh to each Server, or set builder.direct: false")
+			return nil, &silentError{serr}
+		}
+		detail, fields := shipSummary(directResults(dres))
+		step.DoneWith(detail, fields)
+	} else if len(built) > 0 && a.cfg.Builder.Location != "server" {
 		step = u.Step("", "Ship %d image(s)", len(built))
 		var regPW string
 		if a.cfg.Registry != nil && a.cfg.Registry.PasswordSecret != "" {
@@ -314,6 +342,49 @@ func (a *app) buildAndShip(ctx context.Context, s *session, skipBuild bool) (map
 		step.DoneWith(detail, fields)
 	}
 	return images, nil
+}
+
+// directBuilder decides builder.direct for a location=remote build before
+// it starts (build.UseDirect) and returns the connected Builder when images
+// stay there and stream to the Servers; nil means they come back to this
+// machine and ship from here. It errors only for builder.direct: true.
+func (a *app) directBuilder(ctx context.Context, hosts []plan.NamedHost, platforms []string) (*remote.SSH, error) {
+	b := a.cfg.Builder
+	if b.Location != "remote" || b.Direct.Mode() == config.DirectOff {
+		return nil, nil
+	}
+	// The Builder is reached directly, never through the Destination's
+	// Cloudflare Tunnel.
+	h, err := remote.NewSSH("builder", b.Remote, false, remote.SSHOptions{})
+	if err != nil {
+		return nil, err
+	}
+	var dsts []remote.Host
+	for _, nh := range hosts {
+		dsts = append(dsts, nh.Host)
+	}
+	use, reason, err := build.UseDirect(ctx, b, a.cfg.Transport.Mode, platforms, h, dsts)
+	if !use {
+		h.Close()
+		if reason != "" {
+			a.ui.Info("  direct ship off (%s); images come back through this machine", reason)
+		}
+		return nil, err
+	}
+	a.ui.Info("  direct ship: images stay on %s and stream to the Servers", b.Remote)
+	return h, nil
+}
+
+// directResults maps ShipDirect outcomes to Ship step results.
+func directResults(dres []build.DirectResult) []transport.Result {
+	res := make([]transport.Result, len(dres))
+	for i, d := range dres {
+		res[i] = transport.Result{Host: d.Host, Method: transport.MethodDirect, Bytes: d.Stats.Bytes, Duration: d.Stats.Duration}
+		if d.Skipped {
+			res[i].Method = transport.MethodSkip
+		}
+	}
+	return res
 }
 
 // shipSummary renders the Ship step result: per Server the method, and for

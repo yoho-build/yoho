@@ -5,8 +5,33 @@
 `builder.location`:
 
 - `local` (default): your machine.
-- `remote`: a dedicated build Server (`builder.remote: user@host`).
+- `remote`: a dedicated build Server (`builder.remote: user@host`). See [Remote builds](#remote-builds).
 - `server`: sync the build inputs to the Destination's Server and build there with `docker build`. See [Server builds](#server-builds). Needs `rsync` on the Server; `yoho setup` installs it, and deploy fails with a hint if it is missing.
+
+## Remote builds
+
+With `builder.location: remote`, the build runs on the Builder, and by default the images stream from the Builder straight to the Servers, so they never cross your connection. `builder.direct` controls this:
+
+- `auto` (default): direct when it can work, otherwise images come back to your machine and ship from there as with `location: local`. The Build step prints which path it took and why.
+- `true`: always direct; the deploy fails when the Builder cannot reach a Server.
+- `false`: always through your machine.
+
+Direct shipping needs:
+
+- One platform: the Servers' platform, or a `builder.platforms` with one entry. A multi-platform build ships from your machine.
+- `transport.mode` `auto` or `load`. `pussh` and `registry` ship from your machine.
+- SSH from the Builder to every Server that works without a prompt: the Builder's user needs its own key authorized on each Server and a `known_hosts` entry for each one. Yoho never copies keys or accepts host keys for the Builder; it probes with `ssh -o BatchMode=yes -o StrictHostKeyChecking=yes <server> true` before the build. The Builder connects to the Server's `ssh` address (user, host and port), so a name from your `~/.ssh/config` must resolve on the Builder too. Servers reached through a [Cloudflare Tunnel](cloudflare-tunnel.md) ship from your machine.
+
+```yaml
+builder:
+  location: remote
+  remote: build@10.0.0.2
+  direct: auto # default
+```
+
+On the direct path Yoho builds with the Builder's own Docker through a docker context named `yoho-remote-<hash>-d` (`docker context ls`), so the image stays in that Docker. It then runs `docker save | gzip -1 | ssh <server> docker load` on the Builder, once per Server, in parallel, and skips Servers that already have the same image. The Ship step reports per Server `web via direct, 412.0 MB in 38s (10.8 MB/s)`, and `--json` adds the same in `transfers`. The fallback path builds with a `docker-container` buildx builder (`yoho-remote-<hash>`) and `--load`s the image to your machine first.
+
+The Docker driver cannot export build cache, so a Service with `cache_to` (other than `type=inline`) needs `builder.direct: false`. Build secrets travel as before, through BuildKit's session from your machine; nothing secret reaches the Builder's shell or the Server. Built images accumulate in the Builder's Docker; prune them there (`docker image prune`) like on any build host.
 
 ## Server builds
 
@@ -93,6 +118,8 @@ This builds an AMD64 image with a build secret, checks its architecture, runs it
 ## Transport
 
 Apple container images use `load` transport (also selected by `auto`): Yoho runs `container image save --platform <Server platform>`, adds Docker-compatible archive metadata, and streams the archive over SSH to `docker load` on the Server. This needs neither a local Docker daemon nor a registry. Explicit `pussh` or `registry` transport is not supported for Apple container images; use `builder.engine: docker` for those modes.
+
+Remote builds with `builder.direct` ship from the Builder; see [Remote builds](#remote-builds). Everything else ships from your machine.
 
 For Docker-built images, `transport.mode: auto` tries, in order:
 

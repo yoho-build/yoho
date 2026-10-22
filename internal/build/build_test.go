@@ -437,3 +437,32 @@ func TestLabelArgsDestination(t *testing.T) {
 		t.Fatalf("labels %q", got)
 	}
 }
+
+func TestRemoteBuilderDirect(t *testing.T) {
+	r := &recExec{fail: func(a string) error {
+		if strings.HasPrefix(a, "docker context inspect") {
+			return io.EOF
+		}
+		return nil
+	}}
+	o := Options{App: "shop", Version: "v1", Project: project("/src"), Platforms: []string{"linux/amd64"}, Direct: true,
+		Builder: config.Builder{Location: "remote", Remote: "ssh://builder@b1:2222"}, Exec: r.exec}
+	if _, err := Images(context.Background(), o); err != nil {
+		t.Fatal(err)
+	}
+	name := DirectContextName("ssh://builder@b1:2222")
+	if _, i := r.find("docker context create " + name + " --description Yoho remote Builder (direct ship) --docker host=ssh://builder@b1:2222"); i < 0 {
+		t.Fatalf("no context: %v", r.calls)
+	}
+	if _, i := r.find("docker buildx build --builder " + name + " --platform linux/amd64 "); i < 0 {
+		t.Fatalf("no direct build without --load: %v", r.calls)
+	}
+	if _, i := r.find("docker --context " + name + " image inspect"); i < 0 {
+		t.Fatalf("image ID must come from the Builder: %v", r.calls)
+	}
+	for _, c := range r.calls {
+		if a := strings.Join(c.Argv, " "); strings.Contains(a, "--load") || strings.Contains(a, "buildx create") {
+			t.Errorf("direct build must not use %q", a)
+		}
+	}
+}

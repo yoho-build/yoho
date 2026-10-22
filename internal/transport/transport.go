@@ -26,6 +26,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/yoho-build/yoho/internal/build"
 	"github.com/yoho-build/yoho/internal/config"
 	"github.com/yoho-build/yoho/internal/remote"
 )
@@ -36,6 +37,9 @@ const (
 	MethodPussh    = "pussh"
 	MethodLoad     = "load"
 	MethodRegistry = "registry"
+	// MethodDirect: streamed from the remote Builder to the Server
+	// (builder.direct); the image never reaches this machine.
+	MethodDirect = "direct"
 )
 
 // Command is a local process invocation.
@@ -173,13 +177,9 @@ func (p *pusher) saveArgv(ctx context.Context, imgs []string) []string {
 	return append(argv, imgs...)
 }
 
-// Fingerprint identifies image content across image stores. Image IDs
-// differ between a containerd store (manifest/index digest) and a classic
-// overlay2 store (config digest), but platform, creation time and layer diff
-// IDs are the same. range, not join: Docker 27's CLI decodes RootFS.Layers
-// as []interface{} and join fails ("wrong type for value"). Apple container
-// images get the same string from build.ParseContainerInspect.
-const Fingerprint = `{{.Os}}/{{.Architecture}}|{{.Created}}|{{range .RootFS.Layers}}{{.}},{{end}}`
+// Fingerprint identifies image content across image stores; see
+// build.Fingerprint.
+const Fingerprint = build.Fingerprint
 
 // localIDs returns each image's Fingerprint, for the Servers' platform when
 // set (falls back to the default platform on Docker without --platform).

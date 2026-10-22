@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/yoho-build/yoho/internal/build"
 	"github.com/yoho-build/yoho/internal/transport"
 	"github.com/yoho-build/yoho/internal/ui"
 )
@@ -27,5 +28,19 @@ func TestShipSummaryReportsBytesAndDuration(t *testing.T) {
 		if !strings.Contains(out, want) {
 			t.Errorf("json lacks %s:\n%s", want, out)
 		}
+	}
+}
+
+func TestDirectResultsInShipSummary(t *testing.T) {
+	detail, fields := shipSummary(directResults([]build.DirectResult{
+		{Host: "web", Stats: build.Stats{Bytes: 10 << 20, Duration: 2 * time.Second}},
+		{Host: "db", Skipped: true},
+	}))
+	if want := "web via direct, 10.0 MB in 2s (5.0 MB/s), db via skip"; detail != want {
+		t.Errorf("detail %q, want %q", detail, want)
+	}
+	tr := fields["transfers"].([]map[string]any)
+	if tr[0]["method"] != "direct" || tr[0]["bytes"] != int64(10<<20) || tr[1]["method"] != "skip" {
+		t.Errorf("transfers %v", tr)
 	}
 }
