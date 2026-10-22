@@ -142,6 +142,8 @@ destinations:
 
 Stateful rule: a Service with volumes deployed to several Servers without `stateful: true` is an error.
 
+`yoho config check` also warns when a Service's `environment` (including `env_file` values) uses another Service's name, `container_name` or network alias as a host, such as `postgres://u@analytics-db:5432/x`, without a `depends_on` path to it. Compose may then start the Service first, and the deploy fails as "did not become healthy". Add `depends_on: {analytics-db: {condition: service_healthy}}`; under Swarm, where `depends_on` is ignored, make the app retry.
+
 A proxied Service needs a compose `healthcheck` (an error under swarm, a warning under compose). This example executes `wget`, so the image must include it. For a curl-only image, change the healthcheck test to execute `curl` instead:
 
 ```yaml

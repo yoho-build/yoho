@@ -5,6 +5,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/compose-spec/compose-go/v2/types"
 
@@ -169,6 +170,10 @@ func Check(r *Result, runtime string, secretKeys []string) []Finding {
 			}
 		}
 
+		if (ext.Stateful || ext.Proxy != nil) && slowFirstProbe(svc.HealthCheck) {
+			svcAdd(LevelWarning, "healthcheck interval %s sets the first probe time, so the deploy waits that long; Docker 25+ gets start_interval automatically, older engines need start_interval or a shorter interval", time.Duration(*svc.HealthCheck.Interval))
+		}
+
 		// Stateful guard (ADR 0005): data must not silently diverge across Servers.
 		if !ext.Stateful {
 			if desc := stateDescription(svc, r.Project.WorkingDir); desc != "" {
@@ -186,6 +191,7 @@ func Check(r *Result, runtime string, secretKeys []string) []Finding {
 			checkSwarm(svc, svcAdd)
 		}
 	}
+	out = append(out, undeclaredDependencies(r.Project, swarm)...)
 	if _, err := proxy.ProjectRoutes("App", "Destination", r.Project, r.Ext, runtime); err != nil {
 		add(LevelError, "", "%s; %s", err, proxy.RouteConflictHint)
 	}
@@ -290,4 +296,11 @@ func sortedMapKeys(m map[string]string) []string {
 	}
 	sort.Strings(k)
 	return k
+}
+
+// slowFirstProbe reports a healthcheck whose long interval would delay the
+// first probe: no start_period or start_interval to shorten it.
+func slowFirstProbe(hc *types.HealthCheckConfig) bool {
+	return hc != nil && !hc.Disable && hc.Interval != nil && time.Duration(*hc.Interval) > 5*time.Second &&
+		hc.StartPeriod == nil && hc.StartInterval == nil
 }
