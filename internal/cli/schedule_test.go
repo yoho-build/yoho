@@ -13,7 +13,8 @@ func TestScheduleModeJobIdentity(t *testing.T) {
 		wantSudo bool
 	}{
 		{"root@example", true, "yoho", true},
-		{"root@example", false, "yoho", true},
+		// A root login without sudo keeps root's user units (existing timers).
+		{"root@example", false, "yoho", false},
 		{"deploy@example", true, "deploy", true},
 		{"deploy@example", false, "deploy", false},
 	} {
