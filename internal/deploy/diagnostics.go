@@ -290,10 +290,21 @@ func (r *runner) failure(ctx context.Context, err error, service string, ids []s
 		r.diagnosed = true
 	}
 	facts := append([]ServiceFailure(nil), r.facts...)
+	var live []string
 	for _, f := range facts {
 		r.logf("Service %s: convergence=%s Proxy route=%s", f.Service, f.Convergence, f.ProxyRoute)
+		if f.ProxyRoute == "switched" {
+			live = append(live, RouteName(r.app, r.dest, f.Service))
+		}
 	}
-	return &Failure{Cause: err, Message: r.diagnosticRedact(err.Error()), Phase: r.phase, Services: facts}
+	message := r.diagnosticRedact(err.Error())
+	if len(live) > 0 {
+		// Switched routes target ready new containers and stay; the next
+		// deploy updates them in the normal order.
+		r.logf("Proxy routes already live on the new containers: %s", strings.Join(live, ", "))
+		message += " (Proxy routes already live: " + strings.Join(live, ", ") + ")"
+	}
+	return &Failure{Cause: err, Message: message, Phase: r.phase, Services: facts}
 }
 func (r *runner) fact(service string) *ServiceFailure {
 	for i := range r.facts {

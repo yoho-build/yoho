@@ -303,8 +303,9 @@ func dependencyLevels(plans []servicePlan) ([][]servicePlan, error) {
 // stop-first plain replacements. The plain Services of one level start with
 // one `compose up` and are gated concurrently; proxied Services of the level
 // then stage their candidates one at a time. Proxy candidates can satisfy
-// downstream startup dependencies, but no route switches until every Service
-// has passed readiness.
+// downstream startup dependencies. A route that already exists, or whose
+// Service has old containers, switches only after every Service has passed
+// readiness (see earlySwitch for the first-deploy exception).
 func (r *runner) cutover(ctx context.Context, plans []servicePlan) (err error) {
 	r.phase = "service-plan-validation"
 	if err := validateReadinessPlans(plans); err != nil {
@@ -344,6 +345,8 @@ func (r *runner) cutover(ctx context.Context, plans []servicePlan) (err error) {
 			}
 		}
 	}()
+	cutoverStart := time.Now()
+	routes, routesKnown := r.existingRoutes(ctx, plans)
 	for i, level := range levels {
 		start := time.Now()
 		var batch []servicePlan
@@ -380,12 +383,26 @@ func (r *runner) cutover(ctx context.Context, plans []servicePlan) (err error) {
 				return r.failure(ctx, prepErr, sp.Name, ids)
 			}
 			r.fact(sp.Name).Convergence = "complete"
+			if routesKnown && earlySwitch(candidate, routes[RouteName(r.app, r.dest, sp.Name)]) {
+				r.phase = "proxy-switch"
+				r.fact(sp.Name).ProxyRoute = "uncertain"
+				// From this point only proxySwitchFailed may decide whether removal is safe.
+				candidate.switchAttempted = true
+				if err := r.switchProxied(ctx, candidate); err != nil {
+					return err
+				}
+				r.fact(sp.Name).ProxyRoute = "switched"
+				r.logf("route %s is live for %s, %s after cutover started", RouteName(r.app, r.dest, sp.Name), routeHosts(sp), time.Since(cutoverStart).Round(100*time.Millisecond))
+			}
 		}
 		if len(levels) > 1 || len(level) > 1 {
 			r.logf("level %d/%d ready in %s", i+1, len(levels), time.Since(start).Round(100*time.Millisecond))
 		}
 	}
 	for _, candidate := range staged {
+		if candidate.switchAttempted {
+			continue // switched early
+		}
 		failedService = candidate.plan.Name
 		r.phase = "proxy-switch"
 		r.fact(failedService).ProxyRoute = "uncertain"
@@ -429,6 +446,42 @@ func (r *runner) startBatch(ctx context.Context, batch []servicePlan, level, lev
 	}
 	r.phase = "plain-readiness"
 	return r.waitServices(ctx, batch, "complete")
+}
+
+// existingRoutes lists the Proxy's route names once before cutover. When
+// the list fails, known is false and every route switches after all Services
+// are ready, as for an update.
+func (r *runner) existingRoutes(ctx context.Context, plans []servicePlan) (routes map[string]bool, known bool) {
+	if !slices.ContainsFunc(plans, servicePlan.proxied) {
+		return nil, false
+	}
+	list, err := proxy.List(ctx, r.h)
+	if err != nil {
+		r.logf("warning: could not list Proxy routes, so every route switches after all Services are ready: %v", err)
+		return nil, false
+	}
+	routes = map[string]bool{}
+	for _, rt := range list {
+		routes[rt.Service] = true
+	}
+	return routes, true
+}
+
+// earlySwitch reports whether a ready candidate's route may switch before
+// the rest of the App is ready. Only a first deploy of the Service
+// qualifies: no route exists yet and no old containers serve, so nothing
+// can lose traffic, while waiting only prolongs the Proxy's 404s. An update
+// keeps the switch-after-all-ready rule, because the old containers still
+// serve until every Service is ready.
+func earlySwitch(candidate *stagedProxy, routeExists bool) bool {
+	return len(candidate.old) == 0 && !routeExists
+}
+
+func routeHosts(sp servicePlan) string {
+	if len(sp.Proxy.Hosts) == 0 {
+		return "any host"
+	}
+	return strings.Join(sp.Proxy.Hosts, ", ")
 }
 
 type stagedProxy struct {

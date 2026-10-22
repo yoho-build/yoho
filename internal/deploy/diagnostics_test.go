@@ -217,6 +217,10 @@ func TestFailureDiagnosticsBeforeCandidateCleanup(t *testing.T) {
 			defer cancel()
 			h := &diagnosticHost{Local: &remote.Local{}}
 			h.output = func(_ context.Context, c remote.Cmd) (string, error) {
+				if strings.Contains(c.Script, "kamal-proxy list --json") {
+					// An update: the route exists, so it switches last.
+					return `{"app-prod-api":{"hosts":[""],"targets":["old:80"]}}`, nil
+				}
 				if strings.Contains(c.Script, "'--scale'") {
 					return "fresh", nil
 				}
