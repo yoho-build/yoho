@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/yoho-build/yoho/internal/config"
+	"github.com/yoho-build/yoho/internal/deploy"
 	"github.com/yoho-build/yoho/internal/migrate"
 	"github.com/yoho-build/yoho/internal/plan"
 	"github.com/yoho-build/yoho/internal/proxy"
@@ -119,6 +120,44 @@ func (a *app) beginCutover(ctx context.Context, s *session, resume, allowEmpty b
 	}, nil
 }
 
+// lock rechecks the Journal after build and ship, under the Destination lock.
+func (c *cutoverRun) lock(ctx context.Context) (func(context.Context) error, error) {
+	unlock, err := deploy.AcquireLock(ctx, c.host.Host, c.opts.App, c.opts.Destination, deploy.LockInfo{Performer: performer(), Command: "deploy --cutover"})
+	if err != nil {
+		return nil, err
+	}
+	j, err := migrate.ReadJournal(ctx, c.host.Host, c.opts.App, c.opts.Destination)
+	if err == nil {
+		var action migrate.Action
+		action, err = migrate.Next(j, c.action == migrate.Resume)
+		if err == nil {
+			c.action = action
+			if action == migrate.Start {
+				if j != nil {
+					c.j.Retired = j.Retired
+				}
+			} else {
+				c.j = j
+			}
+		}
+	}
+	if err != nil {
+		_ = unlock(ctx)
+		return nil, err
+	}
+	return unlock, nil
+}
+
+func (c *cutoverRun) deployed(version string) bool {
+	return c != nil && c.j.Deployed && c.j.Version == version
+}
+
+func (c *cutoverRun) recordDeploy(ctx context.Context, rel *release.Release) error {
+	c.j.Version, c.j.Deployed = rel.Version, true
+	c.j.TunnelReconciled = false
+	return c.j.Save(ctx, c.host.Host)
+}
+
 // prepare runs after build and ship: preflight (nothing changed on
 // failure), the pre-cutover Hook, stopping the old containers and the
 // claim check.
@@ -144,7 +183,7 @@ func (c *cutoverRun) prepare(ctx context.Context) error {
 	a.cutoverEvent("preflight", "", c.j, map[string]any{
 		"containers": containerNames(p.Containers), "hostnames": hostnames, "duration_ms": time.Since(start).Milliseconds(),
 	})
-	if c.hook != nil {
+	if c.hook != nil && !c.j.StopComplete {
 		if err := c.hook(ctx, "pre-cutover", map[string]string{"YOHO_CUTOVER": c.j.ID}); err != nil {
 			return err
 		}
@@ -214,7 +253,7 @@ func (c *cutoverRun) finish(ctx context.Context, rel *release.Release) error {
 	return nil
 }
 
-// fail applies on_failure after err and returns err unchanged.
+// fail applies on_failure after err, preserving any recovery failure too.
 func (c *cutoverRun) fail(ctx context.Context, err error) error {
 	a, h := c.a, c.host
 	if c.j.StoppedAt == nil {
@@ -228,8 +267,8 @@ func (c *cutoverRun) fail(ctx context.Context, err error) error {
 	step := a.ui.Step(h.Name, "Restart old containers (on_failure: restart_old)")
 	ctx = context.WithoutCancel(ctx)
 	if rerr := migrate.Rollback(ctx, h.Host, c.opts.CF, c.j, migrate.RollbackOptions{Force: true}); rerr != nil {
-		step.Fail(rerr, "run `yoho rollback --cutover`, or start the old containers by hand: "+strings.Join(containerNames(c.j.Stopped), " "))
-		return err
+		step.Fail(rerr, "stop any conflicting writer, then run `yoho rollback --cutover`")
+		return errors.Join(err, fmt.Errorf("cutover recovery: %w", rerr))
 	}
 	step.Done(strings.Join(containerNames(c.j.Stopped), ", "))
 	a.cutoverEvent("rolled_back", "", c.j, map[string]any{"containers": containerNames(c.j.Stopped), "duration_ms": time.Since(start).Milliseconds()})

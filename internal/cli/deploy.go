@@ -424,9 +424,9 @@ func builtServices(p *types.Project, images map[string]string) []string {
 }
 
 // rollout runs the runtime's Deploy for d.
-func (a *app) rollout(ctx context.Context, s *session, d *plan.Deploy) (*release.Release, error) {
+func (a *app) rollout(ctx context.Context, s *session, d *plan.Deploy, runtime plan.Runtime) (*release.Release, error) {
 	step := a.ui.Step(s.hosts[0].Name, "Deploy %s (%s runtime)", shortVersion(s.ver), runtimeName(a.dest))
-	rel, err := a.runtime().Deploy(ctx, d)
+	rel, err := runtime.Deploy(ctx, d)
 	if f, ok := d.Out.(interface{ Flush() error }); ok {
 		f.Flush()
 	}

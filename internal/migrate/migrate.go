@@ -77,6 +77,9 @@ type Plan struct {
 // data. j is the Journal when resuming (its saved containers are used),
 // else nil. The returned Plan holds what was found even when err is set.
 func Preflight(ctx context.Context, h remote.Host, o Options, j *Journal) (*Plan, error) {
+	if j != nil {
+		o.Migrate.Claim = j.Claim
+	}
 	p := &Plan{o: o}
 	var errs []error
 	if t := o.Migrate.Tunnel; t != nil {
@@ -140,6 +143,10 @@ func conflictError(cs []Conflict, why string) error {
 // by ID, never rm). Containers already stopped or gone are skipped, so a
 // rerun is a no-op.
 func (p *Plan) Stop(ctx context.Context, h remote.Host, j *Journal) error {
+	if j.StopComplete {
+		return nil
+	}
+	j.Claim = p.o.Migrate.Claim
 	if len(j.Stopped) == 0 {
 		j.Stopped = append([]Container{}, p.Containers...)
 	}
@@ -151,7 +158,8 @@ func (p *Plan) Stop(ctx context.Context, h remote.Host, j *Journal) error {
 		return err
 	}
 	if len(j.Stopped) == 0 {
-		return nil
+		j.StopComplete = true
+		return j.Save(ctx, h)
 	}
 	var ids []string
 	for _, c := range j.Stopped {
@@ -163,7 +171,8 @@ func (p *Plan) Stop(ctx context.Context, h remote.Host, j *Journal) error {
 	if err := h.Run(ctx, remote.Cmd{Script: script}); err != nil {
 		return fmt.Errorf("stop old containers: %w", err)
 	}
-	return nil
+	j.StopComplete = true
+	return j.Save(ctx, h)
 }
 
 // CheckClaims fails when a running container other than this App
@@ -198,16 +207,24 @@ func (p *Plan) SwitchIngress(ctx context.Context, h remote.Host, j *Journal) (bo
 	if err != nil {
 		return false, err
 	}
+	if missing, err := MissingHostnames(live, t.Hostnames); err != nil {
+		return false, err
+	} else if len(missing) > 0 {
+		return false, fmt.Errorf("tunnel has no ingress rule for %s", strings.Join(missing, ", "))
+	}
+	want, err := RewriteIngress(live, t.Hostnames, t.TargetService())
+	if err != nil {
+		return false, err
+	}
+	if j.IngressSwitched() && Hash(live) == j.TunnelAfterHash && Hash(want) == Hash(live) {
+		return false, nil
+	}
 	if len(j.TunnelBefore) == 0 {
 		j.TunnelBefore = live
 		j.Hostnames = append([]string(nil), t.Hostnames...)
 		if err := j.Save(ctx, h); err != nil {
 			return false, err
 		}
-	}
-	want, err := RewriteIngress(live, t.Hostnames, t.TargetService())
-	if err != nil {
-		return false, err
 	}
 	wrote := false
 	if Hash(want) != Hash(live) {
@@ -219,6 +236,11 @@ func (p *Plan) SwitchIngress(ctx context.Context, h remote.Host, j *Journal) (bo
 	after, err := p.o.CF.GetConfig(ctx)
 	if err != nil {
 		return wrote, err
+	}
+	if missing, err := MissingHostnames(after, t.Hostnames); err != nil {
+		return wrote, err
+	} else if len(missing) > 0 {
+		return wrote, fmt.Errorf("tunnel has no ingress rule for %s after switch", strings.Join(missing, ", "))
 	}
 	if check, err := RewriteIngress(after, t.Hostnames, t.TargetService()); err != nil || Hash(check) != Hash(after) {
 		return wrote, errors.New("Cloudflare did not keep the new ingress service; check the tunnel in Cloudflare Zero Trust")
@@ -278,11 +300,65 @@ func Rollback(ctx context.Context, h remote.Host, cf CloudflareAPI, j *Journal, 
 		}
 	}
 	project := release.ProjectName(j.App, j.Destination)
-	stop := "set -eu\nids=$(docker ps -q --no-trunc --filter " + remote.Quote("label="+labelProject+"="+project) +
+	// Include already stopped containers: they too must stay stopped after a daemon restart.
+	out, err := h.Output(ctx, remote.Cmd{Script: "set -eu\nids=$(docker ps -aq --no-trunc --filter " + remote.Quote("label="+labelProject+"="+project) +
 		" --filter " + remote.Quote("label="+labelApp+"="+j.App) + " --filter " + remote.Quote("label="+labelDestination+"="+j.Destination) + ")\n" +
-		"[ -z \"$ids\" ] || docker stop $ids >/dev/null"
-	if err := h.Run(ctx, remote.Cmd{Script: stop}); err != nil {
-		return fmt.Errorf("stop %s: %w", project, err)
+		`[ -z "$ids" ] || docker inspect --format '{"id":{{json .Id}},"name":{{json .Name}},"restart_policy":{{json .HostConfig.RestartPolicy}}}' $ids`})
+	if err != nil {
+		return fmt.Errorf("inspect %s: %w", project, err)
+	}
+	for _, line := range strings.Split(strings.TrimSpace(out), "\n") {
+		if line == "" {
+			continue
+		}
+		var c struct {
+			ID     string `json:"id"`
+			Name   string `json:"name"`
+			Policy struct {
+				Name              string
+				MaximumRetryCount int
+			} `json:"restart_policy"`
+		}
+		if err := json.Unmarshal([]byte(line), &c); err != nil {
+			return fmt.Errorf("inspect retired containers: %w", err)
+		}
+		policy := c.Policy.Name
+		if policy == "" {
+			policy = "no"
+		}
+		if policy == "on-failure" && c.Policy.MaximumRetryCount > 0 {
+			policy += fmt.Sprintf(":%d", c.Policy.MaximumRetryCount)
+		}
+		found := false
+		for _, r := range j.Retired {
+			if r.ID == c.ID {
+				found = true
+			}
+		}
+		if !found {
+			j.Retired = append(j.Retired, RetiredContainer{ID: c.ID, Name: strings.TrimPrefix(c.Name, "/"), RestartPolicy: policy})
+		}
+	}
+	if err := j.Save(ctx, h); err != nil {
+		return err
+	}
+	for _, c := range j.Retired {
+		script := "set -eu\nif docker inspect --type container " + remote.Quote(c.ID) + " >/dev/null 2>&1; then\n docker update --restart=no " + remote.Quote(c.ID) + " >/dev/null\n docker stop " + remote.Quote(c.ID) + " >/dev/null\nfi"
+		if err := h.Run(ctx, remote.Cmd{Script: script}); err != nil {
+			return fmt.Errorf("retire %s: %w", c.Name, err)
+		}
+	}
+	skip := map[string]bool{}
+	for _, c := range j.Stopped {
+		skip[c.ID] = true
+	}
+	// Do not exempt this App: a container restarted after stop is also a writer.
+	conflicts, err := claimConflicts(ctx, h, "", "", j.Claim, skip)
+	if err != nil {
+		return err
+	}
+	if len(conflicts) > 0 {
+		return fmt.Errorf("refusing to restart old containers: %v; stop the conflicting container, then rerun `yoho rollback --cutover`", conflictError(conflicts, "is still running"))
 	}
 	if len(j.Stopped) > 0 {
 		var ids []string
@@ -393,7 +469,7 @@ func claimConflicts(ctx context.Context, h remote.Host, app, destination string,
 		if err := json.Unmarshal([]byte(line), &c); err != nil {
 			return nil, fmt.Errorf("inspect running containers: unexpected output %q", line)
 		}
-		if skip[c.ID] || (c.App == app && c.Destination == destination) {
+		if skip[c.ID] || (app != "" && c.App == app && c.Destination == destination) {
 			continue
 		}
 		name := strings.TrimPrefix(c.Name, "/")
@@ -422,4 +498,16 @@ func claimConflicts(ctx context.Context, h remote.Host, app, destination string,
 
 func within(p, dir string) bool {
 	return p == dir || dir == "/" || strings.HasPrefix(p, dir+"/")
+}
+
+// RestoreRetired restores restart policies before Compose can reuse saved containers.
+// Call under the Destination lock, after the old stack has stopped.
+func RestoreRetired(ctx context.Context, h remote.Host, j *Journal) error {
+	for _, c := range j.Retired {
+		script := "set -eu\nif docker inspect --type container " + remote.Quote(c.ID) + " >/dev/null 2>&1; then\n docker update " + remote.Quote("--restart="+c.RestartPolicy) + " " + remote.Quote(c.ID) + " >/dev/null\nfi"
+		if err := h.Run(ctx, remote.Cmd{Script: script}); err != nil {
+			return fmt.Errorf("restore restart policy for %s: %w", c.Name, err)
+		}
+	}
+	return nil
 }

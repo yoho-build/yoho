@@ -16,6 +16,7 @@ import (
 	"path"
 	"time"
 
+	"github.com/yoho-build/yoho/internal/config"
 	"github.com/yoho-build/yoho/internal/release"
 	"github.com/yoho-build/yoho/internal/remote"
 )
@@ -33,6 +34,13 @@ type Container struct {
 	Name string `json:"name"`
 }
 
+// RetiredContainer is a Yoho container disabled while the old stack runs.
+type RetiredContainer struct {
+	ID            string `json:"id"`
+	Name          string `json:"name"`
+	RestartPolicy string `json:"restart_policy"`
+}
+
 // Journal is the durable state of one cutover.
 type Journal struct {
 	ID          string `json:"id"`
@@ -44,8 +52,12 @@ type Journal struct {
 	StartedAt time.Time  `json:"started_at"`
 	StoppedAt *time.Time `json:"stopped_at,omitempty"`
 	// Stopped is written before the first docker stop.
-	Stopped     []Container `json:"stopped"`
-	ClaimsClear bool        `json:"claims_clear,omitempty"`
+	Stopped          []Container         `json:"stopped"`
+	StopComplete     bool                `json:"stop_complete,omitempty"`
+	Claim            config.MigrateClaim `json:"claim"`
+	Retired          []RetiredContainer  `json:"retired,omitempty"`
+	TunnelReconciled bool                `json:"tunnel_reconciled,omitempty"`
+	ClaimsClear      bool                `json:"claims_clear,omitempty"`
 	// Version of the Release the cutover deployed, when one was deployed.
 	Version  string `json:"version,omitempty"`
 	Deployed bool   `json:"deployed,omitempty"`

@@ -17,6 +17,7 @@ import (
 
 	"go.yaml.in/yaml/v3"
 
+	"github.com/yoho-build/yoho/internal/migrate"
 	"github.com/yoho-build/yoho/internal/plan"
 	"github.com/yoho-build/yoho/internal/proxy"
 	"github.com/yoho-build/yoho/internal/release"
@@ -24,7 +25,10 @@ import (
 )
 
 // Compose implements plan.Runtime with `docker compose` on a single Server.
-type Compose struct{}
+type Compose struct {
+	// LockHeld means the caller owns the Destination lock through failure recovery.
+	LockHeld bool
+}
 
 var _ plan.Runtime = Compose{}
 
@@ -107,15 +111,17 @@ func (c Compose) Deploy(ctx context.Context, d *plan.Deploy) (_ *release.Release
 		err = AnnotatePoolExhausted(ctx, h, release.ProjectName(d.App, d.Destination), poolKnownNetworks(d), err)
 	}()
 
-	unlock, err := AcquireLock(ctx, h, d.App, d.Destination, lockInfo(d, LockInfo{Performer: d.Performer, Version: d.Version, Command: "deploy", Time: start}))
-	if err != nil {
-		return nil, err
-	}
-	defer func() {
-		if uerr := unlock(ctx); uerr != nil && err == nil {
-			err = uerr
+	if !c.LockHeld {
+		unlock, err := AcquireLock(ctx, h, d.App, d.Destination, lockInfo(d, LockInfo{Performer: d.Performer, Version: d.Version, Command: "deploy", Time: start}))
+		if err != nil {
+			return nil, err
 		}
-	}()
+		defer func() {
+			if uerr := unlock(ctx); uerr != nil && err == nil {
+				err = uerr
+			}
+		}()
+	}
 
 	// Read-only preflight must precede generated values, env/App files and
 	// Release records as well as runtime operations. The route plan does not
@@ -133,6 +139,16 @@ func (c Compose) Deploy(ctx context.Context, d *plan.Deploy) (_ *release.Release
 	}
 	if err := checkSubnetChange(release.ProjectName(d.App, d.Destination), preflightYAML, curSubnet, hasCurrent); err != nil {
 		return nil, err
+	}
+
+	j, err := migrate.ReadJournal(ctx, h, d.App, d.Destination)
+	if err != nil {
+		return nil, err
+	}
+	if j != nil {
+		if err := migrate.RestoreRetired(ctx, h, j); err != nil {
+			return nil, err
+		}
 	}
 
 	r.logf("preparing release %s", d.Version)

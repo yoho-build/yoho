@@ -13,6 +13,8 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/yoho-build/yoho/internal/build"
+	"github.com/yoho-build/yoho/internal/deploy"
+	"github.com/yoho-build/yoho/internal/migrate"
 	"github.com/yoho-build/yoho/internal/plan"
 	"github.com/yoho-build/yoho/internal/proxy"
 	"github.com/yoho-build/yoho/internal/release"
@@ -347,20 +349,39 @@ func (a *app) apply(ctx context.Context, o applyOptions) (err error) {
 	urls := a.urls(s.r, s.hosts)
 	version := ver
 	var images map[string]string
-	if deployNeeded {
+	if deployNeeded && !co.deployed(ver) {
 		s.hook = a.hookFunc(ver, "deploy", s.hosts)
 		if images, err = a.buildAndShip(ctx, s, o.SkipBuild); err != nil {
 			return err
 		}
 	}
+	var cutoverUnlock func(context.Context) error
+	defer func() {
+		if cutoverUnlock != nil {
+			_ = cutoverUnlock(context.WithoutCancel(ctx))
+		}
+	}()
 	if co != nil {
 		co.hook = s.hook
-		if err = co.prepare(ctx); err != nil {
-			return err
+		unlock, lerr := co.lock(ctx)
+		if lerr != nil {
+			return lerr
+		}
+		cutoverUnlock = unlock
+		if co.action == migrate.Skip {
+			if err = cutoverUnlock(ctx); err != nil {
+				return err
+			}
+			cutoverUnlock = nil
+			co = nil
+		} else {
+			if err = co.prepare(ctx); err != nil {
+				return err
+			}
 		}
 	}
 	var rel *release.Release
-	if deployNeeded {
+	if deployNeeded && !co.deployed(ver) {
 		d, derr := a.newDeploy(s, images, false)
 		if derr != nil {
 			return co.failed(ctx, derr)
@@ -368,20 +389,44 @@ func (a *app) apply(ctx context.Context, o applyOptions) (err error) {
 		if co != nil {
 			d.Cutover = co.j.ID
 		}
-		if rel, err = a.rollout(ctx, s, d); err != nil {
+		runtime := a.runtime()
+		if co != nil {
+			runtime = deploy.Compose{LockHeld: true}
+		}
+		if rel, err = a.rollout(ctx, s, d, runtime); err != nil {
 			return co.failed(ctx, err)
 		}
 		version = rel.Version
+		if co != nil {
+			if err = co.recordDeploy(ctx, rel); err != nil {
+				return co.failed(ctx, err)
+			}
+		}
 	}
-	tunnelURLs, err := a.reconcileTunnel(ctx, s)
-	if err != nil {
-		return co.failed(ctx, err)
+	if co == nil || !co.j.TunnelReconciled {
+		tunnelURLs, terr := a.reconcileTunnel(ctx, s)
+		if terr != nil {
+			return co.failed(ctx, terr)
+		}
+		urls += tunnelURLs
+		if co != nil {
+			co.j.TunnelReconciled = true
+			if err = co.j.Save(ctx, co.host.Host); err != nil {
+				return co.failed(ctx, err)
+			}
+		}
 	}
-	urls += tunnelURLs
+
 	if co != nil {
 		if err = co.finish(ctx, rel); err != nil {
 			return err
 		}
+	}
+	if cutoverUnlock != nil {
+		if err = cutoverUnlock(ctx); err != nil {
+			return err
+		}
+		cutoverUnlock = nil
 	}
 	if err = a.applySchedules(ctx, s.hosts, s.store); err != nil {
 		u.Step("", "Scheduled Jobs").Fail(err, hintFor(err, "run `yoho schedule status`"))

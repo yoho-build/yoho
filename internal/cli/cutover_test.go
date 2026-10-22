@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/yoho-build/yoho/internal/config"
+	"github.com/yoho-build/yoho/internal/deploy"
 	"github.com/yoho-build/yoho/internal/migrate"
 	"github.com/yoho-build/yoho/internal/migrate/migratetest"
 	"github.com/yoho-build/yoho/internal/plan"
@@ -237,5 +238,110 @@ func TestPlanCutover(t *testing.T) {
 	_ = j.Save(ctx, h)
 	if ch, err := a.planCutover(ctx, s.hosts[0]); err != nil || len(ch) != 0 {
 		t.Fatalf("done: %+v %v", ch, err)
+	}
+}
+
+func TestCutoverLockSerializesAndRereadsJournal(t *testing.T) {
+	ctx := context.Background()
+	a, s, h, _, _ := cutoverFixture(t, "")
+	first, _ := a.beginCutover(ctx, s, false, false)
+	second, _ := a.beginCutover(ctx, s, false, false)
+	unlock, err := first.lock(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := second.lock(ctx); err == nil {
+		t.Fatal("second cutover acquired held lock")
+	} else {
+		var locked *deploy.LockedError
+		if !errors.As(err, &locked) || !strings.Contains(err.Error(), "if the lock is stale") {
+			t.Fatalf("error %v", err)
+		}
+	}
+	if _, err := deploy.AcquireLock(ctx, h, "shop", "production", deploy.LockInfo{Command: "rollback --cutover"}); err == nil {
+		t.Fatal("rollback acquired held lock")
+	}
+	if err := first.prepare(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := unlock(ctx); err != nil {
+		t.Fatal(err)
+	}
+	// second began before first saved the journal; it must see the new state.
+	if _, err := second.lock(ctx); err == nil || !strings.Contains(err.Error(), "unfinished") {
+		t.Fatalf("stale journal accepted: %v", err)
+	}
+	if h.Locked {
+		t.Fatal("journal rejection leaked lock")
+	}
+}
+
+func TestCutoverResumeAfterIngressOnlyFinishes(t *testing.T) {
+	ctx := context.Background()
+	a, s, h, cf, _ := cutoverFixture(t, "")
+	co, _ := a.beginCutover(ctx, s, false, false)
+	if err := co.prepare(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := co.recordDeploy(ctx, &release.Release{Version: "v1"}); err != nil {
+		t.Fatal(err)
+	}
+	co.j.TunnelReconciled = true
+	if _, err := co.plan.SwitchIngress(ctx, h, co.j); err != nil {
+		t.Fatal(err)
+	}
+	// Saved ingress but no done marker, as after an interrupted final write.
+	co, err := a.beginCutover(ctx, s, true, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	unlock, err := co.lock(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer unlock(ctx)
+	if !co.deployed("v1") || co.deployed("v2") || !co.j.TunnelReconciled {
+		t.Fatalf("resume phases %+v", co.j)
+	}
+	hooks := 0
+	co.hook = func(context.Context, string, map[string]string) error { hooks++; return nil }
+	h.Scripts = nil
+	if err := co.prepare(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if hooks != 0 {
+		t.Fatal("repeated pre-cutover Hook")
+	}
+	if err := co.finish(ctx, nil); err != nil {
+		t.Fatal(err)
+	}
+	if cf.Puts != 1 || co.j.State != migrate.StateDone {
+		t.Fatalf("puts %d state %s", cf.Puts, co.j.State)
+	}
+	for _, script := range h.Scripts {
+		if strings.Contains(script, "docker stop") {
+			t.Fatal("repeated stop")
+		}
+	}
+}
+
+func TestCutoverRestartOldRefusesConflictingWriter(t *testing.T) {
+	ctx := context.Background()
+	a, s, h, _, out := cutoverFixture(t, "")
+	co, _ := a.beginCutover(ctx, s, false, false)
+	if err := co.prepare(ctx); err != nil {
+		t.Fatal(err)
+	}
+	startYoho(h)
+	h.Containers = append(h.Containers, &migratetest.Container{ID: "stray", Name: "stray-writer", Running: true, Mounts: []migratetest.Mount{{Type: "volume", Name: "old_pgdata", RW: true}}})
+	err := co.failed(ctx, errors.New("rollout failed"))
+	if err == nil || !strings.Contains(err.Error(), "stray-writer") {
+		t.Fatalf("missing recovery error: %v", err)
+	}
+	if h.Container("old-db").Running || h.Container("yoho-shop-production-db-1").Running {
+		t.Fatalf("unsafe restart: %v", h.Ops)
+	}
+	if !strings.Contains(out.String(), "stray-writer") {
+		t.Fatal("missing conflict diagnostic")
 	}
 }

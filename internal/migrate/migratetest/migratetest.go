@@ -31,16 +31,18 @@ type Mount struct {
 
 // Container is a fake container.
 type Container struct {
-	ID      string
-	Name    string
-	Labels  map[string]string
-	Running bool
-	Mounts  []Mount
+	ID            string
+	Name          string
+	Labels        map[string]string
+	Running       bool
+	RestartPolicy string
+	Mounts        []Mount
 }
 
 // Host is a fake Server running Docker.
 type Host struct {
 	mu         sync.Mutex
+	Locked     bool
 	Containers []*Container
 	Files      map[string][]byte
 	Modes      map[string]os.FileMode
@@ -130,10 +132,62 @@ func (h *Host) Output(_ context.Context, c remote.Cmd) (string, error) {
 		b, _ := io.ReadAll(c.Stdin)
 		h.Env = append(h.Env, string(b))
 	}
+	if strings.Contains(c.Script, "/info.json; echo acquired") {
+		if h.Locked {
+			return "held\n", nil
+		}
+		h.Locked = true
+		return "acquired\n", nil
+	}
+	if strings.HasPrefix(c.Script, "rm -rf ") && strings.Contains(c.Script, "/lock'") {
+		h.Locked = false
+		return "", nil
+	}
 	var out []string
+	retired := strings.Contains(c.Script, "docker ps -aq")
+	var selected []*Container
 	for _, line := range strings.Split(c.Script, "\n") {
 		line = strings.TrimSpace(line)
 		switch {
+		case strings.HasPrefix(line, "ids=$(docker ps -aq"):
+			filters := args(line)
+			for _, ct := range h.Containers {
+				all := true
+				for _, f := range filters {
+					all = all && ct.matches(f)
+				}
+				if all {
+					selected = append(selected, ct)
+				}
+			}
+		case strings.Contains(line, "docker inspect --format") && retired:
+			for _, ct := range selected {
+				name, count, _ := strings.Cut(ct.RestartPolicy, ":")
+				n := 0
+				if count != "" {
+					fmt.Sscan(count, &n)
+				}
+				b, _ := json.Marshal(map[string]any{"id": ct.ID, "name": ct.Name, "restart_policy": map[string]any{"Name": name, "MaximumRetryCount": n}})
+				out = append(out, string(b))
+			}
+		case strings.HasPrefix(line, "docker update"):
+			as := args(line)
+			policy := "no"
+			if len(as) > 1 {
+				policy = strings.TrimPrefix(as[0], "--restart=")
+			}
+			if len(as) > 0 {
+				if ct := h.byID(as[len(as)-1]); ct != nil {
+					ct.RestartPolicy = policy
+					h.Ops = append(h.Ops, "update "+ct.Name+" "+policy)
+				}
+			}
+		case strings.HasPrefix(line, "docker stop"):
+			for _, id := range args(line) {
+				if ct := h.byID(id); ct != nil {
+					h.stop(ct)
+				}
+			}
 		case strings.Contains(line, "docker inspect --format"):
 			for _, ct := range h.Containers {
 				if !ct.Running {

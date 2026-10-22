@@ -276,7 +276,7 @@ func TestRollbackRestoresAndIsIdempotent(t *testing.T) {
 	if err := migrate.Rollback(ctx, h, o.CF, j, migrate.RollbackOptions{}); err != nil {
 		t.Fatal(err)
 	}
-	if got := strings.Join(h.Ops, ","); got != "stop yoho-shop-production-db-1,start old-db,start old-web" {
+	if got := strings.Join(h.Ops, ","); got != "update yoho-shop-production-db-1 no,stop yoho-shop-production-db-1,start old-db,start old-web" {
 		t.Errorf("ops %s", got)
 	}
 	if h.Container("other-app").Running != true || h.Container("yoho-proxy").Running != true {
@@ -385,5 +385,114 @@ func TestNoTokenInScriptsJournalOrOutput(t *testing.T) {
 		if hd != "Bearer "+apiToken {
 			t.Errorf("Authorization header %q", hd)
 		}
+	}
+}
+
+func TestRollbackRechecksClaimsAndRetiresContainers(t *testing.T) {
+	ctx := context.Background()
+	h, _, o, _, j := cutover(t)
+	h.Container("yoho-shop-production-db-1").RestartPolicy = "on-failure:3"
+	h.Containers = append(h.Containers, &migratetest.Container{ID: "stray", Name: "stray-writer", Running: true, Mounts: []migratetest.Mount{{Type: "volume", Name: "old_pgdata", RW: true}}})
+	h.Ops = nil
+	err := migrate.Rollback(ctx, h, o.CF, j, migrate.RollbackOptions{})
+	if err == nil || !strings.Contains(err.Error(), "stray-writer") || !strings.Contains(err.Error(), "yoho rollback --cutover") {
+		t.Fatalf("error %v", err)
+	}
+	for _, op := range h.Ops {
+		if strings.HasPrefix(op, "start ") {
+			t.Fatalf("unsafe restart: %v", h.Ops)
+		}
+	}
+	if h.Container("yoho-shop-production-db-1").Running || h.Container("yoho-shop-production-db-1").RestartPolicy != "no" {
+		t.Fatalf("not retired: %v", h.Ops)
+	}
+	saved, err := migrate.ReadJournal(ctx, h, "shop", "production")
+	if err != nil || len(saved.Retired) != 1 || saved.Retired[0].RestartPolicy != "on-failure:3" || len(saved.Claim.Volumes) != 1 {
+		t.Fatalf("saved %+v, %v", saved, err)
+	}
+	h.Container("stray-writer").Running = false
+	if err := migrate.Rollback(ctx, h, o.CF, saved, migrate.RollbackOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	if !h.Container("old-db").Running {
+		t.Fatal("old database not restarted")
+	}
+	if err := migrate.RestoreRetired(ctx, h, saved); err != nil {
+		t.Fatal(err)
+	}
+	if h.Container("yoho-shop-production-db-1").RestartPolicy != "on-failure:3" {
+		t.Fatal("lost original restart policy on retry")
+	}
+}
+
+func TestSwitchIngressRevalidatesHostnames(t *testing.T) {
+	ctx := context.Background()
+	h, cf, o := setup(t, apiToken)
+	p, err := migrate.Preflight(ctx, h, o, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	j := migrate.NewJournal("shop", "production", "", time.Now())
+	cf.SetConfig(strings.Replace(migratetest.IngressConfig, "app.example.com", "removed.example.com", 1))
+	if _, err := p.SwitchIngress(ctx, h, j); err == nil || !strings.Contains(err.Error(), "app.example.com") {
+		t.Fatalf("error %v", err)
+	}
+	if cf.Puts != 0 || j.IngressSwitched() || j.State == migrate.StateDone {
+		t.Fatalf("unexpected switch: %+v puts %d", j, cf.Puts)
+	}
+}
+
+func TestResumeSkipsCompletedStop(t *testing.T) {
+	ctx := context.Background()
+	h, _, o, p, j := cutover(t)
+	h.Container("old-db").Running = true
+	h.Scripts = nil
+	p, err := migrate.Preflight(ctx, h, o, j)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := p.Stop(ctx, h, j); err != nil {
+		t.Fatal(err)
+	}
+	for _, script := range h.Scripts {
+		if strings.Contains(script, "docker stop") {
+			t.Fatal("repeated completed stop")
+		}
+	}
+	if err := p.CheckClaims(ctx, h); err == nil {
+		t.Fatal("resume must still detect restarted old writer")
+	}
+}
+
+type afterPutAPI struct {
+	migrate.CloudflareAPI
+	after func()
+}
+
+func (a afterPutAPI) PutConfig(ctx context.Context, config json.RawMessage) error {
+	if err := a.CloudflareAPI.PutConfig(ctx, config); err != nil {
+		return err
+	}
+	a.after()
+	return nil
+}
+
+func TestSwitchIngressRevalidatesReadback(t *testing.T) {
+	ctx := context.Background()
+	h, cf, o := setup(t, apiToken)
+	o.CF = afterPutAPI{CloudflareAPI: o.CF, after: func() {
+		cf.SetConfig(strings.Replace(string(cf.Config()), "api.example.com", "removed.example.com", 1))
+	}}
+	p, err := migrate.Preflight(ctx, h, o, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	j := migrate.NewJournal("shop", "production", "", time.Now())
+	wrote, err := p.SwitchIngress(ctx, h, j)
+	if !wrote || err == nil || !strings.Contains(err.Error(), "api.example.com") {
+		t.Fatalf("wrote %v error %v", wrote, err)
+	}
+	if j.IngressSwitched() || j.State == migrate.StateDone {
+		t.Fatalf("accepted incomplete ingress: %+v", j)
 	}
 }
