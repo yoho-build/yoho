@@ -229,3 +229,43 @@ func TestPullRefusesNonFileTargets(t *testing.T) {
 		}
 	}
 }
+
+func TestPullDoesNotFollowPlantedPartSymlink(t *testing.T) {
+	repo, local := pullRepo(t), t.TempDir()
+	dir := filepath.Join(local, "shop", "production")
+	os.MkdirAll(dir, 0o700)
+	victim := filepath.Join(t.TempDir(), "victim")
+	os.WriteFile(victim, []byte("precious"), 0o600)
+	os.Symlink(victim, filepath.Join(dir, "."+pullNew+".part"))
+	if _, err := Pull(context.Background(), pullOpts(repo, local)); err != nil {
+		t.Fatal(err)
+	}
+	if b, _ := os.ReadFile(victim); string(b) != "precious" {
+		t.Fatalf("symlink target overwritten: %q", b)
+	}
+	if b, _ := os.ReadFile(filepath.Join(dir, pullNew)); string(b) != "newer archive body" {
+		t.Fatalf("archive %q", b)
+	}
+}
+
+func TestPublishLocalNeverReplaces(t *testing.T) {
+	d := t.TempDir()
+	part, final := filepath.Join(d, "p"), filepath.Join(d, "f")
+	os.WriteFile(part, []byte("new"), 0o600)
+	os.WriteFile(final, []byte("existing"), 0o600)
+	if err := publishLocal(part, final); err == nil {
+		t.Fatal("must refuse to replace an existing final file")
+	}
+	if b, _ := os.ReadFile(final); string(b) != "existing" {
+		t.Fatalf("final replaced: %q", b)
+	}
+}
+
+func TestPullLocalTargetWithEnvSecrets(t *testing.T) {
+	repo, local := pullRepo(t), t.TempDir()
+	o := pullOpts(repo, local)
+	o.Target.EnvSecrets = []string{"AWS_KEY"}
+	if _, err := Pull(context.Background(), o); err != nil {
+		t.Fatalf("env_secrets must not block a directory pull: %v", err)
+	}
+}

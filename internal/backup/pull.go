@@ -109,7 +109,13 @@ func Pull(ctx context.Context, o PullOptions) ([]PulledArchive, error) {
 	if project == "" {
 		project = release.ProjectName(o.App, o.Destination)
 	}
-	t, err := newTarget(o.App, o.Destination, project, o.Target, "", nil)
+	// Pull reads files with the deploy user's own access and needs no
+	// credentials; give newTarget placeholders so env_secrets do not block it.
+	placeholder := map[string]string{}
+	for _, k := range o.Target.EnvSecrets {
+		placeholder[k] = ""
+	}
+	t, err := newTarget(o.App, o.Destination, project, o.Target, "", placeholder)
 	if err != nil {
 		return nil, err
 	}
@@ -165,11 +171,14 @@ func Pull(ctx context.Context, o PullOptions) ([]PulledArchive, error) {
 
 func (t *target) pullOne(ctx context.Context, o PullOptions, dir string, e Entry) (sum string, err error) {
 	file := path.Join(path.Clean(t.cfg.Repository), e.ID)
-	part := filepath.Join(dir, "."+e.ID+".part")
-	f, err := os.OpenFile(part, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
+	// Exclusive per-run temp file (0600): a planted symlink or hard link at a
+	// predictable name cannot redirect the write, and overlapping pulls do
+	// not share a file.
+	f, err := os.CreateTemp(dir, "."+e.ID+".*.part")
 	if err != nil {
 		return "", err
 	}
+	part := f.Name()
 	defer func() {
 		if err != nil {
 			f.Close()
@@ -183,6 +192,9 @@ func (t *target) pullOne(ctx context.Context, o PullOptions, dir string, e Entry
 	cw := &countWriter{w: w}
 	if err = o.Host.Run(ctx, remote.Cmd{Script: safeFile(file, false) + "cat " + remote.Quote(file) + "\n", Stdout: cw}); err != nil {
 		return "", fmt.Errorf("read from Server: %w", err)
+	}
+	if err = f.Sync(); err != nil {
+		return "", err
 	}
 	if err = f.Close(); err != nil {
 		return "", err
@@ -206,7 +218,7 @@ func (t *target) pullOne(ctx context.Context, o PullOptions, dir string, e Entry
 	if !strings.EqualFold(m[1], sum) {
 		return "", fmt.Errorf("checksum mismatch: local %s, Server %s", sum, strings.ToLower(m[1]))
 	}
-	if err = os.Rename(part, filepath.Join(dir, e.ID)); err != nil {
+	if err = publishLocal(part, filepath.Join(dir, e.ID)); err != nil {
 		return "", err
 	}
 	return sum, nil
@@ -232,4 +244,21 @@ func hashFile(name string) (string, int64, error) {
 	h := sha256.New()
 	n, err := io.Copy(h, f)
 	return hex.EncodeToString(h.Sum(nil)), n, err
+}
+
+// publishLocal moves part to final without replacing an existing final file.
+// A hard link fails if final exists; filesystems without links fall back to
+// an Lstat check and rename.
+func publishLocal(part, final string) error {
+	err := os.Link(part, final)
+	switch {
+	case err == nil:
+		return os.Remove(part)
+	case errors.Is(err, os.ErrExist):
+		return fmt.Errorf("%s appeared during the copy; not overwritten", final)
+	}
+	if _, serr := os.Lstat(final); serr == nil {
+		return fmt.Errorf("%s appeared during the copy; not overwritten", final)
+	}
+	return os.Rename(part, final)
 }
