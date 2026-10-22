@@ -107,7 +107,7 @@ yoho backup pull [JOB] [--to DIR] [--limit N]   # mirror archive-target files to
 yoho backup check [JOB] [--id ID | --read-data]   # integrity only, not restore proof
 yoho schedule install [JOB...] [--binary PATH] | status [--max-age 48h] | remove [JOB...]
 yoho swarm init [-y] | join [-y] | status
-yoho skill install [--dir DIR] [--agent claude|codex|all] | print [SKILL]   # install writes all bundled skills
+yoho skill install [--dir DIR] [--agent claude|codex|all] [--only A,B | --exclude A,B] [--no-migrate-refs] | list | print [SKILL]
 ```
 
 Global flags: `-c/--config`, `-d/--destination` (default `$YOHO_DESTINATION`, then `production`, then the only Destination), `--json`, `-v/--verbose`. Check `yoho <cmd> --help` for all flags. `apply` refuses without a terminal unless `--auto-approve`; `--json` requires it. Agents: never use `app logs -f` or live `app stats`; use `yoho app logs SERVICE -n N`, `yoho app stats --no-stream`, or `yoho --json app stats` (one JSON object per container).

@@ -31,7 +31,17 @@ npx skills add yoho-build/yoho          # skills CLI; the skill lives at skills/
 yoho skill install                      # after installing the CLI; --agent claude|codex|all
 ```
 
-`yoho skill install` writes all bundled skills into the project for Claude Code and Codex. `yoho skill print [SKILL]` prints one.
+`yoho skill install` writes all bundled skills into the project for Claude Code and Codex. `yoho skill list` shows them with their descriptions, and `yoho skill print [SKILL]` prints one.
+
+In a repo that is already on Yoho, install only what you need:
+
+```sh
+yoho skill install --only yoho                       # one skill; skips the migrate-* references
+yoho skill install --exclude yoho-migrate-coolify    # everything else
+yoho skill install --no-migrate-refs                 # all skills, without the yoho skill's migrate-* references
+```
+
+`--only` and `--exclude` are mutually exclusive. An existing layout is respected: when `.claude/skills` (or an existing `.agent/skills`) is a symlink to `.agents/skills`, or a skill folder is a symlink to the real one, the skill is written once and the other paths are reported as linked. Installing never deletes skills that are already present.
 
 ## Prefer to do it yourself
 
