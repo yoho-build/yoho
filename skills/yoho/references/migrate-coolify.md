@@ -10,3 +10,15 @@ In short:
 4. On a Server shared with Coolify: `proxy.http_port: 0`/`https_port: 0` with a tunnel (Traefik keeps 80/443), `setup.firewall: false`, `setup.user: root` + `authorized_keys: []` when connecting as root; read `yoho setup --plan` before changing anything.
 5. Cut over: dump databases, have the user turn off Coolify auto-deploy (never edit Coolify's database), stop (not remove) the Coolify containers from a one-time `pre-deploy` hook so the build is not downtime, `yoho deploy`. Never run both stacks on one volume. Roll back: stop Yoho's containers by compose project plus `yoho.app` and `yoho.destination` labels, restore the dump if the new version migrated, then `docker start` the Coolify containers.
 6. Point tunnel hostnames at `http://yoho-proxy:80`; delete the Coolify app later without deleting volumes.
+
+## Rehearse on a second Destination first
+
+Rehearse the cutover on a separate Destination before the real one, so the production window only repeats steps you have already seen work:
+
+- A second Destination (`rehearsal`) with its own `servers`, for example a LAN box. It has no cutover Hook and no ingress change, so it never touches the Coolify stack or the production tunnel. Do not guard a production-only Hook with `YOHO_DESTINATION`; keep it out of the rehearsal Destination's overlay instead.
+- An overlay (`yoho.rehearsal.yml`, `compose.rehearsal.yaml`) that points data at a restored copy of the dump or volume, never at the production data.
+- Replace side-effect Services with `sleep` in that overlay: schedulers, off-Server Backups, the tunnel connector, mail and webhook senders.
+- Use test-mode payment and API keys.
+- Cold start: stop everything on the rehearsal Server, then run `yoho deploy -d rehearsal`. That reproduces the ordering of the real cutover (stateful Services first, release commands, health gate, Proxy).
+- Fix what the rehearsal finds in the repo files, then reuse them unchanged for production.
+

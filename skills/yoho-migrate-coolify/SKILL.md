@@ -130,6 +130,8 @@ backups:
 
 ## 5. Cutover
 
+Rehearse first when the app matters: a second Destination on another box (a LAN machine is fine) with no cutover Hook, an overlay that points data at a restored copy, side-effect Services (schedulers, off-Server Backups, the tunnel) replaced with `sleep`, test-mode payment keys, and a cold-start run (stop everything, then `yoho deploy -d <rehearsal>`) to reproduce the cutover ordering. Details in `skills/yoho/references/migrate-coolify.md`. Keep the one-time Hook out of the rehearsal Destination.
+
 Get the user's OK on a downtime window. The old and new stacks must never run on the same data volume at once: two Postgres servers on one data directory corrupt it.
 
 1. Back up: `pg_dump -Fc` each database from the running Coolify containers into a dated directory on the Server, and check it with `pg_restore -l`.
