@@ -114,8 +114,12 @@ func (a *app) beginCutover(ctx context.Context, s *session, resume, allowEmpty b
 	} else {
 		step.Done("resuming " + j.ID)
 	}
+	hook := s.hook
+	if hook == nil {
+		hook = a.hookFunc(s.ver, "deploy", s.hosts)
+	}
 	return &cutoverRun{
-		a: a, host: h, action: action, j: j, hook: s.hook,
+		a: a, host: h, action: action, j: j, hook: hook,
 		opts: migrate.Options{App: a.cfg.App, Destination: a.destName, Migrate: *m, CF: cf, AllowEmpty: allowEmpty},
 	}, nil
 }
@@ -148,8 +152,9 @@ func (c *cutoverRun) lock(ctx context.Context) (func(context.Context) error, err
 	return unlock, nil
 }
 
+// deployed also skips rollout when only the post-cutover Hook remains.
 func (c *cutoverRun) deployed(version string) bool {
-	return c != nil && c.j.Deployed && c.j.Version == version
+	return c != nil && (c.j.PostCutoverPending || c.j.Deployed && c.j.Version == version)
 }
 
 func (c *cutoverRun) recordDeploy(ctx context.Context, rel *release.Release) error {
@@ -175,6 +180,13 @@ func (c *cutoverRun) prepare(ctx context.Context) error {
 		return &silentError{err}
 	}
 	c.plan = p
+	if c.j.PostCutoverPending {
+		step.Done("post-cutover Hook pending")
+		return nil
+	}
+	for _, warning := range p.Warnings {
+		a.ui.Warn("%s", warning)
+	}
 	var hostnames []string
 	for _, r := range p.Rules {
 		hostnames = append(hostnames, r.Hostname)
@@ -223,7 +235,7 @@ func (c *cutoverRun) finish(ctx context.Context, rel *release.Release) error {
 	if rel != nil {
 		c.j.Version, c.j.Deployed = rel.Version, true
 	}
-	if t := c.opts.Migrate.Tunnel; t != nil {
+	if t := c.opts.Migrate.Tunnel; t != nil && !c.j.PostCutoverPending {
 		start := time.Now()
 		step := a.ui.Step(h.Name, "Switch tunnel ingress to %s", t.TargetService())
 		wrote, err := c.plan.SwitchIngress(ctx, h.Host, c.j)
@@ -238,18 +250,25 @@ func (c *cutoverRun) finish(ctx context.Context, rel *release.Release) error {
 		step.Done(detail)
 		a.cutoverEvent("ingress_switched", "", c.j, map[string]any{"hostnames": t.Hostnames, "service": t.TargetService(), "duration_ms": time.Since(start).Milliseconds()})
 	}
+	if !c.j.PostCutoverPending {
+		c.j.PostCutoverPending = true
+		if err := c.j.Save(ctx, h.Host); err != nil {
+			return err
+		}
+	}
+	if c.hook != nil {
+		if err := c.hook(ctx, "post-cutover", map[string]string{"YOHO_CUTOVER": c.j.ID}); err != nil {
+			return fmt.Errorf("%w\nhint: rerun `yoho deploy --cutover-resume` to retry post-cutover", err)
+		}
+	}
 	if err := c.plan.Finish(ctx, h.Host, c.j); err != nil {
-		// Everything is switched; a rerun with --cutover-resume only records done.
-		return fmt.Errorf("%w\nhint: rerun with --cutover-resume to record the cutover as done", err)
+		// Resume retries the pending Hook and records completion.
+		return fmt.Errorf("%w\nhint: rerun with --cutover-resume to retry post-cutover and record the cutover as done", err)
 	}
 	down := c.j.Downtime().Round(100 * time.Millisecond)
 	a.cutoverEvent("done", fmt.Sprintf("  Cutover %s done; old containers stopped %s before it finished", c.j.ID, down), c.j,
 		map[string]any{"downtime_ms": c.j.Downtime().Milliseconds(), "version": c.j.Version})
-	if c.hook != nil {
-		if err := c.hook(ctx, "post-cutover", map[string]string{"YOHO_CUTOVER": c.j.ID}); err != nil {
-			return err
-		}
-	}
+
 	return nil
 }
 
@@ -267,7 +286,7 @@ func (c *cutoverRun) fail(ctx context.Context, err error) error {
 	step := a.ui.Step(h.Name, "Restart old containers (on_failure: restart_old)")
 	ctx = context.WithoutCancel(ctx)
 	if rerr := migrate.Rollback(ctx, h.Host, c.opts.CF, c.j, migrate.RollbackOptions{Force: true}); rerr != nil {
-		step.Fail(rerr, "stop any conflicting writer, then run `yoho rollback --cutover`")
+		step.Fail(rerr, "resolve the recovery error, then run `yoho rollback --cutover`")
 		return errors.Join(err, fmt.Errorf("cutover recovery: %w", rerr))
 	}
 	step.Done(strings.Join(containerNames(c.j.Stopped), ", "))

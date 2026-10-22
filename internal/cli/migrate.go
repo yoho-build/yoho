@@ -122,6 +122,9 @@ func (a *app) migratePlanOn(ctx context.Context, h plan.NamedHost, store *secret
 	} else {
 		step.Done()
 	}
+	for _, warning := range p.Warnings {
+		u.Warn("%s", warning)
+	}
 	var conflicts []string
 	for _, c := range p.Conflicts {
 		conflicts = append(conflicts, c.String())
@@ -138,7 +141,7 @@ func (a *app) migratePlanOn(ctx context.Context, h plan.NamedHost, store *secret
 		rules = append(rules, map[string]string{"hostname": r.Hostname, "path": r.Path, "service": r.Service})
 	}
 	a.cutoverEvent("plan", "", resume, map[string]any{
-		"ok": perr == nil, "containers": containerNames(p.Containers), "conflicts": conflicts, "rules": rules,
+		"ok": perr == nil, "containers": containerNames(p.Containers), "conflicts": conflicts, "rules": rules, "warnings": p.Warnings,
 	})
 	if perr != nil {
 		return &silentError{perr}

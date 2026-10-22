@@ -29,14 +29,22 @@ type Mount struct {
 	RW     bool   `json:"RW"`
 }
 
+// PortBinding is a Docker published host-port binding.
+type PortBinding struct {
+	HostIP   string
+	HostPort string
+}
+
 // Container is a fake container.
 type Container struct {
-	ID            string
-	Name          string
-	Labels        map[string]string
-	Running       bool
-	RestartPolicy string
-	Mounts        []Mount
+	ID             string
+	Name           string
+	Labels         map[string]string
+	Running        bool
+	RestartPolicy  string
+	Mounts         []Mount
+	PortBindings   map[string][]PortBinding
+	PublishedPorts map[string][]PortBinding
 }
 
 // Host is a fake Server running Docker.
@@ -49,7 +57,7 @@ type Host struct {
 	// Scripts and Env are every script and env sent, for leak checks.
 	Scripts []string
 	Env     []string
-	// Ops is the docker state changes in order: "stop NAME", "start NAME".
+	// Ops records stop, start and restart-policy updates in order.
 	Ops []string
 	// AfterStop runs after a container is stopped (restart policies).
 	AfterStop func(h *Host, c *Container)
@@ -149,6 +157,28 @@ func (h *Host) Output(_ context.Context, c remote.Cmd) (string, error) {
 	for _, line := range strings.Split(c.Script, "\n") {
 		line = strings.TrimSpace(line)
 		switch {
+		case strings.Contains(line, "docker inspect --format") && strings.Contains(line, ".HostConfig.PortBindings"):
+			running := strings.Contains(c.Script, "ids=$(docker ps -q")
+			ids := args(line)
+			for _, ct := range h.Containers {
+				selected := running && ct.Running
+				if !running {
+					for _, id := range ids {
+						if id == ct.ID {
+							selected = true
+						}
+					}
+				}
+				if !selected {
+					continue
+				}
+				published := ct.PublishedPorts
+				if published == nil && ct.Running {
+					published = ct.PortBindings
+				}
+				b, _ := json.Marshal(map[string]any{"id": ct.ID, "name": "/" + ct.Name, "app": ct.Labels["yoho.app"], "destination": ct.Labels["yoho.destination"], "project": ct.Labels["com.docker.compose.project"], "bindings": ct.PortBindings, "published": published})
+				out = append(out, string(b))
+			}
 		case strings.HasPrefix(line, "ids=$(docker ps -aq"):
 			filters := args(line)
 			for _, ct := range h.Containers {

@@ -342,6 +342,7 @@ func (a *app) apply(ctx context.Context, o applyOptions) (err error) {
 	}
 	// A migration cutover is decided (and its tokens resolved) before the
 	// build; it stops the old stack only after build and ship (ADR 0012).
+	s.hook = a.hookFunc(ver, "deploy", s.hosts)
 	co, err := a.beginCutover(ctx, s, o.CutoverResume, o.CutoverAllowEmpty)
 	if err != nil {
 		return err
@@ -350,7 +351,6 @@ func (a *app) apply(ctx context.Context, o applyOptions) (err error) {
 	version := ver
 	var images map[string]string
 	if deployNeeded && !co.deployed(ver) {
-		s.hook = a.hookFunc(ver, "deploy", s.hosts)
 		if images, err = a.buildAndShip(ctx, s, o.SkipBuild); err != nil {
 			return err
 		}
@@ -362,7 +362,6 @@ func (a *app) apply(ctx context.Context, o applyOptions) (err error) {
 		}
 	}()
 	if co != nil {
-		co.hook = s.hook
 		unlock, lerr := co.lock(ctx)
 		if lerr != nil {
 			return lerr

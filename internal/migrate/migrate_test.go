@@ -496,3 +496,125 @@ func TestSwitchIngressRevalidatesReadback(t *testing.T) {
 		t.Fatalf("accepted incomplete ingress: %+v", j)
 	}
 }
+
+func portBindings(containerPort, hostIP, hostPort string) map[string][]migratetest.PortBinding {
+	return map[string][]migratetest.PortBinding{containerPort: {{HostIP: hostIP, HostPort: hostPort}}}
+}
+
+func portRollbackFixture(t *testing.T) (*migratetest.Host, *migrate.Journal) {
+	t.Helper()
+	ctx := context.Background()
+	h := oldStack()
+	m := migrateConfig()
+	m.Tunnel = nil
+	p, err := migrate.Preflight(ctx, h, migrate.Options{App: "shop", Destination: "production", Migrate: m}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	j := migrate.NewJournal("shop", "production", "", time.Now())
+	if err := p.Stop(ctx, h, j); err != nil {
+		t.Fatal(err)
+	}
+	yohoService(h)
+	j.State = migrate.StateDone
+	if err := j.Save(ctx, h); err != nil {
+		t.Fatal(err)
+	}
+	h.Ops = nil
+	return h, j
+}
+
+func TestRollbackChecksAllPublishedPortsBeforeChanges(t *testing.T) {
+	for _, tc := range []struct {
+		name, wantIP, wantPort, wantProtocol, holderIP, holderPort, holderProtocol string
+		conflict                                                                   bool
+	}{
+		{"shared proxy HTTP", "", "80", "tcp", "0.0.0.0", "80", "tcp", true},
+		{"shared proxy HTTPS", "0.0.0.0", "443", "tcp", "::", "443", "tcp", true},
+		{"other published port", "127.0.0.1", "8080", "tcp", "127.0.0.1", "8080", "tcp", true},
+		{"distinct protocols", "", "443", "udp", "", "443", "tcp", false},
+		{"distinct addresses", "127.0.0.1", "80", "tcp", "127.0.0.2", "80", "tcp", false},
+		{"distinct ports", "", "80", "tcp", "", "8080", "tcp", false},
+		{"ephemeral requested port", "", "0", "tcp", "", "80", "tcp", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			h, j := portRollbackFixture(t)
+			h.Container("old-web").PortBindings = portBindings("3000/"+tc.wantProtocol, tc.wantIP, tc.wantPort)
+			// Deliberately use an ephemeral configured port for the holder: the live
+			// binding, rather than its configured port, must be compared.
+			h.Container("yoho-proxy").PortBindings = portBindings("9000/"+tc.holderProtocol, tc.holderIP, "")
+			h.Container("yoho-proxy").PublishedPorts = portBindings("9000/"+tc.holderProtocol, tc.holderIP, tc.holderPort)
+			before := string(h.Files[migrate.JournalPath(j.App, j.Destination)])
+			err := migrate.Rollback(ctx, h, nil, j, migrate.RollbackOptions{})
+			if tc.conflict {
+				if err == nil {
+					t.Fatal("accepted port collision")
+				}
+				for _, text := range []string{"old-web", tc.wantPort + "/" + tc.wantProtocol, "yoho-proxy", "stop the holder", "remove that container from migrate.stop", "yoho rollback --cutover"} {
+					if !strings.Contains(err.Error(), text) {
+						t.Fatalf("missing %q in %v", text, err)
+					}
+				}
+				if len(h.Ops) != 0 || j.State != migrate.StateDone || string(h.Files[migrate.JournalPath(j.App, j.Destination)]) != before {
+					t.Fatalf("changed state before refusing: ops %v journal %+v", h.Ops, j)
+				}
+				if h.Container("old-db").Running || h.Container("old-web").Running {
+					t.Fatal("started some old containers before refusing")
+				}
+			} else if err != nil {
+				t.Fatal(err)
+			}
+			if !h.Container("yoho-proxy").Running {
+				t.Fatal("stopped shared Proxy")
+			}
+		})
+	}
+}
+
+func TestRollbackRechecksPortsAfterRetiringYohoContainers(t *testing.T) {
+	ctx := context.Background()
+	h, j := portRollbackFixture(t)
+	h.Container("old-web").PortBindings = portBindings("3000/tcp", "", "80")
+	h.AfterStop = func(h *migratetest.Host, c *migratetest.Container) {
+		if c.ID == "fff666" {
+			h.Container("yoho-proxy").PublishedPorts = portBindings("80/tcp", "", "80")
+		}
+	}
+	err := migrate.Rollback(ctx, h, nil, j, migrate.RollbackOptions{})
+	if err == nil || !strings.Contains(err.Error(), "yoho-proxy") {
+		t.Fatalf("error %v", err)
+	}
+	for _, op := range h.Ops {
+		if strings.HasPrefix(op, "start ") {
+			t.Fatalf("started old container: %v", h.Ops)
+		}
+	}
+	if j.State != migrate.StateDone {
+		t.Fatal("recorded rollback despite port conflict")
+	}
+}
+
+func TestPreflightWarnsAboutRollbackPorts(t *testing.T) {
+	h := oldStack()
+	h.Container("old-web").PortBindings = map[string][]migratetest.PortBinding{
+		"3000/tcp": {{HostPort: "80"}}, "3443/tcp": {{HostPort: "443"}}, "8080/tcp": {{HostPort: "8080"}},
+	}
+	m := migrateConfig()
+	m.Tunnel = nil
+	p, err := migrate.Preflight(context.Background(), h, migrate.Options{App: "shop", Destination: "production", Migrate: m}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(p.Warnings) != 2 {
+		t.Fatalf("warnings %v", p.Warnings)
+	}
+	for _, warning := range p.Warnings {
+		if !strings.Contains(warning, "old-web") || !strings.Contains(warning, "rollback") || !strings.Contains(warning, "yoho-proxy") {
+			t.Fatalf("warning %q", warning)
+		}
+	}
+	if len(h.Ops) != 0 {
+		t.Fatal("preflight changed containers")
+	}
+}

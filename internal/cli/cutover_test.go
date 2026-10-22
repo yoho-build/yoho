@@ -5,6 +5,9 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -343,5 +346,141 @@ func TestCutoverRestartOldRefusesConflictingWriter(t *testing.T) {
 	}
 	if !strings.Contains(out.String(), "stray-writer") {
 		t.Fatal("missing conflict diagnostic")
+	}
+}
+
+func TestCutoverPostHookFailureResumesOnlyHook(t *testing.T) {
+	for _, deployed := range []bool{true, false} {
+		t.Run(fmt.Sprintf("deployed=%v", deployed), func(t *testing.T) {
+			ctx := context.Background()
+			a, s, h, cf, out := cutoverFixture(t, "")
+			co, err := a.beginCutover(ctx, s, false, false)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := co.prepare(ctx); err != nil {
+				t.Fatal(err)
+			}
+			if deployed {
+				if err := co.recordDeploy(ctx, &release.Release{Version: "v1"}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			co.j.TunnelReconciled = true
+			failed := false
+			hook := func(_ context.Context, name string, _ map[string]string) error {
+				if name != "post-cutover" {
+					t.Fatalf("repeated Hook %s", name)
+				}
+				saved, err := migrate.ReadJournal(ctx, h, "shop", "production")
+				if err != nil || saved.State != migrate.StateStarted || !saved.PostCutoverPending {
+					t.Fatalf("premature completion: %+v %v", saved, err)
+				}
+				if !failed {
+					failed = true
+					return errors.New("post Hook failed")
+				}
+				return nil
+			}
+			co.hook = hook
+			err = co.finish(ctx, nil)
+			if err == nil || !strings.Contains(err.Error(), "--cutover-resume") {
+				t.Fatalf("error %v", err)
+			}
+			if strings.Contains(strings.Join(cutoverPhases(t, out.String()), ","), "done") {
+				t.Fatal("reported done before Hook succeeded")
+			}
+			// Resume must not even inspect ingress or Docker while retrying only
+			// the Hook. An expired API token would make another preflight fail.
+			s.store = secrets.New(map[string]string{"CF_API_TOKEN": "expired", "CF_TUNNEL_TOKEN": cf.TunnelToken()})
+			co, err = a.beginCutover(ctx, s, true, false)
+			if err != nil {
+				t.Fatal(err)
+			}
+			co.hook = hook
+			if !co.deployed("v1") {
+				t.Fatal("resume would repeat rollout")
+			}
+			h.Scripts = nil
+			requests := len(cf.Headers)
+			if err := co.prepare(ctx); err != nil {
+				t.Fatal(err)
+			}
+			if err := co.finish(ctx, nil); err != nil {
+				t.Fatal(err)
+			}
+			saved, err := migrate.ReadJournal(ctx, h, "shop", "production")
+			if err != nil || saved.State != migrate.StateDone || saved.PostCutoverPending || len(h.Scripts) != 0 || len(cf.Headers) != requests || cf.Puts != 1 {
+				t.Fatalf("resume repeated completed work: journal %+v scripts %v requests %d/%d puts %d err %v", saved, h.Scripts, len(cf.Headers), requests, cf.Puts, err)
+			}
+		})
+	}
+}
+
+func TestCutoverCreatesHooksWithoutRuntimeRollout(t *testing.T) {
+	ctx := context.Background()
+	a, s, _, _, _ := cutoverFixture(t, "")
+	dir := t.TempDir()
+	log := filepath.Join(dir, "hooks.log")
+	t.Setenv("CUTOVER_HOOK_LOG", log)
+	a.cfg.Hooks.Path = dir
+	s.ver = "v1"
+	// No runtime diff means no buildAndShip or rollout provides a Hook.
+	s.hook = nil
+	for _, name := range []string{"pre-cutover", "post-cutover"} {
+		script := "#!/bin/sh\nset -eu\nprintf '%s|%s|%s|%s\\n' '" + name + "' \"$YOHO_CUTOVER\" \"$YOHO_VERSION\" \"$YOHO_DESTINATION\" >> \"$CUTOVER_HOOK_LOG\"\n"
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(script), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	co, err := a.beginCutover(ctx, s, false, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := co.prepare(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := co.finish(ctx, nil); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(log)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "pre-cutover|" + co.j.ID + "|v1|production\npost-cutover|" + co.j.ID + "|v1|production\n"
+	if string(data) != want {
+		t.Fatalf("Hooks %q, want %q", data, want)
+	}
+}
+
+func TestCutoverRestartOldRefusesPortsHeldBySharedProxy(t *testing.T) {
+	ctx := context.Background()
+	a, s, h, _, _ := cutoverFixture(t, "")
+	co, err := a.beginCutover(ctx, s, false, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := co.prepare(ctx); err != nil {
+		t.Fatal(err)
+	}
+	h.Container("old-web").PortBindings = map[string][]migratetest.PortBinding{"3000/tcp": {{HostPort: "80"}}}
+	h.Containers = append(h.Containers, &migratetest.Container{ID: "proxy", Name: "yoho-proxy", Running: true, PortBindings: map[string][]migratetest.PortBinding{"80/tcp": {{HostPort: "80"}}}})
+	err = co.failed(ctx, errors.New("rollout failed"))
+	if err == nil || !strings.Contains(err.Error(), "old-web needs host port 80/tcp held by yoho-proxy") {
+		t.Fatalf("error %v", err)
+	}
+	if h.Container("old-db").Running || h.Container("old-web").Running || !h.Container("yoho-proxy").Running || co.j.State != migrate.StateStarted {
+		t.Fatalf("unsafe rollback: ops %v state %s", h.Ops, co.j.State)
+	}
+}
+
+func TestMigratePlanDisplaysRollbackPortWarning(t *testing.T) {
+	a, s, h, _, out := cutoverFixture(t, "")
+	h.Container("old-web").PortBindings = map[string][]migratetest.PortBinding{"3000/tcp": {{HostPort: "80"}}}
+	if err := a.migratePlanOn(context.Background(), s.hosts[0], s.store); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out.String(), "old-web publishes host port 80/tcp") || !strings.Contains(out.String(), "yoho-proxy") {
+		t.Fatalf("missing warning: %s", out)
 	}
 }

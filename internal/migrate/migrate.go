@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/netip"
 	"path"
 	"regexp"
 	"sort"
@@ -69,6 +70,8 @@ type Plan struct {
 	Conflicts []Conflict
 	// Rules are the current ingress rules of the listed hostnames.
 	Rules []IngressRule
+	// Warnings are non-fatal rollback limitations found during preflight.
+	Warnings []string
 }
 
 // Preflight checks everything the cutover needs before it changes
@@ -81,6 +84,10 @@ func Preflight(ctx context.Context, h remote.Host, o Options, j *Journal) (*Plan
 		o.Migrate.Claim = j.Claim
 	}
 	p := &Plan{o: o}
+	if j != nil && j.PostCutoverPending {
+		p.Containers = append([]Container(nil), j.Stopped...)
+		return p, nil
+	}
 	var errs []error
 	if t := o.Migrate.Tunnel; t != nil {
 		if o.CF == nil {
@@ -126,6 +133,17 @@ func Preflight(ctx context.Context, h remote.Host, o Options, j *Journal) (*Plan
 		p.Conflicts = conflicts
 		if len(conflicts) > 0 {
 			errs = append(errs, conflictError(conflicts, "is not in migrate.stop"))
+		}
+	}
+	ports, err := inspectPorts(ctx, h, p.Containers, false)
+	if err != nil {
+		errs = append(errs, err)
+	}
+	for _, c := range ports {
+		for _, port := range c.ports(false) {
+			if port.number == "80" || port.number == "443" {
+				p.Warnings = append(p.Warnings, fmt.Sprintf("%s publishes host port %s/%s; rollback will need that port while yoho-proxy holds it; stop the holder or remove this container from migrate.stop before the cutover", c.Name, port.number, port.protocol))
+			}
 		}
 	}
 	return p, errors.Join(errs...)
@@ -252,7 +270,7 @@ func (p *Plan) SwitchIngress(ctx context.Context, h remote.Host, j *Journal) (bo
 // Finish marks the Journal done.
 func (p *Plan) Finish(ctx context.Context, h remote.Host, j *Journal) error {
 	t := p.o.now().UTC()
-	j.State, j.DoneAt = StateDone, &t
+	j.State, j.DoneAt, j.PostCutoverPending = StateDone, &t, false
 	return j.Save(ctx, h)
 }
 
@@ -298,6 +316,11 @@ func Rollback(ctx context.Context, h remote.Host, cf CloudflareAPI, j *Journal, 
 			}
 			return &DriftError{Live: lh, Want: want}
 		}
+	}
+	// Refuse before any journal, restart-policy or container changes. Ports of
+	// this App's containers will be freed when they are retired below.
+	if err := checkRollbackPorts(ctx, h, j, true); err != nil {
+		return err
 	}
 	project := release.ProjectName(j.App, j.Destination)
 	// Include already stopped containers: they too must stay stopped after a daemon restart.
@@ -359,6 +382,10 @@ func Rollback(ctx context.Context, h remote.Host, cf CloudflareAPI, j *Journal, 
 	}
 	if len(conflicts) > 0 {
 		return fmt.Errorf("refusing to restart old containers: %v; stop the conflicting container, then rerun `yoho rollback --cutover`", conflictError(conflicts, "is still running"))
+	}
+	// Recheck the live bindings after stopping in case a new holder appeared.
+	if err := checkRollbackPorts(ctx, h, j, false); err != nil {
+		return err
 	}
 	if len(j.Stopped) > 0 {
 		var ids []string
@@ -508,6 +535,138 @@ func RestoreRetired(ctx context.Context, h remote.Host, j *Journal) error {
 		if err := h.Run(ctx, remote.Cmd{Script: script}); err != nil {
 			return fmt.Errorf("restore restart policy for %s: %w", c.Name, err)
 		}
+	}
+	return nil
+}
+
+// portContainer includes configured bindings for stopped containers and live
+// bindings for running ones (including Docker-assigned ephemeral host ports).
+type portContainer struct {
+	ID          string                   `json:"id"`
+	Name        string                   `json:"name"`
+	App         string                   `json:"app"`
+	Destination string                   `json:"destination"`
+	Project     string                   `json:"project"`
+	Bindings    map[string][]portBinding `json:"bindings"`
+	Published   map[string][]portBinding `json:"published"`
+}
+
+type portBinding struct {
+	HostIP   string
+	HostPort string
+}
+
+type hostPort struct{ number, protocol, ip string }
+
+func (c portContainer) ports(running bool) []hostPort {
+	bindings := c.Bindings
+	if running {
+		bindings = c.Published
+	}
+	keys := make([]string, 0, len(bindings))
+	for key := range bindings {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	var ports []hostPort
+	for _, key := range keys {
+		_, protocol, _ := strings.Cut(key, "/")
+		for _, binding := range bindings[key] {
+			// Empty or zero configured ports request a free ephemeral port.
+			if binding.HostPort == "" || binding.HostPort == "0" {
+				continue
+			}
+			ports = append(ports, hostPort{number: binding.HostPort, protocol: protocol, ip: binding.HostIP})
+		}
+	}
+	return ports
+}
+
+const portInspectFormat = `{"id":{{json .Id}},"name":{{json .Name}},"app":{{json (index .Config.Labels "yoho.app")}},"destination":{{json (index .Config.Labels "yoho.destination")}},"project":{{json (index .Config.Labels "com.docker.compose.project")}},"bindings":{{json .HostConfig.PortBindings}},"published":{{json .NetworkSettings.Ports}}}`
+
+func inspectPorts(ctx context.Context, h remote.Host, containers []Container, running bool) ([]portContainer, error) {
+	var script string
+	if running {
+		script = "set -eu\nids=$(docker ps -q --no-trunc)\n[ -z \"$ids\" ] || docker inspect --format " + remote.Quote(portInspectFormat) + " $ids"
+	} else {
+		if len(containers) == 0 {
+			return nil, nil
+		}
+		var ids []string
+		for _, c := range containers {
+			ids = append(ids, remote.Quote(c.ID))
+		}
+		script = "set -eu\ndocker inspect --format " + remote.Quote(portInspectFormat) + " " + strings.Join(ids, " ")
+	}
+	out, err := h.Output(ctx, remote.Cmd{Script: script})
+	if err != nil {
+		return nil, fmt.Errorf("inspect published host ports: %w", err)
+	}
+	var result []portContainer
+	for _, line := range strings.Split(strings.TrimSpace(out), "\n") {
+		if line == "" {
+			continue
+		}
+		var c portContainer
+		if err := json.Unmarshal([]byte(line), &c); err != nil {
+			return nil, fmt.Errorf("inspect published host ports: %w", err)
+		}
+		c.Name = strings.TrimPrefix(c.Name, "/")
+		result = append(result, c)
+	}
+	return result, nil
+}
+
+func portIPsOverlap(a, b string) bool {
+	// An unspecified IPv6 bind may also accept IPv4 through Docker's proxy.
+	if a == "" || b == "" || a == "::" || b == "::" {
+		return true
+	}
+	aa, aerr := netip.ParseAddr(a)
+	bb, berr := netip.ParseAddr(b)
+	if aerr != nil || berr != nil {
+		// Fail closed on an unknown address.
+		return true
+	}
+	aa, bb = aa.Unmap(), bb.Unmap()
+	if aa.Is4() != bb.Is4() {
+		return false
+	}
+	return aa == bb || aa.IsUnspecified() || bb.IsUnspecified()
+}
+
+func checkRollbackPorts(ctx context.Context, h remote.Host, j *Journal, retiring bool) error {
+	old, err := inspectPorts(ctx, h, j.Stopped, false)
+	if err != nil {
+		return err
+	}
+	if len(old) == 0 {
+		return nil
+	}
+	running, err := inspectPorts(ctx, h, nil, true)
+	if err != nil {
+		return err
+	}
+	var conflicts []string
+	for _, c := range old {
+		for _, want := range c.ports(false) {
+			for _, holder := range running {
+				if holder.ID == c.ID {
+					continue
+				}
+				if retiring && holder.App == j.App && holder.Destination == j.Destination && holder.Project == release.ProjectName(j.App, j.Destination) {
+					continue
+				}
+				for _, port := range holder.ports(true) {
+					if want.number == port.number && want.protocol == port.protocol && portIPsOverlap(want.ip, port.ip) {
+						conflicts = append(conflicts, fmt.Sprintf("%s needs host port %s/%s held by %s", c.Name, want.number, want.protocol, holder.Name))
+					}
+				}
+			}
+		}
+	}
+	if len(conflicts) > 0 {
+		return fmt.Errorf("cannot restart old containers: %s\nhint: stop the holder or remove that container from migrate.stop, then rerun `yoho rollback --cutover`", strings.Join(conflicts, "; "))
 	}
 	return nil
 }

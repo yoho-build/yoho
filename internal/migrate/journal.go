@@ -57,7 +57,9 @@ type Journal struct {
 	Claim            config.MigrateClaim `json:"claim"`
 	Retired          []RetiredContainer  `json:"retired,omitempty"`
 	TunnelReconciled bool                `json:"tunnel_reconciled,omitempty"`
-	ClaimsClear      bool                `json:"claims_clear,omitempty"`
+	// PostCutoverPending means rollout and ingress are complete; only the Hook remains.
+	PostCutoverPending bool `json:"post_cutover_pending,omitempty"`
+	ClaimsClear        bool `json:"claims_clear,omitempty"`
 	// Version of the Release the cutover deployed, when one was deployed.
 	Version  string `json:"version,omitempty"`
 	Deployed bool   `json:"deployed,omitempty"`
