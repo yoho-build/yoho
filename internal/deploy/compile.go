@@ -200,6 +200,9 @@ func compile(d *plan.Deploy, server, generationDir string, svcSecrets map[string
 			}
 		}
 	}
+	if err := pinDefaultSubnet(p, d.Subnet); err != nil {
+		return nil, nil, err
+	}
 	if p.Secrets == nil {
 		p.Secrets = types.Secrets{}
 	}
@@ -390,4 +393,34 @@ func escapeDollars(src []byte) ([]byte, error) {
 func sha256Hex(b []byte) string {
 	h := sha256.Sum256(b)
 	return hex.EncodeToString(h[:])
+}
+
+// pinDefaultSubnet sets Destination.subnet on the project's default network
+// unless the compose file already configures ipam for it or makes it external.
+func pinDefaultSubnet(p *types.Project, subnet string) error {
+	if subnet == "" {
+		return nil
+	}
+	n, ok := p.Networks["default"]
+	if !ok {
+		uses := false
+		for _, s := range p.Services {
+			if _, has := s.Networks["default"]; has || len(s.Networks) == 0 {
+				uses = true
+			}
+		}
+		if !uses {
+			return nil
+		}
+		n = types.NetworkConfig{Name: p.Name + "_default"}
+	}
+	if n.External || len(n.Ipam.Config) > 0 {
+		return nil
+	}
+	n.Ipam.Config = []*types.IPAMPool{{Subnet: subnet}}
+	if p.Networks == nil {
+		p.Networks = types.Networks{}
+	}
+	p.Networks["default"] = n
+	return nil
 }

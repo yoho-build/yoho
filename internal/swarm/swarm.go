@@ -168,6 +168,9 @@ func (Runtime) Deploy(ctx context.Context, d *plan.Deploy) (_ *release.Release, 
 	r := newRunner(d)
 	relDir := release.Dir(d.App, d.Destination, d.Version)
 	stackFile := path.Join(relDir, "compose.yaml")
+	defer func() {
+		err = deploy.AnnotatePoolExhausted(ctx, h, r.stack+"_default", err)
+	}()
 
 	unlock, err := deploy.AcquireLock(ctx, h, d.App, d.Destination, deploy.LockInfo{Performer: d.Performer, Version: d.Version, Command: "deploy", Time: start})
 	if err != nil {

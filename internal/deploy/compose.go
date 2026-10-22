@@ -104,6 +104,7 @@ func (c Compose) Deploy(ctx context.Context, d *plan.Deploy) (_ *release.Release
 		if err != nil && !errors.As(err, &failure) {
 			err = r.failure(ctx, err, "", nil)
 		}
+		err = AnnotatePoolExhausted(ctx, h, release.ProjectName(d.App, d.Destination)+"_default", err)
 	}()
 
 	unlock, err := AcquireLock(ctx, h, d.App, d.Destination, lockInfo(d, LockInfo{Performer: d.Performer, Version: d.Version, Command: "deploy", Time: start}))

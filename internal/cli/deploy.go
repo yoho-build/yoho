@@ -401,7 +401,7 @@ func (a *app) newDeploy(s *session, images map[string]string, forPlan bool) (*pl
 	return &plan.Deploy{
 		App: a.cfg.App, Destination: a.destName, Version: s.ver, Performer: performer(),
 		Servers: s.hosts, Project: proj, Ext: s.r.Ext, Built: built,
-		ServiceSecrets: svcSecrets, SecretRefs: refs, Env: a.dest.Env, Registry: a.cfg.Registry,
+		ServiceSecrets: svcSecrets, SecretRefs: refs, Env: a.dest.Env, Subnet: a.dest.Subnet, Registry: a.cfg.Registry,
 		Proxy: a.proxyConfig(), RetainReleases: a.cfg.RetainReleases, Hook: s.hook,
 		Out: out,
 	}, nil

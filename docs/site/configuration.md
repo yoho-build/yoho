@@ -21,6 +21,7 @@ Validate with `yoho config check`; print the resolved file with `yoho config sho
 | `destinations.<name>.runtime` | `compose` (default) or `swarm`. Switching causes downtime. |
 | `destinations.<name>.env` | Non-secret variables for compose interpolation (image tags, ports). |
 | `destinations.<name>.proxy` | Overrides the top-level `proxy` for this Destination. |
+| `destinations.<name>.subnet` | Optional IPv4 subnet (CIDR) for the App's compose `default` network, used when Docker's address pools are exhausted (`all predefined address pools have been fully subnetted`). A failed deploy prints a free `/24` found on the Server. Ignored when the compose file sets `ipam` for that network. Adding it to a deployed App recreates the network. |
 | `destinations.<name>.app_dir` | Optional absolute directory on the Server for this Destination's App directory, outside `root`. See [App directory](#app-directory-app_dir). |
 | `builder.location` | `local` (default), `remote` (dedicated build Server), `server` (build on the Destination's Server). |
 | `builder.engine` | `auto` (Apple `container` on Apple silicon if installed, else Docker), `docker`, `container`. |

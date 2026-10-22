@@ -54,3 +54,25 @@ func TestHintForGateError(t *testing.T) {
 		t.Fatalf("hint %q", got)
 	}
 }
+
+func TestPoolExhaustedHintAndFacts(t *testing.T) {
+	err := &deploy.Failure{Cause: fmt.Errorf("x"), Message: "Docker has no free address pool", Phase: "create-network",
+		Network: &deploy.NetworkHint{Network: "shop_default", SuggestedSubnet: "10.200.3.0/24", Snippet: deploy.SnippetFor("10.200.3.0/24")}}
+	for _, mode := range []ui.Mode{ui.Human, ui.JSON} {
+		var out bytes.Buffer
+		ui.New(&out, mode, false).Step("primary", "Deploy").Fail(err, hintFor(err, "default hint"))
+		if !strings.Contains(out.String(), "10.200.3.0/24") || strings.Contains(out.String(), "default hint") {
+			t.Fatalf("hint lacks subnet: %s", out.String())
+		}
+	}
+	var out bytes.Buffer
+	ui.New(&out, ui.JSON, false).Step("primary", "Deploy").Fail(err, hintFor(err, "d"))
+	var ev map[string]any
+	for _, line := range strings.Split(strings.TrimSpace(out.String()), "\n") {
+		_ = json.Unmarshal([]byte(line), &ev)
+	}
+	facts := ev["failure_facts"].(map[string]any)["network"].(map[string]any)
+	if facts["suggested_subnet"] != "10.200.3.0/24" {
+		t.Fatalf("facts %v", ev)
+	}
+}
