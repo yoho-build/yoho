@@ -230,6 +230,19 @@ func NewSpec(j Job) (Spec, error) {
 			s.SecretFingerprints[k] = fp
 		}
 	}
+	// The rclone config is seeded into a persistent Server file, not stored
+	// as a job secret; only its fingerprint is kept to detect rotation.
+	if k := j.Target.RcloneConfigSecret; k != "" {
+		if !envNameRe.MatchString(k) {
+			return Spec{}, fmt.Errorf("job %s: invalid secret key %q", j.Name, k)
+		}
+		if fp := j.SecretFingerprints[k]; fp != "" {
+			if s.SecretFingerprints == nil {
+				s.SecretFingerprints = map[string]string{}
+			}
+			s.SecretFingerprints[k] = fp
+		}
+	}
 	return s, nil
 }
 

@@ -354,3 +354,47 @@ func TestServiceProxyHealthSettings(t *testing.T) {
 		t.Fatalf("timeout schema %v", p["health_timeout"])
 	}
 }
+
+func TestValidateRcloneConfigSecret(t *testing.T) {
+	targets := map[string]BackupTarget{
+		"od":       {Type: "archive", Repository: "od:backups", RcloneConfigSecret: "RCLONE_CONF", EnvSecrets: []string{"RCLONE_CONFIG_OD_TYPE"}},
+		"restic":   {Repository: "rclone:gd:restic", PasswordSecret: "PW", RcloneConfigSecret: "RCLONE_CONF"},
+		"local":    {Type: "archive", Repository: "/srv/backups", RcloneConfigSecret: "RCLONE_CONF"},
+		"s3":       {Repository: "s3:s3.amazonaws.com/b", RcloneConfigSecret: "RCLONE_CONF"},
+		"badkey":   {Type: "archive", Repository: "od:x", RcloneConfigSecret: "bad-key"},
+		"conflict": {Type: "archive", Repository: "od:x", PasswordSecret: "SAME", RcloneConfigSecret: "SAME"},
+	}
+	c := &Config{Backups: BackupsConfig{Targets: targets}}
+	var all []string
+	for _, e := range Validate(c) {
+		if strings.Contains(e.Error(), "rclone_config_secret") {
+			all = append(all, e.Error())
+		}
+	}
+	joined := strings.Join(all, "\n")
+	for _, bad := range []string{"local", "s3", "badkey", "conflict"} {
+		if !strings.Contains(joined, "backups.targets."+bad+".rclone_config_secret") {
+			t.Errorf("target %s not rejected:\n%s", bad, joined)
+		}
+	}
+	for _, ok := range []string{"backups.targets.od.", "backups.targets.restic."} {
+		if strings.Contains(joined, ok) {
+			t.Errorf("valid target rejected:\n%s", joined)
+		}
+	}
+}
+
+func TestRcloneWarningsAcrossDestinations(t *testing.T) {
+	c := &Config{Backups: BackupsConfig{
+		Targets: map[string]BackupTarget{"a": {RcloneConfigSecret: "RCLONE_CONF"}, "b": {RcloneConfigSecret: "RCLONE_CONF"}, "own": {RcloneConfigSecret: "OTHER_CONF"}},
+		Jobs:    map[string]BackupJob{"one": {Target: "a", Destination: "a"}, "two": {Target: "b", Destination: "b"}, "three": {Target: "a", Destination: "a"}, "four": {Target: "own", Destination: "c"}},
+	}}
+	warnings := RcloneWarnings(c)
+	if len(warnings) != 1 || warnings[0] != "rclone_config_secret RCLONE_CONF is used by Destinations a and b; OAuth remotes rotate refresh tokens, so give each Destination its own authorized remote/secret" {
+		t.Fatalf("warnings: %v", warnings)
+	}
+	delete(c.Backups.Jobs, "two")
+	if warnings := RcloneWarnings(c); len(warnings) != 0 {
+		t.Fatalf("same Destination warned: %v", warnings)
+	}
+}

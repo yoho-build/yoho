@@ -272,6 +272,9 @@ func runConfigCheck(cmd *cobra.Command, g *globals, offline bool) error {
 	}
 	keyCount = len(keys)
 	findings := composefile.Check(r, a.dest.Runtime, keys)
+	for _, warning := range config.RcloneWarnings(a.cfg) {
+		findings = append(findings, composefile.Finding{Level: composefile.LevelWarning, Message: warning})
+	}
 	findings = append(findings, composefile.CheckServerBuild(r, a.dir, a.cfg.Builder)...)
 	if t := a.proxyConfig().Tunnel; t != nil && t.TokenSecret == "" {
 		for _, name := range sortedKeys(r.Ext) {

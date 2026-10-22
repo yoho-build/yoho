@@ -567,3 +567,86 @@ func TestResticCheckRevalidatesOwnedSnapshotsAfterCheck(t *testing.T) {
 		})
 	}
 }
+
+func TestCheckRedactsRefreshedRcloneConfig(t *testing.T) {
+	for _, resolved := range []bool{false, true} {
+		mode := "seeded only"
+		if resolved {
+			mode = "unchanged resolved secret"
+		}
+		for _, phase := range []string{"snapshots", "check", "post-check snapshots", "unlock"} {
+			t.Run(mode+"/"+phase, func(t *testing.T) {
+				h := rcloneHost()
+				original := rcloneSecret("original")
+				if _, err := SeedRcloneConfig(context.Background(), h, "shop", "production", rcloneTarget(), original); err != nil {
+					t.Fatal(err)
+				}
+				token := `{"access_token":"refreshed-access-value","refresh_token":"refreshed-refresh-value"}`
+				line := "token = " + token
+				refreshed := "[od]\ntype = onedrive\n" + line + "\n"
+				h.files[rcloneConfPath] = []byte(refreshed)
+				failure := errors.New("rclone diagnostic failure")
+				diagnostic := fmt.Errorf("%w: could not parse line: %s; token JSON: %s; access: refreshed-access-value; refresh: refreshed-refresh-value", failure, line, token)
+				respond := h.respond
+				snapshots, checks := 0, 0
+				locked, unlocked := false, false
+				h.respond = func(ctx context.Context, script string) (string, error) {
+					if !locked {
+						t.Fatal("check accessed config without the Destination lock")
+					}
+					if strings.Contains(script, "r snapshots") {
+						snapshots++
+						if phase == "snapshots" || (phase == "post-check snapshots" && snapshots == 2) {
+							return "", diagnostic
+						}
+						return `[{"short_id":"abcdef12","tags":["yoho","app=shop","destination=production"]}]`, nil
+					}
+					if strings.Contains(script, "r check") {
+						checks++
+						if phase == "check" {
+							return "", diagnostic
+						}
+					}
+					return respond(ctx, script)
+				}
+				o := checkOptions(h)
+				o.Target.Repository = "rclone:od:backups"
+				o.Target.RcloneConfigSecret = "RCLONE_CONF"
+				if resolved {
+					o.RcloneConfig = original
+				}
+				o.Lock = func(context.Context) (func(context.Context) error, error) {
+					locked = true
+					return func(ctx context.Context) error {
+						if ctx.Err() != nil {
+							t.Fatal("unlock context cancelled")
+						}
+						unlocked = true
+						if phase == "unlock" {
+							return diagnostic
+						}
+						return nil
+					}, nil
+				}
+				_, err := Check(context.Background(), o)
+				if !errors.Is(err, failure) || !unlocked {
+					t.Fatalf("error chain or unlock lost: %v; unlocked=%v", err, unlocked)
+				}
+				for _, fragment := range []string{line, token, "refreshed-access-value", "refreshed-refresh-value"} {
+					if strings.Contains(err.Error(), fragment) {
+						t.Fatalf("config leaked in error: %v", err)
+					}
+				}
+				if !strings.Contains(err.Error(), "***") {
+					t.Fatalf("no redaction: %v", err)
+				}
+				if string(h.files[rcloneConfPath]) != refreshed || h.writes(rcloneConfPath) != 1 {
+					t.Fatal("check overwrote the refreshed config")
+				}
+				if snapshots == 0 || (phase != "snapshots" && checks != 1) {
+					t.Fatalf("failure phase not reached: snapshots=%d checks=%d", snapshots, checks)
+				}
+			})
+		}
+	}
+}

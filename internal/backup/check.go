@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"path"
 	"strings"
+	"time"
 
 	"github.com/yoho-build/yoho/internal/release"
 	"github.com/yoho-build/yoho/internal/remote"
@@ -31,13 +32,16 @@ type CheckResult struct {
 	ID       string `json:"id,omitempty"`
 	Method   string `json:"method"`
 	Verified string `json:"verified"`
+	// RcloneConfig is the persistent rclone config state, e.g.
+	// "seeded 2026-10-22T03:00:00Z"; empty without rclone_config_secret.
+	RcloneConfig string `json:"rclone_config,omitempty"`
 }
 
 // Check never initializes, restores, prunes or changes a Backup Target or App
 // data. The Destination lock serializes it with Yoho writers. Restic uses
 // --no-lock, so coordinate other tools writing this repository yourself.
 func Check(ctx context.Context, o CheckOptions) (res *CheckResult, err error) {
-	values := []string{o.Password}
+	values := []string{o.Password, o.RcloneConfig}
 	for _, v := range o.TargetEnv {
 		values = append(values, v)
 	}
@@ -78,7 +82,15 @@ func Check(ctx context.Context, o CheckOptions) (res *CheckResult, err error) {
 			err = errors.Join(err, unlock(cctx))
 		}()
 	}
-	return t.check(ctx, o.Host, release.BackupDir(o.App, o.Destination), o.ID, o.ReadData)
+	if err := t.prepareRclone(ctx, o.Host, o.RcloneConfig, time.Now()); err != nil {
+		return nil, err
+	}
+	values = append(values, t.diagnostics...)
+	res, err = t.check(ctx, o.Host, release.BackupDir(o.App, o.Destination), o.ID, o.ReadData)
+	if res != nil {
+		res.RcloneConfig = t.rcloneSeeded(ctx, o.Host)
+	}
+	return res, err
 }
 
 // check is strictly non-mutating to the target. Archive staging is exclusively
@@ -228,7 +240,16 @@ func (t *target) readOnlyResticPrelude() string {
 		pre += safeDir(path.Clean(t.cfg.Repository), false, false) + "test -d " + remote.Quote(t.cfg.Repository) + "\n"
 		mounts = append(mounts, t.cfg.Repository+":"+t.cfg.Repository+":ro")
 	}
-	return pre + "if command -v restic >/dev/null 2>&1; then r() { restic --no-lock --no-cache \"$@\"; }; else r() { docker run --rm" + t.envFlags() + mountFlags(mounts) + " " + remote.Quote(ResticImage) + " --no-lock --no-cache \"$@\"; }; fi\n"
+	native, docker := "restic", "docker run --rm"
+	if rc := t.rcloneConfig(); rc != nil {
+		// rclone may refresh OAuth tokens in its config; that is local Server
+		// state, not a change to the Backup Target.
+		pre += rc.check
+		native = rc.native + native
+		docker += rc.docker
+		mounts = append(mounts, rc.mount)
+	}
+	return pre + "if command -v restic >/dev/null 2>&1; then r() { " + native + " --no-lock --no-cache \"$@\"; }; else r() { " + docker + t.envFlags() + mountFlags(mounts) + " " + remote.Quote(ResticImage) + " --no-lock --no-cache \"$@\"; }; fi\n"
 }
 
 func (t *target) checkManifest(ctx context.Context, h remote.Host, data string, m Manifest) error {

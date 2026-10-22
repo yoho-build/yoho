@@ -41,7 +41,7 @@ Validate with `yoho config check`; print the resolved file with `yoho config sho
 | `proxy.http_port`, `https_port` | Published host ports; default 80/443; `0` disables publishing. |
 | `proxy.bind` | Bind address, e.g. `127.0.0.1`. |
 | `proxy.tunnel` | Managed Cloudflare Tunnel: `token_secret` (empty or `tunnel: {}` = Quick Tunnel), `image`, `replicas` (default 1). See [Cloudflare Tunnel](cloudflare-tunnel.md). |
-| `backups.targets.<n>` | `type` (`restic` default, `archive`), `repository`, `format` (`tar.gz`, `zip`, `7z`), `password_secret`, `env_secrets`, `keep_last`. |
+| `backups.targets.<n>` | `type` (`restic` default, `archive`), `repository`, `format` (`tar.gz`, `zip`, `7z`), `password_secret`, `env_secrets`, `rclone_config_secret` (persistent rclone.conf for OAuth remotes such as OneDrive; rclone repositories only), `keep_last`. |
 | `backups.jobs.<n>` | `destination`, `services`, `target`, `schedule` (systemd `OnCalendar`; empty = on demand). |
 | `setup` | `user` (default `yoho`), `authorized_keys` (unset: your `~/.ssh/*.pub`; `[]`: none), `packages`, `firewall`, `allow_ports`, `auto_updates`, `swap`, `timezone`. |
 | `hooks.path` | Default `.yoho/hooks`. |

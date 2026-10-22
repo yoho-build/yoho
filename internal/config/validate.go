@@ -6,6 +6,7 @@ import (
 	"net/url"
 	"path"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -172,6 +173,17 @@ func Validate(c *Config) []error {
 		}
 		if t.Type != "" && t.Type != "restic" && t.Type != "archive" {
 			add("backups.targets.%s.type %q must be restic or archive", n, t.Type)
+		}
+		if k := t.RcloneConfigSecret; k != "" {
+			if !secretKeyPattern.MatchString(k) {
+				add("backups.targets.%s.rclone_config_secret must be a secret key matching [A-Za-z_][A-Za-z0-9_]*", n)
+			}
+			if !t.UsesRclone() {
+				add("backups.targets.%s.rclone_config_secret requires an rclone repository: type archive with remote:path, or restic rclone:remote:path", n)
+			}
+			if k == t.PasswordSecret || slices.Contains(t.EnvSecrets, k) {
+				add("backups.targets.%s.rclone_config_secret %s is also used as password_secret or env_secrets", n, k)
+			}
 		}
 	}
 	for _, n := range sortedKeys(c.Backups.Jobs) {
@@ -490,4 +502,53 @@ func validateMigrate(c *Config, n string, d Destination) []error {
 		}
 	}
 	return errs
+}
+
+// UsesRclone reports whether the Backup Target stores through rclone: an
+// archive remote:path, or a restic rclone: repository.
+func (t BackupTarget) UsesRclone() bool {
+	r := t.Repository
+	if t.Type == "archive" {
+		return !strings.HasPrefix(r, "/") && strings.Contains(r, ":")
+	}
+	return (t.Type == "" || t.Type == "restic") && strings.HasPrefix(r, "rclone:")
+}
+
+// SecretKeys returns the secret keys the Backup Target references.
+func (t BackupTarget) SecretKeys() []string {
+	var keys []string
+	if t.PasswordSecret != "" {
+		keys = append(keys, t.PasswordSecret)
+	}
+	keys = append(keys, t.EnvSecrets...)
+	if t.RcloneConfigSecret != "" {
+		keys = append(keys, t.RcloneConfigSecret)
+	}
+	return keys
+}
+
+// RcloneWarnings warns about independent token files seeded from one OAuth
+// authorization. Targets within one Destination deliberately share a file.
+func RcloneWarnings(c *Config) []string {
+	uses := map[string]map[string]bool{}
+	for _, job := range c.Backups.Jobs {
+		key := c.Backups.Targets[job.Target].RcloneConfigSecret
+		if key == "" || job.Destination == "" {
+			continue
+		}
+		if uses[key] == nil {
+			uses[key] = map[string]bool{}
+		}
+		uses[key][job.Destination] = true
+	}
+	var warnings []string
+	for _, key := range sortedKeys(uses) {
+		dests := sortedKeys(uses[key])
+		for i, a := range dests {
+			for _, b := range dests[i+1:] {
+				warnings = append(warnings, fmt.Sprintf("rclone_config_secret %s is used by Destinations %s and %s; OAuth remotes rotate refresh tokens, so give each Destination its own authorized remote/secret", key, a, b))
+			}
+		}
+	}
+	return warnings
 }

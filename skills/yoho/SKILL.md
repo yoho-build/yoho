@@ -169,5 +169,6 @@ Fetch with `curl -sL <url>` (not a summarizing fetch tool). Relative paths are u
 - `references/migrate-coolify.md`: https://raw.githubusercontent.com/yoho-build/yoho/main/skills/yoho/references/migrate-coolify.md
 - Skill `yoho-migrate-coolify` (full Coolify playbook: inventory, secrets, shared Server, cutover, tunnel): https://raw.githubusercontent.com/yoho-build/yoho/main/skills/yoho-migrate-coolify/SKILL.md
 - Skill `yoho-team-access` (share one App with teammates and CI through the Gate: operator setup, Member use, CI keys, Cloudflare Tunnel, Gate refusals): https://raw.githubusercontent.com/yoho-build/yoho/main/skills/yoho-team-access/SKILL.md
+- Skill `yoho-offsite-backup` (encrypted off-Server Backups with rclone: OneDrive/Google Drive/S3 remotes, 7z or zip with a password, `rclone_config_secret`, expired-token reconnect, restore without Yoho): https://raw.githubusercontent.com/yoho-build/yoho/main/skills/yoho-offsite-backup/SKILL.md
 - `references/migrate-dokploy.md`: https://raw.githubusercontent.com/yoho-build/yoho/main/skills/yoho/references/migrate-dokploy.md
 - `references/migrate-ansible.md`: https://raw.githubusercontent.com/yoho-build/yoho/main/skills/yoho/references/migrate-ansible.md

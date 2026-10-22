@@ -24,6 +24,7 @@ import (
 	"github.com/yoho-build/yoho/internal/config"
 	"github.com/yoho-build/yoho/internal/release"
 	"github.com/yoho-build/yoho/internal/remote"
+	"github.com/yoho-build/yoho/internal/secrets"
 )
 
 // Helper images. Pinned so Backups are reproducible; override in tests or
@@ -64,11 +65,15 @@ type RunOptions struct {
 	// unencrypted-target warning uses it. Empty falls back to the repository.
 	TargetName string
 	// Resolved Target.EnvSecrets values (name -> value).
-	TargetEnv   map[string]string
-	Host        remote.Host
-	Out         io.Writer
-	Lock        LockFunc
-	YohoVersion string
+	TargetEnv map[string]string
+	// Resolved Target.RcloneConfigSecret value. Set: seed the persistent
+	// rclone config when it changed. Empty (Scheduled Jobs): use the seeded
+	// file as rclone left it.
+	RcloneConfig string
+	Host         remote.Host
+	Out          io.Writer
+	Lock         LockFunc
+	YohoVersion  string
 	// Now is overridable for tests.
 	Now func() time.Time
 	// Runtime is "compose" (default) or "swarm". On swarm, the Service's
@@ -128,6 +133,14 @@ var (
 // directory is always removed and paused containers are always unpaused,
 // also on error or cancellation.
 func Run(ctx context.Context, o RunOptions) (res *Result, err error) {
+	values := secrets.RcloneConfigValues(o.RcloneConfig)
+	defer func() { err = secrets.RedactError(err, values...) }()
+	if o.Out != nil {
+		r := secrets.NewRedactor(o.Out, values...)
+		defer r.Flush()
+		o.Out = r
+	}
+
 	if err := o.validate(); err != nil {
 		return nil, err
 	}
@@ -152,6 +165,10 @@ func Run(ctx context.Context, o RunOptions) (res *Result, err error) {
 				err = fmt.Errorf("unlock: %w", uerr)
 			}
 		}()
+	}
+
+	if err := t.prepareRclone(ctx, o.Host, o.RcloneConfig, start); err != nil {
+		return nil, err
 	}
 
 	ts := start.UTC().Format(tsLayout)

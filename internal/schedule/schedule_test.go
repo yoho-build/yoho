@@ -384,3 +384,42 @@ func TestInstallRefusesUnitOfAnotherApp(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestScheduledRcloneConfigUsesPersistentFile(t *testing.T) {
+	j := testJob()
+	j.Target = config.BackupTarget{Type: "archive", Format: "7z", Repository: "od:backups/shop", PasswordSecret: "BACKUP_PASSWORD", RcloneConfigSecret: "RCLONE_CONF"}
+	j.Secrets = map[string]string{"BACKUP_PASSWORD": pw}
+	j.SecretFingerprints = map[string]string{"RCLONE_CONF": "fp-rclone"}
+	s, err := NewSpec(j)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := s.SecretFiles["RCLONE_CONF"]; ok {
+		t.Fatal("rclone config must not be a job secret file")
+	}
+	if s.SecretFingerprints["RCLONE_CONF"] != "fp-rclone" {
+		t.Fatalf("rclone fingerprint not kept: %v", s.SecretFingerprints)
+	}
+	sp := filepath.Join(t.TempDir(), "job.json")
+	b, _ := json.Marshal(s)
+	if err := os.WriteFile(sp, b, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	h := &fakeHost{files: map[string][]byte{s.SecretFiles["BACKUP_PASSWORD"]: []byte(pw), "/var/lib/yoho/backups/shop/production/.rclone/RCLONE_CONF/rclone.conf": []byte("[od]\ntype = onedrive\n")}}
+	h.respond = func(sc string) (string, error) {
+		if strings.Contains(sc, " ps -q") {
+			return "", errors.New("stop here")
+		}
+		return "", nil
+	}
+	_ = RunJob(context.Background(), sp, RunJobOptions{Host: h})
+	conf := "/var/lib/yoho/backups/shop/production/.rclone/RCLONE_CONF/rclone.conf"
+	if !strings.Contains(h.scripts(), "yoho_secret '"+conf+"'") {
+		t.Fatalf("scheduled run does not use the persistent rclone config:\n%s", h.scripts())
+	}
+	for p := range h.files {
+		if strings.Contains(p, "/.rclone/") && p != conf {
+			t.Fatalf("scheduled run wrote %s", p)
+		}
+	}
+}

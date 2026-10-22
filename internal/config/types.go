@@ -303,6 +303,11 @@ type BackupTarget struct {
 	PasswordSecret string `json:"password_secret,omitempty"`
 	// Secret keys exported as env for the target (AWS_ACCESS_KEY_ID, B2_ACCOUNT_KEY, RCLONE_CONFIG_*...).
 	EnvSecrets []string `json:"env_secrets,omitempty"`
+	// Secret key holding rclone.conf section(s) for an rclone remote (OAuth
+	// remotes such as OneDrive or Google Drive). Seeded once to a private file
+	// on the Server that rclone keeps refreshing tokens in; re-seeded only when
+	// the secret changes. Archive rclone remote:path or restic rclone: only.
+	RcloneConfigSecret string `json:"rclone_config_secret,omitempty"`
 	// Retention: keep last N (archive) or restic forget --keep-last N.
 	KeepLast int `json:"keep_last,omitempty"`
 }
