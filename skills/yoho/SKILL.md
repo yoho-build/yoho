@@ -92,6 +92,7 @@ yoho schema [--ext]               # JSON Schema
 yoho builder status | setup [-y]  # local Builder (Apple container on Apple silicon)
 yoho secrets list                 # keys, sources, lengths (no values)
 yoho secrets print KEY --reveal   # TTY only
+yoho secrets rotate [SERVICE...] [--dry-run]  # re-resolve, restart only changed Services, record a Release
 yoho setup [--plan] [-y] [--containerd-image-store]   # provision Servers (interactive)
 yoho plan [--version V] [--detailed-exitcode]   # read-only diff; exit 2 = changes
 yoho apply [--auto-approve] [--skip-build] [--version V]   # plan, confirm, deploy
@@ -117,7 +118,7 @@ Global flags: `-c/--config`, `-d/--destination` (default `$YOHO_DESTINATION`, th
 - Never run `docker compose down -v` or remove volumes on a Server; Yoho never does. Stateful Services are pinned and never duplicated.
 - Never run `docker buildx history` (any subcommand, including `ls`) on a Server. On Docker 28.x after a build-cache prune it can panic in BuildKit (`llbsolver.filterHistoryEvents`), crash `dockerd` and stop every container on the Server; only workloads under a separate supervisor come back on their own. Inspect with `yoho app ps`, `yoho app logs SERVICE -n N`, `docker ps` and `docker logs`.
 - Never put secrets in compose `${VAR}` interpolation, in `environment:` values, in argv, or in the repo; `yoho config check` rejects `${VAR}` secrets. Declare them in `x-yoho.secrets` and keep values in `.yoho/secrets` refs (`$(op read ...)`) or `secrets.values`.
-- Do not print secret values; use `yoho secrets list`. `secrets print` needs `--reveal` and a terminal.
+- Do not print secret values; use `yoho secrets list`. `secrets print` needs `--reveal` and a terminal. After changing a value in the password manager, `yoho secrets rotate` restarts only the Services that changed (zero downtime through the Proxy; Stateful Services follow their normal rules) and records a Release so `yoho rollback` works. `--dry-run` lists names only.
 - Rollback does not revert volumes or migrations. Take a `yoho backup run` before risky releases.
 - Run `yoho config check` and `yoho plan` before `yoho deploy`; deploy to staging first when a Destination exists.
 - `backup check` is read-only to the target/App data and never initializes or restores. Restic checks repository structure (`--read-data` adds all packs); archive checks one owned Backup (`--id`, default latest), its manifest/files and nested volume archives in private staging. It does not prove dump loading or App recovery. Coordinate external/shared-repository writers: only this Destination's Yoho lock is held, restic uses `--no-lock --no-cache`.

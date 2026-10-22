@@ -46,7 +46,7 @@ Destination overlays can replace the list when contracts differ.
 `deploy`, `apply`, and `plan` check resolved values before connecting to any
 Server or running the pre-connect Hook. Any other command that resolves local
 secrets checks the entire list too, including Backup Target credentials, managed
-`tunnel up`, `secrets list`/`print`, and credential-bearing `schedule install`.
+`tunnel up`, `secrets list`/`print`/`rotate`, and credential-bearing `schedule install`.
 `config check` also resolves local secrets **only when this list is nonempty**;
 without it, config inspection still runs no secret commands. This opt-in uses the
 full existing resolution pipeline, not just listed keys: all applicable providers
@@ -81,6 +81,18 @@ credentials; current local declarations are not retroactively enforced on them.
 Reinstall/apply checks newly resolved credentials, but this declaration does not
 rotate secrets, alter empty values, or repair credentials automatically.
 
+## Rotating values
+
+Change the value in 1Password, Bitwarden, or `.yoho/secrets`, then:
+
+```sh
+yoho secrets rotate              # every Service whose values changed
+yoho secrets rotate web          # only named Services
+yoho secrets rotate --dry-run    # list what would restart; change nothing
+```
+
+Yoho re-resolves secrets on your machine, writes a new generation, and restarts only the Services whose values changed: proxied Services through the Proxy (zero downtime), Stateful Services stop-first. Images are not rebuilt. A Release is recorded so `yoho rollback` works. Output names Services, never values. With scoped access, the operator also runs `yoho access secrets push` so Members pick up the new generation.
+
 ## Giving a Service its secrets
 
 ```yaml
@@ -99,5 +111,6 @@ Each Service receives only what it declares. Apps read files via the `*_FILE` co
 - Provider failures are classified without showing provider output: `secrets_approval_timeout` (the approval prompt of `op`, `bw` or `bws` went unanswered or was denied, or a `command` provider exited 75), `secrets_not_signed_in`, `secrets_item_not_found`. The `--json` `step_fail` event carries the `code` and a distinct `hint`; other failures keep the redacted command error.
 - A provider call that runs longer than 3 s prints "waiting for secrets provider approval…" (`step_wait` in `--json`). On a terminal Yoho reruns an approval timeout once; set `--secrets-retries N` or `YOHO_SECRETS_RETRIES` to change it (default 0 without a terminal). The first provider value is read alone, so one approval covers the rest.
 - `yoho secrets list` shows keys, sources, and lengths. `yoho secrets print KEY --reveal` works only on a terminal.
+- `yoho secrets rotate [service...]` re-resolves values from the provider with no rebuild and no code change, shows which Services changed (names only), and does a zero-downtime rolling restart of only those Services. Stateful Services follow their normal stop-first rules. A Release is recorded so `yoho rollback` works. `--dry-run` lists what would restart.
 - Build-time secrets: list keys in `builder.secrets` and use `RUN --mount=type=secret`.
 - Server-side jobs (Scheduled Backups) read stored files, not your password manager.

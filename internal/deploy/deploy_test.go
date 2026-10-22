@@ -419,3 +419,45 @@ func TestProxyHealthProbeSavedRollback(t *testing.T) {
 		}
 	}
 }
+
+func TestDeployRestartOnlyAffectedServices(t *testing.T) {
+	withRoot(t)
+	ctx := context.Background()
+	h := &dockerHost{local: &remote.Local{}, respond: respond(nil)}
+	var out bytes.Buffer
+	d := testDeploy(t, h, &out)
+	if _, err := (Compose{}).Deploy(ctx, d); err != nil {
+		t.Fatalf("first deploy: %v\n%s", err, out.String())
+	}
+	rotated := "rotated-secret-value-ABC"
+	d.ServiceSecrets["web"]["SECRET_KEY_BASE"] = rotated
+	d.Restart = []string{"web"}
+	h.scripts = nil
+	out.Reset()
+	rel, err := Compose{}.Deploy(ctx, d)
+	if err != nil {
+		t.Fatalf("rotate deploy: %v\n%s\n%s", err, out.String(), h.all())
+	}
+	if rel.Status != "deployed" || rel.SecretsGeneration == "" {
+		t.Fatalf("release %+v", rel)
+	}
+	second := h.all()
+	if !strings.Contains(second, "'--scale' 'web=2' 'web'") {
+		t.Fatalf("web not restarted:\n%s", second)
+	}
+	for _, leaked := range []string{
+		"'up' '-d' '--no-deps' 'cloudflared' 'db'",
+		"'up' '-d' '--no-recreate' 'db'",
+		"db:migrate",
+		"'up' '-d' '--no-deps' 'cloudflared'",
+		"'up' '-d' '--no-deps' 'db'",
+	} {
+		if strings.Contains(second, leaked) {
+			t.Fatalf("unaffected Service or release command ran (%s):\n%s", leaked, second)
+		}
+	}
+	progress := out.String()
+	if strings.Contains(progress, rotated) || strings.Contains(progress, webSecret) || strings.Contains(progress, tunnelSecret) {
+		t.Fatalf("secret value in output:\n%s", progress)
+	}
+}

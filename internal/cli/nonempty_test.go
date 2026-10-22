@@ -59,6 +59,9 @@ func runNonemptyCommand(t *testing.T, g *globals, name string) (string, error) {
 	case "secrets list":
 		c = secretsCmd(g)
 		args = []string{"list"}
+	case "secrets rotate":
+		c = secretsCmd(g)
+		args = []string{"rotate"}
 	case "tunnel up":
 		c = tunnelCmd(g)
 		args = []string{"up"}
@@ -94,7 +97,7 @@ func TestNonemptyFailsBeforeConnectionAndHooks(t *testing.T) {
 	encoded := base64.StdEncoding.EncodeToString([]byte(leaked))
 	for _, runtime := range []string{"compose", "swarm"} {
 		for _, state := range []string{"missing", "empty", "provider-empty", "provider-error", "generated"} {
-			for _, command := range []string{"deploy", "apply", "plan", "config check", "secrets list", "tunnel up", "backup run", "backup list", "backup check", "schedule install"} {
+			for _, command := range []string{"deploy", "apply", "plan", "config check", "secrets list", "secrets rotate", "tunnel up", "backup run", "backup list", "backup check", "schedule install"} {
 				t.Run(runtime+"/"+state+"/"+command, func(t *testing.T) {
 					src := "services:\n  web:\n    image: nginx\n    volumes: [data:/data]\n    x-yoho:\n      stateful: true\n      secrets: {ALIAS: KEY}\n      backup: {volumes: [data]}\nvolumes: {data: {}}\n"
 					if state == "missing" {
@@ -230,7 +233,7 @@ func TestNonemptyCommandFailureDiagnosticsAndFullConfigCheckScope(t *testing.T) 
 	variants := []string{secret, base64.StdEncoding.EncodeToString([]byte(secret)), url.QueryEscape(secret), strconv.Quote(secret)}
 	diagnostics := strings.Join(variants, " | ")
 	for _, mode := range []string{"shared provider", "unrelated provider", "unrelated file command", "generated"} {
-		for _, command := range []string{"config check", "secrets list", "plan", "apply"} {
+		for _, command := range []string{"config check", "secrets list", "secrets rotate", "plan", "apply"} {
 			t.Run(mode+"/"+command, func(t *testing.T) {
 				marker := filepath.Join(t.TempDir(), "provider-called")
 				provider := filepath.Join(t.TempDir(), "fake-provider")

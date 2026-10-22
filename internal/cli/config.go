@@ -88,7 +88,7 @@ func schemaCmd(g *globals) *cobra.Command {
 }
 
 func secretsCmd(g *globals) *cobra.Command {
-	c := &cobra.Command{Use: "secrets", Short: "Inspect secrets (values are never printed unless revealed on a terminal)"}
+	c := &cobra.Command{Use: "secrets", Short: "Inspect or rotate secrets (values are never printed unless revealed on a terminal)"}
 	c.AddCommand(&cobra.Command{
 		Use:   "list",
 		Short: "Resolve secrets and list keys, sources and lengths",
@@ -134,6 +134,7 @@ func secretsCmd(g *globals) *cobra.Command {
 	}
 	p.Flags().BoolVar(&reveal, "reveal", false, "Confirm printing values")
 	c.AddCommand(p)
+	c.AddCommand(secretsRotateCmd(g))
 	return c
 }
 

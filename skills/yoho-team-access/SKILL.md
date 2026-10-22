@@ -37,7 +37,7 @@ yoho access key add alice alice.pub -d production
 yoho access ls -d production
 ```
 
-- Rerun `access secrets push` after rotating or adding a secret, or adding a Proxy hostname.
+- After `yoho secrets rotate` (or adding a secret or Proxy hostname), rerun `access secrets push` so Members pick up the new generation.
 - Rerun `access install` after upgrading Yoho; the Gate and Member CLIs must speak the same protocol.
 - Limits (ports, memory, CPU, replicas, upload size, registries pulled with the Server's login) live in `<root>/apps/<app>/<dest>/access/settings.json` under `limits`; edit as root. `secrets push` keeps them.
 - Revoke: `yoho access rm alice` (verbs) and `yoho access key rm alice` (keys); effective on the next connection.
