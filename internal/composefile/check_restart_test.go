@@ -42,14 +42,21 @@ func TestRestartPolicyFinding(t *testing.T) {
     restart: unless-stopped
     depends_on:
       migrate: {condition: service_completed_successfully}
+  db: {image: a}
+  idle:
+    image: a
+    restart: unless-stopped
+    deploy: {replicas: 0}
+    depends_on:
+      db: {condition: service_completed_successfully}
 `
 	got := restartFindings(t, "compose", svcs)
-	for _, name := range []string{"unset", "no"} {
+	for _, name := range []string{"unset", "no", "db"} {
 		if !got[name] {
 			t.Errorf("%s: want restart warning", name)
 		}
 	}
-	for _, name := range []string{"always", "unless", "onfail", "deployed", "migrate", "prof", "app"} {
+	for _, name := range []string{"always", "unless", "onfail", "deployed", "migrate", "prof", "app", "idle"} {
 		if got[name] {
 			t.Errorf("%s: unexpected restart warning", name)
 		}

@@ -257,7 +257,12 @@ func runConfigCheck(cmd *cobra.Command, g *globals, offline bool) error {
 	r, err := a.compose(cmd.Context())
 	if err != nil {
 		errCount = 1
-		return fail(exitLoad, err, "fix the compose file, then run `yoho config check` again")
+		code := exitLoad
+		var extErr *composefile.ExtError
+		if errors.As(err, &extErr) {
+			code = exitFindings
+		}
+		return fail(code, err, "fix the compose file, then run `yoho config check` again")
 	}
 	services = len(r.Project.Services)
 	keys, err := a.secretKeys(r)

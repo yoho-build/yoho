@@ -206,10 +206,14 @@ func Check(r *Result, runtime string, secretKeys []string) []Finding {
 
 // completionJobs returns the Services another Service waits on with
 // condition service_completed_successfully: one-shot jobs that are meant to
-// exit, so a restart policy does not apply.
+// exit, so a restart policy does not apply. As in deploy's compile, only a
+// dependent that runs (scale > 0) makes its dependency a job.
 func completionJobs(p *types.Project) map[string]bool {
 	jobs := map[string]bool{}
 	for _, svc := range p.Services {
+		if svc.GetScale() <= 0 {
+			continue
+		}
 		for dep, d := range svc.DependsOn {
 			if d.Condition == types.ServiceConditionCompletedSuccessfully {
 				jobs[dep] = true

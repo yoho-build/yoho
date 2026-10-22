@@ -87,12 +87,22 @@ func Load(ctx context.Context, dir string, files []string, env map[string]string
 		}
 		e, err := config.DecodeServiceExt(raw)
 		if err != nil {
-			return nil, fmt.Errorf("service %q: x-yoho: %w", name, err)
+			return nil, &ExtError{Service: name, Err: err}
 		}
 		res.Ext[name] = e
 	}
 	return res, nil
 }
+
+// ExtError is an invalid x-yoho block in a compose file that otherwise
+// loaded: an error in the checked files, not a load failure.
+type ExtError struct {
+	Service string
+	Err     error
+}
+
+func (e *ExtError) Error() string { return fmt.Sprintf("service %q: x-yoho: %v", e.Service, e.Err) }
+func (e *ExtError) Unwrap() error { return e.Err }
 
 // ServiceNames returns the sorted names of the active Services (the ones Yoho
 // deploys; profile-disabled Services are excluded) from the same files,
@@ -247,7 +257,7 @@ func LoadResolved(ctx context.Context, content []byte, workingDir, projectName s
 		}
 		e, err := config.DecodeServiceExt(raw)
 		if err != nil {
-			return nil, fmt.Errorf("service %q: x-yoho: %w", name, err)
+			return nil, &ExtError{Service: name, Err: err}
 		}
 		res.Ext[name] = e
 	}

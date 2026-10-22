@@ -136,6 +136,15 @@ func TestConfigCheckExitCodes(t *testing.T) {
 	if e := checkEvent(t, out); e["ok"] != false || e["errors"] != float64(1) {
 		t.Errorf("check event: %v", e)
 	}
+	// Invalid x-yoho block in a compose file that loaded: exit 1.
+	p = appDir(t, "compose", "services:\n  web: {image: nginx, x-yoho: {bogus: 1}}\n")
+	out, err = runCheck(t, p, "--offline")
+	if exitCodeOf(err) != 1 || !strings.Contains(out, "x-yoho") {
+		t.Fatalf("bad x-yoho: want exit 1, got %d:\n%s", exitCodeOf(err), out)
+	}
+	if e := checkEvent(t, out); e["ok"] != false || e["errors"] != float64(1) {
+		t.Errorf("check event: %v", e)
+	}
 	// Malformed Yoho file: load error, exit 2.
 	if err := os.WriteFile(p, []byte("app: [unterminated\n"), 0o644); err != nil {
 		t.Fatal(err)
