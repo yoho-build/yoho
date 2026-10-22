@@ -14,7 +14,7 @@ Always run `yoho config check` after editing config. It warns when a Service's `
 Follow in order. Ask before installing anything, editing files, or running any command against a Server. Never use sudo.
 
 1. Ask what the user wants: new deploy, migrate from Kamal/Coolify/Dokploy/Ansible (read the matching migrate reference), or operate an existing App. Ask for the target Server (`ssh user@host`) and confirm before any remote command.
-2. Run `yoho version`. If missing, ask, then install with `curl -fsSL https://yohobuild.com/install.sh | sh` (fallback `curl -fsSL https://raw.githubusercontent.com/yoho-build/yoho/main/scripts/install.sh | sh`) or `go install github.com/yoho-build/yoho/cmd/yoho@latest`.
+3. Offer `yoho skill install` so this skill persists in the project. Once `yoho.yml` exists, `yoho skill install --project --only yoho` adds a generated `yoho-deploy-<app>` skill for this repo.
 3. Offer `yoho skill install` so this skill persists in the project.
 4. Run `yoho init`. Edit `yoho.yml` and `x-yoho` in `compose.yaml` using the config reference. Secrets only as refs in `.yoho/secrets`; never write values into the repo.
 5. Run `yoho config check` and fix what it reports.
@@ -107,7 +107,7 @@ yoho backup pull [JOB] [--to DIR] [--limit N]   # mirror archive-target files to
 yoho backup check [JOB] [--id ID | --read-data]   # integrity only, not restore proof
 yoho schedule install [JOB...] [--binary PATH] | status [--max-age 48h] | remove [JOB...]
 yoho swarm init [-y] | join [-y] | status
-yoho skill install [--dir DIR] [--agent claude|codex|all] [--only A,B | --exclude A,B] [--no-migrate-refs] | list | print [SKILL]
+yoho skill install [--dir DIR] [--agent claude|codex|all] [--only A,B | --exclude A,B] [--no-migrate-refs] [--project [--force]] | list | print [SKILL]
 ```
 
 Global flags: `-c/--config`, `-d/--destination` (default `$YOHO_DESTINATION`, then `production`, then the only Destination), `--json`, `-v/--verbose`. Check `yoho <cmd> --help` for all flags. `apply` refuses without a terminal unless `--auto-approve`; `--json` requires it. Agents: never use `app logs -f` or live `app stats`; use `yoho app logs SERVICE -n N`, `yoho app stats --no-stream`, or `yoho --json app stats` (one JSON object per container).

@@ -153,16 +153,26 @@ func (g *globals) loadOperator(cmd *cobra.Command) (*app, error) {
 	return a, nil
 }
 
+// yohoFile returns --config, else the Yoho file in the working directory.
+func (g *globals) yohoFile() (string, error) {
+	if g.configPath != "" {
+		return g.configPath, nil
+	}
+	wd, err := os.Getwd()
+	if err != nil {
+		return "", err
+	}
+	path, err := config.Find(wd)
+	if err != nil {
+		return "", fmt.Errorf("%w\nhint: run `yoho init` to create a Yoho file", err)
+	}
+	return path, nil
+}
+
 func (g *globals) loadApp(cmd *cobra.Command) (*app, error) {
-	path := g.configPath
-	if path == "" {
-		wd, err := os.Getwd()
-		if err != nil {
-			return nil, err
-		}
-		if path, err = config.Find(wd); err != nil {
-			return nil, fmt.Errorf("%w\nhint: run `yoho init` to create a Yoho file", err)
-		}
+	path, err := g.yohoFile()
+	if err != nil {
+		return nil, err
 	}
 	selected := g.destination
 	if selected == "" {

@@ -265,9 +265,13 @@ func TestYohoSkillWarnsAgainstBuildxHistory(t *testing.T) {
 
 // Yoho must never run `docker buildx history` on a Server: on Docker 28.x it
 // can crash dockerd. Guard the Go sources and embedded scripts under internal/.
+// testdata holds generated skill text, which warns against it like skills/.
 func TestNoBuildxHistoryInSources(t *testing.T) {
 	needle := "buildx" + " history"
 	err := filepath.WalkDir(filepath.Join("..", "..", "internal"), func(p string, d os.DirEntry, err error) error {
+		if err == nil && d.IsDir() && d.Name() == "testdata" {
+			return filepath.SkipDir
+		}
 		if err != nil || d.IsDir() || strings.HasSuffix(p, "_test.go") {
 			return err
 		}
