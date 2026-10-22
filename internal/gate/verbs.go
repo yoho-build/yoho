@@ -306,6 +306,9 @@ type DeployArgs struct {
 	Pull []string `json:"pull,omitempty"`
 	// Performer as the CLI sees it (user@host), recorded next to the Member.
 	Performer string `json:"performer,omitempty"`
+	// Attach reconnects to a rollout of Version (running or just finished)
+	// instead of starting a new one.
+	Attach bool `json:"attach,omitempty"`
 }
 
 func deployVerb(ctx context.Context, c *call) (any, error) {
@@ -321,6 +324,11 @@ func deployVerb(ctx context.Context, c *call) (any, error) {
 	for _, svc := range a.Built {
 		if !serviceRe.MatchString(svc) {
 			return nil, invalid(fmt.Sprintf("invalid Service name %q", svc))
+		}
+	}
+	if !c.o.RolloutWorker {
+		if res, err, ok := c.maybeAttach(ctx, VerbDeploy, a.Version, a.Attach); ok {
+			return res, err
 		}
 	}
 	s, err := c.settings()
@@ -369,6 +377,17 @@ func deployVerb(ctx context.Context, c *call) (any, error) {
 		}
 	}
 
+	if !c.o.RolloutWorker {
+		if err := c.startRollout(VerbDeploy, a.Version, a); err != nil {
+			return nil, err
+		}
+		return c.attachRollout(ctx)
+	}
+	return c.finishDeploy(ctx, s, r, a)
+}
+
+// finishDeploy is the detached worker: secrets, compose rollout, vetted record.
+func (c *call) finishDeploy(ctx context.Context, s *Settings, r *composefile.Result, a DeployArgs) (any, error) {
 	svcSecrets, gen, err := storedSecrets(c.req.App, c.req.Destination, r.Ext)
 	if err != nil {
 		return nil, err
@@ -389,7 +408,7 @@ func deployVerb(ctx context.Context, c *call) (any, error) {
 		ServiceSecrets: svcSecrets, Registry: s.Registry, Proxy: s.Proxy, RetainReleases: s.RetainReleases, Out: out,
 		Scoped: c.scoped(nil),
 	}
-	rel, err := deploy.Compose{}.Deploy(ctx, d)
+	rel, err := composeDeploy(ctx, d)
 	if err != nil {
 		return nil, secrets.RedactError(lockedError(err), values...)
 	}
@@ -398,6 +417,15 @@ func deployVerb(ctx context.Context, c *call) (any, error) {
 	}
 	rel.Secrets = nil
 	return rel, nil
+}
+
+// composeDeploy is deploy.Compose.Deploy; tests replace it to drop the client mid-rollout.
+var composeDeploy = func(ctx context.Context, d *plan.Deploy) (*release.Release, error) {
+	return deploy.Compose{}.Deploy(ctx, d)
+}
+
+var composeRollback = func(ctx context.Context, d *plan.Deploy, version string) (*release.Release, error) {
+	return deploy.Compose{}.Rollback(ctx, d, version)
 }
 
 // vet loads a Member's resolved compose project and checks it against the
@@ -683,6 +711,8 @@ func accessGeneration(app, dest string) (string, error) {
 type RollbackArgs struct {
 	Version   string `json:"version"`
 	Performer string `json:"performer,omitempty"`
+	// Attach reconnects to a rollback of Version instead of starting a new one.
+	Attach bool `json:"attach,omitempty"`
 }
 
 func rollbackVerb(ctx context.Context, c *call) (any, error) {
@@ -707,6 +737,15 @@ func rollbackVerb(ctx context.Context, c *call) (any, error) {
 		return nil, err
 	}
 	c.audit["version"] = version
+	if !c.o.RolloutWorker {
+		if res, err, ok := c.maybeAttach(ctx, VerbRollback, version, a.Attach); ok {
+			return res, err
+		}
+		if err := c.startRollout(VerbRollback, version, a); err != nil {
+			return nil, err
+		}
+		return c.attachRollout(ctx)
+	}
 	c.clearStaleLock()
 	d := &plan.Deploy{
 		App: c.req.App, Destination: c.req.Destination, Performer: c.performer(a.Performer),
@@ -714,7 +753,7 @@ func rollbackVerb(ctx context.Context, c *call) (any, error) {
 		RetainReleases: s.RetainReleases, Out: c.fw,
 		Scoped: c.scoped(func(compose []byte, rel *release.Release) error { return c.vetRollback(ctx, s, version, compose, rel) }),
 	}
-	rel, err := deploy.Compose{}.Rollback(ctx, d, version)
+	rel, err := composeRollback(ctx, d, version)
 	if err != nil {
 		return nil, lockedError(err)
 	}

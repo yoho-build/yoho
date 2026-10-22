@@ -119,6 +119,53 @@ func (a *app) gateFail(err error) error {
 	return a.fail(err)
 }
 
+// gateAttachAttempts / gateAttachDelay bound reconnects after a dropped
+// SSH session (the tunnel may still be coming back). Tests shrink them.
+var (
+	gateAttachAttempts = 8
+	gateAttachDelay    = 2 * time.Second
+)
+
+// gateCallOrAttach runs verb, and if the SSH session drops mid-rollout
+// reconnects with attach so the client reads the worker's outcome.
+func (a *app) gateCallOrAttach(ctx context.Context, g *remote.Gate, verb string, args any, payload io.Reader, out io.Writer, result any) error {
+	err := g.Call(ctx, verb, args, payload, out, result)
+	if !remote.IsDisconnect(err) {
+		return err
+	}
+	a.ui.Warn("SSH session dropped; waiting for the rollout on the Server")
+	switch x := args.(type) {
+	case gate.DeployArgs:
+		x.Attach, x.Archive = true, false
+		args = x
+	case gate.RollbackArgs:
+		x.Attach = true
+		args = x
+	}
+	var last error = err
+	for i := 0; i < gateAttachAttempts; i++ {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(gateAttachDelay):
+		}
+		g2, _, herr := a.hello(ctx, verb)
+		if herr != nil {
+			last = herr
+			continue
+		}
+		last = g2.Call(ctx, verb, args, nil, out, result)
+		g2.Close()
+		if last == nil || !remote.IsDisconnect(last) {
+			return last
+		}
+	}
+	if last == nil {
+		last = err
+	}
+	return last
+}
+
 // gateHint is the step hint when the Gate cannot be reached.
 func (a *app) gateHint(target string) string {
 	h := "check that `ssh " + target + "` reaches the Gate: the operator runs `yoho access install` and `yoho access key add` with your public key"
@@ -203,6 +250,7 @@ func (a *app) scopedDeploy(ctx context.Context, ver string, skipBuild bool) (err
 		}
 	}
 	findings := composefile.Check(r, "compose", keys)
+	findings = append(findings, composefile.CheckCloudflareSSH(a.destName, a.dest, r.Project)...)
 	for _, f := range findings {
 		u.Finding(f.Level, f.Service, f.Message)
 	}
@@ -267,7 +315,7 @@ func (a *app) scopedDeploy(ctx context.Context, ver string, skipBuild bool) (err
 	}
 	step = u.Step(g.Name(), "Deploy %s through the Gate", shortVersion(ver))
 	var rel release.Release
-	if err := g.Call(ctx, gate.VerbDeploy, args, payload, step.Output(), &rel); err != nil {
+	if err := a.gateCallOrAttach(ctx, g, gate.VerbDeploy, args, payload, step.Output(), &rel); err != nil {
 		var ge *remote.GateError
 		hint := "see `yoho app ps` and `yoho releases`"
 		if errors.As(err, &ge) && ge.Hint != "" {
@@ -393,7 +441,7 @@ func (a *app) scopedRollback(ctx context.Context, v string) error {
 	a.ui.Warn("volumes and database migrations are not reverted")
 	step := a.ui.Step(g.Name(), "Redeploy %s", shortVersion(target))
 	var rel release.Release
-	if err := g.Call(ctx, gate.VerbRollback, gate.RollbackArgs{Version: target, Performer: performer()}, nil, step.Output(), &rel); err != nil {
+	if err := a.gateCallOrAttach(ctx, g, gate.VerbRollback, gate.RollbackArgs{Version: target, Performer: performer()}, nil, step.Output(), &rel); err != nil {
 		step.Fail(err, hintFor(err, "see `yoho releases`"))
 		a.ui.Finished(err, "")
 		return &silentError{err}

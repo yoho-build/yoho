@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/signal"
 	"path"
+	"strings"
 	"syscall"
 
 	"github.com/spf13/cobra"
@@ -33,7 +34,7 @@ type GateConfig struct {
 // through sudo, so it is root; it reads one request on stdin and exits.
 // SSH_ORIGINAL_COMMAND is ignored: the request names the verb.
 func gateCmd(_ *globals) *cobra.Command {
-	var member, key, root string
+	var member, key, root, rollout string
 	c := &cobra.Command{
 		Use:    "gate --member NAME",
 		Short:  "Serve one scoped-access request on stdin (run by sshd for Members)",
@@ -48,9 +49,18 @@ func gateCmd(_ *globals) *cobra.Command {
 				return err
 			}
 			release.Root = r
-			code := gate.Serve(cmd.Context(), gate.Options{
-				Member: member, Key: key, Version: Version, In: os.Stdin, Out: os.Stdout,
-			})
+			gate.StartRolloutWorker = gate.StartDetachedProcess
+			opts := gate.Options{Member: member, Key: key, Version: Version, In: os.Stdin, Out: os.Stdout}
+			var code int
+			if rollout != "" {
+				app, dest, ok := strings.Cut(rollout, "/")
+				if !ok || gate.ValidAppDest(app, dest) != nil {
+					return fmt.Errorf("rollout %q must be app/destination", rollout)
+				}
+				code = gate.RunWorker(cmd.Context(), opts, app, dest)
+			} else {
+				code = gate.Serve(cmd.Context(), opts)
+			}
 			if code != 0 {
 				exitFunc(code)
 			}
@@ -59,6 +69,8 @@ func gateCmd(_ *globals) *cobra.Command {
 	}
 	c.Flags().StringVar(&member, "member", "", "Member this key belongs to")
 	c.Flags().StringVar(&key, "key", "", "Fingerprint of the key, for the audit log")
+	c.Flags().StringVar(&rollout, "rollout", "", "app/destination of a detached deploy or rollback")
+	c.Flags().MarkHidden("rollout")
 	// Older forced commands passed --root; the root now comes only from
 	// GateConfigPath, so the flag is accepted and ignored.
 	c.Flags().StringVar(&root, "root", "", "ignored (see "+GateConfigPath+")")

@@ -45,3 +45,5 @@ A remotely managed tunnel can also carry SSH to the Server, for Servers without 
 ## Alternative: your own cloudflared Service
 
 See `examples/basic`: a `cloudflared` Service in compose joined to the `yoho` network, with `secrets: [TUNNEL_TOKEN]` and `secrets_as_env: true`.
+
+Do not send deploy SSH through that same Service. A Destination with `ssh: {via: cloudflare, hostname: …}` whose hostname is routed by a `cloudflared` in this App will drop the session (exit 255) when the rollout restarts the connector. Gate rollouts still finish on the Server and record the real Release status; `yoho deploy` reconnects, or `yoho releases` shows the outcome. `yoho config check` and `yoho plan` warn. Prefer a dedicated SSH tunnel outside the App (the managed `yoho-tunnel` connector, or a cloudflared that is not a Service of this App).
