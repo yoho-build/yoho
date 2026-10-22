@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/base64"
 	"errors"
+	"fmt"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -475,5 +476,15 @@ func TestGenerate(t *testing.T) {
 	}
 	if Fingerprint([]byte("a"), "v") == Fingerprint([]byte("b"), "v") || len(Fingerprint(nil, "v")) != 16 {
 		t.Error("fingerprint")
+	}
+}
+
+func TestRcloneConfigDiagnosticFragments(t *testing.T) {
+	value := "[od]\n  client_secret = a-client-secret  \n token = {\"refresh_token\":\"a-refresh-token\"}\n"
+	for _, fragment := range []string{"client_secret = a-client-secret", `{"refresh_token":"a-refresh-token"}`, "a-refresh-token"} {
+		err := RedactError(fmt.Errorf("could not parse line: %s", fragment), RcloneConfigValues(value)...)
+		if strings.Contains(err.Error(), fragment) || !strings.Contains(err.Error(), "***") {
+			t.Fatalf("not redacted: %v", err)
+		}
 	}
 }

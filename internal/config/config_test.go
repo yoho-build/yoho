@@ -383,3 +383,18 @@ func TestValidateRcloneConfigSecret(t *testing.T) {
 		}
 	}
 }
+
+func TestRcloneWarningsAcrossDestinations(t *testing.T) {
+	c := &Config{Backups: BackupsConfig{
+		Targets: map[string]BackupTarget{"a": {RcloneConfigSecret: "RCLONE_CONF"}, "b": {RcloneConfigSecret: "RCLONE_CONF"}, "own": {RcloneConfigSecret: "OTHER_CONF"}},
+		Jobs:    map[string]BackupJob{"one": {Target: "a", Destination: "a"}, "two": {Target: "b", Destination: "b"}, "three": {Target: "a", Destination: "a"}, "four": {Target: "own", Destination: "c"}},
+	}}
+	warnings := RcloneWarnings(c)
+	if len(warnings) != 1 || warnings[0] != "rclone_config_secret RCLONE_CONF is used by Destinations a and b; OAuth remotes rotate refresh tokens, so give each Destination its own authorized remote/secret" {
+		t.Fatalf("warnings: %v", warnings)
+	}
+	delete(c.Backups.Jobs, "two")
+	if warnings := RcloneWarnings(c); len(warnings) != 0 {
+		t.Fatalf("same Destination warned: %v", warnings)
+	}
+}

@@ -405,7 +405,7 @@ func TestScheduledRcloneConfigUsesPersistentFile(t *testing.T) {
 	if err := os.WriteFile(sp, b, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	h := &fakeHost{files: map[string][]byte{s.SecretFiles["BACKUP_PASSWORD"]: []byte(pw)}}
+	h := &fakeHost{files: map[string][]byte{s.SecretFiles["BACKUP_PASSWORD"]: []byte(pw), "/var/lib/yoho/backups/shop/production/.rclone/RCLONE_CONF/rclone.conf": []byte("[od]\ntype = onedrive\n")}}
 	h.respond = func(sc string) (string, error) {
 		if strings.Contains(sc, " ps -q") {
 			return "", errors.New("stop here")
@@ -418,7 +418,7 @@ func TestScheduledRcloneConfigUsesPersistentFile(t *testing.T) {
 		t.Fatalf("scheduled run does not use the persistent rclone config:\n%s", h.scripts())
 	}
 	for p := range h.files {
-		if strings.Contains(p, "/.rclone/") {
+		if strings.Contains(p, "/.rclone/") && p != conf {
 			t.Fatalf("scheduled run wrote %s", p)
 		}
 	}

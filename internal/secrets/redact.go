@@ -51,19 +51,50 @@ func (s *Store) Redactor(w io.Writer) *Redactor {
 	return newRedactor(w, m)
 }
 
+// RcloneConfigValues includes config fragments rclone may echo in parse errors.
+// Short section names are omitted to keep ordinary diagnostics readable.
+func RcloneConfigValues(value string) []string {
+	values := []string{value}
+	for _, line := range strings.Split(value, "\n") {
+		line = strings.TrimSpace(line)
+		if len(line) >= 8 {
+			values = append(values, line)
+		}
+		key, v, ok := strings.Cut(line, "=")
+		if ok && strings.EqualFold(strings.TrimSpace(key), "token") {
+			v = strings.TrimSpace(v)
+			if len(v) >= 8 {
+				values = append(values, v)
+			}
+			var tokens map[string]json.RawMessage
+			if json.Unmarshal([]byte(v), &tokens) == nil {
+				for _, raw := range tokens {
+					var token string
+					if json.Unmarshal(raw, &token) == nil && len(token) >= 8 {
+						values = append(values, token)
+					}
+				}
+			}
+		}
+	}
+	return values
+}
+
 // NewDiagnosticRedactor also masks short values and individual nonempty lines
 // of multiline values. Docker's recent-log window can begin inside a secret.
 // Use only for bounded failure diagnostics, not ordinary progress output.
 func NewDiagnosticRedactor(w io.Writer, values ...string) *Redactor {
 	m := map[string]string{}
-	for _, v := range values {
-		if v == "" {
-			continue
-		}
-		m[v] = "***"
-		for _, line := range strings.Split(v, "\n") {
-			if line != "" {
-				m[line] = "***"
+	for _, value := range values {
+		for _, v := range RcloneConfigValues(value) {
+			if v == "" {
+				continue
+			}
+			m[v] = "***"
+			for _, line := range strings.Split(v, "\n") {
+				if line != "" {
+					m[line] = "***"
+				}
 			}
 		}
 	}

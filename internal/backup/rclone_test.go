@@ -4,6 +4,8 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -30,8 +32,24 @@ func rcloneTarget() config.BackupTarget {
 
 // rcloneHost answers the seed probe from its own files, like the Server.
 func rcloneHost() *fakeHost {
-	h := &fakeHost{}
+	h := &fakeHost{files: map[string][]byte{}, modes: map[string]os.FileMode{}}
 	h.respond = func(_ context.Context, s string) (string, error) {
+		if strings.Contains(s, "echo acquired") {
+			return "acquired", nil
+		}
+		if strings.Contains(s, "mv -f ") {
+			for _, line := range strings.Split(s, "\n") {
+				if strings.HasPrefix(line, "mv -f ") {
+					parts := strings.Split(line, "'")
+					if len(parts) == 5 {
+						h.files[parts[3]] = h.files[parts[1]]
+						h.modes[parts[3]] = h.modes[parts[1]]
+						delete(h.files, parts[1])
+						delete(h.modes, parts[1])
+					}
+				}
+			}
+		}
 		if strings.Contains(s, "head -n 1 ") {
 			if _, ok := h.files[rcloneConfPath]; ok {
 				seed := string(h.files[rcloneConfPath+".seed"])
@@ -47,7 +65,7 @@ func rcloneHost() *fakeHost {
 func (f *fakeHost) writes(p string) int {
 	n := 0
 	for _, c := range f.cmds {
-		if c.Script == "#writefile "+p {
+		if strings.Contains(c.Script, "mv -f ") && strings.Contains(c.Script, " "+remote.Quote(p)+"\n") {
 			n++
 		}
 	}
@@ -138,10 +156,11 @@ func TestRcloneConfigScriptsCarryNoSecret(t *testing.T) {
 
 func TestRcloneConfigWithoutSecretUsesSeededFile(t *testing.T) {
 	h := rcloneHost()
+	h.files = map[string][]byte{rcloneConfPath: []byte(rcloneSecret("seeded"))}
 	if _, err := List(context.Background(), ListOptions{App: "shop", Destination: "production", Host: h, Target: rcloneTarget()}); err != nil {
 		t.Fatal(err)
 	}
-	if len(h.files) != 0 {
+	if h.writes(rcloneConfPath) != 0 {
 		t.Fatalf("seeded without a secret: %v", h.files)
 	}
 	if !strings.Contains(h.scripts(), "yoho_secret '"+rcloneConfPath+"'") {
@@ -246,5 +265,113 @@ func TestRcloneConfigLocalKeepsRefreshedTokens(t *testing.T) {
 	}
 	if got := read(); got != "[od]\ntoken = b\n" {
 		t.Fatalf("new secret not seeded: %q", got)
+	}
+}
+
+func TestRcloneDiagnosticsAndListLock(t *testing.T) {
+	for _, typ := range []string{"archive", "restic"} {
+		t.Run(typ, func(t *testing.T) {
+			h := rcloneHost()
+			respond := h.respond
+			locked, unlocked := false, false
+			line := `token = {"refresh_token":"sensitive-refresh-token"}`
+			cfg := rcloneTarget()
+			password := ""
+			if typ == "restic" {
+				cfg.Type = "restic"
+				cfg.Repository = "rclone:od:backups"
+				password = "backup-password"
+			}
+			h.respond = func(ctx context.Context, script string) (string, error) {
+				if !locked {
+					t.Fatal("remote operation before Destination lock")
+				}
+				if strings.Contains(script, "rc lsf ") || strings.Contains(script, "r snapshots ") {
+					return "", fmt.Errorf("could not parse line: %s; token JSON: %s", line, strings.TrimPrefix(line, "token = "))
+				}
+				return respond(ctx, script)
+			}
+			_, err := List(context.Background(), ListOptions{App: "shop", Destination: "production", Target: cfg, Password: password, Host: h,
+				RcloneConfig: "[od]\n" + line + "\n", Lock: func(context.Context) (func(context.Context) error, error) {
+					locked = true
+					return func(ctx context.Context) error {
+						if ctx.Err() != nil {
+							t.Fatal(ctx.Err())
+						}
+						unlocked = true
+						return nil
+					}, nil
+				}})
+			if err == nil || strings.Contains(err.Error(), "sensitive-refresh-token") || !strings.Contains(err.Error(), "***") || !unlocked {
+				t.Fatalf("unsafe error or lock lifecycle: %v, unlocked %v", err, unlocked)
+			}
+			script := h.scripts()
+			if !strings.Contains(script, "mv -f ") || strings.Index(script, " '"+rcloneConfPath+"'\n") > strings.Index(script, " '"+rcloneConfPath+".seed'\n") {
+				t.Fatal("config must publish before sidecar")
+			}
+		})
+	}
+}
+
+func TestRcloneListRefusesHeldLock(t *testing.T) {
+	h := rcloneHost()
+	_, err := List(context.Background(), ListOptions{App: "shop", Destination: "production", Target: rcloneTarget(), Host: h, RcloneConfig: rcloneSecret("x"),
+		Lock: func(context.Context) (func(context.Context) error, error) { return nil, errors.New("already locked") }})
+	if err == nil || !strings.Contains(err.Error(), "already locked") || len(h.cmds) != 0 {
+		t.Fatalf("seed ran without lock: %v", err)
+	}
+}
+
+func TestRcloneSeedScheduledUserRepairsMatchingSeed(t *testing.T) {
+	h := rcloneHost()
+	// A root-created config with an unchanged seed must still change owner.
+	secret := rcloneSecret("unchanged")
+	sum := sha256.Sum256([]byte(secret))
+	h.files = map[string][]byte{rcloneConfPath: []byte("refreshed config"), rcloneConfPath + ".seed": []byte(hex.EncodeToString(sum[:]) + " date")}
+	written, err := SeedRcloneConfigAsUser(context.Background(), h, "shop", "production", rcloneTarget(), secret, "yoho")
+	if err != nil || written {
+		t.Fatalf("matching seed: wrote %v, %v", written, err)
+	}
+	scripts := h.scripts()
+	for _, want := range []string{"chown 'yoho:' '" + rcloneConfPath + "'", "chown 'yoho:' '" + rcloneConfPath + ".seed'", "chown 'yoho:' '/var/lib/yoho/backups/shop/production'", "sudo -n -u 'yoho' sh -c"} {
+		if !strings.Contains(scripts, want) {
+			t.Errorf("missing %s", want)
+		}
+	}
+	if string(h.files[rcloneConfPath]) != "refreshed config" {
+		t.Fatal("matching seed overwrote refreshed config")
+	}
+}
+
+func TestRcloneSeedScheduledUserFirstSeed(t *testing.T) {
+	h := rcloneHost()
+	written, err := SeedRcloneConfigAsUser(context.Background(), h, "shop", "production", rcloneTarget(), rcloneSecret("new"), "yoho")
+	if err != nil || !written {
+		t.Fatalf("first seed: wrote %v, %v", written, err)
+	}
+	scripts := h.scripts()
+	for _, want := range []string{"chown 'yoho:' '/var/lib/yoho/backups'", "chown 'yoho:' '/var/lib/yoho/backups/shop'", "sudo -n -u 'yoho' sh -c", "mv -f "} {
+		if !strings.Contains(scripts, want) {
+			t.Errorf("missing %s", want)
+		}
+	}
+	if strings.Contains(scripts, rcloneSecretToken) {
+		t.Fatal("config secret in script")
+	}
+}
+
+func TestRcloneListUsesDestinationLockByDefault(t *testing.T) {
+	h := rcloneHost()
+	_, err := List(context.Background(), ListOptions{App: "shop", Destination: "production", Host: h, Target: rcloneTarget(), RcloneConfig: rcloneSecret("lock")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	scripts := h.scripts()
+	acquired := strings.Index(scripts, "echo acquired")
+	seeded := strings.Index(scripts, "#writefile ")
+	listed := strings.Index(scripts, "rc lsf ")
+	unlocked := strings.LastIndex(scripts, "rm -rf '/var/lib/yoho/apps/shop/production/lock'")
+	if acquired < 0 || seeded < acquired || listed < seeded || unlocked < listed {
+		t.Fatal("Destination lock did not span seed and List")
 	}
 }

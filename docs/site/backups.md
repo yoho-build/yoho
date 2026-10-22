@@ -71,6 +71,8 @@ OAuth remotes refresh their access token on every run and write the new token ba
 
 Yoho writes the secret over SSH stdin to `<root>/backups/<app>/<destination>/.rclone/<KEY>/rclone.conf` (mode 0600, private directory) the first time a `yoho backup` command or `yoho schedule install` runs, and records the secret's SHA-256 next to it. Server-installed rclone gets `RCLONE_CONFIG` pointing at that file; the pinned rclone container mounts its directory read-write and runs as the deploy user, so refreshed tokens are kept. Scheduled Jobs use the file and never store the secret. Yoho replaces the file only when the secret changes, so after `rclone config reconnect od:` locally, update the secret and run `yoho deploy`, `yoho schedule install` or any `yoho backup` command. `yoho backup check` shows when the config was seeded; an authentication failure adds this re-authorization hint. `env_secrets` still work alongside it and override config values.
 
+Give each Destination its own authorized OAuth remote and `rclone_config_secret`, even when the Destinations share a Server or Backup Target. OAuth remotes can rotate refresh tokens: independently refreshed copies of one authorization can invalidate each other. Targets in the same Destination may share the secret because they use the same persistent config file. `yoho config check` warns when Backup jobs in different Destinations use the same secret key.
+
 ## Commands
 
 ```sh

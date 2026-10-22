@@ -85,6 +85,7 @@ func Check(ctx context.Context, o CheckOptions) (res *CheckResult, err error) {
 	if err := t.prepareRclone(ctx, o.Host, o.RcloneConfig, time.Now()); err != nil {
 		return nil, err
 	}
+	values = append(values, t.diagnostics...)
 	res, err = t.check(ctx, o.Host, release.BackupDir(o.App, o.Destination), o.ID, o.ReadData)
 	if res != nil {
 		res.RcloneConfig = t.rcloneSeeded(ctx, o.Host)

@@ -10,6 +10,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/yoho-build/yoho/internal/config"
 	"github.com/yoho-build/yoho/internal/release"
 )
 
@@ -183,5 +184,85 @@ func TestConfigCheckCountsSecretLoadWarnings(t *testing.T) {
 	}
 	if e := checkEvent(t, out); e["warnings"] != float64(1) {
 		t.Errorf("check event: %v", e)
+	}
+}
+
+func TestConfigCheckWarnsAboutSharedRcloneConfig(t *testing.T) {
+	oldRoot := release.Root
+	t.Cleanup(func() { release.Root = oldRoot })
+	const warning = "rclone_config_secret RCLONE_CONF is used by Destinations production and staging; OAuth remotes rotate refresh tokens, so give each Destination its own authorized remote/secret"
+	for _, tc := range []struct {
+		name, secondTarget, secondKey, secondDestination string
+		wantWarning                                      bool
+	}{
+		{"shared Target", "offsite", "RCLONE_CONF", "staging", true},
+		{"different Targets on one Server root", "other", "RCLONE_CONF", "staging", true},
+		{"separate authorizations", "other", "STAGING_CONF", "staging", false},
+		{"one Destination", "other", "RCLONE_CONF", "production", false},
+	} {
+		for _, jsonOutput := range []bool{false, true} {
+			mode := "human"
+			if jsonOutput {
+				mode = "json"
+			}
+			t.Run(tc.name+"/"+mode, func(t *testing.T) {
+				p := appDir(t, "compose", "services:\n  web: {image: nginx, restart: unless-stopped}\n")
+				cfg, err := config.Load(p)
+				if err != nil {
+					t.Fatal(err)
+				}
+				cfg.Destinations["staging"] = cfg.Destinations["production"]
+				cfg.Backups = config.BackupsConfig{
+					Targets: map[string]config.BackupTarget{
+						"offsite": {Type: "archive", Repository: "od:backups", RcloneConfigSecret: "RCLONE_CONF"},
+					},
+					Jobs: map[string]config.BackupJob{
+						"production": {Destination: "production", Target: "offsite"},
+						"second":     {Destination: tc.secondDestination, Target: tc.secondTarget},
+					},
+				}
+				if tc.secondTarget != "offsite" {
+					cfg.Backups.Targets[tc.secondTarget] = config.BackupTarget{Type: "archive", Repository: "od:other", RcloneConfigSecret: tc.secondKey}
+				}
+				data, err := json.Marshal(cfg)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(p, data, 0o600); err != nil {
+					t.Fatal(err)
+				}
+				c := configCmd(&globals{configPath: p, json: jsonOutput})
+				var out bytes.Buffer
+				c.SetOut(&out)
+				c.SetErr(&out)
+				c.SetArgs([]string{"check", "--offline"})
+				c.SilenceErrors, c.SilenceUsage = true, true
+				if err := c.ExecuteContext(context.Background()); err != nil {
+					t.Fatalf("%v\n%s", err, out.String())
+				}
+				if got := strings.Count(out.String(), warning); got != map[bool]int{false: 0, true: 1}[tc.wantWarning] {
+					t.Fatalf("unexpected warning count %d:\n%s", got, out.String())
+				}
+				if jsonOutput {
+					warnings := 0
+					if tc.wantWarning {
+						warnings = 1
+					}
+					event := checkEvent(t, out.String())
+					if event["ok"] != true || event["errors"] != float64(0) || event["warnings"] != float64(warnings) {
+						t.Fatalf("check event: %v", event)
+					}
+					for _, line := range strings.Split(strings.TrimSpace(out.String()), "\n") {
+						var finding map[string]any
+						if err := json.Unmarshal([]byte(line), &finding); err != nil {
+							t.Fatal(err)
+						}
+						if finding["message"] == warning && (finding["event"] != "finding" || finding["level"] != "warning") {
+							t.Fatalf("not a warning finding: %v", finding)
+						}
+					}
+				}
+			})
+		}
 	}
 }

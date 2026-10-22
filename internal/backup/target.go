@@ -30,6 +30,7 @@ type target struct {
 	cfg                config.BackupTarget
 	typ, format        string
 	env                map[string]string
+	diagnostics        []string
 }
 
 func newTarget(app, dest, project string, cfg config.BackupTarget, password string, targetEnv map[string]string) (*target, error) {
@@ -221,6 +222,7 @@ func (t *target) remoteFile(name string) string {
 
 // store saves base/<ts> to the Backup Target.
 func (t *target) store(ctx context.Context, h remote.Host, cacheBase, base, ts string) (*Result, error) {
+	h = diagnosticHost{Host: h, values: t.diagnostics}
 	staging := path.Join(base, ts)
 	if t.typ == "restic" {
 		return t.storeRestic(ctx, h, cacheBase, staging)
@@ -353,6 +355,7 @@ type Entry struct {
 
 // list returns Backups of this App/Destination, newest first.
 func (t *target) list(ctx context.Context, h remote.Host, base string) ([]Entry, error) {
+	h = diagnosticHost{Host: h, values: t.diagnostics}
 	var entries []Entry
 	switch {
 	case t.typ == "restic":
@@ -410,6 +413,7 @@ func (t *target) list(ctx context.Context, h remote.Host, base string) ([]Entry,
 // fetch places Backup id under dir (inside base) and returns the directory
 // holding manifest.json.
 func (t *target) fetch(ctx context.Context, h remote.Host, base, dir, id string) (string, error) {
+	h = diagnosticHost{Host: h, values: t.diagnostics}
 	data := path.Join(dir, "data")
 	if t.typ == "restic" {
 		args := "r restore " + remote.Quote(id) + " --target " + remote.Quote(data)

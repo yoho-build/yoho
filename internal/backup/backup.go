@@ -24,6 +24,7 @@ import (
 	"github.com/yoho-build/yoho/internal/config"
 	"github.com/yoho-build/yoho/internal/release"
 	"github.com/yoho-build/yoho/internal/remote"
+	"github.com/yoho-build/yoho/internal/secrets"
 )
 
 // Helper images. Pinned so Backups are reproducible; override in tests or
@@ -132,6 +133,14 @@ var (
 // directory is always removed and paused containers are always unpaused,
 // also on error or cancellation.
 func Run(ctx context.Context, o RunOptions) (res *Result, err error) {
+	values := secrets.RcloneConfigValues(o.RcloneConfig)
+	defer func() { err = secrets.RedactError(err, values...) }()
+	if o.Out != nil {
+		r := secrets.NewRedactor(o.Out, values...)
+		defer r.Flush()
+		o.Out = r
+	}
+
 	if err := o.validate(); err != nil {
 		return nil, err
 	}

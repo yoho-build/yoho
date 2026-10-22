@@ -526,3 +526,29 @@ func (t BackupTarget) SecretKeys() []string {
 	}
 	return keys
 }
+
+// RcloneWarnings warns about independent token files seeded from one OAuth
+// authorization. Targets within one Destination deliberately share a file.
+func RcloneWarnings(c *Config) []string {
+	uses := map[string]map[string]bool{}
+	for _, job := range c.Backups.Jobs {
+		key := c.Backups.Targets[job.Target].RcloneConfigSecret
+		if key == "" || job.Destination == "" {
+			continue
+		}
+		if uses[key] == nil {
+			uses[key] = map[string]bool{}
+		}
+		uses[key][job.Destination] = true
+	}
+	var warnings []string
+	for _, key := range sortedKeys(uses) {
+		dests := sortedKeys(uses[key])
+		for i, a := range dests {
+			for _, b := range dests[i+1:] {
+				warnings = append(warnings, fmt.Sprintf("rclone_config_secret %s is used by Destinations %s and %s; OAuth remotes rotate refresh tokens, so give each Destination its own authorized remote/secret", key, a, b))
+			}
+		}
+	}
+	return warnings
+}

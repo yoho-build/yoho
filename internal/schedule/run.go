@@ -118,6 +118,11 @@ func RunJob(ctx context.Context, specPath string, o RunJobOptions) (err error) {
 	for _, v := range ro.TargetEnv {
 		values = append(values, v)
 	}
+	if prepErr == nil {
+		configValues, configErr := backup.RcloneDiagnosticValues(ctx, h, s.App, s.Destination, s.Target)
+		values = append(values, configValues...)
+		prepErr = configErr
+	}
 	out := o.Out
 	if out == nil {
 		out = io.Discard

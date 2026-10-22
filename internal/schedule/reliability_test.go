@@ -324,3 +324,34 @@ func TestSuccessHealthExplicitThreshold(t *testing.T) {
 		}
 	}
 }
+
+func TestScheduledRcloneDiagnosticsRedactRefreshedConfig(t *testing.T) {
+	s, p, h := retryFixture(t, 0)
+	s.Target.RcloneConfigSecret = "RCLONE_CONF"
+	s.Target.Type = "archive"
+	s.Target.Format = "7z"
+	s.Target.Repository = "od:backups"
+	saveSpec(t, p, s)
+	token := `{"refresh_token":"refreshed-sensitive-token"}`
+	line := "token = " + token
+	conf := backup.RcloneConfigDir(s.App, s.Destination, "RCLONE_CONF") + "/rclone.conf"
+	h.files[conf] = []byte("[od]\n" + line + "\n")
+	var out bytes.Buffer
+	err := RunJob(context.Background(), p, RunJobOptions{Host: h, Out: &out,
+		runBackup: func(_ context.Context, o backup.RunOptions) (*backup.Result, error) {
+			if o.RcloneConfig != "" {
+				t.Fatal("Scheduled Job must never re-seed refreshed tokens")
+			}
+			fmt.Fprintln(o.Out, "could not parse line: "+line)
+			return nil, fmt.Errorf("could not parse token: %s", token)
+		},
+	})
+	if err == nil {
+		t.Fatal("expected failure")
+	}
+	for _, diagnostic := range []string{err.Error(), out.String(), string(h.files[StatePath(s.App, s.Destination)])} {
+		if strings.Contains(diagnostic, "refreshed-sensitive-token") {
+			t.Fatalf("config leaked in diagnostic: %s", diagnostic)
+		}
+	}
+}

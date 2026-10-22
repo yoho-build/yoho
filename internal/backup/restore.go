@@ -11,8 +11,10 @@ import (
 	"time"
 
 	"github.com/yoho-build/yoho/internal/config"
+	"github.com/yoho-build/yoho/internal/deploy"
 	"github.com/yoho-build/yoho/internal/release"
 	"github.com/yoho-build/yoho/internal/remote"
+	"github.com/yoho-build/yoho/internal/secrets"
 )
 
 // ListOptions selects the Backups of one App/Destination in a Backup Target.
@@ -24,10 +26,14 @@ type ListOptions struct {
 	// Resolved Target.RcloneConfigSecret; see RunOptions.RcloneConfig.
 	RcloneConfig string
 	Host         remote.Host
+	// Destination lock; defaults to the deploy lock when using persistent rclone config.
+	Lock LockFunc
 }
 
 // List returns stored Backups, newest first.
-func List(ctx context.Context, o ListOptions) ([]Entry, error) {
+func List(ctx context.Context, o ListOptions) (entries []Entry, err error) {
+	defer func() { err = secrets.RedactError(err, secrets.RcloneConfigValues(o.RcloneConfig)...) }()
+
 	if o.Host == nil {
 		return nil, errors.New("backup: Host is required")
 	}
@@ -38,6 +44,23 @@ func List(ctx context.Context, o ListOptions) ([]Entry, error) {
 	t, err := newTarget(o.App, o.Destination, project, o.Target, o.Password, o.TargetEnv)
 	if err != nil {
 		return nil, err
+	}
+	if o.Target.RcloneConfigSecret != "" || o.Lock != nil {
+		lock := o.Lock
+		if lock == nil {
+			lock = func(ctx context.Context) (func(context.Context) error, error) {
+				return deploy.AcquireLock(ctx, o.Host, o.App, o.Destination, deploy.LockInfo{Command: "backup list"})
+			}
+		}
+		unlock, lerr := lock(ctx)
+		if lerr != nil {
+			return nil, fmt.Errorf("lock: %w", lerr)
+		}
+		defer func() {
+			cctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), cleanupTimeout)
+			defer cancel()
+			err = errors.Join(err, unlock(cctx))
+		}()
 	}
 	if err := t.prepareRclone(ctx, o.Host, o.RcloneConfig, time.Now()); err != nil {
 		return nil, err
@@ -101,6 +124,14 @@ type RestoreResult struct {
 // Hooks succeed. Failure or cancellation keeps the App stopped (best effort if
 // the Server is unreachable); volume changes are never automatically rolled back.
 func Restore(ctx context.Context, o RestoreOptions) (res *RestoreResult, err error) {
+	values := secrets.RcloneConfigValues(o.RcloneConfig)
+	defer func() { err = secrets.RedactError(err, values...) }()
+	if o.Out != nil {
+		r := secrets.NewRedactor(o.Out, values...)
+		defer r.Flush()
+		o.Out = r
+	}
+
 	if !o.Confirm {
 		return nil, errors.New("restore replaces volume data; confirmation required")
 	}
