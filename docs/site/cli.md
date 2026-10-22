@@ -7,7 +7,7 @@ Global flags (every command): `-c, --config FILE`, `-d, --destination NAME` (def
 | Command | Description |
 |---|---|
 | `init` | Create `yoho.yml`, `.yoho/secrets`, sample hooks. |
-| `config check` | Validate Yoho file, compose files, secret references; resolves local secrets only when `secrets.nonempty` is nonempty. |
+| `config check [--offline]` | Validate Yoho file, compose files, `x-yoho` and secret names; resolves local secrets only when `secrets.nonempty` is nonempty. `--offline` (or `YOHO_OFFLINE=1`) never resolves secrets. Exit 0 ok, 1 findings, 2 files could not be loaded. See [CI check](#ci-check). |
 | `config show` | Print the resolved Yoho file with defaults as JSON. |
 | `schema [--ext]` | JSON Schema of the Yoho file, or of `x-yoho` with `--ext`. |
 | `setup [--plan] [-y] [--containerd-image-store]` | Provision the Destination's Servers (interactive). `--plan` only shows the checklist, `-y` applies every needed step. See [Server setup](setup.md). |
@@ -43,7 +43,8 @@ Global flags (every command): `-c, --config FILE`, `-d, --destination NAME` (def
 | `swarm status` | Swarm nodes and the App's services. |
 | `builder status` | Build engine in use and Apple `container` state. |
 | `builder setup [-y]` | Install/upgrade Apple container, Rosetta, builder VM; smoke test. |
-| `skill install [--dir DIR] [--agent claude\|codex\|all]` | Write all bundled agent skills to `.claude/skills/<name>` and/or `.agents/skills/<name>`. |
+| `skill install [--dir DIR] [--agent claude\|codex\|all] [--only A,B \| --exclude A,B] [--no-migrate-refs]` | Write the bundled agent skills (all by default) to `.claude/skills/<name>` and/or `.agents/skills/<name>`; symlinked layouts are written once. See [Agents](agents.md). |
+| `skill list` | List the bundled skills with descriptions. |
 | `skill print [SKILL]` | Print a skill's `SKILL.md` (default `yoho`). |
 | `version` | Print the version. |
 | `completion` | Shell completion script. |
@@ -69,3 +70,23 @@ Plan: 0 to add, 1 to change, 1 to replace, 1 to destroy.
 `+` create, `~` update in place, `-/+` replace (stop then start: non-proxied and Stateful Services), `-` delete. Unchanged resources are hidden; with none changing it prints `No changes. Your Servers match the configuration.` With `--json`, plan emits one `change` event per change and a `plan_summary` event.
 
 Image references in the plan are the ones the Version would build. Uncommitted work uses a version hashed from that content, so repeated plans match until the content changes. Pass `--version` to pin a tag.
+
+## CI check
+
+`yoho config check --offline` needs no SSH key, Docker or password manager. It loads the Yoho file, the compose files and the Destination overlay, validates the schema and `x-yoho`, and checks that every name in `x-yoho.secrets` has a line in `.yoho/secrets` (or `secrets.values`, or is generated) without running any line. It opens no connection and runs no Hook. With `secrets.nonempty` set it skips resolving and prints the warning `secrets.nonempty not verified (--offline)`.
+
+Exit codes: `0` no errors, `1` findings or errors in the checked files (including an invalid `x-yoho` block), `2` the files could not be loaded (unreadable, parse error, failed interpolation, unknown Destination). With `--json` the last event before the process ends is `{"event":"check","ok":true,"errors":0,"warnings":0,"offline":true,"services":3,"secret_keys":5,"time":...}`; findings arrive earlier as `finding` events.
+
+```yaml
+# .github/workflows/check.yml
+on: pull_request
+jobs:
+  yoho:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: yoho-build/yoho/.github/actions/setup-yoho@v0.2.0
+      - run: yoho config check --offline -d production --json
+```
+
+Compose interpolation reads only the App's `.env` and the Destination's `env`, never the job's process environment. Commit those values (non-secret ones only) or put them in `destinations.<name>.env`, as for a deploy.

@@ -31,6 +31,7 @@ type UI struct {
 	mode       Mode
 	color      bool
 	Verbose    bool
+	warnings   int
 	start      time.Time
 	progressAt time.Time // last human line; shared by every Progress writer
 	depth      int
@@ -133,6 +134,7 @@ func (u *UI) Event(kind, human string, fields map[string]any) {
 func (u *UI) Warn(format string, args ...any) {
 	u.mu.Lock()
 	defer u.mu.Unlock()
+	u.warnings++
 	msg := fmt.Sprintf(format, args...)
 	if u.mode == JSON {
 		u.event("warning", map[string]any{"message": msg})
@@ -162,6 +164,9 @@ func (u *UI) Error(err error, hint string) {
 func (u *UI) Finding(level, subject, msg string) {
 	u.mu.Lock()
 	defer u.mu.Unlock()
+	if level != "error" {
+		u.warnings++
+	}
 	if u.mode == JSON {
 		u.event("finding", map[string]any{"level": level, "subject": subject, "message": msg})
 		return
@@ -176,6 +181,17 @@ func (u *UI) Finding(level, subject, msg string) {
 		fmt.Fprintln(u.w, u.indent()+"  "+u.paint(yellow, "! ")+where+msg)
 	}
 	u.stamp()
+}
+
+// Check emits the closing result of `config check` as one JSON event, with
+// the warnings (Warn and warning Findings) this UI printed; human
+// output already ended with the step line.
+func (u *UI) Check(ok bool, errors int, offline bool, services, secretKeys int) {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	if u.mode == JSON {
+		u.event("check", map[string]any{"ok": ok, "errors": errors, "warnings": u.warnings, "offline": offline, "services": services, "secret_keys": secretKeys})
+	}
 }
 
 // Step is a timed unit of work.

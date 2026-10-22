@@ -16,6 +16,8 @@ Ground rules:
 
 ## 1. Inventory (read-only)
 
+Use only the commands below and `docker ps` / `docker logs`. Never run `docker buildx history` (any subcommand) on the Server: on Docker 28.x it can crash `dockerd` and stop every container there, including the other apps. Read build history from the Coolify UI instead.
+
 Find the app's uuid (in the Coolify UI URL, or the `com.docker.compose.project` label of its containers), then on the Server:
 
 ```sh
@@ -127,6 +129,8 @@ backups:
 - A local `.env` that compose loads triggers secret warnings. Make sure git ignores it, so `builder.location: server` does not ship it.
 
 ## 5. Cutover
+
+Rehearse first when the app matters: a second Destination on another box (a LAN machine is fine) with no cutover Hook and `proxy: {tunnel: null}` in its overlay (it would otherwise join the live tunnel), an overlay that points data at a restored copy, side-effect Services (schedulers, off-Server Backups, the tunnel) replaced with `sleep`, test-mode payment keys, and a cold-start run (stop only the rehearsal App's containers by its `yoho.app` and `yoho.destination` labels, never other Apps or `yoho-proxy`, then `yoho deploy -d <rehearsal>`) to reproduce the cutover ordering. Details in `skills/yoho/references/migrate-coolify.md`. Keep the one-time Hook out of the rehearsal Destination.
 
 Get the user's OK on a downtime window. The old and new stacks must never run on the same data volume at once: two Postgres servers on one data directory corrupt it.
 

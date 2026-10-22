@@ -111,6 +111,7 @@ func Check(r *Result, runtime string, secretKeys []string) []Finding {
 	}
 
 	names := r.Project.ServiceNames()
+	oneShot := completionJobs(r.Project)
 	for _, name := range names {
 		svc := r.Project.Services[name]
 		ext := r.Ext[name]
@@ -186,6 +187,11 @@ func Check(r *Result, runtime string, secretKeys []string) []Finding {
 			}
 		}
 
+		if !swarm && !oneShot[name] && len(svc.Profiles) == 0 && (svc.Restart == "" || svc.Restart == "no") &&
+			(svc.Deploy == nil || svc.Deploy.RestartPolicy == nil) {
+			svcAdd(LevelWarning, "restart policy `no`: this Service stays down after a Docker daemon restart or crash; set `restart: unless-stopped` (advisory: Yoho cannot see a supervisor that restarts it on a shared Server)")
+		}
+
 		checkBinds(svc, r.Project.WorkingDir, swarm, svcAdd)
 		if swarm {
 			checkSwarm(svc, svcAdd)
@@ -196,6 +202,25 @@ func Check(r *Result, runtime string, secretKeys []string) []Finding {
 		add(LevelError, "", "%s; %s", err, proxy.RouteConflictHint)
 	}
 	return out
+}
+
+// completionJobs returns the Services another Service waits on with
+// condition service_completed_successfully: one-shot jobs that are meant to
+// exit, so a restart policy does not apply. As in deploy's compile, only a
+// dependent that runs (scale > 0) makes its dependency a job.
+func completionJobs(p *types.Project) map[string]bool {
+	jobs := map[string]bool{}
+	for _, svc := range p.Services {
+		if svc.GetScale() <= 0 {
+			continue
+		}
+		for dep, d := range svc.DependsOn {
+			if d.Condition == types.ServiceConditionCompletedSuccessfully {
+				jobs[dep] = true
+			}
+		}
+	}
+	return jobs
 }
 
 // CheckServerBuild checks what a builder.location=server build would sync

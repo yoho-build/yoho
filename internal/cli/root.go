@@ -69,6 +69,10 @@ kamal-proxy, keeps secrets in your password manager, and backs up volumes.`,
 		if !errors.As(err, &silent) {
 			fmt.Fprintln(os.Stderr, "Error:", err)
 		}
+		var ee *exitError
+		if errors.As(err, &ee) {
+			return ee.code
+		}
 		return 1
 	}
 	return 0
@@ -82,6 +86,15 @@ type silentError struct{ err error }
 
 func (e *silentError) Error() string { return e.err.Error() }
 func (e *silentError) Unwrap() error { return e.err }
+
+// exitError carries a process exit code other than 1.
+type exitError struct {
+	code int
+	err  error
+}
+
+func (e *exitError) Error() string { return e.err.Error() }
+func (e *exitError) Unwrap() error { return e.err }
 
 func versionCmd() *cobra.Command {
 	return &cobra.Command{
