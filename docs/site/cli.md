@@ -33,6 +33,7 @@ Global flags (every command): `-c, --config FILE`, `-d, --destination NAME` (def
 | `secrets print KEY... --reveal` | Print values; terminal only. |
 | `backup run [JOB]` | Take a Backup now. |
 | `backup list [JOB]` | Stored Backups, newest first. |
+| `backup pull [JOB] [--to DIR] [--limit N]` | Mirror new archives of an `archive` target to a local directory; never deletes. |
 | `backup restore ID [--job JOB] [-y]` | Restore a Backup (`latest` for the newest); asks for confirmation unless `-y`. |
 | `schedule install [JOB...] [--binary PATH]` | Install systemd timers for Backup jobs with a schedule (default: all of the Destination). |
 | `schedule status` | Installed Scheduled Jobs, timers, last runs. |

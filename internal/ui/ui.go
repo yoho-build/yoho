@@ -110,6 +110,25 @@ func (u *UI) Info(format string, args ...any) {
 	u.stamp()
 }
 
+// Event emits a named event with fields in JSON mode and the human line
+// otherwise. Use it for results that scripts consume (one event per item).
+func (u *UI) Event(kind, human string, fields map[string]any) {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	if u.mode == JSON {
+		f := map[string]any{}
+		for k, v := range fields {
+			f[k] = v
+		}
+		u.event(kind, f)
+		return
+	}
+	if human != "" {
+		fmt.Fprintln(u.w, u.indent()+human)
+		u.stamp()
+	}
+}
+
 // Warn prints a warning.
 func (u *UI) Warn(format string, args ...any) {
 	u.mu.Lock()

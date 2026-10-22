@@ -103,6 +103,7 @@ yoho tunnel up | status | down    # Cloudflare Tunnel (Quick Tunnel when no toke
 yoho access install | secrets push | add MEMBER --verbs all|read|deploy,... | rm MEMBER | ls | audit   # operator: share one App via the Gate
 yoho access key add MEMBER KEY.pub | key rm MEMBER   # restricted Gate keys (forced command `yoho gate`)
 yoho backup run [JOB] | list [JOB] | restore ID [--job JOB] [-y]   # ID may be "latest"
+yoho backup pull [JOB] [--to DIR] [--limit N]   # mirror archive-target files to a local dir; never deletes, verifies SHA-256, no rsync
 yoho backup check [JOB] [--id ID | --read-data]   # integrity only, not restore proof
 yoho schedule install [JOB...] [--binary PATH] | status [--max-age 48h] | remove [JOB...]
 yoho swarm init [-y] | join [-y] | status
