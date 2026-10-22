@@ -69,6 +69,11 @@ func fastStartEligible(ext config.ServiceExt, hc *types.HealthCheckConfig, waitO
 	if hc == nil || hc.Disable {
 		return false
 	}
+	// Without its own test the check is inherited from the image, whose
+	// start_period a 60s default could shorten.
+	if len(hc.Test) == 0 {
+		return false
+	}
 	if ext.Proxy != nil || ext.Stateful {
 		return true
 	}

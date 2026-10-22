@@ -8,26 +8,54 @@ import (
 	"github.com/compose-spec/compose-go/v2/types"
 )
 
-var (
-	// scheme://[user[:pw]@]host
-	urlHostRe = regexp.MustCompile(`[A-Za-z][A-Za-z0-9+.-]*://(?:[^/@\s]*@)?([^/:?#\s,]+)`)
-	// host:port after start, whitespace, ',', '@' or '='; a leading '/' is a path.
-	hostPortRe = regexp.MustCompile(`(?:^|[\s,@=])([A-Za-z0-9][A-Za-z0-9_.-]*):\d+(?:$|[\s,/?])`)
-)
+var hostPortRe = regexp.MustCompile(`^([A-Za-z0-9][A-Za-z0-9_.-]*):\d+(?:[/?].*)?$`)
+
+// endpointKeys are the environment key fragments that mark a bare value as a
+// hostname (POSTGRES_DB=web is a database name, not a host).
+var endpointKeys = []string{"HOST", "ADDR", "URL", "URI", "ENDPOINT", "SERVER", "DSN", "BROKER"}
+
+func endpointKey(key string) bool {
+	key = strings.ToUpper(key)
+	for _, k := range endpointKeys {
+		if strings.Contains(key, k) {
+			return true
+		}
+	}
+	return false
+}
 
 // hostTokens returns the lower-cased hostnames an environment value refers to:
-// URL hosts, host:port pairs and a value that is a bare name. Names inside
-// paths or longer words never match.
-func hostTokens(v string) []string {
+// URL hosts, host:port pairs (comma or space separated lists included) and,
+// for an endpoint-like key, a value that is a bare name. Names inside paths
+// or longer words never match.
+func hostTokens(key, v string) []string {
 	v = strings.TrimSpace(v)
 	var out []string
-	for _, m := range urlHostRe.FindAllStringSubmatch(v, -1) {
-		out = append(out, strings.ToLower(m[1]))
+	for _, piece := range strings.FieldsFunc(v, func(r rune) bool { return r == ',' || r == ' ' || r == '\t' || r == '\n' }) {
+		if i := strings.Index(piece, "://"); i >= 0 {
+			auth := piece[i+3:]
+			if j := strings.IndexAny(auth, "/?#"); j >= 0 {
+				auth = auth[:j]
+			}
+			// The last '@' ends the userinfo, which may hold '@' in the password.
+			auth = auth[strings.LastIndex(auth, "@")+1:]
+			if j := strings.Index(auth, ":"); j >= 0 {
+				auth = auth[:j]
+			}
+			if auth != "" {
+				out = append(out, strings.ToLower(auth))
+			}
+			continue
+		}
+		if i := strings.LastIndex(piece, "="); i >= 0 {
+			piece = piece[i+1:]
+		}
+		piece = piece[strings.LastIndex(piece, "@")+1:]
+		if m := hostPortRe.FindStringSubmatch(piece); m != nil {
+			out = append(out, strings.ToLower(m[1]))
+		}
 	}
-	for _, m := range hostPortRe.FindAllStringSubmatch(v, -1) {
-		out = append(out, strings.ToLower(m[1]))
-	}
-	if v != "" && !strings.ContainsAny(v, "/:@= \t,") {
+	if endpointKey(key) && v != "" && !strings.ContainsAny(v, "/:@=, \t") {
 		out = append(out, strings.ToLower(v))
 	}
 	return out
@@ -114,9 +142,9 @@ func undeclaredDependencies(p *types.Project, swarm bool) []Finding {
 			if val == nil {
 				continue
 			}
-			for _, tok := range hostTokens(*val) {
+			for _, tok := range hostTokens(key, *val) {
 				for _, other := range p.ServiceNames() {
-					if other == name || reported[other] || deps[other] {
+					if other == name || reported[other] || deps[other] || p.Services[other].NetworkMode != "" {
 						continue
 					}
 					nets, ok := serviceHosts(p.Services[other])[tok]
@@ -124,7 +152,8 @@ func undeclaredDependencies(p *types.Project, swarm bool) []Finding {
 						continue
 					}
 					reported[other] = true
-					out = append(out, dependsFinding(name, key, other, p.Services[other], swarm))
+					// depends_on would close a cycle when other already needs name.
+					out = append(out, dependsFinding(name, key, other, p.Services[other], swarm || dependsClosure(p, other)[name]))
 				}
 			}
 		}
@@ -141,10 +170,10 @@ func sharesNetwork(a, b map[string]bool) bool {
 	return false
 }
 
-func dependsFinding(svc, key, other string, o types.ServiceConfig, swarm bool) Finding {
+func dependsFinding(svc, key, other string, o types.ServiceConfig, retry bool) Finding {
 	f := Finding{Level: LevelWarning, Service: svc}
-	if swarm {
-		f.Message = "environment " + key + " refers to Service " + other + "; depends_on is ignored by stack deploy and Swarm has no start order, so make the app retry until it is reachable"
+	if retry {
+		f.Message = "environment " + key + " refers to Service " + other + "; depends_on cannot order them (Swarm ignores it, or it would close a cycle), so make the app retry until it is reachable"
 		return f
 	}
 	cond := "service_started"

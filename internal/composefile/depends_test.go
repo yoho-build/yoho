@@ -51,7 +51,7 @@ func TestUndeclaredDependency(t *testing.T) {
 		t.Errorf("declared db must not warn:\n%s", w)
 	}
 	sw := msgs(checkSrc(t, dependsBase, "swarm"), LevelWarning)
-	if !strings.Contains(sw, "depends_on is ignored by stack deploy") {
+	if !strings.Contains(sw, "depends_on cannot order them") {
 		t.Errorf("swarm wording:\n%s", sw)
 	}
 }
@@ -102,6 +102,9 @@ func TestSlowFirstProbeWarning(t *testing.T) {
 	if w := msgs(checkSrc(t, svc("interval: 10s"), "compose"), LevelWarning); !strings.Contains(w, "healthcheck interval 10s sets the first probe time") {
 		t.Errorf("want slow-interval warning:\n%s", w)
 	}
+	if w := msgs(checkSrc(t, svc("interval: 10s"), "compose"), LevelWarning); !strings.Contains(w, "start_interval needs Docker 25+") || strings.Contains(w, "older engines need start_interval") {
+		t.Errorf("older engines must not be told to set start_interval:\n%s", w)
+	}
 	for _, hc := range []string{"interval: 5s", "interval: 10s, start_interval: 1s", "interval: 10s, start_period: 30s"} {
 		if w := msgs(checkSrc(t, svc(hc), "compose"), LevelWarning); strings.Contains(w, "first probe") {
 			t.Errorf("%s must not warn:\n%s", hc, w)
@@ -110,5 +113,51 @@ func TestSlowFirstProbeWarning(t *testing.T) {
 	plain := "services:\n  w:\n    image: w\n    healthcheck: {test: ['CMD', 'true'], interval: 10s}\n"
 	if w := msgs(checkSrc(t, plain, "compose"), LevelWarning); strings.Contains(w, "first probe") {
 		t.Errorf("plain Service must not warn:\n%s", w)
+	}
+}
+
+func warnsFor(t *testing.T, env, extra string) string {
+	t.Helper()
+	src := "services:\n  web:\n    image: web\n    environment:\n" + env + "  db:\n    image: pg\n" + extra
+	return msgs(checkSrc(t, src, "compose"), LevelWarning)
+}
+
+func TestUndeclaredDependencyCycle(t *testing.T) {
+	src := "services:\n  web:\n    image: web\n    environment: {API_URL: 'http://api:80'}\n  api:\n    image: api\n    depends_on: [web]\n"
+	w := msgs(checkSrc(t, src, "compose"), LevelWarning)
+	if !strings.Contains(w, "refers to Service api") || strings.Contains(w, "add depends_on") {
+		t.Errorf("cycle must not suggest depends_on:\n%s", w)
+	}
+}
+
+func TestUndeclaredDependencyBareValueNeedsEndpointKey(t *testing.T) {
+	db := "  db:\n    image: pg\n    environment: {POSTGRES_DB: web}\n"
+	src := "services:\n  web:\n    image: web\n" + db
+	if w := msgs(checkSrc(t, src, "compose"), LevelWarning); strings.Contains(w, "refers to Service") {
+		t.Errorf("POSTGRES_DB=web is a name, not a host:\n%s", w)
+	}
+	if w := warnsFor(t, "      CACHE_HOST: db\n", ""); !strings.Contains(w, "refers to Service db") {
+		t.Errorf("endpoint key bare value:\n%s", w)
+	}
+}
+
+func TestUndeclaredDependencyLists(t *testing.T) {
+	src := "services:\n  web:\n    image: web\n    environment: {BROKERS: 'kafka1:9092,kafka2:9092'}\n  kafka1: {image: k}\n  kafka2: {image: k}\n"
+	w := msgs(checkSrc(t, src, "compose"), LevelWarning)
+	if !strings.Contains(w, "Service kafka1") || !strings.Contains(w, "Service kafka2") {
+		t.Errorf("list members:\n%s", w)
+	}
+}
+
+func TestHostTokensAtInPassword(t *testing.T) {
+	got := hostTokens("DATABASE_URL", "postgres://user:p@ss@db:5432/shop")
+	if len(got) != 1 || got[0] != "db" {
+		t.Errorf("tokens %v", got)
+	}
+}
+
+func TestUndeclaredDependencyNetworkModeTarget(t *testing.T) {
+	if w := warnsFor(t, "      DB: db:5432\n", "    network_mode: host\n"); strings.Contains(w, "refers to Service") {
+		t.Errorf("network_mode target is not resolvable by name:\n%s", w)
 	}
 }

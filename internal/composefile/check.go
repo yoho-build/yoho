@@ -171,7 +171,7 @@ func Check(r *Result, runtime string, secretKeys []string) []Finding {
 		}
 
 		if (ext.Stateful || ext.Proxy != nil) && slowFirstProbe(svc.HealthCheck) {
-			svcAdd(LevelWarning, "healthcheck interval %s sets the first probe time, so the deploy waits that long; Docker 25+ gets start_interval automatically, older engines need start_interval or a shorter interval", time.Duration(*svc.HealthCheck.Interval))
+			svcAdd(LevelWarning, "healthcheck interval %s sets the first probe time, so the deploy waits that long; Docker 25+ gets start_interval automatically; set start_period and start_interval together (start_interval needs Docker 25+ and only applies with start_period > 0), or shorten interval on older engines", time.Duration(*svc.HealthCheck.Interval))
 		}
 
 		// Stateful guard (ADR 0005): data must not silently diverge across Servers.

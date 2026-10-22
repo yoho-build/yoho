@@ -53,6 +53,9 @@ func TestUseFastStart(t *testing.T) {
 	if UseFastStart(stateful, &types.HealthCheckConfig{Test: hc.Test, StartPeriod: durPtr(time.Second)}, false, "25.0.0") {
 		t.Error("user start_period must win on a Stateful Service")
 	}
+	if UseFastStart(proxied, &types.HealthCheckConfig{Interval: durPtr(time.Second)}, true, "25.0.0") {
+		t.Error("timing-only override inherits the image healthcheck; keep its start_period")
+	}
 	if !UseFastStart(plain, hc, true, "29.0.0") {
 		t.Error("swarm waits on every healthcheck")
 	}
