@@ -36,3 +36,28 @@ destinations:
 		t.Fatal("schema lacks subnet")
 	}
 }
+
+// The Swarm runtime does not apply subnet; accepting it would ignore it.
+func TestValidateSubnetRejectsSwarm(t *testing.T) {
+	c, err := Parse([]byte(`
+app: a
+servers: {s: {ssh: x}}
+destinations:
+  sw: {servers: [s], runtime: swarm, subnet: 10.200.3.0/24}
+  co: {servers: [s], runtime: compose, subnet: 10.200.4.0/24}
+`), "t")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var all []string
+	for _, e := range Validate(c) {
+		all = append(all, e.Error())
+	}
+	j := strings.Join(all, "\n")
+	if !strings.Contains(j, "destinations.sw.subnet supports the compose runtime only") {
+		t.Errorf("swarm subnet not rejected:\n%s", j)
+	}
+	if strings.Contains(j, "destinations.co.subnet") {
+		t.Errorf("compose subnet rejected:\n%s", j)
+	}
+}

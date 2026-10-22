@@ -288,3 +288,57 @@ func TestSharedMemoRetryRunsOncePerRound(t *testing.T) {
 		t.Fatalf("runner ran %d times, want 2 (one failure, one retry)", calls)
 	}
 }
+
+// Permission and network errors are not approval timeouts, even after a long
+// wait, and only op / bw get the wait heuristic.
+func TestClassifyKeepsPermissionAndNetworkErrorsApart(t *testing.T) {
+	long := 60 * time.Second
+	exit1 := errors.New("exit status 1")
+	cases := []struct {
+		provider, stderr string
+		elapsed          time.Duration
+		class            ErrClass
+		inferred         bool
+	}{
+		{"op", "[ERROR] You are not authorized to access this item", 0, Other, false},
+		{"op", "[ERROR] You are not authorized to access this item", long, Other, false},
+		{"op", "[ERROR] request timed out", long, Other, false},
+		{"bw", "Request timed out", long, Other, false},
+		{"op", "[ERROR] authorization timeout", 0, ApprovalTimeout, false},
+		{"op", "[ERROR] something unexpected", long, ApprovalTimeout, true},
+		{"bw", "", long, ApprovalTimeout, true},
+		{"bws", "", long, Other, false},
+		{"bws", "Error: 0: Received error message from server: [401 Unauthorized] {}", 0, NotSignedIn, false},
+		{"bws", "Error: 0: Access token is not in a valid format: Doesn't contain a decryption key", 0, NotSignedIn, false},
+		{"bws", "Error: 0: Received error message from server: [404 Not Found] {\"message\":\"Resource not found.\"}", 0, NotFound, false},
+		{"bws", "error 401 in request id 404", 0, Other, false},
+		{"bws", "bad access token value", 0, Other, false},
+	}
+	for _, tc := range cases {
+		c, inf := classify(tc.provider, exit1, []byte(tc.stderr), tc.elapsed)
+		if c != tc.class || inf != tc.inferred {
+			t.Errorf("%s %q after %v: class %v inferred %v, want %v %v", tc.provider, tc.stderr, tc.elapsed, c, inf, tc.class, tc.inferred)
+		}
+	}
+}
+
+func TestPermissionErrorIsNotRetried(t *testing.T) {
+	r := &scriptRunner{answers: []scriptAnswer{{stderr: "[ERROR] You are not authorized to access this item", err: errors.New("exit status 1"), took: 60 * time.Second}}}
+	_, err := load(t, opCfg("op://v/i/f"), LoadOptions{Runner: r, Clock: r.clock, Retries: 1})
+	if err == nil || len(r.calls) != 1 {
+		t.Fatalf("calls %d err %v", len(r.calls), err)
+	}
+	var pe *ProviderError
+	if errors.As(err, &pe) && pe.Class == ApprovalTimeout {
+		t.Fatalf("permission error classified as approval: %v", err)
+	}
+}
+
+func TestInferredApprovalTimeoutSaysSo(t *testing.T) {
+	r := &scriptRunner{answers: []scriptAnswer{{stderr: "[ERROR] odd", err: errors.New("exit status 1"), took: 60 * time.Second}, {stderr: "[ERROR] odd", err: errors.New("exit status 1"), took: 60 * time.Second}}}
+	_, err := load(t, opCfg("op://v/i/f"), LoadOptions{Runner: r, Clock: r.clock})
+	pe := asProviderError(t, err)
+	if pe.Class != ApprovalTimeout || !pe.Inferred || !strings.Contains(err.Error(), "likely an unanswered approval prompt") {
+		t.Fatalf("got %+v: %v", pe, err)
+	}
+}

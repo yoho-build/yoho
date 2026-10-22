@@ -92,6 +92,9 @@ func Validate(c *Config) []error {
 		default:
 			add("destinations.%s.access %q must be operator or scoped", n, d.Access)
 		}
+		if d.Subnet != "" && rt == "swarm" {
+			add("destinations.%s.subnet supports the compose runtime only; remove it or pin the subnet in the compose file's networks.default.ipam", n)
+		}
 		if d.Subnet != "" {
 			if p, err := netip.ParsePrefix(d.Subnet); err != nil || !p.Addr().Is4() || p != p.Masked() {
 				add("destinations.%s.subnet %q must be an IPv4 network in CIDR form, like 10.200.3.0/24", n, d.Subnet)

@@ -569,7 +569,9 @@ func (r *runner) deployStack(ctx context.Context, file, stack string, prune, aut
 	}
 	dctx, cancel := context.WithTimeout(ctx, convergeTimeout)
 	defer cancel()
-	deployErr := r.h.Run(dctx, remote.Cmd{Script: stackDeployCmd(r.dir, file, stack, prune, auth, true) + " 2>&1", Stdout: io.Discard, Stderr: io.Discard})
+	tail := &deploy.OutputTail{Redact: r.redact}
+	deployErr := r.h.Run(dctx, remote.Cmd{Script: stackDeployCmd(r.dir, file, stack, prune, auth, true) + " 2>&1", Stdout: tail, Stderr: io.Discard})
+	deployErr = tail.Annotate(deployErr)
 	if deployErr != nil {
 		cause := fmt.Errorf("docker stack deploy %s: %w", stack, deployErr)
 		failure := r.convergenceFailure(cause, unknownServiceStatus(before, stack, planned), r.diagnose(ctx, stack, nil))

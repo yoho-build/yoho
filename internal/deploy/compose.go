@@ -127,11 +127,11 @@ func (c Compose) Deploy(ctx context.Context, d *plan.Deploy) (_ *release.Release
 	if err := checkOwnership(ctx, h, d.App, d.Destination, preflightPlans); err != nil {
 		return nil, err
 	}
-	curState, err := loadCurrent(ctx, h, d.App, d.Destination)
+	curSubnet, hasCurrent, err := currentSubnet(ctx, h, d.App, d.Destination)
 	if err != nil {
 		return nil, err
 	}
-	if err := checkSubnetChange(release.ProjectName(d.App, d.Destination), preflightYAML, curState); err != nil {
+	if err := checkSubnetChange(release.ProjectName(d.App, d.Destination), preflightYAML, curSubnet, hasCurrent); err != nil {
 		return nil, err
 	}
 

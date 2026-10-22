@@ -5,14 +5,17 @@ import (
 	"errors"
 	"fmt"
 	"net/netip"
+	"path"
 	"regexp"
 	"strings"
+	"sync"
 	"time"
 
 	"go.yaml.in/yaml/v3"
 
 	"github.com/yoho-build/yoho/internal/plan"
 	"github.com/yoho-build/yoho/internal/proxy"
+	"github.com/yoho-build/yoho/internal/release"
 	"github.com/yoho-build/yoho/internal/remote"
 )
 
@@ -100,17 +103,26 @@ func failedNetwork(err error, project string, known []string) string {
 }
 
 // usedSubnetsScript fails when any inventory command fails, so an incomplete
-// list never produces a suggestion.
+// list never produces a suggestion. A missing `ip` fails the script too
+// (command substitution under set -e); routes of type blackhole, unreachable,
+// prohibit and throw count as taken, so their prefix is printed, not the type.
 const usedSubnetsScript = `set -eu
 ids=$(docker network ls -q)
 if [ -n "$ids" ]; then
   # shellcheck disable=SC2086
   docker network inspect -f '{{range .IPAM.Config}}{{.Subnet}} {{end}}' $ids
 fi
-if command -v ip >/dev/null 2>&1; then
-  routes=$(ip -4 -o route)
-  printf '%s\n' "$routes" | while read -r dst rest; do echo "$dst"; done
-fi
+routes=$(ip -4 -o route)
+printf '%s\n' "$routes" | while read -r dst rest; do
+  case "$dst" in
+  blackhole|unreachable|prohibit|throw|unicast|local|broadcast|multicast|anycast|nat)
+    # shellcheck disable=SC2086
+    set -- $rest
+    dst=${1:-}
+    ;;
+  esac
+  echo "$dst"
+done
 `
 
 // SuggestSubnet returns the first /24 of ReservedSubnetRange that overlaps no
@@ -213,8 +225,8 @@ func (e *SubnetChangeError) Error() string {
 }
 
 // defaultSubnet is the first ipam subnet of the compiled file's default
-// network, "" when none.
-func defaultSubnet(composeYAML []byte) string {
+// network, "" when none. A file it cannot parse is an error, never "".
+func defaultSubnet(composeYAML []byte) (string, error) {
 	var doc struct {
 		Networks map[string]struct {
 			Ipam struct {
@@ -225,22 +237,103 @@ func defaultSubnet(composeYAML []byte) string {
 		} `yaml:"networks"`
 	}
 	if err := yaml.Unmarshal(composeYAML, &doc); err != nil {
-		return ""
+		return "", err
 	}
 	if n, ok := doc.Networks["default"]; ok && len(n.Ipam.Config) > 0 {
-		return n.Ipam.Config[0].Subnet
+		return n.Ipam.Config[0].Subnet, nil
 	}
-	return ""
+	return "", nil
 }
 
-// checkSubnetChange compares the wanted compiled compose with the current
-// Release's. A first subnet on an App without a current Release is fine.
-func checkSubnetChange(project string, want []byte, cur *currentState) error {
-	if cur == nil {
+// checkSubnetChange compares the wanted compiled compose with the subnet of
+// the current Release. exists is true only when a current Release was
+// confirmed; a first subnet on an App without one is fine.
+func checkSubnetChange(project string, want []byte, curSubnet string, exists bool) error {
+	if !exists {
 		return nil
 	}
-	if o, n := cur.subnet, defaultSubnet(want); o != n {
-		return &SubnetChangeError{Project: project, Old: o, New: n}
+	n, err := defaultSubnet(want)
+	if err != nil {
+		return fmt.Errorf("parse compiled compose file of %s: %w", project, err)
+	}
+	if curSubnet != n {
+		return &SubnetChangeError{Project: project, Old: curSubnet, New: n}
 	}
 	return nil
+}
+
+// currentSubnet reads the default network subnet of the Release `current`
+// points at. It fails closed: exists is false only when there is confirmed no
+// `current` link; a failed read of the link, the compose file, or its parse is
+// an error, so a subnet change cannot slip through as a "first" subnet.
+func currentSubnet(ctx context.Context, h remote.Host, app, dest string) (subnet string, exists bool, err error) {
+	dir := release.AppDir(app, dest)
+	cur := path.Join(dir, "current")
+	link, err := h.Output(ctx, remote.Cmd{Script: "set -eu\nif [ -L " + remote.Quote(cur) + " ]; then readlink " + remote.Quote(cur) + "\nelif [ -e " + remote.Quote(cur) + " ]; then echo 'current is not a symlink' >&2; exit 1\nfi"})
+	if err != nil {
+		return "", false, fmt.Errorf("read current Release link: %w", err)
+	}
+	link = strings.TrimSpace(link)
+	if link == "" {
+		return "", false, nil
+	}
+	file := path.Join(dir, "releases", path.Base(link), "compose.yaml")
+	raw, err := h.ReadFile(ctx, file, false)
+	if err != nil {
+		return "", false, fmt.Errorf("read current Release compose file (cannot tell whether the default network subnet changes): %w", err)
+	}
+	subnet, err = defaultSubnet(raw)
+	if err != nil {
+		return "", false, fmt.Errorf("parse %s (cannot tell whether the default network subnet changes): %w", file, err)
+	}
+	return subnet, true, nil
+}
+
+// OutputTail keeps the last bytes of a command's stdout so a pool exhaustion
+// line survives when the script merges stderr into stdout (2>&1).
+type OutputTail struct {
+	// Redact masks secret values in the line Annotate keeps; the merged
+	// output can carry anything the command printed.
+	Redact func(string) string
+	mu     sync.Mutex
+	buf    []byte
+}
+
+const outputTailMax = 16 << 10
+
+func (t *OutputTail) Write(p []byte) (int, error) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.buf = append(t.buf, p...)
+	if len(t.buf) > outputTailMax {
+		t.buf = t.buf[len(t.buf)-outputTailMax:]
+	}
+	return len(p), nil
+}
+
+// Annotate lets IsPoolExhausted see a pool exhaustion message that went to the
+// merged output: when err is a *remote.ExitError whose Stderr lacks it, the
+// matching line (and only that line, never other output) becomes its Stderr.
+func (t *OutputTail) Annotate(err error) error {
+	var ee *remote.ExitError
+	if err == nil || !errors.As(err, &ee) || IsPoolExhausted(err) {
+		return err
+	}
+	t.mu.Lock()
+	text := string(t.buf)
+	t.mu.Unlock()
+	for _, line := range strings.Split(text, "\n") {
+		l := strings.ToLower(line)
+		for _, m := range poolExhaustedMessages {
+			if strings.Contains(l, m) {
+				line = strings.TrimSpace(line)
+				if t.Redact != nil {
+					line = t.Redact(line)
+				}
+				ee.Stderr = line
+				return err
+			}
+		}
+	}
+	return err
 }

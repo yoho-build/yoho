@@ -94,8 +94,12 @@ func TestSecretsHintPerClass(t *testing.T) {
 		}
 		seen[got[k]] = true
 	}
-	if !strings.Contains(got["timeout"], "approval") {
+	if !strings.Contains(got["timeout"], "approval") || strings.Contains(got["timeout"], "inferred") {
 		t.Fatalf("timeout hint %q", got["timeout"])
+	}
+	inferred := secretsHint(&secrets.ProviderError{Class: secrets.ApprovalTimeout, Provider: "op", Inferred: true}, def)
+	if !strings.Contains(inferred, "inferred from the long wait") {
+		t.Fatalf("inferred hint %q", inferred)
 	}
 }
 

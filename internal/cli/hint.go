@@ -74,7 +74,11 @@ func secretsHint(err error, def string) string {
 	}
 	switch pe.Class {
 	case secrets.ApprovalTimeout:
-		return "the " + pe.Provider + " approval prompt was not answered in time; approve it when it appears and rerun (or pass --secrets-retries 1)"
+		h := "the " + pe.Provider + " approval prompt was not answered in time; approve it when it appears and rerun (or pass --secrets-retries 1)"
+		if pe.Inferred {
+			h += " (inferred from the long wait: the provider gave no reason, so this may be another failure)"
+		}
+		return h
 	case secrets.NotSignedIn:
 		return "sign in to " + pe.Provider + " (`op signin`, `bw unlock`, or set BWS_ACCESS_TOKEN) and rerun"
 	case secrets.NotFound:

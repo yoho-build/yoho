@@ -27,8 +27,9 @@ const (
 // tells Yoho its own approval timed out, so the call is worth retrying.
 const approvalExitCode = 75
 
-// approvalElapsed is when a failing op / bw / bws call is taken as an
-// unanswered approval prompt: their own prompt timeout is about 60 s.
+// approvalElapsed is when a failing op / bw call with no recognised message
+// is taken as an unanswered approval prompt: their own prompt timeout is
+// about 60 s.
 const approvalElapsed = 55 * time.Second
 
 // ProviderError is a classified secrets provider failure. Its text is fixed
@@ -39,6 +40,9 @@ type ProviderError struct {
 	Class    ErrClass
 	Provider string
 	Elapsed  time.Duration
+	// Inferred: ApprovalTimeout was concluded from the long wait alone; the
+	// provider did not say so.
+	Inferred bool
 	// note is fixed text chosen by Yoho, never provider output.
 	note   string
 	detail error
@@ -48,6 +52,9 @@ func (e *ProviderError) Error() string {
 	switch e.Class {
 	case ApprovalTimeout:
 		s := "secrets provider " + e.Provider + ": approval timed out or was not granted"
+		if e.Inferred {
+			s = "secrets provider " + e.Provider + ": failed with no reason Yoho recognises after a long wait, likely an unanswered approval prompt"
+		}
 		if e.Elapsed >= time.Second {
 			s += " (waited " + e.Elapsed.Round(time.Second).String() + ")"
 		}
@@ -103,33 +110,48 @@ func watchWait(onWait func(WaitEvent), after time.Duration, ev WaitEvent) (stop 
 	return func() { t.Stop() }
 }
 
+// providerPhrases are the provider's own message shapes. Generic text such as
+// "not authorized" (a permission error) or "timed out" (a network error) is
+// deliberately absent from approval: it must not be relabelled as an
+// approval timeout or retried.
 var providerPhrases = map[string]struct{ approval, signedIn, notFound []string }{
 	"op": {
-		approval: []string{"authorization timeout", "authorization prompt", "authorization denied", "authorization was denied", "not authorized", "timed out"},
-		signedIn: []string{"not signed in", "no accounts configured", "not currently signed in", "session expired", "sign in to"},
-		notFound: []string{"isn't an item", "isn't a vault", "could not be found", "no item", "isn't a field", "does not exist"},
+		approval: []string{"authorization timeout", "authorization prompt", "authorization denied", "authorization was denied"},
+		signedIn: []string{"not signed in", "no accounts configured", "not currently signed in", "session expired"},
+		notFound: []string{"isn't an item", "isn't a vault", "could not be found", "isn't a field"},
 	},
 	"bw": {
-		approval: []string{"timed out", "authorization"},
-		signedIn: []string{"not logged in", "vault is locked", "you are not logged in", "invalid master password", "bw_session"},
-		notFound: []string{"not found"},
+		signedIn: []string{"not logged in", "vault is locked", "invalid master password"},
+		notFound: []string{"not found."},
 	},
 	"bws": {
-		approval: []string{"timed out", "authorization"},
-		signedIn: []string{"access token", "unauthorized", "not logged in", "401"},
-		notFound: []string{"not found", "404"},
+		signedIn: []string{"[401 unauthorized]", "access token is not in a valid format", "--access-token <access_token>", `"invalid_client"`},
+		notFound: []string{"[404 not found]", "resource not found"},
 	},
 }
 
+// otherFailures are permission and network errors. They stay Other even
+// after a long wait, so the wait heuristic below never turns them into an
+// approval timeout.
+var otherFailures = []string{
+	"not authorized", "permission", "forbidden",
+	"timed out", "timeout", "connection refused", "connection reset", "no such host", "network is unreachable", "dial tcp",
+}
+
+// interactive providers show an approval prompt of their own; only they get
+// the elapsed-time inference.
+var interactiveProvider = map[string]bool{"op": true, "bw": true}
+
 // classify places a provider failure. stderr is read here and dropped.
-func classify(provider string, err error, stderr []byte, elapsed time.Duration) ErrClass {
+// inferred is true when ApprovalTimeout rests on the wait alone.
+func classify(provider string, err error, stderr []byte, elapsed time.Duration) (class ErrClass, inferred bool) {
 	var ee *exec.ExitError
 	if errors.As(err, &ee) && ee.ExitCode() == approvalExitCode {
-		return ApprovalTimeout
+		return ApprovalTimeout, false
 	}
 	ph, known := providerPhrases[provider]
 	if !known {
-		return Other
+		return Other, false
 	}
 	text := strings.ToLower(string(stderr))
 	has := func(list []string) bool {
@@ -142,25 +164,27 @@ func classify(provider string, err error, stderr []byte, elapsed time.Duration) 
 	}
 	switch {
 	case has(ph.approval):
-		return ApprovalTimeout
+		return ApprovalTimeout, false
 	case has(ph.signedIn):
-		return NotSignedIn
+		return NotSignedIn, false
 	case has(ph.notFound):
-		return NotFound
-	case elapsed >= approvalElapsed:
-		return ApprovalTimeout
+		return NotFound, false
+	case has(otherFailures):
+		return Other, false
+	case interactiveProvider[provider] && elapsed >= approvalElapsed:
+		return ApprovalTimeout, true
 	}
-	return Other
+	return Other, false
 }
 
 // classifiedError builds the error for a failed call; context cancellation
 // is never an approval timeout.
 func classifiedError(ctx context.Context, provider string, argv0 string, err error, out, stderr []byte, elapsed time.Duration) *ProviderError {
-	class := Other
+	class, inferred := Other, false
 	if ctx.Err() == nil {
-		class = classify(provider, err, stderr, elapsed)
+		class, inferred = classify(provider, err, stderr, elapsed)
 	}
-	pe := &ProviderError{Class: class, Provider: provider, Elapsed: elapsed}
+	pe := &ProviderError{Class: class, Provider: provider, Elapsed: elapsed, Inferred: inferred}
 	if class == Other {
 		pe.detail = commandError(argv0, err, out, stderr, nil)
 	}

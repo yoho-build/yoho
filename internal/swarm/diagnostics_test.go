@@ -272,3 +272,28 @@ func TestSwarmConvergenceFailureFacts(t *testing.T) {
 		t.Fatal("App-wide rollback promise")
 	}
 }
+
+// poolStackHost prints Docker's pool exhaustion line (merged by 2>&1) on a
+// docker stack deploy, next to a secret, then fails it.
+type poolStackHost struct{ *fakeHost }
+
+func (p *poolStackHost) Run(ctx context.Context, c remote.Cmd) error {
+	if strings.Contains(c.Script, "docker stack deploy") && c.Stdout != nil {
+		_, _ = io.WriteString(c.Stdout, "token current-token\nfailed to create network app_default: Error response from daemon: all predefined address pools have been fully subnetted current-token\n")
+		return &remote.ExitError{Host: "s1", Code: 1}
+	}
+	return p.fakeHost.Run(ctx, c)
+}
+
+func TestSwarmStackDeployPoolExhaustionDetected(t *testing.T) {
+	h := &poolStackHost{&fakeHost{local: &remote.Local{}, respond: func(string) (string, error) { return "", nil }}}
+	r := runner{h: h, out: io.Discard, secretVals: []string{"current-token"}}
+	err := r.deployStack(context.Background(), "compose.yaml", "app", true, false, "web")
+	if !deploy.IsPoolExhausted(err) {
+		t.Fatalf("pool exhaustion missed: %v", err)
+	}
+	var ee *remote.ExitError
+	if !errors.As(err, &ee) || strings.Contains(ee.Stderr, "current-token") || strings.Contains(err.Error(), "current-token") {
+		t.Fatalf("secret leaked: %v / %q", err, ee.Stderr)
+	}
+}

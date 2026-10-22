@@ -85,9 +85,10 @@ type Destination struct {
 	SSH *DestinationSSH `json:"ssh,omitempty"`
 	// IPv4 subnet (CIDR, e.g. 10.200.3.0/24) for the App's compose default
 	// network, for Servers whose Docker address pools are exhausted. Applied
-	// only when the compose file defines no ipam for that network. Setting
-	// it on a deployed App recreates the network (containers restart), so
-	// Yoho never picks it by itself; a failed deploy suggests a free one.
+	// only when the compose file defines no ipam for that network. Compose
+	// runtime only. Changing it on a deployed App is refused (Docker would
+	// recreate the network), and Yoho never picks it by itself; a failed
+	// deploy suggests a free one.
 	Subnet string `json:"subnet,omitempty" jsonschema:"example=10.200.3.0/24"`
 }
 
