@@ -14,8 +14,8 @@ Always run `yoho config check` after editing config. It warns when a Service's `
 Follow in order. Ask before installing anything, editing files, or running any command against a Server. Never use sudo.
 
 1. Ask what the user wants: new deploy, migrate from Kamal/Coolify/Dokploy/Ansible (read the matching migrate reference), or operate an existing App. Ask for the target Server (`ssh user@host`) and confirm before any remote command.
+2. Run `yoho version`. If missing, ask, then install with `curl -fsSL https://yohobuild.com/install.sh | sh` (fallback `curl -fsSL https://raw.githubusercontent.com/yoho-build/yoho/main/scripts/install.sh | sh`) or `go install github.com/yoho-build/yoho/cmd/yoho@latest`.
 3. Offer `yoho skill install` so this skill persists in the project. Once `yoho.yml` exists, `yoho skill install --project --only yoho` adds a generated `yoho-deploy-<app>` skill for this repo.
-3. Offer `yoho skill install` so this skill persists in the project.
 4. Run `yoho init`. Edit `yoho.yml` and `x-yoho` in `compose.yaml` using the config reference. Secrets only as refs in `.yoho/secrets`; never write values into the repo.
 5. Run `yoho config check` and fix what it reports.
 6. Run `yoho setup --plan`. `yoho setup` is interactive: tell the user to run it, or run `yoho setup -y` only with their consent.

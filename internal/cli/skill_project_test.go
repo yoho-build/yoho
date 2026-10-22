@@ -225,3 +225,166 @@ func TestSkillInstallProjectDirDefaultsToGitRoot(t *testing.T) {
 		t.Error("skill written next to the Yoho file")
 	}
 }
+
+func installedProjectSkill(t *testing.T, root, path string) string {
+	t.Helper()
+	if out, err := runProjectSkill(t, path, false); err != nil {
+		t.Fatalf("%v\n%s", err, out)
+	} else if strings.Contains(out, "S3CR3T") {
+		t.Fatal("secret leaked into install output")
+	}
+	b, err := os.ReadFile(filepath.Join(root, ".agents", "skills", "yoho-deploy-sample", "SKILL.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(b), "S3CR3T") {
+		t.Fatal("secret value or ref leaked into skill")
+	}
+	return string(b)
+}
+
+func TestSkillInstallProjectMergedDestinations(t *testing.T) {
+	base := strings.ReplaceAll(projectYoho, "production", "qa")
+	base = strings.ReplaceAll(base, "cluster", "staging")
+	base = strings.Replace(base, "prod1: {ssh: root@203.0.113.10}", "prod1: {}", 1)
+	root, path := projectRepo(t, base)
+	dir := filepath.Dir(path)
+	// Each merged config must be valid, even when its base is incomplete.
+	for name, overlay := range map[string]string{
+		"qa": `servers:
+  prod1: {ssh: qa@203.0.113.10}
+builder: {location: local}
+secrets:
+  providers:
+    extra: {type: bw, account: account-S3CR3T}
+  values:
+    API_KEY: {provider: extra, ref: item-S3CR3T}
+backups:
+  jobs:
+    hourly: {destination: qa, target: local}
+    weekly: {destination: qa, target: local, schedule: hourly}
+    ignored: {destination: staging, target: local}
+`,
+		"staging": `servers:
+  prod1: {ssh: staging@203.0.113.10}
+builder: {location: remote, remote: builder@203.0.113.20}
+secrets:
+  providers:
+    extra: {type: bws}
+  values:
+    API_KEY: {provider: extra, ref: other-S3CR3T}
+`,
+	} {
+		if err := os.WriteFile(filepath.Join(dir, "yoho."+name+".yml"), []byte(overlay), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	s := installedProjectSkill(t, root, path)
+	for _, want := range []string{
+		"### qa\n\nBuilder: `local`", "### staging\n\nBuilder: `remote`",
+		"`extra` (bw), `extra` (bws), `vault` (op)", "`API_KEY`, `DB_PASSWORD`",
+		"yoho config check -d qa", "yoho config check -d staging",
+		"yoho backup run hourly -d qa", "yoho backup list hourly -d qa",
+		"yoho backup list nightly -d qa", "yoho backup list weekly -d qa",
+		"yoho backup list weekly -d staging", "schedule `hourly`",
+	} {
+		if !strings.Contains(s, want) {
+			t.Errorf("merged skill lacks %q:\n%s", want, s)
+		}
+	}
+	for _, bad := range []string{"yoho config check\n", "yoho backup list\n", "ignored", "Builder: `server`"} {
+		if strings.Contains(s, bad) {
+			t.Errorf("merged skill contains %q", bad)
+		}
+	}
+	for _, once := range []string{"`vault` (op)", "`API_KEY`", "`DB_PASSWORD`", "yoho backup run nightly -d qa"} {
+		if n := strings.Count(s, once); n != 1 {
+			t.Errorf("%q appears %d times, want 1", once, n)
+		}
+	}
+	// Validation still rejects an invalid merged config.
+	if err := os.WriteFile(filepath.Join(dir, "yoho.qa.yml"), []byte("builder: {location: invalid}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := loadProjectSkill(path); err == nil || !strings.Contains(err.Error(), "invalid yoho.yml for Destination qa") {
+		t.Fatalf("want merged validation error, got %v", err)
+	}
+}
+
+func TestSkillInstallProjectCommandDirectories(t *testing.T) {
+	for _, runDir := range []string{"deploy files", "."} {
+		t.Run(runDir, func(t *testing.T) {
+			root, path := projectRepo(t, projectYoho)
+			dir := filepath.Join(root, runDir)
+			if runDir != "." {
+				if err := os.Rename(filepath.Dir(path), dir); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if runDir == "." {
+				if err := os.WriteFile(filepath.Join(dir, "yoho.yml"), []byte(projectYoho), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+			s := installedProjectSkill(t, root, filepath.Join(dir, "yoho.yml"))
+			blocks := strings.Split(s, "```bash\n")[1:]
+			if len(blocks) != 5 {
+				t.Fatalf("want 5 command blocks, got %d", len(blocks))
+			}
+			for _, block := range blocks {
+				if runDir != "." && !strings.HasPrefix(block, "cd 'deploy files'\n") {
+					t.Errorf("command block lacks quoted cd:\n%s", block)
+				}
+				if runDir == "." && !strings.HasPrefix(block, "yoho ") {
+					t.Errorf("root command block should start with yoho:\n%s", block)
+				}
+			}
+		})
+	}
+}
+
+func TestSkillInstallProjectExplicitConfig(t *testing.T) {
+	for _, name := range []string{"yoho.yaml", "custom config's.yml"} {
+		t.Run(name, func(t *testing.T) {
+			root, original := projectRepo(t, projectYoho)
+			path := filepath.Join(filepath.Dir(original), name)
+			if err := os.WriteFile(path, []byte(projectYoho), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			s := installedProjectSkill(t, root, path)
+			flag := "-c yoho.yaml "
+			if name != "yoho.yaml" {
+				flag = "-c 'custom config'\"'\"'s.yml' "
+			}
+			for _, line := range strings.Split(s, "\n") {
+				if strings.HasPrefix(line, "yoho ") && !strings.HasPrefix(line, "yoho "+flag) {
+					t.Errorf("command lost explicit config: %s", line)
+				}
+			}
+		})
+	}
+}
+
+func TestProjectSkillShellQuoting(t *testing.T) {
+	for _, tc := range []struct{ arg, want string }{
+		{"safe_@%+=:,./-123", "safe_@%+=:,./-123"},
+		{"", "''"},
+		{"deploy files", "'deploy files'"},
+		{"it's", "'it'\"'\"'s'"},
+		{"qa; $(touch nope)", "'qa; $(touch nope)'"},
+		{"line\nbreak", "'line\nbreak'"},
+	} {
+		if got := projectShellArg(tc.arg); got != tc.want {
+			t.Errorf("quote %q = %q, want %q", tc.arg, got, tc.want)
+		}
+	}
+	base := strings.ReplaceAll(projectYoho, "production", "qa; $HOME")
+	base = strings.ReplaceAll(base, "nightly", "nightly's backup")
+	root, path := projectRepo(t, base)
+	s := installedProjectSkill(t, root, path)
+	for _, command := range []string{"config check", "plan", "deploy", "app ps", "app logs SERVICE -n 200", "releases", "rollback VERSION", "backup run 'nightly'\"'\"'s backup'", "backup list 'nightly'\"'\"'s backup'"} {
+		if want := "yoho " + command + " -d 'qa; $HOME'"; !strings.Contains(s, want) {
+			t.Errorf("missing quoted command %q", want)
+		}
+	}
+}

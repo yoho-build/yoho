@@ -23,8 +23,7 @@ type projectSkill struct {
 	App          string
 	ConfigRel    string // Yoho file, relative to the git root
 	RunDir       string // directory of the Yoho file, relative to the git root
-	ConfigFlag   string // "-c NAME " when the Yoho file is not a default name
-	Builder      string
+	ConfigFlag   string // "-c NAME " unless config discovery selects this file
 	Destinations []projectDest
 	SecretFiles  []string
 	Providers    []projectProvider
@@ -33,8 +32,8 @@ type projectSkill struct {
 }
 
 type projectDest struct {
-	Name, Runtime string
-	Servers       []projectServer
+	Name, Runtime, Builder string
+	Servers                []projectServer
 }
 
 type projectServer struct{ Name, SSH string }
@@ -64,9 +63,6 @@ func loadProjectSkill(path string) (projectSkill, error) {
 	if err != nil {
 		return projectSkill{}, err
 	}
-	if errs := config.Validate(base); len(errs) > 0 {
-		return projectSkill{}, fmt.Errorf("invalid %s:\n  %w", filepath.Base(path), errors.Join(errs...))
-	}
 	abs, err := filepath.Abs(path)
 	if err != nil {
 		return projectSkill{}, err
@@ -84,12 +80,18 @@ func loadProjectSkill(path string) (projectSkill, error) {
 		App:       base.App,
 		ConfigRel: rel(abs),
 		RunDir:    rel(dir),
-		Builder:   base.Builder.Location,
 	}
-	if !slices.Contains(config.FileNames, filepath.Base(abs)) {
-		p.ConfigFlag = "-c " + filepath.Base(abs) + " "
+	if found, err := config.Find(dir); err != nil || found != abs {
+		p.ConfigFlag = "-c " + projectShellArg(filepath.Base(abs)) + " "
 	}
+	providers := make(map[projectProvider]bool)
+	keys := make(map[string]bool)
+	jobs := make(map[[2]string]projectJob)
 	names := sortedKeys(base.Destinations)
+	if len(names) == 0 {
+		_, err := base.DestName("")
+		return projectSkill{}, err
+	}
 	if def, err := base.DestName(""); err == nil {
 		names = slices.Insert(slices.DeleteFunc(names, func(n string) bool { return n == def }), 0, def)
 	}
@@ -102,11 +104,22 @@ func loadProjectSkill(path string) (projectSkill, error) {
 			return projectSkill{}, fmt.Errorf("invalid %s for Destination %s:\n  %w", filepath.Base(path), name, errors.Join(errs...))
 		}
 		d := cfg.Destinations[name]
-		pd := projectDest{Name: name, Runtime: d.Runtime}
+		pd := projectDest{Name: name, Runtime: d.Runtime, Builder: cfg.Builder.Location}
 		for _, s := range d.Servers {
 			pd.Servers = append(pd.Servers, projectServer{s, cfg.Servers[s].SSH})
 		}
 		p.Destinations = append(p.Destinations, pd)
+		for n, provider := range cfg.Secrets.Providers {
+			providers[projectProvider{n, provider.Type}] = true
+		}
+		for n := range cfg.Secrets.Values {
+			keys[n] = true
+		}
+		for n, j := range cfg.Backups.Jobs {
+			if j.Destination == name {
+				jobs[[2]string{n, name}] = projectJob{n, name, j.Target, j.Schedule}
+			}
+		}
 		for _, f := range secrets.FileNames(name) {
 			full := filepath.Join(dir, f)
 			if _, err := os.Stat(full); err == nil && !slices.Contains(p.SecretFiles, rel(full)) {
@@ -115,14 +128,25 @@ func loadProjectSkill(path string) (projectSkill, error) {
 		}
 	}
 	slices.Sort(p.SecretFiles)
-	for _, n := range sortedKeys(base.Secrets.Providers) {
-		p.Providers = append(p.Providers, projectProvider{n, base.Secrets.Providers[n].Type})
+	for provider := range providers {
+		p.Providers = append(p.Providers, provider)
 	}
-	p.SecretKeys = sortedKeys(base.Secrets.Values)
-	for _, n := range sortedKeys(base.Backups.Jobs) {
-		j := base.Backups.Jobs[n]
-		p.Jobs = append(p.Jobs, projectJob{n, j.Destination, j.Target, j.Schedule})
+	slices.SortFunc(p.Providers, func(a, b projectProvider) int {
+		if n := strings.Compare(a.Name, b.Name); n != 0 {
+			return n
+		}
+		return strings.Compare(a.Type, b.Type)
+	})
+	p.SecretKeys = sortedKeys(keys)
+	for _, job := range jobs {
+		p.Jobs = append(p.Jobs, job)
 	}
+	slices.SortFunc(p.Jobs, func(a, b projectJob) int {
+		if n := strings.Compare(a.Name, b.Name); n != 0 {
+			return n
+		}
+		return strings.Compare(a.Destination, b.Destination)
+	})
 	return p, nil
 }
 
@@ -139,7 +163,16 @@ func gitRoot(dir string) string {
 	}
 }
 
-var projectSkillTmpl = template.Must(template.New("skill").Parse(`---
+var projectShellSafeRE = regexp.MustCompile(`^[A-Za-z0-9_@%+=:,./-]+$`)
+
+func projectShellArg(arg string) string {
+	if projectShellSafeRE.MatchString(arg) {
+		return arg
+	}
+	return "'" + strings.ReplaceAll(arg, "'", "'\"'\"'") + "'"
+}
+
+var projectSkillTmpl = template.Must(template.New("skill").Funcs(template.FuncMap{"sh": projectShellArg}).Parse(`---
 name: {{.Name}}
 description: Deploy, check, roll back or back up {{.App}} with Yoho (Destinations {{.DestNames}}). Use for any deploy, release, rollback, backup or log check of {{.App}}.
 ---
@@ -157,30 +190,36 @@ Run every command from ` + "`{{.RunDir}}`" + ` (relative to the repository root)
 - ` + "`{{.Name}}`" + `: runtime ` + "`{{.Runtime}}`" + `, Servers {{range $i, $s := .Servers}}{{if $i}}, {{end}}` + "`{{$s.Name}}`" + ` (` + "`{{$s.SSH}}`" + `){{end}}{{if eq .Runtime "swarm"}}; the first Server is the Swarm manager{{end}}
 {{- end}}
 
+## Deploy
+{{range .Destinations}}
+### {{.Name}}
+
 Builder: ` + "`{{.Builder}}`" + `. {{if eq .Builder "server"}}Images build on the Server from git-visible files; no local Docker needed.{{else if eq .Builder "remote"}}Images build on the configured remote builder.{{else}}Images build on this machine; Docker must be running.{{end}}
 
-## Deploy
-
 ` + "```bash" + `
-cd {{.RunDir}}
-yoho {{.ConfigFlag}}config check
-{{- range .Destinations}}
-yoho {{$.ConfigFlag}}plan -d {{.Name}}
-yoho {{$.ConfigFlag}}deploy -d {{.Name}}
+{{- if ne $.RunDir "."}}
+cd {{sh $.RunDir}}
 {{- end}}
+yoho {{$.ConfigFlag}}config check -d {{sh .Name}}
+yoho {{$.ConfigFlag}}plan -d {{sh .Name}}
+yoho {{$.ConfigFlag}}deploy -d {{sh .Name}}
 ` + "```" + `
+{{end}}
 
 Read the plan before deploying.
 
 ## Check
 
 ` + "```bash" + `
+{{- if ne .RunDir "."}}
+cd {{sh .RunDir}}
+{{- end}}
 {{- range .Destinations}}
-yoho {{$.ConfigFlag}}app ps -d {{.Name}}
-yoho {{$.ConfigFlag}}app logs SERVICE -n 200 -d {{.Name}}
-yoho {{$.ConfigFlag}}releases -d {{.Name}}
+yoho {{$.ConfigFlag}}app ps -d {{sh .Name}}
+yoho {{$.ConfigFlag}}app logs SERVICE -n 200 -d {{sh .Name}}
+yoho {{$.ConfigFlag}}releases -d {{sh .Name}}
 {{- if eq .Runtime "swarm"}}
-yoho {{$.ConfigFlag}}swarm status -d {{.Name}}
+yoho {{$.ConfigFlag}}swarm status -d {{sh .Name}}
 {{- end}}
 {{- end}}
 ` + "```" + `
@@ -190,8 +229,11 @@ Never use ` + "`app logs -f`" + ` or a live ` + "`app stats`" + `; use ` + "`-n 
 ## Roll back
 
 ` + "```bash" + `
+{{- if ne .RunDir "."}}
+cd {{sh .RunDir}}
+{{- end}}
 {{- range .Destinations}}
-yoho {{$.ConfigFlag}}rollback VERSION -d {{.Name}}
+yoho {{$.ConfigFlag}}rollback VERSION -d {{sh .Name}}
 {{- end}}
 ` + "```" + `
 
@@ -216,10 +258,13 @@ Never print, log or commit secret values. ` + "`yoho secrets list`" + ` shows ke
 ## Backups
 {{if .Jobs}}
 ` + "```bash" + `
-{{- range .Jobs}}
-yoho {{$.ConfigFlag}}backup run {{.Name}}
+{{- if ne .RunDir "."}}
+cd {{sh .RunDir}}
 {{- end}}
-yoho {{$.ConfigFlag}}backup list
+{{- range .Jobs}}
+yoho {{$.ConfigFlag}}backup run {{sh .Name}} -d {{sh .Destination}}
+yoho {{$.ConfigFlag}}backup list {{sh .Name}} -d {{sh .Destination}}
+{{- end}}
 ` + "```" + `
 {{range .Jobs}}
 - ` + "`{{.Name}}`" + `: Destination ` + "`{{.Destination}}`" + `, Backup Target ` + "`{{.Target}}`" + `{{if .Schedule}}, schedule ` + "`{{.Schedule}}`" + `{{end}}
