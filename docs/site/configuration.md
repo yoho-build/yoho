@@ -22,6 +22,7 @@ Validate with `yoho config check`; print the resolved file with `yoho config sho
 | `destinations.<name>.env` | Non-secret variables for compose interpolation (image tags, ports). |
 | `destinations.<name>.proxy` | Overrides the top-level `proxy` for this Destination. |
 | `destinations.<name>.subnet` | Optional IPv4 subnet (CIDR) for the App's compose `default` network, used when Docker's address pools are exhausted (`all predefined address pools have been fully subnetted`). A failed deploy prints a free `/24` found on the Server. Ignored when the compose file sets `ipam` for that network. Compose runtime only (rejected with `runtime: swarm`). Changing it on a deployed App is refused, because Docker would have to recreate the network. |
+| `destinations.<name>.migrate` | One-shot cutover from Coolify, Dokploy or plain compose on this Destination: `from`, `stop`, `claim`, `tunnel`, `on_failure`. Compose runtime and operator access only. See [Migration cutover](#migration-cutover-migrate). |
 | `destinations.<name>.app_dir` | Optional absolute directory on the Server for this Destination's App directory, outside `root`. See [App directory](#app-directory-app_dir). |
 | `builder.location` | `local` (default), `remote` (dedicated build Server), `server` (build on the Destination's Server). |
 | `builder.engine` | `auto` (Apple `container` on Apple silicon if installed, else Docker), `docker`, `container`. |
@@ -116,6 +117,49 @@ destinations:
 
 - `access: scoped` sends `deploy`, `rollback`, `releases`, `app ps/logs/stats`, `tui` and `ui` through the Gate as the `gate_user`, and makes every other command that connects fail fast. `YOHO_ACCESS=operator|scoped` overrides it per shell. This option needs the compose runtime. See [Sharing one App with a team](team-access.md).
 - `ssh.via: cloudflare` reaches the Destination's only Server through a Cloudflare Tunnel `ssh://` ingress (`cloudflared access ssh --hostname …` as ssh's ProxyCommand), on the operator path and the scoped path. `hostname` must be a plain DNS name.
+
+### Migration cutover (`migrate`)
+
+A `migrate` block makes the next `yoho deploy` or `yoho apply` of that Destination take over a live App from another platform once, with rollback ([ADR 0012](https://github.com/yoho-build/yoho/blob/main/docs/adr/0012-one-shot-migration-cutover.md)). A Destination without the block, such as a rehearsal Destination, never touches the old stack or the tunnel.
+
+```yaml
+destinations:
+  production:
+    servers: [main]
+    migrate:
+      from: coolify                # coolify | dokploy | compose (recorded only)
+      stop:                        # old running containers; any selector matches
+        compose_project: ab12cd    # label com.docker.compose.project
+        labels: ["coolify.applicationId=ab12"]
+        containers: [old-web]
+      claim:                       # no other running container may mount these once stop ran
+        paths: [/data/app/postgres]
+        volumes: [ab12cd_pgdata]
+      tunnel:                      # optional: repoint Cloudflare Tunnel ingress after the deploy
+        api_token_secret: CF_API_TOKEN
+        hostnames: [app.example.com]
+        service: http://yoho-proxy:80   # default
+      on_failure: restart_old      # default; or leave
+```
+
+The deploy runs, in order:
+
+1. Build and ship images, as usual. The old stack still serves.
+2. **Preflight**, read-only: resolve `api_token_secret`, read the tunnel's configuration from the Cloudflare API (account and tunnel come from `proxy.tunnel.token_secret`) and check that every hostname has an ingress rule, list the running containers `stop` selects, and check that only those mount the claimed data. Any failure ends the deploy before anything is stopped. Selecting no container is an error unless `--cutover-allow-empty`; selecting a Yoho container (`yoho-*` or a `yoho.app` label) is always an error.
+3. The `pre-cutover` Hook.
+4. **Stop** the selected containers with `docker stop` by ID. They are never removed. Their IDs are written to the journal first.
+5. **Claim check**: every running container, except this App Destination's, is inspected; a read-write mount of a claimed volume, of a claimed path, or of a directory inside or above it fails the deploy. Read-only mounts are allowed.
+6. The normal deploy (`pre-deploy` Hook, health checks, Proxy switch) and the Tunnel connector.
+7. **Switch ingress**: the configuration before the switch goes into the journal, then only the `service` of the listed hostnames changes; other rules and the final catch-all stay as they are.
+8. The journal is marked `done`, the downtime (from stop to done) is printed, and the `post-cutover` Hook runs.
+
+When a step after 4 fails, `on_failure: restart_old` stops this App's containers, starts the old ones and restores the saved ingress; `leave` keeps everything as it is for `yoho rollback --cutover` or `yoho deploy --cutover-resume` (continues from the journal; every step is idempotent). A deploy refuses while a cutover is unfinished. Once it is `done`, deploys are normal deploys; remove the block whenever you like.
+
+The journal is `<app dir>/cutover.json` (0600) on the Server: the stopped containers, the hostnames, the ingress configuration before the switch and a hash of the one after it. It holds no secret values. The Release that performed the cutover records its id (`cutover` in `release.json`). `yoho migrate plan` runs the preflight alone; `yoho migrate status` prints the journal. With `--json`, each phase emits a `cutover` event (`preflight`, `stopped`, `claims_clear`, `ingress_switched`, `done`, `rolled_back`) with container names, hostnames and timings.
+
+`yoho rollback --cutover` stops this App's containers (by compose project and `yoho.app`/`yoho.destination` labels; never `down`, volumes kept), starts the saved old containers, and restores the saved ingress. It refuses, before changing anything, when the live ingress is neither the one the cutover left nor the saved one (someone edited it since); `--force` restores anyway. It does not revert volumes, database migrations or Scheduled Jobs, and the old stack cannot start if it publishes ports Yoho's Proxy now holds (use `proxy.http_port: 0` and `https_port: 0` behind the tunnel).
+
+The Cloudflare API token needs Account > Cloudflare Tunnel > Edit. It is resolved on your machine, sent only in the `Authorization` header to `api.cloudflare.com`, and redacted from errors. Only remotely managed tunnels (configured in the dashboard, run with a token) can be switched; DNS cutovers stay a manual step or a Hook.
 
 ## x-yoho
 
