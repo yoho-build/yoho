@@ -36,6 +36,8 @@ var Names = []string{
 	"post-backup",
 	"pre-restore",
 	"post-restore",
+	"pre-cutover",
+	"post-cutover",
 }
 
 // Env names set for Hooks (documented for users and the agent skill).
@@ -44,7 +46,7 @@ var Names = []string{
 var EnvNames = []string{
 	"YOHO_APP", "YOHO_DESTINATION", "YOHO_VERSION", "YOHO_SERVICE_VERSION",
 	"YOHO_HOSTS", "YOHO_COMMAND", "YOHO_SUBCOMMAND", "YOHO_PERFORMER",
-	"YOHO_RECORDED_AT", "YOHO_LOCK", "YOHO_RUNTIME",
+	"YOHO_RECORDED_AT", "YOHO_LOCK", "YOHO_RUNTIME", "YOHO_CUTOVER",
 }
 
 // New returns a HookFunc running Hooks from dir with base env (YOHO_APP,

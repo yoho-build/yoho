@@ -90,6 +90,82 @@ type Destination struct {
 	// recreate the network), and Yoho never picks it by itself; a failed
 	// deploy suggests a free one.
 	Subnet string `json:"subnet,omitempty" jsonschema:"example=10.200.3.0/24"`
+	// One-shot cutover from another platform (Coolify, Dokploy, plain
+	// compose) run by deploy and apply on this Destination only: stop the
+	// old containers, prove the claimed data is free, deploy, then repoint
+	// Cloudflare Tunnel ingress. Recorded in <app dir>/cutover.json; undo
+	// with `yoho rollback --cutover`. Compose runtime and operator access only.
+	Migrate *Migrate `json:"migrate,omitempty"`
+}
+
+// Migrate is a Destination's one-shot cutover from another platform (ADR 0012).
+type Migrate struct {
+	// Platform the App comes from: coolify, dokploy or compose. Recorded
+	// in the cutover journal; selectors in stop are always explicit.
+	From string `json:"from,omitempty" jsonschema:"enum=coolify,enum=dokploy,enum=compose"`
+	// Old containers to stop (never remove), matched on the Server.
+	Stop MigrateStop `json:"stop" jsonschema:"required"`
+	// Data the App reuses: no running container may mount it once stop ran.
+	Claim MigrateClaim `json:"claim,omitempty"`
+	// Cloudflare Tunnel ingress to repoint to the Proxy after the deploy.
+	// Requires proxy.tunnel.token_secret (the tunnel's account and ID).
+	Tunnel *MigrateTunnel `json:"tunnel,omitempty"`
+	// What to do when a step after stopping fails: restart_old (default)
+	// stops this App's Services, starts the old containers again and
+	// restores the saved ingress; leave keeps the state for
+	// `yoho rollback --cutover` or `yoho deploy --cutover-resume`.
+	OnFailure string `json:"on_failure,omitempty" jsonschema:"enum=restart_old,enum=leave"`
+}
+
+// MigrateStop selects old containers. A running container matching any
+// selector is stopped.
+type MigrateStop struct {
+	// Compose project of the old stack (label com.docker.compose.project).
+	ComposeProject string `json:"compose_project,omitempty"`
+	// Docker label filters, key or key=value, e.g. coolify.applicationId=ab12.
+	Labels []string `json:"labels,omitempty"`
+	// Container names.
+	Containers []string `json:"containers,omitempty"`
+}
+
+// MigrateClaim is data the App takes over from the old stack.
+type MigrateClaim struct {
+	// Absolute host paths (bind mounts). A mount of the path, inside it or
+	// above it counts.
+	Paths []string `json:"paths,omitempty"`
+	// Named Docker volumes.
+	Volumes []string `json:"volumes,omitempty"`
+}
+
+// MigrateTunnel repoints Cloudflare Tunnel ingress rules.
+type MigrateTunnel struct {
+	// Secret key holding a Cloudflare API token with Cloudflare Tunnel edit
+	// permission. Resolved locally, sent only to the Cloudflare API.
+	APITokenSecret string `json:"api_token_secret" jsonschema:"required"`
+	// Hostnames whose ingress rules get the new service; other rules,
+	// including the final catch-all, are kept unchanged.
+	Hostnames []string `json:"hostnames" jsonschema:"required,minItems=1"`
+	// Service for those rules. Default http://yoho-proxy:80.
+	Service string `json:"service,omitempty"`
+}
+
+// DefaultMigrateService is where repointed ingress rules send traffic.
+const DefaultMigrateService = "http://yoho-proxy:80"
+
+// FailurePolicy returns on_failure with its default.
+func (m Migrate) FailurePolicy() string {
+	if m.OnFailure == "" {
+		return "restart_old"
+	}
+	return m.OnFailure
+}
+
+// TargetService returns service with its default.
+func (t MigrateTunnel) TargetService() string {
+	if t.Service == "" {
+		return DefaultMigrateService
+	}
+	return t.Service
 }
 
 // DestinationSSH routes SSH to a Destination's Server.

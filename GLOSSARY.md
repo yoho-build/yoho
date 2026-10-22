@@ -46,6 +46,10 @@ _Avoid_: Ingress, load balancer, gateway
 A user script run at a named point of a command, aborting the command on failure.
 _Avoid_: Callback, plugin
 
+**Migration Cutover**:
+The one-shot move of a live App from another platform to a Destination, declared in its `migrate` block: stop the old containers, prove the claimed data is free, deploy, repoint tunnel ingress, recorded in a journal for `yoho rollback --cutover`.
+_Avoid_: Cutover (alone; that is also the Proxy switch inside every deploy), migration (alone; database migrations)
+
 **Scheduled Job**:
 A recurring task, such as a Backup, run on a Server by Yoho without the operator's machine.
 _Avoid_: Cron, sidecar, background task

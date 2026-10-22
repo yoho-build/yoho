@@ -3,6 +3,7 @@ package config
 import (
 	"fmt"
 	"net/netip"
+	"net/url"
 	"path"
 	"regexp"
 	"sort"
@@ -102,6 +103,9 @@ func Validate(c *Config) []error {
 		}
 		if d.GateUser != "" && !unixUserPattern.MatchString(d.GateUser) {
 			add("destinations.%s.gate_user %q must be a Unix user name", n, d.GateUser)
+		}
+		if d.Migrate != nil {
+			errs = append(errs, validateMigrate(c, n, d)...)
 		}
 		if d.SSH != nil {
 			if d.SSH.Via != "cloudflare" {
@@ -387,4 +391,103 @@ func shareServer(c *Config, a, b Destination) bool {
 		}
 	}
 	return false
+}
+
+var (
+	composeProjectPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]*$`)
+	dockerNamePattern     = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.-]*$`)
+	labelFilterPattern    = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_./-]*(=[^\x00-\x1f]*)?$`)
+	// ingressHostPattern allows Cloudflare's leading wildcard label.
+	ingressHostPattern = regexp.MustCompile(`^(\*\.)?(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)+[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?$`)
+)
+
+// validateMigrate checks a Destination's one-shot cutover (ADR 0012).
+func validateMigrate(c *Config, n string, d Destination) []error {
+	var errs []error
+	add := func(f string, a ...any) { errs = append(errs, fmt.Errorf(f, a...)) }
+	m := d.Migrate
+	if d.Runtime == "swarm" {
+		add("destinations.%s.migrate supports the compose runtime only; cut over to a compose Destination first, or stop the old stack by hand before `yoho deploy`", n)
+	}
+	if d.Access == "scoped" {
+		add("destinations.%s.migrate needs access: operator (the cutover stops other containers on the Server)", n)
+	}
+	switch m.From {
+	case "", "coolify", "dokploy", "compose":
+	default:
+		add("destinations.%s.migrate.from %q must be coolify, dokploy or compose", n, m.From)
+	}
+	switch m.OnFailure {
+	case "", "restart_old", "leave":
+	default:
+		add("destinations.%s.migrate.on_failure %q must be restart_old or leave", n, m.OnFailure)
+	}
+	st := m.Stop
+	if st.ComposeProject == "" && len(st.Labels) == 0 && len(st.Containers) == 0 {
+		add("destinations.%s.migrate.stop: set compose_project, labels or containers to select the old containers", n)
+	}
+	if p := st.ComposeProject; p != "" {
+		switch {
+		case !composeProjectPattern.MatchString(p):
+			add("destinations.%s.migrate.stop.compose_project %q is not a compose project name", n, p)
+		case strings.HasPrefix(p, "yoho-"):
+			add("destinations.%s.migrate.stop.compose_project %q is a Yoho project; stop only the old platform's containers", n, p)
+		}
+	}
+	for _, l := range st.Labels {
+		key, _, _ := strings.Cut(l, "=")
+		switch {
+		case !labelFilterPattern.MatchString(l):
+			add("destinations.%s.migrate.stop.labels: %q must be key or key=value", n, l)
+		case strings.HasPrefix(key, "yoho."):
+			add("destinations.%s.migrate.stop.labels: %q selects Yoho containers", n, l)
+		}
+	}
+	for _, name := range st.Containers {
+		switch {
+		case !dockerNamePattern.MatchString(name):
+			add("destinations.%s.migrate.stop.containers: %q is not a container name", n, name)
+		case strings.HasPrefix(name, "yoho-"):
+			add("destinations.%s.migrate.stop.containers: %q is a Yoho container", n, name)
+		}
+	}
+	for _, p := range m.Claim.Paths {
+		switch {
+		case !strings.HasPrefix(p, "/") || p == "/":
+			add("destinations.%s.migrate.claim.paths: %q must be an absolute path other than /", n, p)
+		case path.Clean(p) != p:
+			add("destinations.%s.migrate.claim.paths: %q must be a clean path; use %q", n, p, path.Clean(p))
+		}
+	}
+	for _, v := range m.Claim.Volumes {
+		if !dockerNamePattern.MatchString(v) {
+			add("destinations.%s.migrate.claim.volumes: %q is not a volume name", n, v)
+		}
+	}
+	if t := m.Tunnel; t != nil {
+		if !secretKeyPattern.MatchString(t.APITokenSecret) {
+			add("destinations.%s.migrate.tunnel.api_token_secret must be a secret key name", n)
+		}
+		if len(t.Hostnames) == 0 {
+			add("destinations.%s.migrate.tunnel.hostnames: list the hostnames to repoint", n)
+		}
+		for _, h := range t.Hostnames {
+			if !ingressHostPattern.MatchString(h) || len(h) > 253 {
+				add("destinations.%s.migrate.tunnel.hostnames: %q must be a DNS hostname such as app.example.com", n, h)
+			}
+		}
+		if s := t.Service; s != "" {
+			if u, err := url.Parse(s); err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+				add("destinations.%s.migrate.tunnel.service %q must be an http:// or https:// URL", n, s)
+			}
+		}
+		tun := c.Proxy.Tunnel
+		if d.Proxy != nil && d.Proxy.Tunnel != nil {
+			tun = d.Proxy.Tunnel
+		}
+		if tun == nil || tun.TokenSecret == "" {
+			add("destinations.%s.migrate.tunnel needs proxy.tunnel.token_secret: the tunnel token names the account and tunnel whose ingress is repointed", n)
+		}
+	}
+	return errs
 }

@@ -13,10 +13,12 @@ Hooks are executable scripts in `.yoho/hooks/<name>` (or `hooks.path`), run on y
 | `pre-proxy-reboot`, `post-proxy-reboot` | around Proxy (re)boot |
 | `pre-backup`, `post-backup` | around a Backup |
 | `pre-restore`, `post-restore` | around a restore |
+| `pre-cutover` | after the migration cutover preflight, before the old containers stop (`migrate`) |
+| `post-cutover` | after the migration cutover is done |
 
 ## Hook environment
 
-`YOHO_APP`, `YOHO_DESTINATION`, `YOHO_VERSION`, `YOHO_SERVICE_VERSION` (`<app>@<version>`), `YOHO_HOSTS` (comma-separated), `YOHO_COMMAND`, `YOHO_SUBCOMMAND`, `YOHO_PERFORMER`, `YOHO_RECORDED_AT` (UTC RFC3339), `YOHO_LOCK`, `YOHO_RUNTIME` (seconds, `post-deploy` only). Backup and restore hooks add `YOHO_BACKUP_JOB`, `YOHO_BACKUP_TARGET` and `YOHO_BACKUP_ID` (`post-backup`, `pre-restore`, `post-restore`).
+`YOHO_APP`, `YOHO_DESTINATION`, `YOHO_VERSION`, `YOHO_SERVICE_VERSION` (`<app>@<version>`), `YOHO_HOSTS` (comma-separated), `YOHO_COMMAND`, `YOHO_SUBCOMMAND`, `YOHO_PERFORMER`, `YOHO_RECORDED_AT` (UTC RFC3339), `YOHO_LOCK`, `YOHO_RUNTIME` (seconds, `post-deploy` only), `YOHO_CUTOVER` (the cutover id, `pre-cutover` and `post-cutover`). Backup and restore hooks add `YOHO_BACKUP_JOB`, `YOHO_BACKUP_TARGET` and `YOHO_BACKUP_ID` (`post-backup`, `pre-restore`, `post-restore`).
 
 Secrets are never injected into hooks.
 
