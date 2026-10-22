@@ -126,12 +126,14 @@ func (r *runner) diagnose(ctx context.Context, service string, ids []string) {
 	r.diagnoseSamples(ctx, []diagnosticSample{{service: service, fresh: ids}})
 }
 
-func (r *runner) diagnosePrerequisites(ctx context.Context, services []string) {
+// diagnoseBatch samples the Services of a batch `compose up` that failed
+// without naming the Service at fault.
+func (r *runner) diagnoseBatch(ctx context.Context, services []string) {
 	samples := make([]diagnosticSample, 0, min(len(services), diagnosticContainers))
 	for _, service := range services[:min(len(services), diagnosticContainers)] {
 		samples = append(samples, diagnosticSample{service: service})
 	}
-	r.logf("diagnostics: batch startup failed; sampling %d of %d prerequisite Services, not identifying a single failing Service", len(samples), len(services))
+	r.logf("diagnostics: batch startup failed; sampling %d of %d Services, not identifying a single failing Service", len(samples), len(services))
 	r.diagnoseSamples(ctx, samples)
 }
 
