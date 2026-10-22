@@ -15,6 +15,9 @@ hero:
       text: Get started
       link: /getting-started/
     - theme: alt
+      text: 5-minute quickstart
+      link: /quickstart/
+    - theme: alt
       text: Set up with your AI agent
       link: /agents/
     - theme: alt
@@ -69,6 +72,7 @@ yoho ui            # local dashboard of the running App
 Yoho is one static Go binary. `compose.yaml` stays the source of truth; Yoho adds an `x-yoho` block per Service and a small `yoho.yml`. Status: alpha. License: MIT.
 
 - [Getting started](getting-started.md)
+- [5-minute quickstart](quickstart.md)
 - [Set up with your AI agent](agents.md)
 - [Configuration](configuration.md)
 - [CLI reference](cli.md)

@@ -48,6 +48,10 @@ For optional signed binary provenance verification, install a current GitHub CLI
 
 From source (Go 1.26): `go install github.com/yoho-build/yoho/cmd/yoho@latest`.
 
+## 5-minute quickstart
+
+From a blank Debian/Ubuntu Server to a live App (web + worker + Postgres), then a zero-downtime redeploy and a secret change: [docs/site/quickstart.md](docs/site/quickstart.md). The matching App is [`examples/quickstart`](examples/quickstart).
+
 ## 60-second quickstart
 
 ```sh
@@ -130,7 +134,7 @@ volumes: { pgdata: {} }
 
 A proxied Service needs that compose `healthcheck` (an error under swarm, a warning under compose). This example executes `wget`, so the image must include `wget`; if you use `curl`, change the healthcheck command accordingly.
 
-See `examples/basic` for a fuller file.
+See `examples/quickstart` for a runnable web + worker + Postgres App, and `examples/basic` for a fuller config-only file.
 
 ## Commands
 

@@ -1,0 +1,64 @@
+services:
+  web:
+    build: .
+    restart: unless-stopped
+    stop_grace_period: 15s
+    depends_on:
+      db:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8080/up"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    x-yoho:
+      proxy:
+        # Empty hosts: catch-all, so a Quick Tunnel or a raw IP both work.
+        # Set hosts: [shop.example.com] when you have DNS.
+        port: 8080
+      secrets:
+        - POSTGRES_PASSWORD
+        - APP_GREETING
+      release_command: ["/app", "migrate"]
+
+  worker:
+    build: .
+    command: ["/app", "worker"]
+    restart: unless-stopped
+    stop_grace_period: 10s
+    depends_on:
+      db:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "/app", "health"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    x-yoho:
+      secrets:
+        - POSTGRES_PASSWORD
+        - APP_GREETING
+
+  db:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_DB: postgres
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 2s
+      timeout: 3s
+      retries: 20
+    x-yoho:
+      stateful: true
+      generate:
+        POSTGRES_PASSWORD: password32
+      backup:
+        dump: ["pg_dump", "-U", "postgres", "postgres"]
+        volumes: [pgdata]
+
+volumes:
+  pgdata:

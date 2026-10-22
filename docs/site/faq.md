@@ -1,5 +1,7 @@
 # FAQ
 
+**Is there a 5-minute demo?** Yes. [5-minute quickstart](quickstart.md) takes a fresh Server to web + worker + Postgres, then a zero-downtime redeploy and a secret change. The App lives in `examples/quickstart`.
+
 **Do I need a registry?** No. Images are pushed over SSH. A registry is optional.
 
 **Does it run anything on my Server?** Only Docker, kamal-proxy, and your App. Scheduled Jobs (systemd timers) and the tunnel connector are opt-in.

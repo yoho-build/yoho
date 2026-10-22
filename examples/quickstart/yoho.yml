@@ -1,0 +1,24 @@
+# yaml-language-server: $schema=https://yohobuild.com/schema/yoho.schema.json
+app: shop
+
+servers:
+  primary:
+    ssh: root@203.0.113.10 # replace with root@YOUR_SERVER (or a sudo user)
+
+destinations:
+  production:
+    servers: [primary]
+
+builder:
+  location: local
+
+# Quick Tunnel: a public https://*.trycloudflare.com URL, no DNS or published ports.
+# For a hostname on port 80 instead, drop tunnel, set http_port: 80, and add
+# x-yoho.proxy.hosts on web. See docs/site/cloudflare-tunnel.md.
+proxy:
+  http_port: 0
+  https_port: 0
+  tunnel: {}
+
+setup:
+  user: yoho

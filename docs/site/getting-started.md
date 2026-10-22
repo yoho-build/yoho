@@ -1,6 +1,6 @@
 # Getting started
 
-Prefer to let your AI agent do this? See [Set up with your AI agent](agents.md).
+Timed path from a blank Server to a live App (web + worker + Postgres), then a zero-downtime redeploy and a secret change: [5-minute quickstart](quickstart.md). Prefer to let your AI agent do this? See [Set up with your AI agent](agents.md).
 
 ## Install
 
