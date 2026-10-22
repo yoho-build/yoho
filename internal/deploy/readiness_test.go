@@ -280,6 +280,9 @@ func TestCutoverDependencyOrderedCandidates(t *testing.T) {
 			h := &dockerHost{local: &remote.Local{}}
 			h.respond = func(s string) (string, error) {
 				switch {
+				case strings.Contains(s, "kamal-proxy list --json"):
+					// An update: the route exists, so it switches last.
+					return `{"test-prod-api":{"hosts":[""],"targets":["old-api:80"]}}`, nil
 				case strings.Contains(s, "'ps' '--all' '-q' 'db'"):
 					dbReady = true
 				case strings.Contains(s, "'ps' '-q' 'api'") && strings.Contains(s, "status=$(docker inspect"):
@@ -367,7 +370,7 @@ func TestStagedCutoverUncertainSwitchCleanup(t *testing.T) {
 			cancel()
 			return "", context.Canceled
 		case strings.Contains(s, "kamal-proxy list --json"):
-			return `{}`, nil
+			return `{"test-prod-a":{"hosts":["a"],"targets":["old-a:80"]},"test-prod-b":{"hosts":["b"],"targets":["old-b:80"]}}`, nil
 		}
 		return "", nil
 	}

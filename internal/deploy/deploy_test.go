@@ -110,17 +110,16 @@ func TestDeployEndToEnd(t *testing.T) {
 		t.Errorf("hooks %v", hooks)
 	}
 
-	// Command order: proxy boot, deps, release command, plain up, scale,
-	// health, proxy switch, remove old, orphans.
+	// Command order: proxy boot, deps, release command, one plain up for
+	// the independent cloudflared and db, scale, health, proxy switch, remove
+	// old, orphans.
 	s := h.scripts
 	order := []string{
 		"docker network create yoho",
 		"'up' '-d' '--no-recreate' 'db'",
 		"'ps' '--all' '-q' 'db'",
 		"'run' '--rm' '--no-deps' '-T' 'web' 'bin/rails' 'db:migrate'",
-		"'up' '-d' '--no-deps' 'cloudflared'",
-		"'ps' '--all' '-q' 'cloudflared'",
-		"'up' '-d' '--no-deps' 'db'",
+		"'up' '-d' '--no-deps' 'cloudflared' 'db'",
 		"case \"$status\" in exited|dead|created)",
 		"'up' '-d' '--no-deps' '--no-recreate' '--scale' 'web=2' 'web'",
 		"set -- 'new1'",

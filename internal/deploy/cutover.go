@@ -8,6 +8,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/yoho-build/yoho/internal/config"
@@ -77,7 +78,13 @@ func (r *runner) redact(s string) string {
 }
 
 func (r *runner) logf(format string, a ...any) {
-	fmt.Fprintln(r.out, r.redact(fmt.Sprintf("["+r.server+"] "+format, a...)))
+	r.logTo(r.out, format, a...)
+}
+
+// logTo writes one redacted step line to w. Concurrent readiness waits use
+// their own buffers so lines do not interleave.
+func (r *runner) logTo(w io.Writer, format string, a ...any) {
+	fmt.Fprintln(w, r.redact(fmt.Sprintf("["+r.server+"] "+format, a...)))
 }
 
 func lines(s string) []string {
@@ -144,18 +151,33 @@ func (r *runner) startDependencies(ctx context.Context, plans []servicePlan) err
 	}
 	if err := r.h.Run(ctx, remote.Cmd{Script: r.cc.cmd(append([]string{"up", "-d", "--no-recreate"}, startup...)...)}); err != nil {
 		r.logf("deploy failed in phase %s", r.phase)
-		r.diagnosePrerequisites(ctx, deps)
+		r.diagnoseBatch(ctx, deps)
 		r.diagnosed = true
 		return r.failure(ctx, fmt.Errorf("start dependencies: %w", err), "", nil)
 	}
-	for _, sp := range plans {
-		if slices.Contains(deps, sp.Name) {
-			r.phase = "release-prerequisites-readiness"
-			r.fact(sp.Name).Convergence = "prerequisite-readiness-attempted"
-			if err := r.waitService(ctx, sp); err != nil {
-				return fmt.Errorf("start dependencies: %w", err)
+	// Compose has started every prerequisite. Gate them by dependency level,
+	// so a prerequisite's deadline starts only after its own dependencies are
+	// ready; the Services of one level are waited on concurrently.
+	levels, err := dependencyLevels(plans)
+	if err != nil {
+		return r.failure(ctx, err, "", nil)
+	}
+	for _, level := range levels {
+		var batch []servicePlan
+		for _, sp := range level {
+			if slices.Contains(deps, sp.Name) {
+				batch = append(batch, sp)
 			}
-			r.fact(sp.Name).Convergence = "prerequisite-ready"
+		}
+		if len(batch) == 0 {
+			continue
+		}
+		r.phase = "release-prerequisites-readiness"
+		for _, sp := range batch {
+			r.fact(sp.Name).Convergence = "prerequisite-readiness-attempted"
+		}
+		if err := r.waitServices(ctx, batch, "prerequisite-ready"); err != nil {
+			return fmt.Errorf("start dependencies: %w", err)
 		}
 	}
 	return nil
@@ -251,15 +273,45 @@ func dependencyOrder(plans []servicePlan) ([]servicePlan, error) {
 	return ordered, nil
 }
 
-// cutover prepares Services in dependency order, preserving stop-first plain
-// replacements. Proxy candidates can satisfy downstream startup dependencies,
-// but no route switches until every Service has passed readiness.
+// dependencyLevels groups the saved plan by depends_on depth: level 0 has no
+// dependencies, and every other Service sits one level above its deepest
+// dependency. Services of one level never depend on each other. Within a
+// level, Services keep dependencyOrder's order, which stays the validator.
+func dependencyLevels(plans []servicePlan) ([][]servicePlan, error) {
+	ordered, err := dependencyOrder(plans)
+	if err != nil {
+		return nil, err
+	}
+	depth := make(map[string]int, len(ordered))
+	var levels [][]servicePlan
+	for _, sp := range ordered {
+		// dependencyOrder places every dependency before its dependants.
+		d := 0
+		for _, dep := range sp.DependsOn {
+			d = max(d, depth[dep]+1)
+		}
+		depth[sp.Name] = d
+		for len(levels) <= d {
+			levels = append(levels, nil)
+		}
+		levels[d] = append(levels[d], sp)
+	}
+	return levels, nil
+}
+
+// cutover prepares Services level by level in dependency order, preserving
+// stop-first plain replacements. The plain Services of one level start with
+// one `compose up` and are gated concurrently; proxied Services of the level
+// then stage their candidates one at a time. Proxy candidates can satisfy
+// downstream startup dependencies. A route that already exists, or whose
+// Service has old containers, switches only after every Service has passed
+// readiness (see earlySwitch for the first-deploy exception).
 func (r *runner) cutover(ctx context.Context, plans []servicePlan) (err error) {
 	r.phase = "service-plan-validation"
 	if err := validateReadinessPlans(plans); err != nil {
 		return r.failure(ctx, err, "", nil)
 	}
-	ordered, err := dependencyOrder(plans)
+	levels, err := dependencyLevels(plans)
 	if err != nil {
 		return err
 	}
@@ -293,11 +345,32 @@ func (r *runner) cutover(ctx context.Context, plans []servicePlan) (err error) {
 			}
 		}
 	}()
-	for _, sp := range ordered {
-		failedService = sp.Name
-		r.phase = "service-prepare"
-		r.fact(sp.Name).Convergence = "attempted"
-		if sp.proxied() {
+	cutoverStart := time.Now()
+	routes, routesKnown := r.existingRoutes(ctx, plans)
+	for i, level := range levels {
+		start := time.Now()
+		var batch []servicePlan
+		for _, sp := range level {
+			if !sp.proxied() {
+				batch = append(batch, sp)
+			}
+		}
+		if len(batch) > 0 {
+			if err := r.startBatch(ctx, batch, i, len(levels)); err != nil {
+				failedService = ""
+				if len(batch) == 1 {
+					failedService = batch[0].Name
+				}
+				return err
+			}
+		}
+		for _, sp := range level {
+			if !sp.proxied() {
+				continue
+			}
+			failedService = sp.Name
+			r.phase = "service-prepare"
+			r.fact(sp.Name).Convergence = "attempted"
 			candidate, prepErr := r.prepareProxied(ctx, sp)
 			if candidate != nil {
 				staged = append(staged, candidate)
@@ -309,19 +382,27 @@ func (r *runner) cutover(ctx context.Context, plans []servicePlan) (err error) {
 				}
 				return r.failure(ctx, prepErr, sp.Name, ids)
 			}
-		} else {
-			r.logf("starting %s", sp.Name)
-			if err := r.h.Run(ctx, remote.Cmd{Script: r.cc.cmd("up", "-d", "--no-deps", sp.Name)}); err != nil {
-				return fmt.Errorf("compose up %s: %w", sp.Name, err)
-			}
-			r.phase = "plain-readiness"
-			if err := r.waitService(ctx, sp); err != nil {
-				return err
+			r.fact(sp.Name).Convergence = "complete"
+			if routesKnown && earlySwitch(candidate, routes[RouteName(r.app, r.dest, sp.Name)]) {
+				r.phase = "proxy-switch"
+				r.fact(sp.Name).ProxyRoute = "uncertain"
+				// From this point only proxySwitchFailed may decide whether removal is safe.
+				candidate.switchAttempted = true
+				if err := r.switchProxied(ctx, candidate); err != nil {
+					return err
+				}
+				r.fact(sp.Name).ProxyRoute = "switched"
+				r.logf("route %s is live for %s, %s after cutover started", RouteName(r.app, r.dest, sp.Name), routeHosts(sp), time.Since(cutoverStart).Round(100*time.Millisecond))
 			}
 		}
-		r.fact(sp.Name).Convergence = "complete"
+		if len(levels) > 1 || len(level) > 1 {
+			r.logf("level %d/%d ready in %s", i+1, len(levels), time.Since(start).Round(100*time.Millisecond))
+		}
 	}
 	for _, candidate := range staged {
+		if candidate.switchAttempted {
+			continue // switched early
+		}
 		failedService = candidate.plan.Name
 		r.phase = "proxy-switch"
 		r.fact(failedService).ProxyRoute = "uncertain"
@@ -335,6 +416,72 @@ func (r *runner) cutover(ctx context.Context, plans []servicePlan) (err error) {
 	r.phase = "orphan-cleanup"
 	failedService = ""
 	return r.removeOrphans(ctx, plans)
+}
+
+// startBatch converges the plain Services of one dependency level stop-first
+// with one `compose up`, then waits for their readiness concurrently. A
+// single-Service level runs the same commands as a sequential start.
+func (r *runner) startBatch(ctx context.Context, batch []servicePlan, level, levels int) error {
+	r.phase = "service-prepare"
+	names := make([]string, len(batch))
+	for i, sp := range batch {
+		names[i] = sp.Name
+		r.fact(sp.Name).Convergence = "attempted"
+	}
+	if len(batch) == 1 {
+		r.logf("starting %s", names[0])
+	} else {
+		r.logf("starting level %d/%d: %s", level+1, levels, strings.Join(names, ", "))
+	}
+	if err := r.h.Run(ctx, remote.Cmd{Script: r.cc.cmd(append([]string{"up", "-d", "--no-deps"}, names...)...)}); err != nil {
+		err = fmt.Errorf("compose up %s: %w", strings.Join(names, " "), err)
+		if len(batch) == 1 {
+			return err // cutover diagnoses the one Service
+		}
+		// Compose does not say which Service failed: sample them all.
+		r.logf("deploy failed in phase %s", r.phase)
+		r.diagnoseBatch(ctx, names)
+		r.diagnosed = true
+		return r.failure(ctx, err, "", nil)
+	}
+	r.phase = "plain-readiness"
+	return r.waitServices(ctx, batch, "complete")
+}
+
+// existingRoutes lists the Proxy's route names once before cutover. When
+// the list fails, known is false and every route switches after all Services
+// are ready, as for an update.
+func (r *runner) existingRoutes(ctx context.Context, plans []servicePlan) (routes map[string]bool, known bool) {
+	if !slices.ContainsFunc(plans, servicePlan.proxied) {
+		return nil, false
+	}
+	list, err := proxy.List(ctx, r.h)
+	if err != nil {
+		r.logf("warning: could not list Proxy routes, so every route switches after all Services are ready: %v", err)
+		return nil, false
+	}
+	routes = map[string]bool{}
+	for _, rt := range list {
+		routes[rt.Service] = true
+	}
+	return routes, true
+}
+
+// earlySwitch reports whether a ready candidate's route may switch before
+// the rest of the App is ready. Only a first deploy of the Service
+// qualifies: no route exists yet and no old containers serve, so nothing
+// can lose traffic, while waiting only prolongs the Proxy's 404s. An update
+// keeps the switch-after-all-ready rule, because the old containers still
+// serve until every Service is ready.
+func earlySwitch(candidate *stagedProxy, routeExists bool) bool {
+	return len(candidate.old) == 0 && !routeExists
+}
+
+func routeHosts(sp servicePlan) string {
+	if len(sp.Proxy.Hosts) == 0 {
+		return "any host"
+	}
+	return strings.Join(sp.Proxy.Hosts, ", ")
 }
 
 type stagedProxy struct {
@@ -496,19 +643,74 @@ func (r *runner) proxySwitchFailed(ctx context.Context, svc, route string, targe
 }
 
 // waitService never scales up: Compose has already converged stop-first.
-// ps --all includes exited jobs and crashed Services, not just running ones.
 func (r *runner) waitService(ctx context.Context, sp servicePlan) error {
+	if err := r.readiness(ctx, sp, r.out); err != nil {
+		return r.failure(ctx, err, sp.Name, nil)
+	}
+	return nil
+}
+
+// waitServices gates Services that do not depend on each other concurrently
+// and sets each ready one's convergence fact to ready. Each wait writes to its
+// own buffer, flushed in Service order, so output does not interleave. The
+// first failure cancels the other waits and is diagnosed for its Service;
+// only this goroutine touches facts and diagnostics.
+func (r *runner) waitServices(ctx context.Context, batch []servicePlan, ready string) error {
+	if len(batch) == 1 {
+		if err := r.waitService(ctx, batch[0]); err != nil {
+			return err
+		}
+		r.fact(batch[0].Name).Convergence = ready
+		return nil
+	}
+	waitCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	outs := make([]*cappedBuffer, len(batch))
+	errs := make([]error, len(batch))
+	failed := -1
+	var mu sync.Mutex
+	var wg sync.WaitGroup
+	for i, sp := range batch {
+		outs[i] = &cappedBuffer{limit: 65536}
+		wg.Go(func() {
+			errs[i] = r.readiness(waitCtx, sp, discardOverflow{outs[i]})
+			if errs[i] != nil {
+				mu.Lock()
+				if failed < 0 {
+					failed = i
+					cancel()
+				}
+				mu.Unlock()
+			}
+		})
+	}
+	wg.Wait()
+	for i, sp := range batch {
+		_, _ = r.out.Write(outs[i].Bytes())
+		if errs[i] == nil {
+			r.fact(sp.Name).Convergence = ready
+		}
+	}
+	if failed >= 0 {
+		return r.failure(ctx, errs[failed], batch[failed].Name, nil)
+	}
+	return nil
+}
+
+// readiness runs one Service's readiness gate, logging to out. ps --all
+// includes exited jobs and crashed Services, not just running ones.
+func (r *runner) readiness(ctx context.Context, sp servicePlan, out io.Writer) error {
 	if sp.Replicas == 0 {
 		return nil
 	}
 	completed := sp.CompletedSuccessfully != nil && *sp.CompletedSuccessfully
-	r.logf("waiting for Service %s readiness", sp.Name)
+	r.logTo(out, "waiting for Service %s readiness", sp.Name)
 	script := "set -eu\nids=$(" + r.cc.containerIDs(sp.Name, true) + ")\nset -- $ids\n" +
 		"if [ \"$#\" -ne " + strconv.Itoa(sp.Replicas) + " ]; then echo " +
 		remote.Quote("Service "+sp.Name+": expected "+strconv.Itoa(sp.Replicas)+" container(s)") + " >&2; exit 1; fi\n" +
 		waitReadyBody(defaultDeployTimeout, completed, true)
-	if err := r.h.Run(ctx, remote.Cmd{Script: script, Stdout: r.out}); err != nil {
-		return r.failure(ctx, fmt.Errorf("Service %s did not become ready: %w", sp.Name, err), sp.Name, nil)
+	if err := r.h.Run(ctx, remote.Cmd{Script: script, Stdout: out}); err != nil {
+		return fmt.Errorf("Service %s did not become ready: %w", sp.Name, err)
 	}
 	return nil
 }
