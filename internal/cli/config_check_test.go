@@ -57,7 +57,7 @@ func exitCodeOf(err error) int {
 func TestConfigCheckOfflineNeverRunsSecretLines(t *testing.T) {
 	oldRoot := release.Root
 	t.Cleanup(func() { release.Root = oldRoot })
-	src := "services:\n  web: {image: nginx, x-yoho: {secrets: {ALIAS: KEY}}}\n"
+	src := "services:\n  web: {image: nginx, restart: unless-stopped, x-yoho: {secrets: {ALIAS: KEY}}}\n"
 	p := nonemptyApp(t, "compose", src, "KEY", "")
 	dir := filepath.Dir(p)
 	marker := filepath.Join(dir, "line-ran")
@@ -103,7 +103,7 @@ func TestConfigCheckOfflineNeverRunsSecretLines(t *testing.T) {
 func TestConfigCheckWithoutNonemptyRunsNoSecretLine(t *testing.T) {
 	oldRoot := release.Root
 	t.Cleanup(func() { release.Root = oldRoot })
-	p := appDir(t, "compose", "services:\n  web: {image: nginx, x-yoho: {secrets: {ALIAS: KEY}}}\n")
+	p := appDir(t, "compose", "services:\n  web: {image: nginx, restart: unless-stopped, x-yoho: {secrets: {ALIAS: KEY}}}\n")
 	dir := filepath.Dir(p)
 	marker := filepath.Join(dir, "line-ran")
 	if err := os.MkdirAll(filepath.Join(dir, ".yoho"), 0o700); err != nil {

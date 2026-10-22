@@ -16,6 +16,8 @@ Ground rules:
 
 ## 1. Inventory (read-only)
 
+Use only the commands below and `docker ps` / `docker logs`. Never run `docker buildx history` (any subcommand) on the Server: on Docker 28.x it can crash `dockerd` and stop every container there, including the other apps. Read build history from the Coolify UI instead.
+
 Find the app's uuid (in the Coolify UI URL, or the `com.docker.compose.project` label of its containers), then on the Server:
 
 ```sh

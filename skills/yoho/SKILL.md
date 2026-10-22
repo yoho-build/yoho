@@ -115,6 +115,7 @@ Global flags: `-c/--config`, `-d/--destination` (default `$YOHO_DESTINATION`, th
 ## Safety rules
 
 - Never run `docker compose down -v` or remove volumes on a Server; Yoho never does. Stateful Services are pinned and never duplicated.
+- Never run `docker buildx history` (any subcommand, including `ls`) on a Server. On Docker 28.x after a build-cache prune it can panic in BuildKit (`llbsolver.filterHistoryEvents`), crash `dockerd` and stop every container on the Server; only workloads under a separate supervisor come back on their own. Inspect with `yoho app ps`, `yoho app logs SERVICE -n N`, `docker ps` and `docker logs`.
 - Never put secrets in compose `${VAR}` interpolation, in `environment:` values, in argv, or in the repo; `yoho config check` rejects `${VAR}` secrets. Declare them in `x-yoho.secrets` and keep values in `.yoho/secrets` refs (`$(op read ...)`) or `secrets.values`.
 - Do not print secret values; use `yoho secrets list`. `secrets print` needs `--reveal` and a terminal.
 - Rollback does not revert volumes or migrations. Take a `yoho backup run` before risky releases.

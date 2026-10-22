@@ -248,3 +248,36 @@ func TestSkillInstallPerSkillSymlinkAndAgentDir(t *testing.T) {
 		t.Error(".agent/skills/yoho not written although the directory exists")
 	}
 }
+
+func TestYohoSkillWarnsAgainstBuildxHistory(t *testing.T) {
+	for _, name := range []string{"yoho", "yoho-migrate-coolify"} {
+		b, err := skills.FS.ReadFile(name + "/SKILL.md")
+		if err != nil {
+			t.Fatal(err)
+		}
+		s := string(b)
+		i := strings.Index(s, "docker buildx history")
+		if i < 0 || !strings.Contains(strings.ToLower(s[max(0, i-80):i+80]), "never") {
+			t.Errorf("%s/SKILL.md must say to never run `docker buildx history` on a Server", name)
+		}
+	}
+}
+
+// Yoho must never run `docker buildx history` on a Server: on Docker 28.x it
+// can crash dockerd. Guard the Go sources and embedded scripts under internal/.
+func TestNoBuildxHistoryInSources(t *testing.T) {
+	needle := "buildx" + " history"
+	err := filepath.WalkDir(filepath.Join("..", "..", "internal"), func(p string, d os.DirEntry, err error) error {
+		if err != nil || d.IsDir() || strings.HasSuffix(p, "_test.go") {
+			return err
+		}
+		b, err := os.ReadFile(p)
+		if err == nil && strings.Contains(string(b), needle) {
+			t.Errorf("%s contains %q", p, needle)
+		}
+		return err
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+}

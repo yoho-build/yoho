@@ -43,6 +43,11 @@ yoho skill install --no-migrate-refs                 # all skills, without the y
 
 `--only` and `--exclude` are mutually exclusive. An existing layout is respected: when `.claude/skills` (or an existing `.agent/skills`) is a symlink to `.agents/skills`, or a skill folder is a symlink to the real one, the skill is written once and the other paths are reported as linked. Installing never deletes skills that are already present.
 
+## Operating Servers safely
+
+- Never run `docker buildx history` (including `ls`) on a Server. On Docker 28.x, after a build-cache prune, it can hit a nil-pointer panic in BuildKit (`llbsolver.filterHistoryEvents`). That crashes `dockerd` and stops every container on the Server. Containers under their own supervisor come back; the rest stay down until someone restarts them. Yoho never calls it. Use `yoho app ps`, `yoho app logs SERVICE -n N`, `docker ps` and `docker logs`. The bundled `yoho` and `yoho-migrate-coolify` skills say the same.
+- `yoho config check`, `plan` and `deploy` warn about a compose Service whose `restart` is unset or `no`, because it stays down after a daemon crash or restart. Set `restart: unless-stopped`. One-shot jobs (a Service others wait on with `service_completed_successfully`, or one with `profiles`) and Services with `deploy.restart_policy` are not reported. The warning is advisory: Yoho cannot see a supervisor on a shared Server.
+
 ## Prefer to do it yourself
 
 See [Getting started](getting-started.md).
