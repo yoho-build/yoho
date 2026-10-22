@@ -18,57 +18,30 @@ import (
 
 func configCmd(g *globals) *cobra.Command {
 	c := &cobra.Command{Use: "config", Short: "Inspect and check the Yoho file and compose files"}
-	c.AddCommand(&cobra.Command{
+	var offline bool
+	check := &cobra.Command{
 		Use:   "check",
-		Short: "Validate config and secret references (resolves secrets only with secrets.nonempty)",
+		Short: "Validate config and secret references (resolves secrets only with secrets.nonempty; --offline never does)",
+		Long: `Validate the Yoho file, compose files, x-yoho and secret references.
+
+It opens no connection and runs no Hook. Secret names are checked against the
+keys in .yoho/secrets without running any line. With secrets.nonempty set it
+also resolves secrets, which runs $(...) lines and password managers; --offline
+(or YOHO_OFFLINE=1) skips that, so the command is safe in CI.
+
+Exit codes: 0 no errors, 1 findings or a failed secrets.nonempty check, 2 the
+Yoho or compose files could not be loaded (unreadable, parse error, unknown
+Destination).`,
+		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			a, err := g.load(cmd)
-			if err != nil {
-				return err
+			if !cmd.Flags().Changed("offline") && os.Getenv("YOHO_OFFLINE") == "1" {
+				offline = true
 			}
-			step := a.ui.Step("", "Check %s and compose for %s", filepath.Base(a.path), a.destName)
-			r, err := a.compose(cmd.Context())
-			if err != nil {
-				step.Fail(err, "fix the compose file, then run `yoho config check` again")
-				return &silentError{err}
-			}
-			keys, err := a.secretKeys(r)
-			if err != nil {
-				step.Fail(err, "")
-				return &silentError{err}
-			}
-			findings := composefile.Check(r, a.dest.Runtime, keys)
-			findings = append(findings, composefile.CheckServerBuild(r, a.dir, a.cfg.Builder)...)
-			if t := a.proxyConfig().Tunnel; t != nil && t.TokenSecret == "" {
-				for _, name := range sortedKeys(r.Ext) {
-					if p := r.Ext[name].Proxy; p != nil && len(p.Hosts) > 0 {
-						findings = append(findings, composefile.Finding{Level: composefile.LevelWarning, Service: name,
-							Message: "Quick Tunnel requests use a *.trycloudflare.com Host and won't match proxy.hosts; leave hosts empty or set proxy.tunnel.token_secret"})
-					}
-				}
-			}
-			errCount := 0
-			for _, f := range findings {
-				if f.Level == composefile.LevelError {
-					errCount++
-				}
-				a.ui.Finding(f.Level, f.Service, f.Message)
-			}
-			if errCount > 0 {
-				err := fmt.Errorf("%d error(s)", errCount)
-				step.Fail(err, "")
-				return &silentError{err}
-			}
-			if len(a.cfg.Secrets.Nonempty) > 0 {
-				if _, err := a.loadSecrets(cmd.Context(), step); err != nil {
-					step.Fail(err, secretsHint(err, "check the declared source keys in .yoho/secrets and secrets.values"))
-					return &silentError{err}
-				}
-			}
-			step.Done(fmt.Sprintf("%d services, %d secret keys, runtime %s", len(r.Project.Services), len(keys), a.dest.Runtime))
-			return nil
+			return runConfigCheck(cmd, g, offline)
 		},
-	})
+	}
+	check.Flags().BoolVar(&offline, "offline", false, "Never resolve secrets (no $(...) lines or password managers); also YOHO_OFFLINE=1")
+	c.AddCommand(check)
 	c.AddCommand(&cobra.Command{
 		Use:   "show",
 		Short: "Print the resolved Yoho file (with defaults) as JSON",
@@ -258,4 +231,72 @@ func ensureGitignore(dir, line string) error {
 		b = append(b, '\n')
 	}
 	return os.WriteFile(p, append(b, []byte(line+"\n")...), 0o644)
+}
+
+// Exit codes of `config check`.
+const (
+	exitFindings = 1
+	exitLoad     = 2
+)
+
+// runConfigCheck is `yoho config check`. It never connects to a Server.
+func runConfigCheck(cmd *cobra.Command, g *globals, offline bool) error {
+	a, err := g.load(cmd)
+	if err != nil {
+		g.ui(cmd).Error(err, "")
+		g.ui(cmd).Check(false, 1, 0, offline, 0, 0)
+		return &exitError{exitLoad, &silentError{err}}
+	}
+	errCount, warnCount, services, keyCount := 0, 0, 0, 0
+	step := a.ui.Step("", "Check %s and compose for %s", filepath.Base(a.path), a.destName)
+	fail := func(code int, err error, hint string) error {
+		step.Fail(err, hint)
+		a.ui.Check(false, errCount, warnCount, offline, services, keyCount)
+		return &exitError{code, &silentError{err}}
+	}
+	r, err := a.compose(cmd.Context())
+	if err != nil {
+		errCount = 1
+		return fail(exitLoad, err, "fix the compose file, then run `yoho config check` again")
+	}
+	services = len(r.Project.Services)
+	keys, err := a.secretKeys(r)
+	if err != nil {
+		errCount = 1
+		return fail(exitLoad, err, "")
+	}
+	keyCount = len(keys)
+	findings := composefile.Check(r, a.dest.Runtime, keys)
+	findings = append(findings, composefile.CheckServerBuild(r, a.dir, a.cfg.Builder)...)
+	if t := a.proxyConfig().Tunnel; t != nil && t.TokenSecret == "" {
+		for _, name := range sortedKeys(r.Ext) {
+			if p := r.Ext[name].Proxy; p != nil && len(p.Hosts) > 0 {
+				findings = append(findings, composefile.Finding{Level: composefile.LevelWarning, Service: name,
+					Message: "Quick Tunnel requests use a *.trycloudflare.com Host and won't match proxy.hosts; leave hosts empty or set proxy.tunnel.token_secret"})
+			}
+		}
+	}
+	for _, f := range findings {
+		if f.Level == composefile.LevelError {
+			errCount++
+		} else {
+			warnCount++
+		}
+		a.ui.Finding(f.Level, f.Service, f.Message)
+	}
+	if errCount > 0 {
+		return fail(exitFindings, fmt.Errorf("%d error(s)", errCount), "")
+	}
+	if len(a.cfg.Secrets.Nonempty) > 0 {
+		if offline {
+			warnCount++
+			a.ui.Warn("secrets.nonempty not verified (--offline)")
+		} else if _, err := a.loadSecrets(cmd.Context(), step); err != nil {
+			errCount = 1
+			return fail(exitFindings, err, secretsHint(err, "check the declared source keys in .yoho/secrets and secrets.values"))
+		}
+	}
+	step.Done(fmt.Sprintf("%d services, %d secret keys, runtime %s", services, keyCount, a.dest.Runtime))
+	a.ui.Check(true, 0, warnCount, offline, services, keyCount)
+	return nil
 }

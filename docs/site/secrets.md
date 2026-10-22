@@ -55,7 +55,7 @@ and secret-file `$(...)` commands run, so an unrelated resolution failure can fa
 trusted shell code; commands can depend on any previously defined key or provider
 value (including indirect environment lookups), so Yoho does not infer a partial
 shell dependency graph. Do not opt in expecting a credential-free structural check;
-`config show` still does not resolve credentials.
+`config show` still does not resolve credentials. `yoho config check --offline` (or `YOHO_OFFLINE=1`) is the only mode that never runs a provider or `$(...)` line, even under `secrets.nonempty`; use it in CI.
 
 Provider references overridden by secret files are still not fetched. With an
 active contract, **all** failed provider/secret-file commands report keys only:

@@ -178,6 +178,16 @@ func (u *UI) Finding(level, subject, msg string) {
 	u.stamp()
 }
 
+// Check emits the closing result of `config check` as one JSON event; human
+// output already ended with the step line.
+func (u *UI) Check(ok bool, errors, warnings int, offline bool, services, secretKeys int) {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	if u.mode == JSON {
+		u.event("check", map[string]any{"ok": ok, "errors": errors, "warnings": warnings, "offline": offline, "services": services, "secret_keys": secretKeys})
+	}
+}
+
 // Step is a timed unit of work.
 type Step struct {
 	u     *UI
