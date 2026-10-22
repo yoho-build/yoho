@@ -186,6 +186,8 @@ type Step struct {
 	start time.Time
 	tail  *tailBuffer
 	done  bool
+	// fields are extra step_done fields set by DoneWith.
+	fields map[string]any
 }
 
 // Step starts a step. host may be empty for local work.
@@ -217,6 +219,14 @@ func (s *Step) Output() io.Writer { return &stepWriter{s: s} }
 // Done marks the step successful, with an optional detail ("3 layers").
 func (s *Step) Done(detail ...string) {
 	s.finish(nil, strings.Join(detail, " "))
+}
+
+// DoneWith is Done plus extra fields on the JSON step_done event (for
+// example "transfers"). Reserved keys (event, time, step, host, duration_ms,
+// detail) keep their usual values.
+func (s *Step) DoneWith(detail string, fields map[string]any) {
+	s.fields = fields
+	s.finish(nil, detail)
 }
 
 // Fail marks the step failed; hint tells the user what to do next.
@@ -262,6 +272,11 @@ func (s *Step) finish(err error, extra string) {
 			f["output_tail"] = s.tail.lines()
 			u.event("step_fail", f)
 		} else {
+			for k, v := range s.fields {
+				if _, taken := f[k]; !taken {
+					f[k] = v
+				}
+			}
 			f["detail"] = extra
 			u.event("step_done", f)
 		}

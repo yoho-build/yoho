@@ -23,6 +23,8 @@ import (
 	"os/exec"
 	"strings"
 	"sync"
+	"sync/atomic"
+	"time"
 
 	"github.com/yoho-build/yoho/internal/config"
 	"github.com/yoho-build/yoho/internal/remote"
@@ -79,6 +81,10 @@ type PushOptions struct {
 type Result struct {
 	Host   string
 	Method string
+	// Bytes sent over the operator's link by load (the gzip stream); 0 for
+	// skip, and unknown (0) for pussh and registry.
+	Bytes    int64
+	Duration time.Duration
 }
 
 // Push ships images to all Hosts in parallel and returns the method used
@@ -117,8 +123,9 @@ func Push(ctx context.Context, o PushOptions) ([]Result, error) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			m, err := p.pushHost(ctx, h)
-			results[i] = Result{Host: h.Name(), Method: m}
+			start := time.Now()
+			m, n, err := p.pushHost(ctx, h)
+			results[i] = Result{Host: h.Name(), Method: m, Bytes: n, Duration: time.Since(start)}
 			if err != nil {
 				errs[i] = fmt.Errorf("push images to %s: %w", h.Name(), err)
 				return
@@ -229,43 +236,43 @@ func (p *pusher) target(h remote.Host) string {
 	return ""
 }
 
-func (p *pusher) pushHost(ctx context.Context, h remote.Host) (string, error) {
+func (p *pusher) pushHost(ctx context.Context, h remote.Host) (string, int64, error) {
 	imgs := p.missing(ctx, h)
 	if len(imgs) == 0 {
-		return MethodSkip, nil
+		return MethodSkip, 0, nil
 	}
 	mode := p.o.Mode
 	if p.o.Engine == EngineContainer {
-		return MethodLoad, p.loadContainer(ctx, h, imgs)
+		return MethodLoad, 0, p.loadContainer(ctx, h, imgs)
 	}
 	var errs []error
 
 	if mode == "auto" || mode == MethodPussh {
 		err := p.pussh(ctx, h, imgs)
 		if err == nil {
-			return MethodPussh, nil
+			return MethodPussh, 0, nil
 		}
 		if mode == MethodPussh {
-			return MethodPussh, err
+			return MethodPussh, 0, err
 		}
 		fmt.Fprintf(p.out, "%s: pussh unavailable (%v), falling back to docker save | docker load\n", h.Name(), err)
 		errs = append(errs, err)
 	}
 	if mode == "auto" || mode == MethodLoad {
-		err := p.load(ctx, h, imgs)
+		n, err := p.load(ctx, h, imgs)
 		if err == nil {
-			return MethodLoad, nil
+			return MethodLoad, n, nil
 		}
 		if mode == MethodLoad || p.o.Registry == nil {
-			return MethodLoad, err
+			return MethodLoad, n, err
 		}
 		fmt.Fprintf(p.out, "%s: docker load failed (%v), falling back to registry\n", h.Name(), err)
 		errs = append(errs, err)
 	}
 	if err := p.registry(ctx, h, imgs); err != nil {
-		return MethodRegistry, errors.Join(append(errs, err)...)
+		return MethodRegistry, 0, errors.Join(append(errs, err)...)
 	}
-	return MethodRegistry, nil
+	return MethodRegistry, 0, nil
 }
 
 // pussh needs the local plugin, an ssh target and the containerd image store
@@ -338,14 +345,16 @@ func PushRegistry(ctx context.Context, images []string, out io.Writer) error {
 // LoadScript is the Server side of save|load. docker load detects gzip.
 const LoadScript = "docker load"
 
-// load streams `docker save imgs | gzip` into `docker load` on h.
-func (p *pusher) load(ctx context.Context, h remote.Host, imgs []string) error {
+// load streams `docker save imgs | gzip` into `docker load` on h and returns
+// the number of compressed bytes it sent.
+func (p *pusher) load(ctx context.Context, h remote.Host, imgs []string) (int64, error) {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	pr, pw := io.Pipe()
 	saveErr := make(chan error, 1)
+	cw := &countWriter{w: pw}
 	go func() {
-		err := p.save(ctx, imgs, pw)
+		err := p.save(ctx, imgs, cw)
 		pw.CloseWithError(err)
 		saveErr <- err
 	}()
@@ -355,9 +364,22 @@ func (p *pusher) load(ctx context.Context, h remote.Host, imgs []string) error {
 	if runErr != nil {
 		cancel()
 		<-saveErr
-		return runErr
+		return cw.n.Load(), runErr
 	}
-	return <-saveErr
+	err := <-saveErr
+	return cw.n.Load(), err
+}
+
+// countWriter counts bytes written to w. Safe to read after the writer stops.
+type countWriter struct {
+	w io.Writer
+	n atomic.Int64
+}
+
+func (c *countWriter) Write(b []byte) (int, error) {
+	n, err := c.w.Write(b)
+	c.n.Add(int64(n))
+	return n, err
 }
 
 func (p *pusher) registry(ctx context.Context, h remote.Host, imgs []string) error {

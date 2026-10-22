@@ -97,7 +97,7 @@ func TestContainerEngineLoad(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if res[0] != (Result{"fresh", MethodLoad}) || res[1] != (Result{"same", MethodSkip}) {
+	if res[0].Host != "fresh" || res[0].Method != MethodLoad || res[1].Host != "same" || res[1].Method != MethodSkip {
 		t.Fatalf("results %v", res)
 	}
 	if f.has("docker") {
