@@ -454,7 +454,7 @@ func TestRemoteBuilderDirect(t *testing.T) {
 	if _, i := r.find("docker context create " + name + " --description Yoho remote Builder (direct ship) --docker host=ssh://builder@b1:2222"); i < 0 {
 		t.Fatalf("no context: %v", r.calls)
 	}
-	if _, i := r.find("docker --context " + name + " buildx build --platform linux/amd64 "); i < 0 {
+	if _, i := r.find("docker --context " + name + " buildx build --builder " + name + " --platform linux/amd64 "); i < 0 {
 		t.Fatalf("no direct build without --load: %v", r.calls)
 	}
 	if _, i := r.find("docker --context " + name + " image inspect"); i < 0 {

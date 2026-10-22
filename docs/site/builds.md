@@ -20,6 +20,8 @@ Direct shipping needs:
 
 - One platform: the Servers' platform, or a `builder.platforms` with one entry. A multi-platform build ships from your machine.
 - `transport.mode` `auto` or `load`. `pussh` and `registry` ship from your machine.
+- A Builder whose own Docker runs that platform (`docker info` on the Builder): the Builder's Docker driver does not cross-build, so an amd64 Builder building for arm64 Servers ships from your machine.
+- No `cache_to` other than `type=inline`: the Builder's Docker driver cannot export build cache.
 - SSH from the Builder to every Server that works without a prompt: the Builder's user needs its own key authorized on each Server and a `known_hosts` entry for each one. Yoho never copies keys or accepts host keys for the Builder; it probes with `ssh -o BatchMode=yes -o StrictHostKeyChecking=yes <server> true` before the build. The Builder connects to the Server's `ssh` address (user, host and port), so a name from your `~/.ssh/config` must resolve on the Builder too. Servers reached through a [Cloudflare Tunnel](cloudflare-tunnel.md) ship from your machine.
 
 ```yaml
@@ -31,7 +33,7 @@ builder:
 
 On the direct path Yoho builds with the Builder's own Docker through a docker context named `yoho-remote-<hash>-d` (`docker context ls`), so the image stays in that Docker. It then runs `docker save | gzip -1 | ssh <server> docker load` on the Builder, once per Server, in parallel, and skips Servers that already have the same image. The Ship step reports per Server `web via direct, 412.0 MB in 38s (10.8 MB/s)`, and `--json` adds the same in `transfers`. The fallback path builds with a `docker-container` buildx builder (`yoho-remote-<hash>`) and `--load`s the image to your machine first.
 
-The Docker driver cannot export build cache, so a Service with `cache_to` (other than `type=inline`) needs `builder.direct: false`. Build secrets travel as before, through BuildKit's session from your machine; nothing secret reaches the Builder's shell or the Server. Built images accumulate in the Builder's Docker; prune them there (`docker image prune`) like on any build host.
+Build secrets travel as before, through BuildKit's session from your machine; nothing secret reaches the Builder's shell or the Server. Built images accumulate in the Builder's Docker; prune them there (`docker image prune`) like on any build host.
 
 ## Server builds
 

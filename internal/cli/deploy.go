@@ -256,11 +256,16 @@ func (a *app) buildAndShip(ctx context.Context, s *session, skipBuild bool) (map
 	}
 	var builder *remote.SSH
 	var derr error
+	var cacheTo []string
+	hasBuild := false
 	for _, svc := range r.Project.Services {
 		if svc.Build != nil {
-			builder, derr = a.directBuilder(ctx, hosts, platforms)
-			break
+			hasBuild = true
+			cacheTo = append(cacheTo, svc.Build.CacheTo...)
 		}
+	}
+	if hasBuild {
+		builder, derr = a.directBuilder(ctx, hosts, platforms, cacheTo)
 	}
 	if derr != nil {
 		step.Fail(derr, "give the Builder its own SSH key and known_hosts entry for each Server, or set builder.direct: auto")
@@ -348,7 +353,7 @@ func (a *app) buildAndShip(ctx context.Context, s *session, skipBuild bool) (map
 // it starts (build.UseDirect) and returns the connected Builder when images
 // stay there and stream to the Servers; nil means they come back to this
 // machine and ship from here. It errors only for builder.direct: true.
-func (a *app) directBuilder(ctx context.Context, hosts []plan.NamedHost, platforms []string) (*remote.SSH, error) {
+func (a *app) directBuilder(ctx context.Context, hosts []plan.NamedHost, platforms, cacheTo []string) (*remote.SSH, error) {
 	b := a.cfg.Builder
 	if b.Location != "remote" || b.Direct.Mode() == config.DirectOff {
 		return nil, nil
@@ -363,7 +368,7 @@ func (a *app) directBuilder(ctx context.Context, hosts []plan.NamedHost, platfor
 	for _, nh := range hosts {
 		dsts = append(dsts, nh.Host)
 	}
-	use, reason, err := build.UseDirect(ctx, b, a.cfg.Transport.Mode, platforms, h, dsts)
+	use, reason, err := build.UseDirect(ctx, b, a.cfg.Transport.Mode, platforms, cacheTo, h, dsts)
 	if !use {
 		h.Close()
 		if reason != "" {

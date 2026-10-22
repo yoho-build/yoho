@@ -126,10 +126,13 @@ func Direct(ctx context.Context, src, dst remote.Host, refs []string, platform s
 // UseDirect decides, before the build, whether a builder.location=remote
 // build stays in the Builder's own Docker and ships from there (ShipDirect)
 // instead of coming back to this machine. It needs one platform, a
-// save|load transport and a Builder that reaches every Server (DirectProbe).
-// When direct is not used, reason says why for auto; with builder.direct:
-// true the same conditions are an error. src is the Builder host.
-func UseDirect(ctx context.Context, b config.Builder, transportMode string, platforms []string, src remote.Host, dsts []remote.Host) (use bool, reason string, err error) {
+// save|load transport, no exported build cache (the Builder's docker driver
+// only writes inline caches), a Builder whose own platform is the target (it
+// does not cross-build like the docker-container builder) and a Builder that
+// reaches every Server (DirectProbe). cacheTo holds the Services' cache_to
+// entries. When direct is not used, reason says why for auto; with
+// builder.direct: true the same conditions are an error. src is the Builder host.
+func UseDirect(ctx context.Context, b config.Builder, transportMode string, platforms, cacheTo []string, src remote.Host, dsts []remote.Host) (use bool, reason string, err error) {
 	mode := b.Direct.Mode()
 	if b.Location != "remote" || mode == config.DirectOff {
 		return false, "", nil
@@ -142,6 +145,14 @@ func UseDirect(ctx context.Context, b config.Builder, transportMode string, plat
 		why = "transport.mode " + transportMode
 	case src == nil:
 		why = "no Builder host"
+	}
+	for _, c := range cacheTo {
+		if why == "" && !strings.Contains(c, "type=inline") {
+			why = "cache_to " + c + " needs the docker-container builder"
+		}
+	}
+	if why == "" {
+		why = builderPlatformMismatch(ctx, src, platforms[0])
 	}
 	for _, d := range dsts {
 		if why != "" {
@@ -158,6 +169,33 @@ func UseDirect(ctx context.Context, b config.Builder, transportMode string, plat
 		return false, "", fmt.Errorf("builder.direct is true but %s", why)
 	}
 	return false, why, nil
+}
+
+// builderPlatformMismatch says why the Builder's Docker can't build target
+// natively, or "" when it can.
+func builderPlatformMismatch(ctx context.Context, src remote.Host, target string) string {
+	out, err := src.Output(ctx, remote.Cmd{Script: "docker info --format '{{.OSType}}/{{.Architecture}}'"})
+	if err != nil {
+		return "cannot read the Builder's platform: " + err.Error()
+	}
+	have := normalizePlatform(strings.TrimSpace(out))
+	if want := normalizePlatform(target); have != want {
+		return fmt.Sprintf("Builder is %s, target is %s", have, want)
+	}
+	return ""
+}
+
+// normalizePlatform maps docker info and OCI spellings to os/arch.
+func normalizePlatform(p string) string {
+	os, arch, _ := strings.Cut(p, "/")
+	arch, _, _ = strings.Cut(arch, "/") // drop a variant such as arm64/v8
+	switch arch {
+	case "x86_64":
+		arch = "amd64"
+	case "aarch64":
+		arch = "arm64"
+	}
+	return os + "/" + arch
 }
 
 // DirectResult is ShipDirect's outcome for one Server.

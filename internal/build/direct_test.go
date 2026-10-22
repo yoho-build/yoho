@@ -143,6 +143,7 @@ type dockerHost struct {
 	scripts     []string
 	unreachable string // probe fails for this destination
 	oldDocker   bool
+	platform    string // docker info OSType/Architecture; default linux/x86_64
 }
 
 func (h *dockerHost) Name() string { return h.name }
@@ -156,6 +157,11 @@ func (h *dockerHost) Output(ctx context.Context, c remote.Cmd) (string, error) {
 			return "", errors.New("Host key verification failed")
 		}
 		return "", nil
+	case strings.HasPrefix(c.Script, "docker info"):
+		if h.platform != "" {
+			return h.platform + "\n", nil
+		}
+		return "linux/x86_64\n", nil
 	case strings.HasPrefix(c.Script, "docker save --help"):
 		if h.oldDocker {
 			return "Usage: docker save [OPTIONS] IMAGE", nil
@@ -190,22 +196,27 @@ func TestUseDirect(t *testing.T) {
 		b         config.Builder
 		mode      string
 		platforms []string
+		cacheTo   []string
 		src       *dockerHost
 		use       bool
 		reason    string
 		err       string
 	}{
-		{"local builder", config.Builder{}, "", one, &dockerHost{}, false, "", ""},
-		{"off", remoteB(config.DirectOff), "", one, &dockerHost{}, false, "", ""},
-		{"auto reachable", remoteB(""), "", one, &dockerHost{}, true, "", ""},
-		{"auto load", remoteB(config.DirectAuto), "load", one, &dockerHost{}, true, "", ""},
-		{"auto unreachable", remoteB(""), "", one, &dockerHost{unreachable: "10.0.0.5"}, false, "cannot ssh to web", ""},
-		{"auto multi-platform", remoteB(""), "", []string{"linux/amd64", "linux/arm64"}, &dockerHost{}, false, "2 platforms", ""},
-		{"auto registry", remoteB(""), "registry", one, &dockerHost{}, false, "transport.mode registry", ""},
-		{"true unreachable", remoteB(config.DirectOn), "", one, &dockerHost{unreachable: "10.0.0.5"}, false, "", "builder.direct is true but"},
+		{"local builder", config.Builder{}, "", one, nil, &dockerHost{}, false, "", ""},
+		{"off", remoteB(config.DirectOff), "", one, nil, &dockerHost{}, false, "", ""},
+		{"auto reachable", remoteB(""), "", one, nil, &dockerHost{}, true, "", ""},
+		{"auto load", remoteB(config.DirectAuto), "load", one, nil, &dockerHost{}, true, "", ""},
+		{"auto unreachable", remoteB(""), "", one, nil, &dockerHost{unreachable: "10.0.0.5"}, false, "cannot ssh to web", ""},
+		{"auto multi-platform", remoteB(""), "", []string{"linux/amd64", "linux/arm64"}, nil, &dockerHost{}, false, "2 platforms", ""},
+		{"auto registry", remoteB(""), "registry", one, nil, &dockerHost{}, false, "transport.mode registry", ""},
+		{"true unreachable", remoteB(config.DirectOn), "", one, nil, &dockerHost{unreachable: "10.0.0.5"}, false, "", "builder.direct is true but"},
+		{"auto arm64 Builder", remoteB(""), "", one, nil, &dockerHost{platform: "linux/aarch64"}, false, "Builder is linux/arm64, target is linux/amd64", ""},
+		{"auto variant", remoteB(""), "", []string{"linux/arm64/v8"}, nil, &dockerHost{platform: "linux/aarch64"}, true, "", ""},
+		{"auto cache export", remoteB(""), "", one, []string{"type=registry,ref=r/c"}, &dockerHost{}, false, "cache_to type=registry", ""},
+		{"auto inline cache", remoteB(""), "", one, []string{"type=inline"}, &dockerHost{}, true, "", ""},
 	} {
 		tc.src.name = "builder"
-		use, reason, err := UseDirect(ctx, tc.b, tc.mode, tc.platforms, tc.src, []remote.Host{web})
+		use, reason, err := UseDirect(ctx, tc.b, tc.mode, tc.platforms, tc.cacheTo, tc.src, []remote.Host{web})
 		if use != tc.use || !strings.Contains(reason, tc.reason) || (tc.reason == "") != (reason == "") {
 			t.Errorf("%s: use=%v reason=%q", tc.name, use, reason)
 		}
@@ -214,7 +225,7 @@ func TestUseDirect(t *testing.T) {
 		}
 	}
 	// Cloudflare-only and local Servers cannot be reached from the Builder.
-	if use, reason, _ := UseDirect(ctx, remoteB(""), "", one, &dockerHost{name: "b"}, []remote.Host{&remote.Local{}}); use || reason == "" {
+	if use, reason, _ := UseDirect(ctx, remoteB(""), "", one, nil, &dockerHost{name: "b"}, []remote.Host{&remote.Local{}}); use || reason == "" {
 		t.Errorf("local Server: use=%v reason=%q", use, reason)
 	}
 }
