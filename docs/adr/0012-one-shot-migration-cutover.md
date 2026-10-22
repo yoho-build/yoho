@@ -1,6 +1,6 @@
 # One-shot migration cutover
 
-Status: Proposed. Refs [#8](https://github.com/yoho-build/yoho/issues/8).
+Status: Accepted. Refs [#8](https://github.com/yoho-build/yoho/issues/8).
 
 ## Context
 
@@ -43,11 +43,11 @@ Yoho runs the `cloudflared` connector (`internal/proxy/tunnel.go`) but never cal
 2. **Operator machine only, one-shot, never resident.** The cutover runs inside `yoho apply` on the operator's machine (ADR 0008) and leaves nothing running (ADR 0003). The existing `pre-deploy` Hook stays the escape hatch for anything the block cannot express. `pre-cutover` and `post-cutover` Hooks are added.
 
 3. **Order inside `apply`, between `buildAndShip` and the rollout.** The build stays outside the downtime window, as in the hand-written Hook.
-   1. *Preflight*, read-only, before anything changes: resolve `api_token_secret`, GET the tunnel configuration (account and tunnel IDs are decoded from the existing `proxy.tunnel.token_secret`), confirm every `hostnames` entry has an ingress rule, confirm SSH and Docker, list the containers `stop` matches (zero matches is an error unless `--allow-empty`).
+   1. *Preflight*, read-only, before anything changes: resolve `api_token_secret`, GET the tunnel configuration (account and tunnel IDs are decoded from the existing `proxy.tunnel.token_secret`), confirm every `hostnames` entry has an ingress rule, confirm SSH and Docker, list the containers `stop` matches (zero matches is an error unless `--cutover-allow-empty`). Preflight also runs the claim check against everything that will keep running and refuses to stop Yoho's own containers.
    2. *Stop* the matched containers by saved ID (`docker stop`, never `rm`) and write the Journal.
-   3. *Claim check*: every running container not labelled `yoho.app=<this app>` is inspected; any mount of a claimed path (prefix match on cleaned absolute paths) or volume aborts and runs `on_failure`.
-   4. *Rollout*: the normal deploy. On failure with `on_failure: restart_old`, `docker start` the stopped IDs.
-   5. *Switch ingress* after the Services are healthy, which shortens the outage compared with switching first. The previous configuration is written to the Journal before the PUT; only the `service` of the listed hostnames changes and the final catch-all rule is kept.
+   3. *Claim check*: every running container not labelled with this App and Destination (`yoho.app`, `yoho.destination`) is inspected; any read-write mount of a claimed path (prefix match on cleaned absolute paths) or volume aborts and runs `on_failure`. Read-only mounts are ignored.
+   4. *Rollout*: the normal deploy. On failure with `on_failure: restart_old`, Yoho stops its own containers of this App, restores the saved ingress if it was switched, then `docker start`s the stopped IDs.
+   5. *Switch ingress* after the Services are healthy and the tunnel connector is up, which shortens the outage compared with switching first. The previous configuration is written to the Journal before the PUT; only the `service` of the listed hostnames changes and the final catch-all rule is kept.
    6. Mark the Journal `done` and report the downtime window.
 
 4. **The Journal is the durable state.** `<AppDir>/cutover.json`, mode 0600, written through `Host.WriteFile`: `{started_at, stopped:[id,name], tunnel_before, tunnel_after_hash, state: started|done|rolled_back}`. It holds no secret values. `release.Release` gains `Cutover string` (omitted when empty) so `yoho releases` shows which Release performed it. A `done` marker makes a rerun a no-op. A `started` marker makes `apply` refuse and point at `yoho rollback --cutover` (undo) or `yoho deploy --cutover-resume` (continue from the first unfinished step; every step is idempotent).
@@ -58,7 +58,7 @@ Yoho runs the `cloudflared` connector (`internal/proxy/tunnel.go`) but never cal
 
 7. **New commands:** `yoho migrate plan` (preflight only, prints findings) and `yoho migrate status` (reads the Journal). `--json` adds one `cutover` event per phase (`preflight`, `stopped`, `claims_clear`, `ingress_switched`, `done`, `rolled_back`) with container names, hostnames and timings, no values.
 
-8. **Compose runtime only in v1.** The old platforms run plain containers. `config check` rejects `migrate` on a Swarm Destination with a hint. A new package `internal/migrate` holds the logic (`Preflight`, `Plan.Stop`, `Plan.CheckClaims`, `Plan.SwitchIngress`, `Rollback`) so `internal/deploy/cutover.go` keeps its meaning.
+8. **Compose runtime and operator access only in v1.** `yoho deploy` refuses a `migrate` block on a Destination with `access: scoped`, because stopping other containers needs operator access to the Server. The old platforms run plain containers. `config check` rejects `migrate` on a Swarm Destination with a hint. A new package `internal/migrate` holds the logic (`Preflight`, `Plan.Stop`, `Plan.CheckClaims`, `Plan.SwitchIngress`, `Rollback`) so `internal/deploy/cutover.go` keeps its meaning.
 
 9. **The rehearsal Destination pattern is documentation, not code.** A second Destination with its own `servers` (for example a LAN box), overlays that point data at a restored copy, side-effect Services (schedulers, off-Server Backups, the tunnel) replaced with `sleep`, test-mode payment keys, and a cold-start rehearsal (stop everything, then `yoho deploy`) to reproduce cutover ordering. It has no `migrate` block and sets `proxy: {tunnel: null}` in its overlay (otherwise it inherits the live tunnel token and `apply` would join the live tunnel). It ships in the `yoho-migrate-coolify` skill reference and the migration guides with this ADR.
 

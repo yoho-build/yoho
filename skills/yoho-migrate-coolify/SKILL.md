@@ -130,36 +130,30 @@ backups:
 
 ## 5. Cutover
 
-Rehearse first when the app matters: a second Destination on another box (a LAN machine is fine) with no cutover Hook and `proxy: {tunnel: null}` in its overlay (it would otherwise join the live tunnel), an overlay that points data at a restored copy, side-effect Services (schedulers, off-Server Backups, the tunnel) replaced with `sleep`, test-mode payment keys, and a cold-start run (stop only the rehearsal App's containers by its `yoho.app` and `yoho.destination` labels, never other Apps or `yoho-proxy`, then `yoho deploy -d <rehearsal>`) to reproduce the cutover ordering. Details in `skills/yoho/references/migrate-coolify.md`. Keep the one-time Hook out of the rehearsal Destination.
+Rehearse first when the app matters: a second Destination on another box (a LAN machine is fine) with no `migrate` block and `proxy: {tunnel: null}` in its overlay (it would otherwise join the live tunnel), an overlay that points data at a restored copy, side-effect Services (schedulers, off-Server Backups, the tunnel) replaced with `sleep`, test-mode payment keys, and a cold-start run (stop only the rehearsal App's containers by its `yoho.app` and `yoho.destination` labels, never other Apps or `yoho-proxy`, then `yoho deploy -d <rehearsal>`) to reproduce the cutover ordering. Details in `skills/yoho/references/migrate-coolify.md`. Keep the `migrate` block out of the rehearsal Destination.
 
 Get the user's OK on a downtime window. The old and new stacks must never run on the same data volume at once: two Postgres servers on one data directory corrupt it.
 
 1. Back up: `pg_dump -Fc` each database from the running Coolify containers into a dated directory on the Server, and check it with `pg_restore -l`.
 2. Ask the user to turn off auto-deploy for the app in the Coolify UI (or its API, if the user has a token and you have checked the current API). Do not edit Coolify's database. Then confirm no deployment is running for the app (the Coolify deployments list; no `coolify-helper` build in `docker ps`). Otherwise a git push restarts the old stack on the same volumes.
 3. Check each old container's restart policy (`{{.HostConfig.RestartPolicy.Name}}`). `unless-stopped` and `no` stay down after `docker stop`. Change `always` to `unless-stopped` first (`docker update --restart=unless-stopped <id>`), or a Docker restart would bring the old database back.
-4. Stop the old stack after the build, not before it. A one-time `.yoho/hooks/pre-deploy` hook runs after the image is built and shipped, and before Yoho starts any Service, so the downtime does not include the build:
+4. Stop the old stack after the build, not before it, with a `migrate` block on the production Destination (never on the rehearsal one):
 
-   ```sh
-   #!/bin/sh
-   # One-time Coolify cutover; delete this hook afterwards.
-   set -eu
-   # The remote side runs in its own POSIX shell with set -eu, so a failing docker command fails the hook.
-   ssh user@host sh -s <<'EOF'
-   set -eu
-   ids=$(docker ps -q --filter label=com.docker.compose.project=<uuid>)
-   if [ -n "$ids" ]; then docker stop $ids >/dev/null; fi
-   for v in <data-volume-1> <data-volume-2>; do
-     if [ -n "$(docker ps -q --filter volume=$v)" ]; then echo "volume $v is still in use" >&2; exit 1; fi
-   done
-   EOF
+   ```yaml
+   destinations:
+     production:
+       servers: [main]
+       migrate:
+         from: coolify
+         stop: {compose_project: <uuid>}          # or labels / containers
+         claim: {volumes: [<data-volume-1>, <data-volume-2>], paths: [/srv/<data-dir>]}
+         tunnel:                                  # only when the Tunnel's ingress must move
+           api_token_secret: CF_API_TOKEN         # needs Tunnel edit permission
+           hostnames: [app.example.com]
    ```
 
-   `chmod +x` it, then run `yoho deploy -d <dest>`. The volume check also makes a later deploy fail if the hook is left in place, because Yoho's own containers then use the volumes. Yoho starts the stateful Services, runs release commands, health-gates the web Service, switches the Proxy and starts the tunnel connector. Remove the hook once the deploy succeeds.
-5. If it fails and the fix is not quick, roll back:
-   - Stop every Yoho container of the app by all three ownership labels: `docker ps -q --filter label=com.docker.compose.project=yoho-<app>-<dest> --filter label=yoho.app=<app> --filter label=yoho.destination=<dest>`, then `docker stop` those IDs if there are any (none is normal when the deploy failed before starting a Service; `docker stop` with no IDs exits 1, so do not stop there). Do not match on names (a Service with `container_name` would not match), and do not rely on the project name alone (`foo-bar`/`prod` and `foo`/`bar-prod` share it).
-   - Confirm that nothing else uses the data volumes: `docker ps --filter volume=<name>` must be empty. Also list stopped users with `docker ps -a --filter volume=<name>`: set any Yoho container there with restart policy `always` to `docker update --restart=no`, or a Docker restart brings it back.
-   - If the new version ran migrations the old code cannot handle (check the app log and the migrations in the diff), the database has to go back to the step 1 dump. Ask the user before restoring.
-   - Only then `docker start` the Coolify containers.
+   Run `yoho migrate plan -d production`: it checks the token, the ingress rules, the containers it would stop and that no other container mounts the claimed data, and changes nothing. Then `yoho deploy -d production`. After build and ship it stops the matched containers (never removes them), checks the claims again, deploys, switches the listed hostnames to `yoho-proxy` and records a Journal; `yoho migrate status` shows it. A rerun is a normal deploy. Leave the block in place as the record, or remove it later. If a `migrate` block can't express the cutover, a one-time `.yoho/hooks/pre-deploy` Hook is the fallback; it runs at the same point.
+5. If it fails and the fix is not quick, roll back with `yoho rollback --cutover -d production`. It stops this App's Yoho containers (by project and `yoho.*` labels, never `down -v`), starts the saved old containers and restores the saved ingress; it refuses when someone changed the ingress since, unless `--force`. Volumes and database migrations are not reverted: if the new version ran migrations the old code cannot handle (check the app log and the migrations in the diff), the database has to go back to the step 1 dump. Ask the user before restoring.
 
 ## 6. Verify
 
