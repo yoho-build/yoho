@@ -61,14 +61,15 @@ func dockerMajor(version string) (int, bool) {
 	return n, true
 }
 
-// fastStartEligible retains fast-probe defaults for proxied Compose Services
-// and Swarm Services. Plain Compose readiness gates honor the effective Docker
-// timing instead of changing existing non-Proxy healthcheck behavior.
+// fastStartEligible retains fast-probe defaults for proxied and Stateful
+// Compose Services and for Swarm Services. Other plain Compose readiness gates
+// honor the effective Docker timing instead of changing existing non-Proxy
+// healthcheck behavior.
 func fastStartEligible(ext config.ServiceExt, hc *types.HealthCheckConfig, waitOnAll bool) bool {
 	if hc == nil || hc.Disable {
 		return false
 	}
-	if ext.Proxy != nil {
+	if ext.Proxy != nil || ext.Stateful {
 		return true
 	}
 	return waitOnAll

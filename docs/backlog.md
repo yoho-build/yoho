@@ -1,5 +1,6 @@
 # Backlog (decided as future work)
 
+- Fast-start health probes (`start_period`/`start_interval`) for every compose Service that is a `depends_on: condition: service_healthy` target, not only proxied and Stateful ones.
 - Roles: place subsets of Services on subsets of Servers (Kamal-style). Design must be ready before v1 config freezes.
 - Manage Cloudflare Tunnel itself: create tunnels, DNS routes, ingress rules via API.
 - Remote API + dashboard: App health, Server metrics, on-call alerts. The local read-only `yoho ui` / `yoho tui` exist (ADR 0010); this item is the opt-in per-Server API of ADR 0003 for unattended alerting.
