@@ -198,7 +198,7 @@ func (c Compose) Deploy(ctx context.Context, d *plan.Deploy) (_ *release.Release
 		Runtime: "compose", Role: "all", DeployedAt: start, Performer: d.Performer,
 		Images: map[string]string{}, SecretsGeneration: generation, Files: appFileHashes,
 		Secrets:       secretAudit(d, svcSecrets, generated, key),
-		ComposeSHA256: sha256Hex(composeYAML), Status: "failed",
+		ComposeSHA256: sha256Hex(composeYAML), Status: "failed", Cutover: d.Cutover,
 	}
 	for _, sp := range plans {
 		if sp.Image != "" {

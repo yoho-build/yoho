@@ -109,8 +109,7 @@ func (a *app) hookFunc(version, command string, hosts []plan.NamedHost) plan.Hoo
 }
 
 func deployCmd(g *globals) *cobra.Command {
-	var ver string
-	var skipBuild bool
+	var o applyOptions
 	c := &cobra.Command{
 		Use:   "deploy",
 		Short: "Build, ship and deploy the App with zero downtime",
@@ -120,20 +119,24 @@ func deployCmd(g *globals) *cobra.Command {
 				return err
 			}
 			if a.scoped {
-				return a.scopedDeploy(cmd.Context(), ver, skipBuild)
+				if a.dest.Migrate != nil {
+					return a.fail(&hintError{"destinations." + a.destName + ".migrate needs operator access: the cutover stops containers outside the App", "deploy with operator access, or remove the migrate block once `yoho migrate status` shows done"})
+				}
+				return a.scopedDeploy(cmd.Context(), o.Version, o.SkipBuild)
 			}
-			err = a.deploy(cmd.Context(), ver, skipBuild)
-			return err
+			return a.deploy(cmd.Context(), o)
 		},
 	}
-	c.Flags().StringVar(&ver, "version", "", "Version to deploy (default: git SHA)")
-	c.Flags().BoolVar(&skipBuild, "skip-build", false, "Use images already built for this version")
+	c.Flags().StringVar(&o.Version, "version", "", "Version to deploy (default: git SHA)")
+	c.Flags().BoolVar(&o.SkipBuild, "skip-build", false, "Use images already built for this version")
+	addCutoverFlags(c, &o)
 	return c
 }
 
 // deploy is `yoho deploy`: apply --auto-approve without printing the plan.
-func (a *app) deploy(ctx context.Context, ver string, skipBuild bool) error {
-	return a.apply(ctx, applyOptions{Version: ver, SkipBuild: skipBuild, AutoApprove: true})
+func (a *app) deploy(ctx context.Context, o applyOptions) error {
+	o.AutoApprove, o.ShowPlan = true, false
+	return a.apply(ctx, o)
 }
 
 // session is everything one deploy or plan run needs: the loaded compose
@@ -619,16 +622,38 @@ func runtimeName(d config.Destination) string {
 }
 
 func rollbackCmd(g *globals) *cobra.Command {
-	return &cobra.Command{
-		Use:   "rollback VERSION",
+	var cutover, force bool
+	c := &cobra.Command{
+		Use:   "rollback VERSION | rollback --cutover [--force]",
 		Short: "Redeploy a previous Release with zero downtime (volumes and migrations are not reverted)",
-		Args:  cobra.ExactArgs(1),
+		Long: `Redeploy a previous Release with zero downtime. Volumes and database
+migrations are not reverted.
+
+With --cutover, undo the Destination's migration cutover instead: stop this
+App's containers (never removed, volumes kept), start the old containers it
+stopped, and restore the saved Cloudflare Tunnel ingress. It refuses when the
+ingress changed since the cutover, unless --force.`,
+		Args: func(cmd *cobra.Command, args []string) error {
+			if cutover {
+				return cobra.NoArgs(cmd, args)
+			}
+			if force {
+				return errors.New("--force applies to --cutover only")
+			}
+			return cobra.ExactArgs(1)(cmd, args)
+		},
 		RunE: func(cmd *cobra.Command, args []string) error {
 			a, err := g.load(cmd)
 			if err != nil {
 				return err
 			}
 			ctx := cmd.Context()
+			if cutover {
+				if a.scoped {
+					return a.fail(&hintError{"rollback --cutover needs operator access", "ask the operator to run it"})
+				}
+				return a.rollbackCutover(ctx, force)
+			}
 			if a.scoped {
 				return a.scopedRollback(ctx, args[0])
 			}
@@ -663,6 +688,9 @@ func rollbackCmd(g *globals) *cobra.Command {
 			return nil
 		},
 	}
+	c.Flags().BoolVar(&cutover, "cutover", false, "Undo the migration cutover (start the old containers, restore the tunnel ingress)")
+	c.Flags().BoolVar(&force, "force", false, "With --cutover: restore the saved ingress even when it changed since the cutover")
+	return c
 }
 
 // resolveVersion accepts a full version or a unique prefix.
@@ -740,14 +768,26 @@ func releasesCmd(g *globals) *cobra.Command {
 				}
 			}
 			var rows [][]string
+			cutover := false
+			for _, r := range rels {
+				cutover = cutover || r.Cutover != ""
+			}
 			for i, r := range rels {
 				cur := ""
 				if i == 0 && r.Status == "deployed" {
 					cur = "*"
 				}
-				rows = append(rows, []string{cur, shortVersion(r.Version), r.Status, r.DeployedAt.Local().Format("2006-01-02 15:04:05"), r.Performer, r.SecretsGeneration})
+				row := []string{cur, shortVersion(r.Version), r.Status, r.DeployedAt.Local().Format("2006-01-02 15:04:05"), r.Performer, r.SecretsGeneration}
+				if cutover {
+					row = append(row, r.Cutover)
+				}
+				rows = append(rows, row)
 			}
-			a.ui.Table([]string{"CURRENT", "VERSION", "STATUS", "DEPLOYED", "BY", "SECRETS"}, rows)
+			header := []string{"CURRENT", "VERSION", "STATUS", "DEPLOYED", "BY", "SECRETS"}
+			if cutover {
+				header = append(header, "CUTOVER")
+			}
+			a.ui.Table(header, rows)
 			return nil
 		},
 	}

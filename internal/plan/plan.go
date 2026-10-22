@@ -55,6 +55,10 @@ type Deploy struct {
 	RetainReleases int
 	Hook           HookFunc
 
+	// Cutover is the id of the migration cutover this deploy performs, or
+	// "". Recorded in the Release.
+	Cutover string
+
 	// Out receives progress output. Already wrapped by the secrets redactor.
 	Out io.Writer
 

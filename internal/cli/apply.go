@@ -15,6 +15,7 @@ import (
 	"github.com/yoho-build/yoho/internal/build"
 	"github.com/yoho-build/yoho/internal/plan"
 	"github.com/yoho-build/yoho/internal/proxy"
+	"github.com/yoho-build/yoho/internal/release"
 	"github.com/yoho-build/yoho/internal/ui"
 	"github.com/yoho-build/yoho/internal/version"
 )
@@ -35,6 +36,10 @@ type applyOptions struct {
 	// ShowPlan prints the plan first and skips work when nothing changes
 	// (`yoho apply`). `yoho deploy` leaves it false.
 	ShowPlan bool
+	// CutoverResume continues an unfinished migration cutover;
+	// CutoverAllowEmpty accepts a migrate.stop that matches nothing.
+	CutoverResume     bool
+	CutoverAllowEmpty bool
 }
 
 func planCmd(g *globals) *cobra.Command {
@@ -86,6 +91,7 @@ from the configuration.`,
 	c.Flags().StringVar(&o.Version, "version", "", "Version to deploy (default: git SHA)")
 	c.Flags().BoolVar(&o.SkipBuild, "skip-build", false, "Use images already built for this version")
 	c.Flags().BoolVar(&o.AutoApprove, "auto-approve", false, "Apply without asking for confirmation")
+	addCutoverFlags(c, &o)
 	return c
 }
 
@@ -168,6 +174,12 @@ func (a *app) collectChanges(ctx context.Context, s *session) (changes []plan.Ch
 		return nil, false, &silentError{err}
 	}
 	changes = append(changes, sc...)
+	cc, err := a.planCutover(ctx, s.hosts[0])
+	if err != nil {
+		step.Fail(err, "run `yoho migrate status`")
+		return nil, false, &silentError{err}
+	}
+	changes = append(changes, cc...)
 	step.Done()
 	return changes, deployNeeded, nil
 }
@@ -326,29 +338,51 @@ func (a *app) apply(ctx context.Context, o applyOptions) (err error) {
 	if err = a.ensureAppDirs(ctx, s.hosts); err != nil {
 		return err
 	}
+	// A migration cutover is decided (and its tokens resolved) before the
+	// build; it stops the old stack only after build and ship (ADR 0012).
+	co, err := a.beginCutover(ctx, s, o.CutoverResume, o.CutoverAllowEmpty)
+	if err != nil {
+		return err
+	}
 	urls := a.urls(s.r, s.hosts)
 	version := ver
+	var images map[string]string
 	if deployNeeded {
 		s.hook = a.hookFunc(ver, "deploy", s.hosts)
-		images, berr := a.buildAndShip(ctx, s, o.SkipBuild)
-		if berr != nil {
-			return berr
+		if images, err = a.buildAndShip(ctx, s, o.SkipBuild); err != nil {
+			return err
 		}
+	}
+	if co != nil {
+		co.hook = s.hook
+		if err = co.prepare(ctx); err != nil {
+			return err
+		}
+	}
+	var rel *release.Release
+	if deployNeeded {
 		d, derr := a.newDeploy(s, images, false)
 		if derr != nil {
-			return derr
+			return co.failed(ctx, derr)
 		}
-		rel, rerr := a.rollout(ctx, s, d)
-		if rerr != nil {
-			return rerr
+		if co != nil {
+			d.Cutover = co.j.ID
+		}
+		if rel, err = a.rollout(ctx, s, d); err != nil {
+			return co.failed(ctx, err)
 		}
 		version = rel.Version
 	}
 	tunnelURLs, err := a.reconcileTunnel(ctx, s)
 	if err != nil {
-		return err
+		return co.failed(ctx, err)
 	}
 	urls += tunnelURLs
+	if co != nil {
+		if err = co.finish(ctx, rel); err != nil {
+			return err
+		}
+	}
 	if err = a.applySchedules(ctx, s.hosts, s.store); err != nil {
 		u.Step("", "Scheduled Jobs").Fail(err, hintFor(err, "run `yoho schedule status`"))
 		return &silentError{err}
@@ -369,4 +403,10 @@ func (a *app) confirmPrecheck(o applyOptions) error {
 		return errors.New("refusing to apply without confirmation: stdin is not a terminal\nhint: pass --auto-approve")
 	}
 	return nil
+}
+
+// addCutoverFlags adds the migration cutover flags of deploy and apply.
+func addCutoverFlags(c *cobra.Command, o *applyOptions) {
+	c.Flags().BoolVar(&o.CutoverResume, "cutover-resume", false, "Continue an unfinished migration cutover from its journal")
+	c.Flags().BoolVar(&o.CutoverAllowEmpty, "cutover-allow-empty", false, "Cut over even when migrate.stop matches no running container")
 }

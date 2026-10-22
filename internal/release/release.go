@@ -12,6 +12,7 @@
 //	  secrets/<generation>/<service>.env  env_file fallback (0600)
 //	  generated/<NAME>              secrets generated once on the Server (0600)
 //	  hmac.key                      audit fingerprint key (0600)
+//	  cutover.json                  one-shot migration cutover Journal (0600, ADR 0012)
 //	  source/                       seed copy of the last synced build inputs (builder.location=server, 0700)
 //	  source.run-<id>/source/       one build's synced inputs, inside a private 0700 dir
 //	<root>/appdirs/<app>/app.gate/         App gate: app_dir migrations, retention scans
@@ -116,6 +117,9 @@ type Release struct {
 	// SHA-256 of the compiled compose file.
 	ComposeSHA256 string `json:"compose_sha256"`
 	Status        string `json:"status"` // deployed | failed | rolled_back
+	// Cutover is the id of the one-shot migration cutover (ADR 0012) this
+	// Release performed; its Journal is <app dir>/cutover.json.
+	Cutover string `json:"cutover,omitempty"`
 }
 
 // SecretAudit is the audit record of one secret in a Release.
