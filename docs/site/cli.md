@@ -43,7 +43,7 @@ Global flags (every command): `-c, --config FILE`, `-d, --destination NAME` (def
 | `swarm status` | Swarm nodes and the App's services. |
 | `builder status` | Build engine in use and Apple `container` state. |
 | `builder setup [-y]` | Install/upgrade Apple container, Rosetta, builder VM; smoke test. |
-| `skill install [--dir DIR] [--agent claude\|codex\|all] [--only A,B \| --exclude A,B] [--no-migrate-refs]` | Write the bundled agent skills (all by default) to `.claude/skills/<name>` and/or `.agents/skills/<name>`; symlinked layouts are written once. See [Agents](agents.md). |
+| `skill install [--dir DIR] [--agent claude\|codex\|all] [--only A,B \| --exclude A,B] [--no-migrate-refs] [--project [--force]]` | Write the bundled agent skills (all by default) to `.claude/skills/<name>` and/or `.agents/skills/<name>`; symlinked layouts are written once. `--project` also generates `yoho-deploy-<app>` from the Yoho file (at the git root unless `--dir`); a rerun keeps hand edits unless `--force`. See [Agents](agents.md). |
 | `skill list` | List the bundled skills with descriptions. |
 | `skill print [SKILL]` | Print a skill's `SKILL.md` (default `yoho`). |
 | `version` | Print the version. |
