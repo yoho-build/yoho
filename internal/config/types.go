@@ -113,6 +113,11 @@ type Builder struct {
 	Engine string `json:"engine,omitempty" jsonschema:"enum=auto,enum=docker,enum=container"`
 	// For location=remote: ssh target of the build machine.
 	Remote string `json:"remote,omitempty"`
+	// For location=remote: ship images from the Builder straight to the
+	// Servers instead of through this machine. auto (default) does so when
+	// the Builder can ssh to every Server without a prompt, else falls back;
+	// true requires it; false always ships from this machine.
+	Direct BuilderDirect `json:"direct,omitempty"`
 	// Target platforms, e.g. [linux/amd64]. Default: the Server's arch.
 	Platforms []string `json:"platforms,omitempty"`
 	// Secret keys passed to buildx as --secret id=KEY,env=KEY.

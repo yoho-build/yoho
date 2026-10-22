@@ -26,6 +26,7 @@ Validate with `yoho config check`; print the resolved file with `yoho config sho
 | `builder.location` | `local` (default), `remote` (dedicated build Server), `server` (build on the Destination's Server). |
 | `builder.engine` | `auto` (Apple `container` on Apple silicon if installed, else Docker), `docker`, `container`. |
 | `builder.remote` | SSH target; required when `location: remote`. |
+| `builder.direct` | `location: remote`: `auto` (default) streams images from the Builder to the Servers when the Builder can ssh to each one, else ships through this machine; `true` requires it; `false` never. See [Remote builds](builds.md#remote-builds). |
 | `builder.platforms` | e.g. `[linux/amd64]`. Default: the Server's architecture. |
 | `builder.secrets` | Keys passed to buildx as `--secret id=KEY,env=KEY`. |
 | `builder.exclude` | Extra rsync exclude patterns for `location: server`, relative to the transfer root. See [Server builds](builds.md#server-builds). |

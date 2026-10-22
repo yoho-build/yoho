@@ -5,7 +5,10 @@
 //   - remote: a buildx docker-container builder created on the build Server
 //     with `docker buildx create ssh://<remote>`; the image is built there and
 //     `--load` streams the result back into the local daemon, so the normal
-//     image transport ships it to Servers afterwards.
+//     image transport ships it to Servers afterwards. With Options.Direct
+//     (builder.direct, see UseDirect) the build instead runs on the remote
+//     Docker's own BuildKit through a docker context, the image stays in
+//     that Docker, and ShipDirect streams it to the Servers.
 //   - server: the build inputs are rsynced to the Destination's Server and
 //     built there with `docker build`, so no transport is needed. Build
 //     secrets travel as env through remote.Cmd.Env. See source.go and
@@ -67,6 +70,9 @@ type Options struct {
 	Project     *types.Project
 	Builder     config.Builder
 	Registry    *config.Registry
+	// Direct (location=remote): build into the remote Builder's Docker
+	// without --load, for ShipDirect. Decided by UseDirect.
+	Direct bool
 	// Target platforms (e.g. linux/amd64). Default Builder.Platforms; when
 	// both are empty buildx builds for its native platform.
 	Platforms []string
@@ -203,7 +209,11 @@ func Images(ctx context.Context, o Options) (_ map[string]Image, err error) {
 		if o.Builder.Remote == "" {
 			return nil, errors.New("builder.location=remote needs builder.remote")
 		}
-		b, err := ensureRemoteBuilder(ctx, o)
+		ensure := ensureRemoteBuilder
+		if o.Direct {
+			ensure = ensureDirectContext
+		}
+		b, err := ensure(ctx, o)
 		if err != nil {
 			return nil, err
 		}
@@ -435,6 +445,11 @@ func buildLocal(ctx context.Context, o Options, service string, svc types.Servic
 		return "", err
 	}
 	argv := []string{"docker", "buildx", "build", "--load"}
+	if o.Direct {
+		// buildx accepts a context's docker-driver builder only with that
+		// context selected; --builder still overrides an inherited BUILDX_BUILDER.
+		argv = []string{"docker", "--context", builder, "buildx", "build"}
+	}
 	if builder != "" {
 		argv = append(argv, "--builder", builder)
 	}
@@ -449,8 +464,13 @@ func buildLocal(ctx context.Context, o Options, service string, svc types.Servic
 	if err := o.Exec(ctx, c); err != nil {
 		return "", err
 	}
+	inspect := []string{"docker", "image", "inspect", "--format", "{{.Id}}", ref}
+	if o.Direct {
+		// The image is in the remote Docker the context points at.
+		inspect = append([]string{"docker", "--context", builder}, inspect[1:]...)
+	}
 	var out bytes.Buffer
-	if err := o.Exec(ctx, Command{Argv: []string{"docker", "image", "inspect", "--format", "{{.Id}}", ref}, Stdout: &out, Stderr: io.Discard}); err != nil {
+	if err := o.Exec(ctx, Command{Argv: inspect, Stdout: &out, Stderr: io.Discard}); err != nil {
 		return "", nil // ID is best effort
 	}
 	return strings.TrimSpace(out.String()), nil
@@ -474,6 +494,35 @@ func ensureRemoteBuilder(ctx context.Context, o Options) (string, error) {
 	argv := []string{"docker", "buildx", "create", "--name", name, "--driver", "docker-container", ep}
 	if err := o.Exec(ctx, Command{Argv: argv, Stdout: o.Out, Stderr: o.Out}); err != nil {
 		return "", fmt.Errorf("create remote builder %s: %w", ep, err)
+	}
+	return name, nil
+}
+
+// DirectContextName is the docker context Yoho creates for a direct remote
+// build (builder.direct).
+func DirectContextName(target string) string { return RemoteBuilderName(target) + "-d" }
+
+// ensureDirectContext creates a docker context for the remote Builder's
+// Docker over ssh. buildx lists every context as a builder with the docker
+// driver: it builds with that Docker's BuildKit and stores the image there,
+// where ShipDirect finds it. A docker-container builder would keep the image
+// inside BuildKit, with nothing for `docker save` on the Builder.
+func ensureDirectContext(ctx context.Context, o Options) (string, error) {
+	name := DirectContextName(o.Builder.Remote)
+	exists := func() bool {
+		return o.Exec(ctx, Command{Argv: []string{"docker", "context", "inspect", name}, Stdout: io.Discard, Stderr: io.Discard}) == nil
+	}
+	if exists() {
+		return name, nil
+	}
+	if _, _, _, err := remote.ParseTarget(o.Builder.Remote); err != nil || strings.Contains(o.Builder.Remote, ",") {
+		return "", fmt.Errorf("builder.remote %q is not an ssh target", o.Builder.Remote)
+	}
+	ep := "ssh://" + strings.TrimPrefix(o.Builder.Remote, "ssh://")
+	argv := []string{"docker", "context", "create", name, "--description", "Yoho remote Builder (direct ship)", "--docker", "host=" + ep}
+	// A concurrent deploy may have created it first.
+	if err := o.Exec(ctx, Command{Argv: argv, Stdout: o.Out, Stderr: o.Out}); err != nil && !exists() {
+		return "", fmt.Errorf("create docker context for %s: %w", ep, err)
 	}
 	return name, nil
 }

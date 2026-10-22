@@ -130,6 +130,16 @@ func Validate(c *Config) []error {
 	default:
 		add("transport.mode %q must be auto, pussh, load or registry", c.Transport.Mode)
 	}
+	if c.Builder.Direct == DirectOn {
+		switch {
+		case c.Builder.Location != "remote":
+			add("builder.direct: true needs builder.location remote")
+		case len(c.Builder.Platforms) > 1:
+			add("builder.direct: true ships one platform; builder.platforms lists %d", len(c.Builder.Platforms))
+		case c.Transport.Mode == "pussh" || c.Transport.Mode == "registry":
+			add("builder.direct: true streams images with docker save | docker load; transport.mode %s cannot apply", c.Transport.Mode)
+		}
+	}
 	if c.Transport.Mode == "registry" && c.Registry == nil {
 		add("transport.mode registry requires a registry section")
 	}
