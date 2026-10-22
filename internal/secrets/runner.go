@@ -63,6 +63,18 @@ func (m *memoRunner) Run(ctx context.Context, argv []string, env []string) ([]by
 	return c.out, c.stderr, c.err
 }
 
+// forget drops a cached call so a retry runs the command again.
+func (m *memoRunner) forget(argv []string) {
+	prefix := strings.Join(argv, "\x00") + "\x01"
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for k := range m.calls {
+		if strings.HasPrefix(k, prefix) {
+			delete(m.calls, k)
+		}
+	}
+}
+
 // commandError reports a failed command with its stderr, redacting stdout
 // (which may be a partial secret) and any known values, and truncating.
 func commandError(name string, err error, stdout, stderr []byte, known []string) error {

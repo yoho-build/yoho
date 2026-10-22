@@ -13,6 +13,7 @@ import (
 
 	"github.com/yoho-build/yoho/internal/release"
 	"github.com/yoho-build/yoho/internal/remote"
+	"github.com/yoho-build/yoho/internal/secrets"
 )
 
 func TestRouteConflictHintHumanAndNDJSON(t *testing.T) {
@@ -74,5 +75,66 @@ func TestPoolExhaustedHintAndFacts(t *testing.T) {
 	facts := ev["failure_facts"].(map[string]any)["network"].(map[string]any)
 	if facts["suggested_subnet"] != "10.200.3.0/24" {
 		t.Fatalf("facts %v", ev)
+	}
+}
+
+func TestSecretsHintPerClass(t *testing.T) {
+	def := "default secrets hint"
+	got := map[string]string{}
+	for name, class := range map[string]secrets.ErrClass{"timeout": secrets.ApprovalTimeout, "signin": secrets.NotSignedIn, "notfound": secrets.NotFound, "other": secrets.Other} {
+		got[name] = secretsHint(fmt.Errorf("secret A: %w", &secrets.ProviderError{Class: class, Provider: "op"}), def)
+	}
+	if got["other"] != def || secretsHint(fmt.Errorf("plain"), def) != def {
+		t.Fatalf("other must keep the default: %v", got)
+	}
+	seen := map[string]bool{def: true}
+	for _, k := range []string{"timeout", "signin", "notfound"} {
+		if seen[got[k]] {
+			t.Fatalf("%s hint is not distinct: %q", k, got[k])
+		}
+		seen[got[k]] = true
+	}
+	if !strings.Contains(got["timeout"], "approval") {
+		t.Fatalf("timeout hint %q", got["timeout"])
+	}
+}
+
+func TestSecretsFailureJSONCodeAndWaitEvent(t *testing.T) {
+	var out bytes.Buffer
+	u := ui.New(&out, ui.JSON, false)
+	step := u.Step("", "Resolve secrets")
+	step.Waiting("waiting for secrets provider approval… (op)", map[string]any{"provider": "op", "ref": "op://v/i/f", "elapsed_ms": int64(3100)})
+	err := fmt.Errorf("secret A: %w", &secrets.ProviderError{Class: secrets.ApprovalTimeout, Provider: "op"})
+	step.Fail(err, secretsHint(err, "d"))
+	events := map[string]map[string]any{}
+	for _, line := range strings.Split(strings.TrimSpace(out.String()), "\n") {
+		var ev map[string]any
+		if e := json.Unmarshal([]byte(line), &ev); e != nil {
+			t.Fatal(e)
+		}
+		events[ev["event"].(string)] = ev
+	}
+	w := events["step_wait"]
+	if w == nil || w["provider"] != "op" || w["step"] != "Resolve secrets" || w["elapsed_ms"] != float64(3100) {
+		t.Fatalf("step_wait %v", w)
+	}
+	if f := events["step_fail"]; f == nil || f["code"] != "secrets_approval_timeout" || f["hint"] == "" {
+		t.Fatalf("step_fail %v", f)
+	}
+}
+
+func TestResolveSecretsRetriesDefaultDependsOnTTY(t *testing.T) {
+	cases := []struct {
+		flag int
+		env  string
+		tty  bool
+		want int
+	}{
+		{-1, "", true, 1}, {-1, "", false, 0}, {-1, "2", false, 2}, {0, "2", true, 0}, {3, "", false, 3}, {-1, "junk", true, 1},
+	}
+	for _, c := range cases {
+		if got := resolveSecretsRetries(c.flag, c.env, c.tty); got != c.want {
+			t.Errorf("%+v: got %d", c, got)
+		}
 	}
 }

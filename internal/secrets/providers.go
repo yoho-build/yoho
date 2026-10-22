@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/yoho-build/yoho/internal/config"
 )
@@ -15,7 +16,18 @@ import (
 type providerResolver struct {
 	run    Runner
 	getenv func(string) (string, bool)
+	// clock times calls for classification. Default time.Now.
+	clock func() time.Time
+	// retries is how many times an ApprovalTimeout is retried.
+	retries   int
+	onWait    func(WaitEvent)
+	waitAfter time.Duration
+	warn      func(string)
 }
+
+// forgetter is implemented by the memoizing Runner so a failed call is run
+// again on retry instead of being served from the cache.
+type forgetter interface{ forget(argv []string) }
 
 func (r *providerResolver) resolve(ctx context.Context, p config.SecretProvider, ref string) (string, error) {
 	switch p.Type {
@@ -30,7 +42,7 @@ func (r *providerResolver) resolve(ctx context.Context, p config.SecretProvider,
 			return "", errors.New("type command needs a command argv")
 		}
 		argv := append(append([]string{}, p.Command...), ref)
-		out, err := r.call(ctx, argv)
+		out, err := r.call(ctx, "command", ref, argv)
 		if err != nil {
 			return "", err
 		}
@@ -39,12 +51,35 @@ func (r *providerResolver) resolve(ctx context.Context, p config.SecretProvider,
 	return "", fmt.Errorf("unknown provider type %q (want op, bw, bws, command)", p.Type)
 }
 
-func (r *providerResolver) call(ctx context.Context, argv []string) ([]byte, error) {
-	out, stderr, err := r.run.Run(ctx, argv, nil)
-	if err != nil {
-		return nil, commandError(argv[0], err, out, stderr, nil)
+// call runs one provider command. Failures are classified here, where stderr
+// is still in memory; the returned *ProviderError never carries it (Other
+// keeps the redacted command error). An ApprovalTimeout is retried up to
+// r.retries times.
+func (r *providerResolver) call(ctx context.Context, provider, ref string, argv []string) ([]byte, error) {
+	clock := r.clock
+	if clock == nil {
+		clock = time.Now
 	}
-	return out, nil
+	for attempt := 0; ; attempt++ {
+		stop := watchWait(r.onWait, r.waitAfter, WaitEvent{Provider: provider, Ref: ref})
+		start := clock()
+		out, stderr, err := r.run.Run(ctx, argv, nil)
+		stop()
+		if err == nil {
+			return out, nil
+		}
+		pe := classifiedError(ctx, provider, argv[0], err, out, stderr, clock().Sub(start))
+		if pe.Class == ApprovalTimeout && attempt < r.retries && ctx.Err() == nil {
+			if f, ok := r.run.(forgetter); ok {
+				f.forget(argv)
+			}
+			if r.warn != nil {
+				r.warn("secrets provider " + provider + " approval timed out; retrying")
+			}
+			continue
+		}
+		return nil, pe
+	}
 }
 
 // op read prints the field verbatim with --no-newline, preserving values
@@ -54,7 +89,7 @@ func (r *providerResolver) op(ctx context.Context, p config.SecretProvider, ref 
 	if p.Account != "" {
 		argv = append(argv, "--account", p.Account)
 	}
-	out, err := r.call(ctx, append(argv, ref))
+	out, err := r.call(ctx, "op", ref, append(argv, ref))
 	return string(out), err
 }
 
@@ -65,11 +100,11 @@ func (r *providerResolver) op(ctx context.Context, p config.SecretProvider, ref 
 func (r *providerResolver) bw(ctx context.Context, ref string) (string, error) {
 	i := strings.LastIndexByte(ref, '/')
 	if i < 0 {
-		out, err := r.call(ctx, []string{"bw", "get", "password", ref})
+		out, err := r.call(ctx, "bw", ref, []string{"bw", "get", "password", ref})
 		return strings.TrimRight(string(out), "\r\n"), err
 	}
 	item, field := ref[:i], ref[i+1:]
-	out, err := r.call(ctx, []string{"bw", "get", "item", item})
+	out, err := r.call(ctx, "bw", ref, []string{"bw", "get", "item", item})
 	if err != nil {
 		return "", err
 	}
@@ -114,13 +149,13 @@ func (r *providerResolver) bw(ctx context.Context, ref string) (string, error) {
 // to --profile.
 func (r *providerResolver) bws(ctx context.Context, p config.SecretProvider, ref string) (string, error) {
 	if v, ok := r.getenv("BWS_ACCESS_TOKEN"); !ok || v == "" {
-		return "", errors.New("BWS_ACCESS_TOKEN is not set")
+		return "", &ProviderError{Class: NotSignedIn, Provider: "bws", note: "BWS_ACCESS_TOKEN is not set"}
 	}
 	argv := []string{"bws", "secret", "get", ref, "-o", "json"}
 	if p.Account != "" {
 		argv = append(argv, "--profile", p.Account)
 	}
-	out, err := r.call(ctx, argv)
+	out, err := r.call(ctx, "bws", ref, argv)
 	if err != nil {
 		return "", err
 	}

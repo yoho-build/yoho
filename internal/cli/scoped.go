@@ -302,7 +302,7 @@ func (a *app) scopedBuild(ctx context.Context, r *composefile.Result, ver, serve
 	var benv []string
 	if len(a.cfg.Builder.Secrets) > 0 {
 		// Build secrets (e.g. a package registry token) are the Member's own.
-		store, err := a.loadSecrets(ctx)
+		store, err := a.loadSecrets(ctx, nil)
 		if err != nil {
 			return nil, err
 		}

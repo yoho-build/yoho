@@ -193,9 +193,9 @@ func (a *app) openSession(ctx context.Context, ver string, readOnly bool) (_ *se
 	step.Done(fmt.Sprintf("%d services", len(r.Project.Services)))
 
 	step = u.Step("", "Resolve secrets")
-	store, err := a.loadSecrets(ctx)
+	store, err := a.loadSecrets(ctx, step)
 	if err != nil {
-		step.Fail(err, "check .yoho/secrets and that op / bw / bws are signed in")
+		step.Fail(err, secretsHint(err, "check .yoho/secrets and that op / bw / bws are signed in"))
 		return nil, &silentError{err}
 	}
 	step.Done(fmt.Sprintf("%d keys", len(store.Keys())))

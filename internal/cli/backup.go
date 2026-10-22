@@ -158,7 +158,7 @@ func (a *app) resolveTargetSecrets(ctx context.Context, j *backupJob) error {
 	if j.target.PasswordSecret == "" && len(j.target.EnvSecrets) == 0 {
 		return nil
 	}
-	store, err := a.loadSecrets(ctx)
+	store, err := a.loadSecrets(ctx, nil)
 	if err != nil {
 		return err
 	}
@@ -209,7 +209,7 @@ func (a *app) prepareBackup(ctx context.Context, name string, needServices bool)
 	if j.target.PasswordSecret != "" || len(j.target.EnvSecrets) > 0 {
 		step := a.ui.Step("", "Resolve Backup Target secrets")
 		if err := a.resolveTargetSecrets(ctx, j); err != nil {
-			step.Fail(err, "check .yoho/secrets and that op / bw / bws are signed in")
+			step.Fail(err, secretsHint(err, "check .yoho/secrets and that op / bw / bws are signed in"))
 			return nil, &silentError{err}
 		}
 		step.Done()

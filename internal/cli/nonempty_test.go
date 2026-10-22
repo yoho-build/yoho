@@ -393,7 +393,7 @@ func TestNonemptyConfigCheckPreservesIndirectEnvironmentDependencies(t *testing.
 	if err != nil {
 		t.Fatal(err)
 	}
-	store, err := a.loadSecrets(context.Background())
+	store, err := a.loadSecrets(context.Background(), nil)
 	if err != nil {
 		t.Fatal(err)
 	}

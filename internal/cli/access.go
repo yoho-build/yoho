@@ -479,9 +479,9 @@ func (a *app) pushAccessSecrets(ctx context.Context) error {
 	}
 	step.Done(fmt.Sprintf("%d services", len(r.Project.Services)))
 	step = u.Step("", "Resolve secrets")
-	store, err := a.loadSecrets(ctx)
+	store, err := a.loadSecrets(ctx, step)
 	if err != nil {
-		step.Fail(err, "check .yoho/secrets and that op / bw / bws are signed in")
+		step.Fail(err, secretsHint(err, "check .yoho/secrets and that op / bw / bws are signed in"))
 		return &silentError{err}
 	}
 	svcSecrets, _, err := serviceSecrets(store, r)

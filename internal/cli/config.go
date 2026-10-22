@@ -60,8 +60,8 @@ func configCmd(g *globals) *cobra.Command {
 				return &silentError{err}
 			}
 			if len(a.cfg.Secrets.Nonempty) > 0 {
-				if _, err := a.loadSecrets(cmd.Context()); err != nil {
-					step.Fail(err, "check the declared source keys in .yoho/secrets and secrets.values")
+				if _, err := a.loadSecrets(cmd.Context(), step); err != nil {
+					step.Fail(err, secretsHint(err, "check the declared source keys in .yoho/secrets and secrets.values"))
 					return &silentError{err}
 				}
 			}
@@ -125,9 +125,9 @@ func secretsCmd(g *globals) *cobra.Command {
 				return err
 			}
 			step := a.ui.Step("", "Resolve secrets for %s", a.destName)
-			s, err := a.loadSecrets(cmd.Context())
+			s, err := a.loadSecrets(cmd.Context(), step)
 			if err != nil {
-				step.Fail(err, "check .yoho/secrets and that op / bw / bws are signed in")
+				step.Fail(err, secretsHint(err, "check .yoho/secrets and that op / bw / bws are signed in"))
 				return &silentError{err}
 			}
 			step.Done(fmt.Sprintf("%d keys", len(s.Keys())))
@@ -152,7 +152,7 @@ func secretsCmd(g *globals) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			s, err := a.loadSecrets(cmd.Context())
+			s, err := a.loadSecrets(cmd.Context(), nil)
 			if err != nil {
 				return err
 			}

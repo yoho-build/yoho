@@ -96,6 +96,8 @@ Each Service receives only what it declares. Apps read files via the `*_FILE` co
 ## Rules
 
 - Do not use `${VAR}` interpolation for secrets in compose: it leaks through `docker compose config`. `yoho config check` rejects it.
+- Provider failures are classified without showing provider output: `secrets_approval_timeout` (the approval prompt of `op`, `bw` or `bws` went unanswered or was denied, or a `command` provider exited 75), `secrets_not_signed_in`, `secrets_item_not_found`. The `--json` `step_fail` event carries the `code` and a distinct `hint`; other failures keep the redacted command error.
+- A provider call that runs longer than 3 s prints "waiting for secrets provider approval…" (`step_wait` in `--json`). On a terminal Yoho reruns an approval timeout once; set `--secrets-retries N` or `YOHO_SECRETS_RETRIES` to change it (default 0 without a terminal). The first provider value is read alone, so one approval covers the rest.
 - `yoho secrets list` shows keys, sources, and lengths. `yoho secrets print KEY --reveal` works only on a terminal.
 - Build-time secrets: list keys in `builder.secrets` and use `RUN --mount=type=secret`.
 - Server-side jobs (Scheduled Backups) read stored files, not your password manager.
