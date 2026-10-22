@@ -17,6 +17,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/yoho-build/yoho/internal/backup"
 	"github.com/yoho-build/yoho/internal/build"
 	"github.com/yoho-build/yoho/internal/deploy"
 	"github.com/yoho-build/yoho/internal/dist"
@@ -85,7 +86,7 @@ func scheduleInstallCmd(g *globals) *cobra.Command {
 			if len(a.cfg.Secrets.Nonempty) > 0 {
 				for _, name := range names {
 					target := a.cfg.Backups.Targets[a.cfg.Backups.Jobs[name].Target]
-					if target.PasswordSecret != "" || len(target.EnvSecrets) > 0 {
+					if targetNeedsSecrets(target) {
 						step := u.Step("", "Resolve Scheduled Job secrets")
 						store, err = a.loadSecrets(ctx, step)
 						if err != nil {
@@ -141,6 +142,9 @@ func (a *app) installJobs(ctx context.Context, hosts []plan.NamedHost, names []s
 	// Jobs with Backup Target credentials record fingerprints keyed by
 	// hmac.key, which is written under the deploy lock below.
 	needKey := map[int]*backupJob{}
+	// Jobs whose rclone config is seeded on the Server instead of stored as
+	// a job secret: the Scheduled Job keeps the tokens rclone refreshes.
+	var seeds []*backupJob
 	var loaded bool
 	for _, n := range names {
 		jc, ok := a.cfg.Backups.Jobs[n]
@@ -159,7 +163,7 @@ func (a *app) installJobs(ctx context.Context, hosts []plan.NamedHost, names []s
 		} else if jerr == nil {
 			jerr = a.resolveServices(ctx, j)
 		}
-		if jerr == nil && (j.target.PasswordSecret != "" || len(j.target.EnvSecrets) > 0) {
+		if jerr == nil && targetNeedsSecrets(j.target) {
 			step := u.Step("", "Resolve secrets of %s", j.targetName)
 			if store != nil {
 				jerr = secretsFromStore(j, store)
@@ -182,8 +186,11 @@ func (a *app) installJobs(ctx context.Context, hosts []plan.NamedHost, names []s
 		for k, v := range j.env {
 			sec[k] = v
 		}
-		if len(sec) > 0 {
+		if len(sec) > 0 || j.rcloneConf != "" {
 			needKey[len(jobs)] = j
+		}
+		if j.rcloneConf != "" {
+			seeds = append(seeds, j)
 		}
 		jobs = append(jobs, schedule.Job{
 			App: a.cfg.App, Destination: a.destName, Name: n, Project: a.project(),
@@ -246,6 +253,12 @@ func (a *app) installJobs(ctx context.Context, hosts []plan.NamedHost, names []s
 			jobs[i].SecretFingerprints = targetFingerprints(key, j)
 		}
 	}
+	for _, j := range seeds {
+		if _, serr := backup.SeedRcloneConfig(ctx, h.Host, a.cfg.App, a.destName, j.target, j.rcloneConf); serr != nil {
+			step.Fail(serr, "check the Backup directory on the Server")
+			return &silentError{serr}
+		}
+	}
 	res, err := schedule.Install(ctx, h.Host, schedule.InstallOptions{
 		Jobs: jobs, YohoBinaryLocalPath: binary, Mode: mode, Out: step.Output(),
 	})
@@ -264,7 +277,7 @@ func (a *app) installJobs(ctx context.Context, hosts []plan.NamedHost, names []s
 func secretsFromStore(j *backupJob, store *secrets.Store) error {
 	j.env = map[string]string{}
 	j.store = store
-	if j.target.PasswordSecret == "" && len(j.target.EnvSecrets) == 0 {
+	if !targetNeedsSecrets(j.target) {
 		return nil
 	}
 	if store == nil {
@@ -285,6 +298,11 @@ func secretsFromStore(j *backupJob, store *secrets.Store) error {
 	}
 	for _, k := range j.target.EnvSecrets {
 		if j.env[k], err = get(k); err != nil {
+			return err
+		}
+	}
+	if k := j.target.RcloneConfigSecret; k != "" {
+		if j.rcloneConf, err = get(k); err != nil {
 			return err
 		}
 	}

@@ -259,6 +259,10 @@ func targetFingerprints(key []byte, j *backupJob) map[string]string {
 	for k, v := range j.env {
 		out[k] = secrets.Fingerprint(key, k+"\x00"+v)
 	}
+	// A changed rclone config reinstalls the job, which re-seeds the file.
+	if k := j.target.RcloneConfigSecret; k != "" && j.rcloneConf != "" {
+		out[k] = secrets.Fingerprint(key, k+"\x00"+j.rcloneConf)
+	}
 	return out
 }
 

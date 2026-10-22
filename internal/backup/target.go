@@ -74,6 +74,14 @@ func newTarget(app, dest, project string, cfg config.BackupTarget, password stri
 			return nil, fmt.Errorf("backup target: env secret %s not resolved", k)
 		}
 	}
+	if k := cfg.RcloneConfigSecret; k != "" {
+		if !envNameRe.MatchString(k) {
+			return nil, fmt.Errorf("backup target: invalid rclone_config_secret %q", k)
+		}
+		if !cfg.UsesRclone() {
+			return nil, errors.New("backup target: rclone_config_secret requires an rclone repository (archive remote:path or restic rclone:)")
+		}
+	}
 	switch t.typ {
 	case "restic":
 		if password == "" {
@@ -152,16 +160,31 @@ func (t *target) resticPrelude(base string, extra ...string) string {
 		pre += safeDir(path.Clean(t.cfg.Repository), false, true)
 	}
 	mounts = append(mounts, extra...)
+	native, docker := "restic", "docker run --rm --user \"$(id -u):$(id -g)\""
+	if rc := t.rcloneConfig(); rc != nil {
+		pre += rc.check
+		native = rc.native + native
+		docker += rc.dockerEnv
+		mounts = append(mounts, rc.mount)
+	}
 	return pre + "\n" +
-		"if command -v restic >/dev/null 2>&1; then r() { restic \"$@\"; }; else r() { docker run --rm --user \"$(id -u):$(id -g)\"" +
+		"if command -v restic >/dev/null 2>&1; then r() { " + native + " \"$@\"; }; else r() { " + docker +
 		t.envFlags() + " -e RESTIC_CACHE_DIR=/cache" + mountFlags(mounts) + " " + remote.Quote(ResticImage) +
 		" \"$@\"; }; fi\n"
 }
 
 // rclonePrelude defines rc(): rclone on the Server if installed, else the
-// pinned container. RCLONE_CONFIG_* env configures remotes.
+// pinned container. RCLONE_CONFIG_* env and the persistent rclone config
+// (rclone_config_secret) configure remotes.
 func (t *target) rclonePrelude(mounts ...string) string {
-	return "set -eu\nif command -v rclone >/dev/null 2>&1; then rc() { rclone \"$@\"; }; else rc() { docker run --rm" +
+	pre, native, docker := "set -eu\n", "rclone", "docker run --rm"
+	if rc := t.rcloneConfig(); rc != nil {
+		pre = rc.check
+		native = rc.native + native
+		docker += rc.docker
+		mounts = append(mounts, rc.mount)
+	}
+	return pre + "if command -v rclone >/dev/null 2>&1; then rc() { " + native + " \"$@\"; }; else rc() { " + docker +
 		t.envFlags() + mountFlags(mounts) + " " + remote.Quote(RcloneImage) + " \"$@\"; }; fi\n"
 }
 
@@ -277,7 +300,7 @@ func (t *target) storeArchive(ctx context.Context, h remote.Host, base, ts strin
 	var copyErr error
 	if t.isRclone() {
 		copyScript := t.rclonePrelude(base+":"+base+":ro") + "rc copyto " + remote.Quote(local) + " " + remote.Quote(t.remoteFile(name)) + "\n"
-		copyErr = h.Run(ctx, remote.Cmd{Script: copyScript, Env: t.env})
+		copyErr = t.rcloneAuthHint(h.Run(ctx, remote.Cmd{Script: copyScript, Env: t.env}))
 	} else {
 		copyErr = publishArchive(ctx, h, local, path.Clean(t.cfg.Repository), name)
 	}
@@ -367,7 +390,7 @@ func (t *target) list(ctx context.Context, h remote.Host, base string) ([]Entry,
 		}
 		out, err := h.Output(ctx, remote.Cmd{Script: script, Env: t.env})
 		if err != nil {
-			return nil, fmt.Errorf("list archives: %w", err)
+			return nil, fmt.Errorf("list archives: %w", t.rcloneAuthHint(err))
 		}
 		re := t.archiveRe()
 		for _, line := range strings.Split(out, "\n") {
@@ -432,7 +455,7 @@ func (t *target) fetchArchive(ctx context.Context, h remote.Host, dir, id string
 	}
 	get = safeDir(dir, true, false) + "test ! -e " + remote.Quote(local) + " && test ! -L " + remote.Quote(local) + "\n" + get
 	if err := h.Run(ctx, remote.Cmd{Script: get, Env: t.env}); err != nil {
-		return "", fmt.Errorf("fetch %s: %w", id, err)
+		return "", fmt.Errorf("fetch %s: %w", id, t.rcloneAuthHint(err))
 	}
 	// Untrusted outer archives get one writable mount: a new data directory.
 	// The archive and ownership marker cannot be overwritten by an extractor.

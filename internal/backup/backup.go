@@ -64,11 +64,15 @@ type RunOptions struct {
 	// unencrypted-target warning uses it. Empty falls back to the repository.
 	TargetName string
 	// Resolved Target.EnvSecrets values (name -> value).
-	TargetEnv   map[string]string
-	Host        remote.Host
-	Out         io.Writer
-	Lock        LockFunc
-	YohoVersion string
+	TargetEnv map[string]string
+	// Resolved Target.RcloneConfigSecret value. Set: seed the persistent
+	// rclone config when it changed. Empty (Scheduled Jobs): use the seeded
+	// file as rclone left it.
+	RcloneConfig string
+	Host         remote.Host
+	Out          io.Writer
+	Lock         LockFunc
+	YohoVersion  string
 	// Now is overridable for tests.
 	Now func() time.Time
 	// Runtime is "compose" (default) or "swarm". On swarm, the Service's
@@ -152,6 +156,10 @@ func Run(ctx context.Context, o RunOptions) (res *Result, err error) {
 				err = fmt.Errorf("unlock: %w", uerr)
 			}
 		}()
+	}
+
+	if err := t.prepareRclone(ctx, o.Host, o.RcloneConfig, start); err != nil {
+		return nil, err
 	}
 
 	ts := start.UTC().Format(tsLayout)

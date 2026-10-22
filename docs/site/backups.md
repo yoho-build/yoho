@@ -26,9 +26,9 @@ backups:
   targets:
     offsite:
       type: restic                       # or archive
-      repository: "rclone:onedrive:backups/shop"   # s3:, b2:, sftp:, rclone:, or a path
+      repository: "s3:s3.amazonaws.com/shop-backups"   # s3:, b2:, sftp:, rclone:, or a path
       password_secret: BACKUP_PASSWORD
-      env_secrets: [RCLONE_CONFIG_ONEDRIVE_TOKEN]
+      env_secrets: [AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY]
       keep_last: 14
   jobs:
     nightly: { destination: production, target: offsite, schedule: "*-*-* 03:00:00" }
@@ -38,6 +38,38 @@ backups:
 - `archive`: files at a path or rclone remote in `tar.gz` (default `format`), AES-256 `zip`, or `7z` (never ZipCrypto); set `format` to choose; `keep_last` trims old files.
 
 Generated secrets (`x-yoho.generate`, on the Server as `generated/<NAME>`) are included as `yoho-generated/<NAME>` only when the target encrypts at rest: restic, or zip/7z with `password_secret`. Any other target leaves them out and warns once. Restore writes them back after volumes and before Services start. A different value already on the Server is replaced by the Backup (the warning names the secret, not the value). The next deploy keeps that file.
+
+## OneDrive, Google Drive and other OAuth remotes
+
+OAuth remotes refresh their access token on every run and write the new token back to rclone's config file. An `RCLONE_CONFIG_*` env secret cannot be written back, so the remote stops working when the stored refresh token expires (about 90 days for OneDrive). Use `rclone_config_secret` instead:
+
+1. Run `rclone config` on your machine and authorize the remote (here `od`).
+2. Copy that remote's section from `rclone config file` into `.yoho/secrets` as a multi-line value, or load it from 1Password with `$(op read ...)`:
+
+   ```sh
+   RCLONE_CONF='[od]
+   type = onedrive
+   token = {"access_token":"...","refresh_token":"...","expiry":"..."}
+   drive_id = ...
+   drive_type = personal
+   '
+   ```
+
+3. Point an encrypted `archive` Target (or a restic `rclone:` repository) at the remote:
+
+   ```yaml
+   backups:
+     targets:
+       offsite:
+         type: archive
+         repository: "od:backups/shop"      # rclone remote:path
+         format: 7z                         # AES-256, encrypted headers
+         password_secret: BACKUP_PASSWORD
+         rclone_config_secret: RCLONE_CONF
+         keep_last: 30
+   ```
+
+Yoho writes the secret over SSH stdin to `<root>/backups/<app>/<destination>/.rclone/<KEY>/rclone.conf` (mode 0600, private directory) the first time a `yoho backup` command or `yoho schedule install` runs, and records the secret's SHA-256 next to it. Server-installed rclone gets `RCLONE_CONFIG` pointing at that file; the pinned rclone container mounts its directory read-write and runs as the deploy user, so refreshed tokens are kept. Scheduled Jobs use the file and never store the secret. Yoho replaces the file only when the secret changes, so after `rclone config reconnect od:` locally, update the secret and run `yoho deploy`, `yoho schedule install` or any `yoho backup` command. `yoho backup check` shows when the config was seeded; an authentication failure adds this re-authorization hint. `env_secrets` still work alongside it and override config values.
 
 ## Commands
 

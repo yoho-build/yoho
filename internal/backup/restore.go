@@ -21,7 +21,9 @@ type ListOptions struct {
 	Target                    config.BackupTarget
 	Password                  string
 	TargetEnv                 map[string]string
-	Host                      remote.Host
+	// Resolved Target.RcloneConfigSecret; see RunOptions.RcloneConfig.
+	RcloneConfig string
+	Host         remote.Host
 }
 
 // List returns stored Backups, newest first.
@@ -35,6 +37,9 @@ func List(ctx context.Context, o ListOptions) ([]Entry, error) {
 	}
 	t, err := newTarget(o.App, o.Destination, project, o.Target, o.Password, o.TargetEnv)
 	if err != nil {
+		return nil, err
+	}
+	if err := t.prepareRclone(ctx, o.Host, o.RcloneConfig, time.Now()); err != nil {
 		return nil, err
 	}
 	return t.list(ctx, o.Host, release.BackupDir(o.App, o.Destination))
@@ -51,9 +56,11 @@ type RestoreOptions struct {
 	Target    config.BackupTarget
 	Password  string
 	TargetEnv map[string]string
-	Host      remote.Host
-	Out       io.Writer
-	Lock      LockFunc
+	// Resolved Target.RcloneConfigSecret; see RunOptions.RcloneConfig.
+	RcloneConfig string
+	Host         remote.Host
+	Out          io.Writer
+	Lock         LockFunc
 	// restic snapshot id or "latest"; archive file name.
 	ID      string
 	Confirm bool
@@ -138,6 +145,9 @@ func Restore(ctx context.Context, o RestoreOptions) (res *RestoreResult, err err
 		}()
 	}
 
+	if err := t.prepareRclone(ctx, o.Host, o.RcloneConfig, now()); err != nil {
+		return nil, err
+	}
 	base := release.BackupDir(o.App, o.Destination)
 	name, token, err := newStagingName("restore-" + now().UTC().Format(tsLayout))
 	if err != nil {

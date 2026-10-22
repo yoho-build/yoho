@@ -354,3 +354,32 @@ func TestServiceProxyHealthSettings(t *testing.T) {
 		t.Fatalf("timeout schema %v", p["health_timeout"])
 	}
 }
+
+func TestValidateRcloneConfigSecret(t *testing.T) {
+	targets := map[string]BackupTarget{
+		"od":       {Type: "archive", Repository: "od:backups", RcloneConfigSecret: "RCLONE_CONF", EnvSecrets: []string{"RCLONE_CONFIG_OD_TYPE"}},
+		"restic":   {Repository: "rclone:gd:restic", PasswordSecret: "PW", RcloneConfigSecret: "RCLONE_CONF"},
+		"local":    {Type: "archive", Repository: "/srv/backups", RcloneConfigSecret: "RCLONE_CONF"},
+		"s3":       {Repository: "s3:s3.amazonaws.com/b", RcloneConfigSecret: "RCLONE_CONF"},
+		"badkey":   {Type: "archive", Repository: "od:x", RcloneConfigSecret: "bad-key"},
+		"conflict": {Type: "archive", Repository: "od:x", PasswordSecret: "SAME", RcloneConfigSecret: "SAME"},
+	}
+	c := &Config{Backups: BackupsConfig{Targets: targets}}
+	var all []string
+	for _, e := range Validate(c) {
+		if strings.Contains(e.Error(), "rclone_config_secret") {
+			all = append(all, e.Error())
+		}
+	}
+	joined := strings.Join(all, "\n")
+	for _, bad := range []string{"local", "s3", "badkey", "conflict"} {
+		if !strings.Contains(joined, "backups.targets."+bad+".rclone_config_secret") {
+			t.Errorf("target %s not rejected:\n%s", bad, joined)
+		}
+	}
+	for _, ok := range []string{"backups.targets.od.", "backups.targets.restic."} {
+		if strings.Contains(joined, ok) {
+			t.Errorf("valid target rejected:\n%s", joined)
+		}
+	}
+}

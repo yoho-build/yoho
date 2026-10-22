@@ -36,6 +36,7 @@ type backupJob struct {
 	services   map[string]config.ServiceBackup
 	password   string
 	env        map[string]string
+	rcloneConf string         // resolved rclone_config_secret; never stored on the Server as a secret file
 	store      *secrets.Store // nil when the target needs no secrets
 }
 
@@ -155,7 +156,7 @@ func (a *app) resolveServices(ctx context.Context, j *backupJob) error {
 // resolveTargetSecrets loads the Backup Target's password and env secrets.
 func (a *app) resolveTargetSecrets(ctx context.Context, j *backupJob) error {
 	j.env = map[string]string{}
-	if j.target.PasswordSecret == "" && len(j.target.EnvSecrets) == 0 {
+	if !targetNeedsSecrets(j.target) {
 		return nil
 	}
 	store, err := a.loadSecrets(ctx, nil)
@@ -180,8 +181,16 @@ func (a *app) resolveTargetSecrets(ctx context.Context, j *backupJob) error {
 			return err
 		}
 	}
+	if k := j.target.RcloneConfigSecret; k != "" {
+		if j.rcloneConf, err = get(k); err != nil {
+			return err
+		}
+	}
 	return nil
 }
+
+// targetNeedsSecrets reports whether the Backup Target references secrets.
+func targetNeedsSecrets(t config.BackupTarget) bool { return len(t.SecretKeys()) > 0 }
 
 // redact wraps w in the secrets redactor when secrets were loaded.
 func (j *backupJob) redact(w io.Writer) (io.Writer, func()) {
@@ -206,7 +215,7 @@ func (a *app) prepareBackup(ctx context.Context, name string, needServices bool)
 		}
 		step.Done(strings.Join(sortedKeys(j.services), ", "))
 	}
-	if j.target.PasswordSecret != "" || len(j.target.EnvSecrets) > 0 {
+	if targetNeedsSecrets(j.target) {
 		step := a.ui.Step("", "Resolve Backup Target secrets")
 		if err := a.resolveTargetSecrets(ctx, j); err != nil {
 			step.Fail(err, secretsHint(err, "check .yoho/secrets and that op / bw / bws are signed in"))
@@ -296,7 +305,7 @@ func backupRunCmd(g *globals) *cobra.Command {
 			out, flush := j.redact(step.Output())
 			res, err := backup.Run(ctx, backup.RunOptions{
 				App: a.cfg.App, Destination: a.destName, Project: a.project(),
-				Services: j.services, Target: j.target, Password: j.password, TargetEnv: j.env,
+				Services: j.services, Target: j.target, Password: j.password, TargetEnv: j.env, RcloneConfig: j.rcloneConf,
 				TargetName: j.targetName,
 				Host:       h.Host, Out: out, Lock: a.backupLock(h.Host, "backup"), YohoVersion: Version,
 				Runtime: a.dest.Runtime,
@@ -357,7 +366,7 @@ func backupListCmd(g *globals) *cobra.Command {
 			step := a.ui.Step(hosts[0].Name, "List Backups in %s", j.targetName)
 			entries, err := backup.List(ctx, backup.ListOptions{
 				App: a.cfg.App, Destination: a.destName, Project: a.project(),
-				Target: j.target, Password: j.password, TargetEnv: j.env, Host: hosts[0].Host,
+				Target: j.target, Password: j.password, TargetEnv: j.env, RcloneConfig: j.rcloneConf, Host: hosts[0].Host,
 			})
 			if err != nil {
 				step.Fail(err, backupHint(err))
@@ -544,7 +553,7 @@ Use "latest" as ID for the newest Backup.`,
 			step := u.Step(h.Name, "Find Backup %s in %s", id, j.targetName)
 			entries, err := backup.List(ctx, backup.ListOptions{
 				App: a.cfg.App, Destination: a.destName, Project: a.project(),
-				Target: j.target, Password: j.password, TargetEnv: j.env, Host: h.Host,
+				Target: j.target, Password: j.password, TargetEnv: j.env, RcloneConfig: j.rcloneConf, Host: h.Host,
 			})
 			if err != nil {
 				step.Fail(err, backupHint(err))
@@ -579,7 +588,7 @@ Use "latest" as ID for the newest Backup.`,
 			out, flush := j.redact(step.Output())
 			res, err := backup.Restore(ctx, backup.RestoreOptions{
 				App: a.cfg.App, Destination: a.destName, Project: a.project(),
-				Services: j.services, Target: j.target, Password: j.password, TargetEnv: j.env,
+				Services: j.services, Target: j.target, Password: j.password, TargetEnv: j.env, RcloneConfig: j.rcloneConf,
 				Host: h.Host, Out: out, Lock: a.backupLock(h.Host, "restore"), ID: found.ID, Confirm: true,
 				Runtime: a.dest.Runtime,
 				AfterRestore: func(ctx context.Context) error {
@@ -762,7 +771,7 @@ func backupCheckCmd(g *globals) *cobra.Command {
 			h := hosts[0]
 			step := a.ui.Step(h.Name, "Check Backup integrity in %s", j.targetName)
 			res, err := backup.Check(ctx, backup.CheckOptions{
-				ListOptions: backup.ListOptions{App: a.cfg.App, Destination: a.destName, Project: a.project(), Target: j.target, Password: j.password, TargetEnv: j.env, Host: h.Host},
+				ListOptions: backup.ListOptions{App: a.cfg.App, Destination: a.destName, Project: a.project(), Target: j.target, Password: j.password, TargetEnv: j.env, RcloneConfig: j.rcloneConf, Host: h.Host},
 				ID:          id, ReadData: readData, Lock: a.backupLock(h.Host, "backup check"),
 			})
 			if err != nil {
@@ -771,6 +780,9 @@ func backupCheckCmd(g *globals) *cobra.Command {
 			}
 			step.Done(res.Method + " · " + res.ID)
 			a.ui.Table([]string{"METHOD", "BACKUP ID", "VERIFIED", "RESTORE PROVEN"}, [][]string{{res.Method, res.ID, res.Verified, "false"}})
+			if res.RcloneConfig != "" {
+				a.ui.Info("rclone config: %s", res.RcloneConfig)
+			}
 			a.ui.Finished(nil, "Backup integrity check passed; application restore has not been proven")
 			return nil
 		},
