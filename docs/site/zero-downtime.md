@@ -21,7 +21,7 @@ Compose readiness requires every replica's enabled Docker healthcheck to be heal
 
 Non-Proxy Services and release-command prerequisites have a 30-second minimum readiness deadline, extended to cover the effective healthcheck's `start_period` plus `(retries + 1) × (max(interval, start_interval) + timeout)` (Docker defaults apply when unset). A job without a healthcheck has the 30-second deadline; longer migrations should use `release_command`. Proxy Services retain their configured `deploy_timeout`. These gates apply on rollback too; old Release plans recover job classification from their saved Compose file, not today's configuration. A failed plain gate does not undo stop-first replacements already made; it prevents the subsequent Proxy switch, not all App downtime.
 
-On Docker 25 or newer, Yoho compiles `start_period: 60s` and `start_interval: 1s` into a proxied Service's healthcheck when neither is set, so the first probes run every second while the container starts.
+On Docker 25 or newer, Yoho compiles `start_period: 60s` and `start_interval: 1s` into a proxied or Stateful Service's healthcheck when neither is set, so the first probes run every second while the container starts. The first deploy after upgrading Yoho recreates each Stateful Service that has a healthcheck once, because the compiled healthcheck changed. A healthcheck that sets only timing and no `test` inherits the image's check and gets no fast-start fields; `yoho config check` warns when its `interval` is over 5s with no `start_interval` or `start_period`.
 
 ## Proxy HTTP probes
 

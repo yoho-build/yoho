@@ -158,7 +158,9 @@ func TestCompileLayout(t *testing.T) {
 func TestCompileFastStartHealth(t *testing.T) {
 	d := testDeploy(t, nil, nil)
 	src := strings.Replace(testCompose, "  db:\n    image: postgres:17\n", "  db:\n    image: postgres:17\n    healthcheck:\n      test: [\"CMD\", \"pg_isready\"]\n", 1)
+	src = strings.Replace(src, "  cloudflared:\n", "  worker:\n    image: shop-worker:v1\n    healthcheck:\n      test: [\"CMD\", \"true\"]\n  cloudflared:\n", 1)
 	d.Project = loadProject(t, src)
+	d.Ext["worker"] = config.ServiceExt{}
 	gen := map[string]string{"POSTGRES_PASSWORD": "generated-PG-password"}
 	svc, err := serviceSecrets(d, gen, t.Logf)
 	if err != nil {
@@ -178,8 +180,12 @@ func TestCompileFastStartHealth(t *testing.T) {
 		t.Errorf("proxied healthcheck = %v", web)
 	}
 	db := doc["services"].(map[string]any)["db"].(map[string]any)["healthcheck"].(map[string]any)
-	if _, ok := db["start_interval"]; ok || db["start_period"] != nil {
-		t.Errorf("non-proxied compose healthcheck must be unchanged: %v", db)
+	if db["start_period"] != "60s" || db["start_interval"] != "1s" {
+		t.Errorf("Stateful healthcheck = %v", db)
+	}
+	worker := doc["services"].(map[string]any)["worker"].(map[string]any)["healthcheck"].(map[string]any)
+	if _, ok := worker["start_interval"]; ok || worker["start_period"] != nil {
+		t.Errorf("plain compose healthcheck must be unchanged: %v", worker)
 	}
 	if d.Project.Services["web"].HealthCheck.StartPeriod != nil {
 		t.Error("compile mutated the caller's healthcheck")

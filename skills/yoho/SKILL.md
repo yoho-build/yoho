@@ -7,7 +7,7 @@ description: Deploy and operate Docker Compose apps on your own servers with the
 
 Yoho is like Kamal but compose-native: one static Go binary deploys a `compose.yaml` app to Servers over SSH, builds locally, ships images without a registry, switches traffic with kamal-proxy, and backs up volumes. Per-Service settings live in `x-yoho` inside the compose file; where/how settings (Servers, Destinations, Builder, secrets, Backups) live in `yoho.yml`.
 
-Always run `yoho config check` after editing config. Use `--json` (NDJSON events) whenever you parse output. Use `yoho schema` / `yoho schema --ext` for the JSON Schema of the Yoho file / `x-yoho`.
+Always run `yoho config check` after editing config. It warns when a Service's `environment` uses another Service's hostname without a `depends_on` entry: add `depends_on: {name: {condition: service_healthy}}` (`service_started` when that Service has no healthcheck). Use `--json` (NDJSON events) whenever you parse output. Use `yoho schema` / `yoho schema --ext` for the JSON Schema of the Yoho file / `x-yoho`.
 
 ## First-time setup
 

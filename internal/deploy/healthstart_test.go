@@ -33,12 +33,28 @@ func TestUseFastStart(t *testing.T) {
 	hc := &types.HealthCheckConfig{Test: []string{"CMD", "true"}}
 	proxied := config.ServiceExt{Proxy: &config.ServiceProxy{}}
 	plain := config.ServiceExt{}
+	stateful := config.ServiceExt{Stateful: true}
 
 	if !UseFastStart(proxied, hc, false, "25.0.1") {
 		t.Error("proxied healthcheck on Docker 25")
 	}
 	if UseFastStart(plain, hc, false, "25.0.1") {
 		t.Error("plain readiness must preserve existing healthcheck timing")
+	}
+	if !UseFastStart(stateful, hc, false, "25.0.1") {
+		t.Error("Stateful Service healthcheck on Docker 25")
+	}
+	if UseFastStart(stateful, hc, false, "24.0.7") || UseFastStart(stateful, hc, false, "") {
+		t.Error("Docker before 25 must not get start_interval on a Stateful Service")
+	}
+	if UseFastStart(stateful, nil, false, "25.0.0") || UseFastStart(stateful, &types.HealthCheckConfig{Disable: true}, false, "25.0.0") {
+		t.Error("Stateful Service without an enabled healthcheck")
+	}
+	if UseFastStart(stateful, &types.HealthCheckConfig{Test: hc.Test, StartPeriod: durPtr(time.Second)}, false, "25.0.0") {
+		t.Error("user start_period must win on a Stateful Service")
+	}
+	if UseFastStart(proxied, &types.HealthCheckConfig{Interval: durPtr(time.Second)}, true, "25.0.0") {
+		t.Error("timing-only override inherits the image healthcheck; keep its start_period")
 	}
 	if !UseFastStart(plain, hc, true, "29.0.0") {
 		t.Error("swarm waits on every healthcheck")

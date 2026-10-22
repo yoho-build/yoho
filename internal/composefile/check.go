@@ -5,6 +5,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/compose-spec/compose-go/v2/types"
 
@@ -169,6 +170,10 @@ func Check(r *Result, runtime string, secretKeys []string) []Finding {
 			}
 		}
 
+		if (ext.Stateful || ext.Proxy != nil) && slowFirstProbe(svc.HealthCheck) {
+			svcAdd(LevelWarning, "healthcheck sets interval %s without test, so it inherits the image check and Yoho adds no fast-start probes: the deploy waits that long for the first probe; set test, or set start_period and start_interval together (start_interval needs Docker 25+), or shorten interval", time.Duration(*svc.HealthCheck.Interval))
+		}
+
 		// Stateful guard (ADR 0005): data must not silently diverge across Servers.
 		if !ext.Stateful {
 			if desc := stateDescription(svc, r.Project.WorkingDir); desc != "" {
@@ -186,6 +191,7 @@ func Check(r *Result, runtime string, secretKeys []string) []Finding {
 			checkSwarm(svc, svcAdd)
 		}
 	}
+	out = append(out, undeclaredDependencies(r.Project, swarm)...)
 	if _, err := proxy.ProjectRoutes("App", "Destination", r.Project, r.Ext, runtime); err != nil {
 		add(LevelError, "", "%s; %s", err, proxy.RouteConflictHint)
 	}
@@ -290,4 +296,12 @@ func sortedMapKeys(m map[string]string) []string {
 	}
 	sort.Strings(k)
 	return k
+}
+
+// slowFirstProbe reports a timing-only healthcheck (no test, so the image's
+// check is inherited and Yoho injects no fast-start fields) whose long
+// interval delays the first probe.
+func slowFirstProbe(hc *types.HealthCheckConfig) bool {
+	return hc != nil && !hc.Disable && len(hc.Test) == 0 && hc.Interval != nil && time.Duration(*hc.Interval) > 5*time.Second &&
+		hc.StartPeriod == nil && hc.StartInterval == nil
 }
