@@ -157,7 +157,7 @@ func TestSkillList(t *testing.T) {
 		if err != nil || d == "" {
 			t.Errorf("%s: description %q: %v", name, d, err)
 		}
-		if !strings.Contains(out, name) || !strings.Contains(out, d) {
+		if !strings.Contains(out, name) {
 			t.Errorf("list missing %s", name)
 		}
 	}
@@ -279,5 +279,31 @@ func TestNoBuildxHistoryInSources(t *testing.T) {
 	})
 	if err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestSkillListTruncatesHumanKeepsJSONFull(t *testing.T) {
+	out, err := runSkill(t, "list")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, line := range strings.Split(strings.TrimSpace(out), "\n") {
+		if n := len([]rune(line)); n > 80+40 {
+			t.Errorf("line too wide (%d): %s", n, line)
+		}
+	}
+	d, _ := skills.Describe("yoho")
+	if strings.Contains(out, d) {
+		t.Error("human list should truncate the long description")
+	}
+	c := skillCmd(&globals{json: true})
+	var buf bytes.Buffer
+	c.SetOut(&buf)
+	c.SetArgs([]string{"list"})
+	if err := c.Execute(); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(buf.String(), strings.ReplaceAll(d, `"`, `\"`)) {
+		t.Error("--json keeps the full description")
 	}
 }

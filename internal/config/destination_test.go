@@ -228,3 +228,26 @@ func TestBuilderGitignore(t *testing.T) {
 		t.Fatalf("schema lacks builder.gitignore: %v", err)
 	}
 }
+
+func TestOverlayTunnelNullDropsTunnel(t *testing.T) {
+	dir := t.TempDir()
+	base := filepath.Join(dir, "yoho.yml")
+	write := func(name, body string) {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write("yoho.yml", "app: shop\nservers: {a: {ssh: u@h}}\ndestinations:\n  production: {servers: [a]}\n  rehearsal: {servers: [a]}\nproxy:\n  tunnel: {token_secret: CF_TOKEN}\n")
+	write("yoho.rehearsal.yml", "proxy:\n  tunnel: null\n")
+	cfg, _, _, err := LoadForDestination(base, "rehearsal")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Proxy.Tunnel != nil {
+		t.Errorf("rehearsal overlay `tunnel: null` should drop the inherited tunnel, got %+v", cfg.Proxy.Tunnel)
+	}
+	cfg, _, _, err = LoadForDestination(base, "production")
+	if err != nil || cfg.Proxy.Tunnel == nil {
+		t.Errorf("production keeps the tunnel: %v %v", cfg.Proxy.Tunnel, err)
+	}
+}

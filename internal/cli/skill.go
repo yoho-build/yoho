@@ -135,6 +135,9 @@ The yoho skill ships references/migrate-*.md. They are skipped with
 				}
 				return nil
 			}
+			for _, r := range rows {
+				r[1] = truncate(r[1], 80)
+			}
 			g.ui(cmd).Table([]string{"NAME", "DESCRIPTION", "FILES"}, rows)
 			return nil
 		},
@@ -162,6 +165,15 @@ The yoho skill ships references/migrate-*.md. They are skipped with
 	}
 	c.AddCommand(install, list, print)
 	return c
+}
+
+// truncate shortens s to at most n runes, ending in an ellipsis.
+func truncate(s string, n int) string {
+	r := []rune(strings.Join(strings.Fields(s), " "))
+	if len(r) <= n {
+		return string(r)
+	}
+	return strings.TrimSpace(string(r[:n-1])) + "…"
 }
 
 type skillTarget struct{ agent, dir string }

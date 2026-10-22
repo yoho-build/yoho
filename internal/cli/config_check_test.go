@@ -153,3 +153,26 @@ func TestConfigCheckExitCodes(t *testing.T) {
 		t.Fatalf("bad compose: want exit 2, got %d: %v", exitCodeOf(err), err)
 	}
 }
+
+func TestConfigCheckCountsSecretLoadWarnings(t *testing.T) {
+	oldRoot := release.Root
+	t.Cleanup(func() { release.Root = oldRoot })
+	p := nonemptyApp(t, "compose", "services:\n  web: {image: nginx, restart: unless-stopped, x-yoho: {secrets: {ALIAS: KEY}}}\n", "KEY", "")
+	dir := filepath.Dir(p)
+	if err := os.MkdirAll(filepath.Join(dir, ".yoho"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, ".yoho", "secrets"), []byte("KEY=a\nKEY=b\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	out, err := runCheck(t, p)
+	if err != nil {
+		t.Fatalf("%v\n%s", err, out)
+	}
+	if !strings.Contains(out, "defined more than once") {
+		t.Fatalf("expected the duplicate-key warning:\n%s", out)
+	}
+	if e := checkEvent(t, out); e["warnings"] != float64(1) {
+		t.Errorf("check event: %v", e)
+	}
+}

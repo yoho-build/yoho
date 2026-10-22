@@ -60,7 +60,7 @@ Yoho runs the `cloudflared` connector (`internal/proxy/tunnel.go`) but never cal
 
 8. **Compose runtime only in v1.** The old platforms run plain containers. `config check` rejects `migrate` on a Swarm Destination with a hint. A new package `internal/migrate` holds the logic (`Preflight`, `Plan.Stop`, `Plan.CheckClaims`, `Plan.SwitchIngress`, `Rollback`) so `internal/deploy/cutover.go` keeps its meaning.
 
-9. **The rehearsal Destination pattern is documentation, not code.** A second Destination with its own `servers` (for example a LAN box), overlays that point data at a restored copy, side-effect Services (schedulers, off-Server Backups, the tunnel) replaced with `sleep`, test-mode payment keys, and a cold-start rehearsal (stop everything, then `yoho deploy`) to reproduce cutover ordering. It has no `migrate` block. It ships in the `yoho-migrate-coolify` skill reference and the migration guides with this ADR.
+9. **The rehearsal Destination pattern is documentation, not code.** A second Destination with its own `servers` (for example a LAN box), overlays that point data at a restored copy, side-effect Services (schedulers, off-Server Backups, the tunnel) replaced with `sleep`, test-mode payment keys, and a cold-start rehearsal (stop everything, then `yoho deploy`) to reproduce cutover ordering. It has no `migrate` block and sets `proxy: {tunnel: null}` in its overlay (otherwise it inherits the live tunnel token and `apply` would join the live tunnel). It ships in the `yoho-migrate-coolify` skill reference and the migration guides with this ADR.
 
 ## Consequences
 

@@ -244,14 +244,14 @@ func runConfigCheck(cmd *cobra.Command, g *globals, offline bool) error {
 	a, err := g.load(cmd)
 	if err != nil {
 		g.ui(cmd).Error(err, "")
-		g.ui(cmd).Check(false, 1, 0, offline, 0, 0)
+		g.ui(cmd).Check(false, 1, offline, 0, 0)
 		return &exitError{exitLoad, &silentError{err}}
 	}
-	errCount, warnCount, services, keyCount := 0, 0, 0, 0
+	errCount, services, keyCount := 0, 0, 0
 	step := a.ui.Step("", "Check %s and compose for %s", filepath.Base(a.path), a.destName)
 	fail := func(code int, err error, hint string) error {
 		step.Fail(err, hint)
-		a.ui.Check(false, errCount, warnCount, offline, services, keyCount)
+		a.ui.Check(false, errCount, offline, services, keyCount)
 		return &exitError{code, &silentError{err}}
 	}
 	r, err := a.compose(cmd.Context())
@@ -279,8 +279,6 @@ func runConfigCheck(cmd *cobra.Command, g *globals, offline bool) error {
 	for _, f := range findings {
 		if f.Level == composefile.LevelError {
 			errCount++
-		} else {
-			warnCount++
 		}
 		a.ui.Finding(f.Level, f.Service, f.Message)
 	}
@@ -289,7 +287,6 @@ func runConfigCheck(cmd *cobra.Command, g *globals, offline bool) error {
 	}
 	if len(a.cfg.Secrets.Nonempty) > 0 {
 		if offline {
-			warnCount++
 			a.ui.Warn("secrets.nonempty not verified (--offline)")
 		} else if _, err := a.loadSecrets(cmd.Context(), step); err != nil {
 			errCount = 1
@@ -297,6 +294,6 @@ func runConfigCheck(cmd *cobra.Command, g *globals, offline bool) error {
 		}
 	}
 	step.Done(fmt.Sprintf("%d services, %d secret keys, runtime %s", services, keyCount, a.dest.Runtime))
-	a.ui.Check(true, 0, warnCount, offline, services, keyCount)
+	a.ui.Check(true, 0, offline, services, keyCount)
 	return nil
 }

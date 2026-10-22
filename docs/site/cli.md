@@ -89,4 +89,4 @@ jobs:
       - run: yoho config check --offline -d production --json
 ```
 
-Compose files that interpolate variables see the CI environment, so set the same variables as for a deploy.
+Compose interpolation reads only the App's `.env` and the Destination's `env`, never the job's process environment. Commit those values (non-secret ones only) or put them in `destinations.<name>.env`, as for a deploy.
