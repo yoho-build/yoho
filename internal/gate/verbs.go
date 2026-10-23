@@ -316,7 +316,7 @@ type DeployArgs struct {
 	Attach  bool   `json:"attach,omitempty"`
 }
 
-func deployVerb(ctx context.Context, c *call) (any, error) {
+func deployVerb(ctx context.Context, c *call) (_ any, err error) {
 	var a DeployArgs
 	if err := c.args(&a); err != nil {
 		return nil, err
@@ -335,6 +335,12 @@ func deployVerb(ctx context.Context, c *call) (any, error) {
 		if res, err, ok := c.checkRollout(ctx, VerbDeploy, a.Rollout, a.Attach); ok {
 			return res, err
 		}
+		id, perr := c.prepareRollout(VerbDeploy, a.Version, a.Rollout)
+		if perr != nil {
+			return nil, perr
+		}
+		a.Rollout = id
+		defer func() { c.abandonRollout(id, err) }()
 	}
 	s, err := c.settings()
 	if err != nil {
@@ -753,8 +759,12 @@ func rollbackVerb(ctx context.Context, c *call) (any, error) {
 			return res, err
 		}
 		a.Version = version
-		id, err := c.startRollout(VerbRollback, version, a.Rollout, a)
+		id, err := c.prepareRollout(VerbRollback, version, a.Rollout)
 		if err != nil {
+			return nil, err
+		}
+		if _, err := c.startRollout(VerbRollback, version, id, a); err != nil {
+			c.abandonRollout(id, err)
 			return nil, err
 		}
 		return c.attachRollout(ctx, id)

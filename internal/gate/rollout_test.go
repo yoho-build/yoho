@@ -3,8 +3,10 @@ package gate
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -169,6 +171,90 @@ func TestAttachMissingRollout(t *testing.T) {
 	err := client(t, "alice", &fakeHost{}).Call(context.Background(), VerbDeploy, DeployArgs{Version: "v9", Compose: plainCompose, Rollout: "r9", Attach: true}, nil, io.Discard, nil)
 	if err == nil || !strings.Contains(err.Error(), "did not start") {
 		t.Fatalf("got %v", err)
+	}
+}
+
+func TestAttachWaitsWhilePreparing(t *testing.T) {
+	setup(t, "")
+	writeSettings(t, Settings{Server: "srv"})
+	// The Gate that took r1 is still pulling: this process stands in for it.
+	st := &rolloutState{ID: "r1", Verb: VerbDeploy, Version: "v1", Member: "alice", PID: os.Getpid(), Status: rolloutStatusPreparing}
+	if err := writeRolloutState("shop", "production", st); err != nil {
+		t.Fatal(err)
+	}
+	// The log is the previous rollout's until r1 runs.
+	if err := os.WriteFile(rolloutLogPath("shop", "production"), []byte(`{"out":"old rollout\n"}`+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var out strings.Builder
+	done := make(chan error, 1)
+	go func() {
+		done <- client(t, "alice", &fakeHost{}).Call(context.Background(), VerbDeploy, DeployArgs{Version: "v1", Rollout: "r1", Attach: true}, nil, &out, nil)
+	}()
+	select {
+	case err := <-done:
+		t.Fatalf("attach returned while preparing: %v", err)
+	case <-time.After(300 * time.Millisecond):
+	}
+	// A new deploy is refused meanwhile.
+	err := client(t, "alice", &fakeHost{}).Call(context.Background(), VerbDeploy, DeployArgs{Version: "v2", Compose: plainCompose, Rollout: "r2"}, nil, io.Discard, nil)
+	if err == nil || !strings.Contains(err.Error(), "another deploy is running") {
+		t.Fatalf("concurrent deploy: %v", err)
+	}
+	prep := &call{req: &remote.GateRequest{App: "shop", Destination: "production"}}
+	prep.abandonRollout("r1", errors.New("pull app:v1: boom"))
+	select {
+	case err := <-done:
+		if err == nil || !strings.Contains(err.Error(), "boom") {
+			t.Fatalf("got %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("attach did not see the outcome")
+	}
+	if strings.Contains(out.String(), "old rollout") {
+		t.Fatalf("replayed the previous rollout's log: %q", out.String())
+	}
+}
+
+func TestFailedPrepareRecordsOutcome(t *testing.T) {
+	setup(t, "")
+	// No settings: the deploy fails after it was prepared.
+	err := client(t, "alice", &fakeHost{}).Call(context.Background(), VerbDeploy, DeployArgs{Version: "v1", Compose: plainCompose, Rollout: "r1"}, nil, io.Discard, nil)
+	if err == nil {
+		t.Fatal("want error")
+	}
+	st, _ := readRolloutState("shop", "production")
+	if st == nil || st.ID != "r1" || st.Status != "failed" {
+		t.Fatalf("state %+v", st)
+	}
+	aerr := client(t, "alice", &fakeHost{}).Call(context.Background(), VerbDeploy, DeployArgs{Version: "v1", Rollout: "r1", Attach: true}, nil, io.Discard, nil)
+	if aerr == nil || strings.Contains(aerr.Error(), "did not start") || aerr.Error() != err.Error() {
+		t.Fatalf("attach %v, deploy %v", aerr, err)
+	}
+}
+
+func TestRolloutAliveRejectsReusedPID(t *testing.T) {
+	if procStart(os.Getpid()) == "" {
+		t.Skip("no /proc")
+	}
+	old := gateRunning
+	t.Cleanup(func() { gateRunning = old })
+	gateRunning = func(int) bool { return true }
+	cmd := exec.Command("sleep", "5")
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { cmd.Process.Kill(); cmd.Wait() })
+	pid := cmd.Process.Pid
+	if !rolloutAlive(&rolloutState{PID: pid, Start: procStart(pid)}, "") {
+		t.Fatal("live worker reported dead")
+	}
+	if rolloutAlive(&rolloutState{PID: pid, Start: "1"}, "") {
+		t.Fatal("reused pid reported alive")
+	}
+	// A Gate given the pid of a dead one does not take its rollout for itself.
+	if rolloutAlive(&rolloutState{PID: os.Getpid(), Start: "1"}, "") {
+		t.Fatal("own reused pid reported alive")
 	}
 }
 

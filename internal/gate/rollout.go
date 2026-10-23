@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -26,14 +27,17 @@ import (
 // Files under <access>/rollout/:
 //
 //	request.json   GateRequest line the worker re-reads
-//	state.json     running | deployed | failed | rolled_back
+//	state.json     preparing | running | deployed | failed | rolled_back
 //	log            NDJSON Gate frames from the worker
 //	done/<id>.json final state of a finished rollout, for a late attach
 
 const (
-	rolloutStatusRunning = "running"
-	rolloutPollInterval  = 100 * time.Millisecond
-	rolloutDoneRetention = 24 * time.Hour
+	// The Gate that took the request is pulling and checking images;
+	// its pid is the one recorded. An attach waits for it.
+	rolloutStatusPreparing = "preparing"
+	rolloutStatusRunning   = "running"
+	rolloutPollInterval    = 100 * time.Millisecond
+	rolloutDoneRetention   = 24 * time.Hour
 )
 
 var rolloutIDRe = regexp.MustCompile(`^[A-Za-z0-9_-]{1,64}$`)
@@ -64,12 +68,15 @@ func startWorker(job rolloutJob) (int, error) {
 
 // rolloutState is <access>/rollout/state.json.
 type rolloutState struct {
-	ID      string          `json:"id,omitempty"`
-	Verb    string          `json:"verb"`
-	Version string          `json:"version"`
-	Member  string          `json:"member"`
-	Key     string          `json:"key,omitempty"`
-	PID     int             `json:"pid"`
+	ID      string `json:"id,omitempty"`
+	Verb    string `json:"verb"`
+	Version string `json:"version"`
+	Member  string `json:"member"`
+	Key     string `json:"key,omitempty"`
+	PID     int    `json:"pid"`
+	// Start is the pid's start time (/proc/<pid>/stat), so a reused pid
+	// does not keep a dead rollout alive.
+	Start   string          `json:"start,omitempty"`
 	Boot    string          `json:"boot,omitempty"`
 	Started time.Time       `json:"started"`
 	Status  string          `json:"status"`
@@ -77,6 +84,8 @@ type rolloutState struct {
 	Hint    string          `json:"hint,omitempty"`
 	Code    string          `json:"code,omitempty"`
 	Result  json.RawMessage `json:"result,omitempty"`
+	// Unstarted: it ended while preparing, so the log is not its own.
+	Unstarted bool `json:"unstarted,omitempty"`
 }
 
 func rolloutDir(app, dest string) string {
@@ -153,7 +162,7 @@ func RunWorker(ctx context.Context, o Options, app, dest string) int {
 	defer log.Close()
 	o.In, o.Out = req, log
 	updateRolloutState(app, dest, func(st *rolloutState) {
-		st.PID = os.Getpid()
+		st.PID, st.Start = os.Getpid(), procStart(os.Getpid())
 		if o.Boot != "" {
 			st.Boot = o.Boot
 		}
@@ -218,7 +227,7 @@ func updateRolloutState(app, dest string, fn func(*rolloutState)) {
 	}
 	fn(st)
 	_ = writeRolloutState(app, dest, st)
-	if st.ID != "" && st.Status != rolloutStatusRunning {
+	if st.ID != "" && !rolloutPending(st) {
 		p := rolloutDonePath(app, dest, st.ID)
 		if os.MkdirAll(filepath.Dir(p), 0o700) == nil {
 			if b, err := json.Marshal(st); err == nil {
@@ -255,17 +264,51 @@ func writeRolloutState(app, dest string, st *rolloutState) error {
 	return os.Rename(tmp, rolloutStatePath(app, dest))
 }
 
+// rolloutPending is a rollout that has not recorded an outcome yet.
+func rolloutPending(st *rolloutState) bool {
+	return st != nil && (st.Status == rolloutStatusPreparing || st.Status == rolloutStatusRunning)
+}
+
+// rolloutLive is a pending rollout whose process is still there.
+func rolloutLive(st *rolloutState, boot string) bool {
+	return rolloutPending(st) && rolloutAlive(st, boot)
+}
+
 func rolloutAlive(st *rolloutState, boot string) bool {
 	if st == nil || st.PID <= 0 {
 		return false
 	}
-	if st.PID == os.Getpid() {
-		return true
-	}
 	if st.Boot != "" && boot != "" && st.Boot != boot {
 		return false
 	}
+	if st.Start != "" {
+		if s := procStart(st.PID); s != "" && s != st.Start {
+			return false
+		}
+	}
+	if st.PID == os.Getpid() {
+		return true
+	}
 	return gateRunning(st.PID)
+}
+
+// procStart is the start time of pid in clock ticks since boot ("" when
+// /proc is not there).
+func procStart(pid int) string {
+	b, err := os.ReadFile("/proc/" + strconv.Itoa(pid) + "/stat")
+	if err != nil {
+		return ""
+	}
+	// Fields after the parenthesized command; starttime is field 22.
+	i := bytes.LastIndexByte(b, ')')
+	if i < 0 {
+		return ""
+	}
+	f := strings.Fields(string(b[i+1:]))
+	if len(f) < 20 {
+		return ""
+	}
+	return f[19]
 }
 
 func lockRollout(app, dest string) (*os.File, error) {
@@ -297,20 +340,16 @@ func rolloutBusy(st *rolloutState) error {
 	}
 }
 
-// checkRollout handles an Attach request, and refuses a new rollout while
-// another one is live (before any image is loaded). ok reports that the
-// request was answered.
+// checkRollout handles an Attach request. ok reports that the request
+// was answered.
 func (c *call) checkRollout(ctx context.Context, verb, id string, attach bool) (any, error, bool) {
 	if id != "" && !rolloutIDRe.MatchString(id) {
 		return nil, invalid(fmt.Sprintf("invalid rollout id %q", id)), true
 	}
-	st, _ := readRolloutState(c.req.App, c.req.Destination)
 	if !attach {
-		if st != nil && st.Status == rolloutStatusRunning && rolloutAlive(st, c.o.Boot) {
-			return nil, rolloutBusy(st), true
-		}
 		return nil, nil, false
 	}
+	st, _ := readRolloutState(c.req.App, c.req.Destination)
 	if id != "" && (st == nil || st.ID != id) {
 		if done := readRolloutDone(c.req.App, c.req.Destination, id); done != nil && done.Verb == verb {
 			res, err := rolloutOutcome(done)
@@ -328,21 +367,60 @@ func (c *call) checkRollout(ctx context.Context, verb, id string, attach bool) (
 	return res, err, true
 }
 
-// startRollout records a new rollout and starts its worker. The lock is
-// held until the worker's pid is recorded; the worker's own state updates
-// wait for it.
+// prepareRollout records rollout id as preparing by this Gate, before any
+// image is pulled or checked, and refuses it while another one is live. A
+// client whose session drops meanwhile attaches and waits for it instead
+// of being told it did not start. Call abandonRollout when the request
+// ends.
+func (c *call) prepareRollout(verb, version, id string) (string, error) {
+	lock, err := lockRollout(c.req.App, c.req.Destination)
+	if err != nil {
+		return "", fmt.Errorf("rollout lock: %w", err)
+	}
+	defer unlockRollout(lock)
+	if st, err := readRolloutState(c.req.App, c.req.Destination); err == nil && rolloutLive(st, c.o.Boot) {
+		return "", rolloutBusy(st)
+	}
+	if id == "" {
+		id = rand.Text()
+	}
+	st := &rolloutState{
+		ID: id, Verb: verb, Version: version, Member: c.o.Member, Key: c.o.Key,
+		PID: os.Getpid(), Start: procStart(os.Getpid()), Boot: c.o.Boot,
+		Started: c.o.Now().UTC(), Status: rolloutStatusPreparing,
+	}
+	if err := writeRolloutState(c.req.App, c.req.Destination, st); err != nil {
+		return "", err
+	}
+	return id, nil
+}
+
+// abandonRollout records err as the outcome of rollout id if it never got
+// past preparing (a failed pull or check, or a refused request).
+func (c *call) abandonRollout(id string, err error) {
+	if err == nil {
+		err = errors.New("the rollout did not start")
+	}
+	updateRolloutState(c.req.App, c.req.Destination, func(st *rolloutState) {
+		if st.ID == id && st.Status == rolloutStatusPreparing {
+			setRolloutOutcome(st, nil, err)
+			st.Unstarted = true
+		}
+	})
+}
+
+// startRollout starts the worker of prepared rollout id. The lock is held
+// until the worker's pid is recorded; the worker's own state updates wait
+// for it.
 func (c *call) startRollout(verb, version, id string, args any) (string, error) {
 	lock, err := lockRollout(c.req.App, c.req.Destination)
 	if err != nil {
 		return "", fmt.Errorf("rollout lock: %w", err)
 	}
 	defer unlockRollout(lock)
-	if st, err := readRolloutState(c.req.App, c.req.Destination); err == nil && st != nil &&
-		st.Status == rolloutStatusRunning && rolloutAlive(st, c.o.Boot) {
+	if st, err := readRolloutState(c.req.App, c.req.Destination); err == nil && rolloutLive(st, c.o.Boot) &&
+		(st.ID != id || st.Status != rolloutStatusPreparing) {
 		return "", rolloutBusy(st)
-	}
-	if id == "" {
-		id = rand.Text()
 	}
 	pruneRolloutDone(c.req.App, c.req.Destination, c.o.Now())
 
@@ -372,6 +450,9 @@ func (c *call) startRollout(verb, version, id string, args any) (string, error) 
 	st := &rolloutState{
 		ID: id, Verb: verb, Version: version, Member: c.o.Member, Key: c.o.Key,
 		Boot: c.o.Boot, Started: c.o.Now().UTC(), Status: rolloutStatusRunning,
+		// This Gate stands in until the worker's pid is recorded, so an
+		// attach polling meanwhile does not take the rollout for dead.
+		PID: os.Getpid(), Start: procStart(os.Getpid()),
 	}
 	if err := writeRolloutState(c.req.App, c.req.Destination, st); err != nil {
 		return "", err
@@ -385,7 +466,7 @@ func (c *call) startRollout(verb, version, id string, args any) (string, error) 
 		return "", err
 	}
 	if pid > 0 {
-		st.PID = pid
+		st.PID, st.Start = pid, procStart(pid)
 		_ = writeRolloutState(c.req.App, c.req.Destination, st)
 	}
 	c.audit["detached"] = true
@@ -403,18 +484,27 @@ func (c *call) attachRollout(ctx context.Context, id string) (any, error) {
 	ticker := time.NewTicker(rolloutPollInterval)
 	defer ticker.Stop()
 	for {
-		offset, carry = c.copyRolloutLog(app, dest, offset, carry)
 		st, err := readRolloutState(app, dest)
+		// While preparing, the log is still the previous rollout's.
+		if err == nil && st != nil && st.ID == id && st.Status != rolloutStatusPreparing && !st.Unstarted {
+			offset, carry = c.copyRolloutLog(app, dest, offset, carry)
+		}
 		if err == nil && st != nil && st.ID != id {
 			if done := readRolloutDone(app, dest, id); done != nil {
 				return rolloutOutcome(done)
 			}
 			return nil, &remote.GateError{Message: "the rollout was replaced by another one", Hint: "see `yoho releases`", Code: "failed"}
 		}
-		if err == nil && st != nil && st.Status == rolloutStatusRunning && !rolloutAlive(st, c.o.Boot) {
+		if err == nil && rolloutPending(st) && !rolloutAlive(st, c.o.Boot) {
 			// The worker may have finished between the two reads.
-			if st2, _ := readRolloutState(app, dest); st2 != nil && st2.ID == id && st2.Status != rolloutStatusRunning {
+			if st2, _ := readRolloutState(app, dest); st2 != nil && st2.ID == id && !rolloutPending(st2) {
 				st = st2
+			} else if st.Status == rolloutStatusPreparing {
+				return nil, &remote.GateError{
+					Message: "the " + st.Verb + " of " + st.Version + " stopped before it started",
+					Hint:    "see `yoho releases` and " + st.Verb + " again",
+					Code:    "failed",
+				}
 			} else {
 				c.copyRolloutLog(app, dest, offset, carry)
 				return nil, &remote.GateError{
@@ -424,8 +514,10 @@ func (c *call) attachRollout(ctx context.Context, id string) (any, error) {
 				}
 			}
 		}
-		if err == nil && st != nil && st.Status != "" && st.Status != rolloutStatusRunning {
-			c.copyRolloutLog(app, dest, offset, carry)
+		if err == nil && st != nil && st.Status != "" && !rolloutPending(st) {
+			if !st.Unstarted {
+				c.copyRolloutLog(app, dest, offset, carry)
+			}
 			return rolloutOutcome(st)
 		}
 		if c.out.gone() {
