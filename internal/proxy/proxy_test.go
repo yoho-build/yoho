@@ -224,6 +224,12 @@ func TestDeployArgs(t *testing.T) {
 	if err := Deploy(context.Background(), h, "x", "y:1", DeployOptions{TLS: true}); err == nil {
 		t.Error("tls without hosts should fail")
 	}
+	if err := Deploy(context.Background(), h, "x", "y:1", DeployOptions{TLSOnDemandURL: "/allow"}); err == nil {
+		t.Error("tls-on-demand-url without tls should fail")
+	}
+	if err := Deploy(context.Background(), h, "x", "y:1", DeployOptions{TLS: true, Hosts: []string{"a.example.com"}, TLSOnDemandURL: "/allow"}); err == nil {
+		t.Error("tls-on-demand-url with hosts should fail")
+	}
 	if err := Remove(context.Background(), h, "x"); err != nil || !strings.Contains(h.scripts[len(h.scripts)-1], "'remove' 'x'") {
 		t.Errorf("remove: %v %v", err, h.scripts)
 	}
@@ -454,6 +460,28 @@ func TestServiceDeployOptionsHealthProbe(t *testing.T) {
 	timeout = "0s"
 	if _, err = ServiceDeployOptions(p); err == nil {
 		t.Fatal("invalid timeout accepted")
+	}
+}
+
+func TestServiceDeployOptionsCustomDomains(t *testing.T) {
+	p := config.ServiceProxy{Port: 3000, TLS: true, CustomDomains: &config.CustomDomains{Allow: "/custom-domains/allow"}}
+	o, err := ServiceDeployOptions(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if o.TLSOnDemandURL != "/custom-domains/allow" || len(o.Hosts) != 0 || !o.TLS {
+		t.Fatalf("mapped options %+v", o)
+	}
+	h := &fakeHost{}
+	if err = Deploy(context.Background(), h, "shop-production-web", "a:3000", o); err != nil {
+		t.Fatal(err)
+	}
+	want := "'--tls' '--tls-on-demand-url' '/custom-domains/allow'"
+	if !strings.Contains(h.scripts[0], want) || strings.Contains(h.scripts[0], "--host") {
+		t.Fatalf("args %s", h.scripts[0])
+	}
+	if _, err = ServiceDeployOptions(config.ServiceProxy{TLS: true, Hosts: []string{"a.example.com"}, CustomDomains: &config.CustomDomains{Allow: "/allow"}}); err == nil {
+		t.Fatal("hosts + custom_domains accepted")
 	}
 }
 

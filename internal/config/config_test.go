@@ -353,6 +353,45 @@ func TestServiceProxyHealthSettings(t *testing.T) {
 	if p["health_timeout"].(map[string]any)["type"] != "string" {
 		t.Fatalf("timeout schema %v", p["health_timeout"])
 	}
+	if _, ok := p["custom_domains"]; !ok {
+		t.Fatal("schema lacks custom_domains")
+	}
+}
+
+func TestServiceProxyCustomDomains(t *testing.T) {
+	ok := func(p ServiceProxy) {
+		t.Helper()
+		if err := p.Validate(); err != nil {
+			t.Fatalf("valid: %v", err)
+		}
+	}
+	bad := func(p ServiceProxy, want string) {
+		t.Helper()
+		err := p.Validate()
+		if err == nil || !strings.Contains(err.Error(), want) {
+			t.Fatalf("err = %v, want %q", err, want)
+		}
+	}
+	ok(ServiceProxy{Hosts: []string{"shop.example.com"}, TLS: true})
+	ok(ServiceProxy{TLS: true, CustomDomains: &CustomDomains{Allow: "/custom-domains/allow"}})
+	ok(ServiceProxy{TLS: true, CustomDomains: &CustomDomains{Allow: "http://allow.internal/check"}})
+	ok(ServiceProxy{TLS: true, CustomDomains: &CustomDomains{Allow: "https://allow.example.com/check?ok=1"}})
+	bad(ServiceProxy{TLS: true}, "tls requires hosts or custom_domains.allow")
+	bad(ServiceProxy{CustomDomains: &CustomDomains{}}, "allow is required")
+	bad(ServiceProxy{CustomDomains: &CustomDomains{Allow: "/check"}}, "requires tls: true")
+	bad(ServiceProxy{TLS: true, Hosts: []string{"shop.example.com"}, CustomDomains: &CustomDomains{Allow: "/check"}}, "cannot be set with proxy.hosts")
+	bad(ServiceProxy{TLS: true, CustomDomains: &CustomDomains{Allow: "ftp://x/check"}}, "must use http or https")
+	bad(ServiceProxy{TLS: true, CustomDomains: &CustomDomains{Allow: "http://"}}, "missing a host")
+	bad(ServiceProxy{TLS: true, CustomDomains: &CustomDomains{Allow: "//evil.example/check"}}, "path or an absolute")
+	bad(ServiceProxy{TLS: true, CustomDomains: &CustomDomains{Allow: "check"}}, "path or an absolute")
+	bad(ServiceProxy{TLS: true, CustomDomains: &CustomDomains{Allow: "https://ci:sekret@allow.example.com/check"}}, "must not contain credentials")
+	e, err := DecodeServiceExt(map[string]any{"proxy": map[string]any{"tls": true, "custom_domains": map[string]any{"allow": "/allow"}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if e.Proxy.CustomDomainsAllow() != "/allow" {
+		t.Fatalf("decoded allow %q", e.Proxy.CustomDomainsAllow())
+	}
 }
 
 func TestValidateRcloneConfigSecret(t *testing.T) {

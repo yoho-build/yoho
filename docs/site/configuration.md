@@ -166,7 +166,8 @@ The Cloudflare API token needs Account > Cloudflare Tunnel > Edit. It is resolve
 
 | Key | Description |
 |---|---|
-| `proxy.hosts` | Hostnames routed to the Service. Empty: catch-all. |
+| `proxy.hosts` | Hostnames routed to the Service. Empty: catch-all. Cannot be set with `custom_domains`. |
+| `proxy.custom_domains.allow` | On-demand TLS for customer hostnames: a path on this Service or an absolute `http(s)` URL. Requires `tls: true` and no `hosts`. kamal-proxy GETs `?host=` and issues a certificate only on HTTP 200. See [Customer-owned domains](custom-domains.md). |
 | `proxy.port` | Container port. Default 80. |
 | `proxy.health_path` | Default `/up`. |
 | `proxy.health_port` | Optional Proxy HTTP probe port, 1–65535. Omitted: use `proxy.port` (traffic still uses `proxy.port`). Explicit `0` is invalid. |

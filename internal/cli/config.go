@@ -286,6 +286,22 @@ func runConfigCheck(cmd *cobra.Command, g *globals, offline bool) error {
 			}
 		}
 	}
+	px := a.proxyConfig()
+	httpOff, httpsOff := portDisabled(px.HTTPPort), portDisabled(px.HTTPSPort)
+	for _, name := range sortedKeys(r.Ext) {
+		p := r.Ext[name].Proxy
+		if p == nil || p.CustomDomainsAllow() == "" {
+			continue
+		}
+		if px.Tunnel != nil {
+			findings = append(findings, composefile.Finding{Level: composefile.LevelWarning, Service: name,
+				Message: "custom_domains issues Let's Encrypt certificates at the Proxy; behind a Cloudflare Tunnel leave tls and custom_domains off and terminate TLS at Cloudflare"})
+		}
+		if httpOff && httpsOff {
+			findings = append(findings, composefile.Finding{Level: composefile.LevelWarning, Service: name,
+				Message: "custom_domains needs a published Proxy port for ACME (HTTP-01 on 80 or TLS-ALPN on 443); http_port and https_port are both 0"})
+		}
+	}
 	for _, f := range findings {
 		if f.Level == composefile.LevelError {
 			errCount++
@@ -306,4 +322,8 @@ func runConfigCheck(cmd *cobra.Command, g *globals, offline bool) error {
 	step.Done(fmt.Sprintf("%d services, %d secret keys, runtime %s", services, keyCount, a.dest.Runtime))
 	a.ui.Check(true, 0, offline, services, keyCount)
 	return nil
+}
+
+func portDisabled(p *int) bool {
+	return p != nil && *p == 0
 }

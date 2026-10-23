@@ -353,6 +353,9 @@ type DeployOptions struct {
 	HealthPort    int
 	HealthTimeout time.Duration
 	TLS           bool
+	// TLSOnDemandURL is kamal-proxy --tls-on-demand-url: a path on the
+	// Service or an absolute http(s) URL. Requires TLS and forbids Hosts.
+	TLSOnDemandURL string
 	// Zero: kamal-proxy defaults.
 	DeployTimeout time.Duration
 	DrainTimeout  time.Duration
@@ -362,13 +365,14 @@ type DeployOptions struct {
 // The caller applies existing path/deploy/drain defaults; omitted HTTP probe
 // settings remain zero so kamal-proxy supplies its own defaults.
 func ServiceDeployOptions(p config.ServiceProxy) (DeployOptions, error) {
-	if err := p.ValidateHealthCheck(); err != nil {
+	if err := p.Validate(); err != nil {
 		return DeployOptions{}, err
 	}
 	o := DeployOptions{
 		Hosts: p.Hosts, HealthPath: p.HealthPath, TLS: p.TLS,
-		DeployTimeout: time.Duration(p.DeployTimeout) * time.Second,
-		DrainTimeout:  time.Duration(p.DrainTimeout) * time.Second,
+		TLSOnDemandURL: p.CustomDomainsAllow(),
+		DeployTimeout:  time.Duration(p.DeployTimeout) * time.Second,
+		DrainTimeout:   time.Duration(p.DrainTimeout) * time.Second,
 	}
 	if p.HealthPort != nil {
 		o.HealthPort = *p.HealthPort
@@ -400,6 +404,9 @@ func DeployArgs(service, target string, opts DeployOptions) []string {
 	if opts.TLS {
 		argv = append(argv, "--tls")
 	}
+	if opts.TLSOnDemandURL != "" {
+		argv = append(argv, "--tls-on-demand-url", opts.TLSOnDemandURL)
+	}
 	if opts.DeployTimeout > 0 {
 		argv = append(argv, "--deploy-timeout", opts.DeployTimeout.String())
 	}
@@ -419,7 +426,14 @@ func Deploy(ctx context.Context, host remote.Host, service, target string, opts 
 	if opts.HealthPort < 0 || opts.HealthPort > 65535 || opts.HealthTimeout < 0 {
 		return fmt.Errorf("proxy deploy %s: invalid HTTP probe port or timeout", service)
 	}
-	if opts.TLS && len(opts.Hosts) == 0 {
+	if opts.TLSOnDemandURL != "" {
+		if !opts.TLS {
+			return fmt.Errorf("proxy deploy %s: tls-on-demand-url requires tls", service)
+		}
+		if len(opts.Hosts) > 0 {
+			return fmt.Errorf("proxy deploy %s: tls-on-demand-url cannot be set with hosts", service)
+		}
+	} else if opts.TLS && len(opts.Hosts) == 0 {
 		return fmt.Errorf("proxy deploy %s: tls requires at least one host", service)
 	}
 	if err := host.Run(ctx, remote.Cmd{Script: remote.QuoteArgs(DeployArgs(service, target, opts)...)}); err != nil {

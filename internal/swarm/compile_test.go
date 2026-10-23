@@ -347,6 +347,18 @@ func TestValidate(t *testing.T) {
 	if err := validate(d); err == nil || !strings.Contains(err.Error(), "stateful") {
 		t.Errorf("err = %v", err)
 	}
+	d = testDeploy(t, &fakeHost{}, nil)
+	e = d.Ext["web"]
+	e.Proxy = &config.ServiceProxy{TLS: true, CustomDomains: &config.CustomDomains{Allow: "/allow"}}
+	d.Ext["web"] = e
+	if err := validate(d); err != nil {
+		t.Errorf("tls + custom_domains: %v", err)
+	}
+	e.Proxy.Hosts = []string{"shop.example.com"}
+	d.Ext["web"] = e
+	if err := validate(d); err == nil || !strings.Contains(err.Error(), "cannot be set with proxy.hosts") {
+		t.Errorf("hosts + custom_domains: %v", err)
+	}
 }
 
 func TestReleaseJobStack(t *testing.T) {

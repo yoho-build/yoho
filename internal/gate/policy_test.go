@@ -252,4 +252,25 @@ func TestRoutes(t *testing.T) {
 	if got != ",a.example.com,b.example.com" {
 		t.Fatalf("routes %q", got)
 	}
+	cd := load(t, "services: {web: {image: x, x-yoho: {proxy: {tls: true, custom_domains: {allow: /allow}}}}}")
+	if got := Routes(cd.Ext); len(got) != 1 || got[0] != "custom_domains:/allow" {
+		t.Fatalf("custom_domains routes %#v", got)
+	}
+}
+
+func TestPolicyCustomDomainsCatchAll(t *testing.T) {
+	yml := "services: {a: {image: x, x-yoho: {proxy: {tls: true, custom_domains: {allow: /allow}}}}}"
+	r := load(t, yml)
+	// A plain catch-all grant, or another allow endpoint, is not enough:
+	// the Member could point the Proxy's check anywhere.
+	for _, routes := range [][]string{{"shop.example.com"}, {"shop.example.com", ""}, {CustomDomainsRoute("http://169.254.169.254/")}} {
+		deny := Policy{Project: project, Routes: routes}
+		if err := deny.Check(r.Project, r.Ext); err == nil || !strings.Contains(err.Error(), "custom_domains with allow /allow is not allowed") {
+			t.Fatalf("routes %v: %v", routes, err)
+		}
+	}
+	allow := Policy{Project: project, Routes: []string{"shop.example.com", CustomDomainsRoute("/allow")}}
+	if err := allow.Check(r.Project, r.Ext); err != nil {
+		t.Fatal(err)
+	}
 }

@@ -245,11 +245,13 @@ func TestValidate(t *testing.T) {
 		servers int
 		want    string
 	}{
-		"stateful proxy": {"services:\n  web:\n    image: x\n", config.ServiceExt{Stateful: true, Proxy: &config.ServiceProxy{}}, 1, "stateful"},
-		"ports":          {"services:\n  web:\n    image: x\n    ports: ['80:80']\n", config.ServiceExt{Proxy: &config.ServiceProxy{}}, 1, "publish ports"},
-		"container_name": {"services:\n  web:\n    image: x\n    container_name: web\n", config.ServiceExt{Proxy: &config.ServiceProxy{}}, 1, "container_name"},
-		"tls no hosts":   {"services:\n  web:\n    image: x\n", config.ServiceExt{Proxy: &config.ServiceProxy{TLS: true}}, 1, "tls requires hosts"},
-		"two servers":    {"services:\n  web:\n    image: x\n", config.ServiceExt{}, 2, "exactly one Server"},
+		"stateful proxy":            {"services:\n  web:\n    image: x\n", config.ServiceExt{Stateful: true, Proxy: &config.ServiceProxy{}}, 1, "stateful"},
+		"ports":                     {"services:\n  web:\n    image: x\n    ports: ['80:80']\n", config.ServiceExt{Proxy: &config.ServiceProxy{}}, 1, "publish ports"},
+		"container_name":            {"services:\n  web:\n    image: x\n    container_name: web\n", config.ServiceExt{Proxy: &config.ServiceProxy{}}, 1, "container_name"},
+		"tls no hosts":              {"services:\n  web:\n    image: x\n", config.ServiceExt{Proxy: &config.ServiceProxy{TLS: true}}, 1, "tls requires hosts"},
+		"custom domains no tls":     {"services:\n  web:\n    image: x\n", config.ServiceExt{Proxy: &config.ServiceProxy{CustomDomains: &config.CustomDomains{Allow: "/allow"}}}, 1, "requires tls: true"},
+		"custom domains with hosts": {"services:\n  web:\n    image: x\n", config.ServiceExt{Proxy: &config.ServiceProxy{TLS: true, Hosts: []string{"a.example.com"}, CustomDomains: &config.CustomDomains{Allow: "/allow"}}}, 1, "cannot be set with proxy.hosts"},
+		"two servers":               {"services:\n  web:\n    image: x\n", config.ServiceExt{}, 2, "exactly one Server"},
 	}
 	for name, c := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -267,6 +269,32 @@ func TestValidate(t *testing.T) {
 	}
 	if err := validate(testDeploy(t, &dockerHost{}, nil)); err != nil {
 		t.Errorf("example deploy should validate: %v", err)
+	}
+	ok := testDeploy(t, &dockerHost{}, nil)
+	ok.Ext["web"] = config.ServiceExt{Proxy: &config.ServiceProxy{TLS: true, CustomDomains: &config.CustomDomains{Allow: "/custom-domains/allow"}}}
+	if err := validate(ok); err != nil {
+		t.Errorf("tls + custom_domains should validate: %v", err)
+	}
+}
+
+func TestCompileCustomDomainsIsCloned(t *testing.T) {
+	d := testDeploy(t, nil, nil)
+	p := d.Ext["web"].Proxy
+	p.TLS = true
+	p.Hosts = nil
+	p.CustomDomains = &config.CustomDomains{Allow: "/allow"}
+	_, plans, _ := compileTest(t, d)
+	for _, sp := range plans {
+		if sp.Name != "web" {
+			continue
+		}
+		if sp.Proxy.CustomDomainsAllow() != "/allow" {
+			t.Fatalf("compiled %+v", sp.Proxy)
+		}
+		p.CustomDomains.Allow = "/mutated"
+		if sp.Proxy.CustomDomainsAllow() != "/allow" {
+			t.Fatal("saved plan aliases caller custom_domains")
+		}
 	}
 }
 
@@ -292,6 +320,15 @@ func TestCompileProxyHealthProbeDoesNotChangeDockerHealthcheck(t *testing.T) {
 				t.Fatal("saved plan aliases caller's optional settings")
 			}
 		}
+	}
+}
+
+func TestRouteHostsLabelCustomDomains(t *testing.T) {
+	if got := routeHostsLabel(&config.ServiceProxy{CustomDomains: &config.CustomDomains{Allow: "/allow"}}); got != "custom domains via /allow" {
+		t.Fatalf("got %q", got)
+	}
+	if got := routeHostsLabel(&config.ServiceProxy{Hosts: []string{"shop.example.com"}}); got != "shop.example.com" {
+		t.Fatalf("got %q", got)
 	}
 }
 

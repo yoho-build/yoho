@@ -392,10 +392,26 @@ type ServiceProxy struct {
 	HealthTimeout *string `json:"health_timeout,omitempty" jsonschema:"minLength=1,description=Positive Go duration per Proxy HTTP probe (e.g. 750ms or 2s); omitted uses the pinned Proxy default; separate from deploy_timeout and Docker healthcheck"`
 	// Terminate TLS with Let's Encrypt in the Proxy. Off behind Cloudflare Tunnel.
 	TLS bool `json:"tls,omitempty"`
+	// Customer-owned hostnames: on-demand Let's Encrypt via kamal-proxy
+	// --tls-on-demand-url. Requires tls and cannot be combined with hosts
+	// (the route is a catch-all; known hostnames belong on another Service
+	// or in the App's allow check).
+	CustomDomains *CustomDomains `json:"custom_domains,omitempty"`
 	// Seconds to wait for the new container to become healthy. Default 30.
 	DeployTimeout int `json:"deploy_timeout,omitempty"`
 	// Seconds to drain the old container. Default 30.
 	DrainTimeout int `json:"drain_timeout,omitempty"`
+}
+
+// CustomDomains issues TLS certificates for hostnames the App approves,
+// without listing them on the route or redeploying when a customer adds one.
+type CustomDomains struct {
+	// Path on this Service (e.g. /custom-domains/allow) or an absolute
+	// http(s) URL. kamal-proxy GETs it with ?host= before issuing a
+	// certificate. HTTP 200 allows; any other status denies. Checks time
+	// out after 2s. A path is routed through the Service; a URL is called
+	// directly.
+	Allow string `json:"allow,omitempty" jsonschema:"minLength=1,description=Path on this Service (e.g. /custom-domains/allow) or absolute http(s) URL; kamal-proxy GETs it with ?host= and issues a certificate only on HTTP 200"`
 }
 
 // ServiceBackup defines what a Backup copies for a Service.

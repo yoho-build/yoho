@@ -213,3 +213,28 @@ func TestProxyHealthProbeCheck(t *testing.T) {
 		}
 	}
 }
+
+func TestCustomDomainsCheck(t *testing.T) {
+	write := func(t *testing.T, proxy string) *Result {
+		t.Helper()
+		dir := t.TempDir()
+		src := "services:\n  web:\n    image: nginx\n    healthcheck: {test: ['CMD', 'true']}\n    x-yoho: {proxy: {" + proxy + "}}\n"
+		if err := os.WriteFile(filepath.Join(dir, "compose.yaml"), []byte(src), 0600); err != nil {
+			t.Fatal(err)
+		}
+		loaded, err := Load(context.Background(), dir, nil, nil, "shop", "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		return loaded
+	}
+	if fs := Check(write(t, "tls: true, custom_domains: {allow: /allow}"), "compose", nil); HasErrors(fs) {
+		t.Fatalf("valid custom_domains: %v", fs)
+	}
+	if fs := Check(write(t, "custom_domains: {allow: /allow}"), "compose", nil); !HasErrors(fs) || !strings.Contains(msgs(fs, LevelError), "requires tls: true") {
+		t.Fatalf("tls required: %v", fs)
+	}
+	if fs := Check(write(t, "tls: true, hosts: [a.example.com], custom_domains: {allow: /allow}"), "swarm", nil); !HasErrors(fs) || !strings.Contains(msgs(fs, LevelError), "cannot be set with proxy.hosts") {
+		t.Fatalf("hosts forbidden: %v", fs)
+	}
+}

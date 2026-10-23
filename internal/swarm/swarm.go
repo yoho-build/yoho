@@ -1168,7 +1168,7 @@ func readPlan(ctx context.Context, h remote.Host, relDir string) (*stackPlan, er
 	}
 	for _, sp := range p.Services {
 		if sp.Proxy != nil {
-			if err := sp.Proxy.ValidateHealthCheck(); err != nil {
+			if err := sp.Proxy.Validate(); err != nil {
 				return nil, fmt.Errorf("parse %s/plan.json: service %s: %w", relDir, sp.Name, err)
 			}
 		}

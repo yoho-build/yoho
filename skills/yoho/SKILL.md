@@ -63,7 +63,7 @@ If versions carry `_uncommitted_`, the build used local changes. Suggest committ
 | `env.secret` | `x-yoho.secrets`, with `NAME:KEY` alias (container name <- secret key) |
 | `env.clear` | compose `environment:` |
 | `builder.secrets` | `builder.secrets` (buildx `--secret`) |
-| kamal-proxy | kamal-proxy, same (`x-yoho.proxy` per Service, `proxy:` in `yoho.yml`) |
+| kamal-proxy | kamal-proxy, same (`x-yoho.proxy` per Service, `proxy:` in `yoho.yml`). Customer domains: `x-yoho.proxy.custom_domains.allow` (on-demand TLS; see config reference) |
 | `.kamal/hooks/*` | `.yoho/hooks/*`, same names plus backup/restore hooks |
 | `KAMAL_*` in hooks | `YOHO_*` |
 | container env `KAMAL_VERSION`, `KAMAL_HOST`... | `YOHO_APP`, `YOHO_DESTINATION`, `YOHO_VERSION`, `YOHO_SERVER`, `YOHO_SERVICE` |

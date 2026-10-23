@@ -150,7 +150,7 @@ func Check(r *Result, runtime string, secretKeys []string) []Finding {
 		}
 
 		if ext.Proxy != nil {
-			if err := ext.Proxy.ValidateHealthCheck(); err != nil {
+			if err := ext.Proxy.Validate(); err != nil {
 				svcAdd(LevelError, "%s", err)
 			}
 			if len(svc.Ports) > 0 {

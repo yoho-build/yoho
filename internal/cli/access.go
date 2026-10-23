@@ -456,7 +456,8 @@ func accessSecretsCmd(g *globals) *cobra.Command {
 them on the Server as a new secrets generation, plus the operator settings
 scoped deploys use instead of the Member's Yoho file: Proxy, Registry
 (without its password), retained Releases, and the Proxy hostnames the App
-may claim (today's x-yoho.proxy hosts). Members never see the values. Run it
+may claim (today's x-yoho.proxy hosts, and custom_domains with its allow
+endpoint). Members never see the values. Run it
 again after changing secrets or hostnames.`,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			a, err := g.loadOperator(cmd)
@@ -476,6 +477,18 @@ func (a *app) pushAccessSecrets(ctx context.Context) error {
 	if err != nil {
 		step.Fail(err, "run `yoho config check`")
 		return &silentError{err}
+	}
+	// The Proxy settings become the Gate's route grants; an invalid one
+	// (custom_domains with hosts, or an empty allow) would grant the wrong
+	// routes.
+	for _, name := range sortedKeys(r.Ext) {
+		if p := r.Ext[name].Proxy; p != nil {
+			if err = p.Validate(); err != nil {
+				err = fmt.Errorf("service %s: %w", name, err)
+				step.Fail(err, "run `yoho config check`")
+				return &silentError{err}
+			}
+		}
 	}
 	step.Done(fmt.Sprintf("%d services", len(r.Project.Services)))
 	step = u.Step("", "Resolve secrets")
@@ -567,10 +580,7 @@ func displayRoutes(r []string) []string {
 	}
 	out := make([]string, len(r))
 	for i, h := range r {
-		if h == "" {
-			h = "(catch-all)"
-		}
-		out[i] = h
+		out[i] = gate.RouteLabel(h)
 	}
 	return out
 }
