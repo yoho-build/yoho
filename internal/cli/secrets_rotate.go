@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"regexp"
 	"slices"
 	"strings"
 	"time"
@@ -15,6 +16,7 @@ import (
 	"github.com/yoho-build/yoho/internal/deploy"
 	"github.com/yoho-build/yoho/internal/plan"
 	"github.com/yoho-build/yoho/internal/release"
+	"github.com/yoho-build/yoho/internal/version"
 )
 
 func secretsRotateCmd(g *globals) *cobra.Command {
@@ -25,11 +27,15 @@ func secretsRotateCmd(g *globals) *cobra.Command {
 		Long: `Re-resolve secrets from the configured provider (1Password, Bitwarden, or
 .yoho/secrets) without rebuilding images or changing code. Services whose
 values changed are restarted through the Proxy (zero downtime). Stateful
-Services follow their normal stop-first rules. A Release is recorded so
-yoho rollback works.
+Services follow their normal stop-first rules. The current Release is
+recorded again with the new secrets generation; yoho rollback does not
+bring old secret values back (restore them in the provider and rotate).
 
-Pass Service names to rotate only those. --dry-run lists what would restart
-and changes nothing. Secret values are never printed.`,
+The local compose files must be the deployed Version (same git commit and
+uncommitted changes), so rotate changes secrets and nothing else.
+
+Pass Service names to require that only those changed. --dry-run lists
+what would restart and changes nothing. Secret values are never printed.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			a, err := g.load(cmd)
 			if err != nil {
@@ -117,6 +123,10 @@ func (a *app) rotateSecrets(ctx context.Context, services []string, dryRun bool)
 		step.Fail(err, "run `yoho deploy` first")
 		return &silentError{err}
 	}
+	if err = a.checkRotateVersion(cur.Version); err != nil {
+		step.Fail(err, "check out the deployed Version so rotate uses its compose files, or run `yoho deploy`")
+		return &silentError{err}
+	}
 	step.Done(shortVersion(cur.Version))
 	s.ver = cur.Version
 
@@ -131,13 +141,17 @@ func (a *app) rotateSecrets(ctx context.Context, services []string, dryRun bool)
 		return &silentError{err}
 	}
 	if len(services) > 0 {
+		// The new generation and Release audit cover every Service, so
+		// leaving out a changed one would record values it never got.
+		if other := changedServicesNotRequested(changed, services); len(other) > 0 {
+			err = fmt.Errorf("secrets of %s also changed", strings.Join(other, ", "))
+			step.Fail(err, "name those Services too, or run `yoho secrets rotate` without Service names")
+			return &silentError{err}
+		}
 		for _, name := range services {
 			if !slices.Contains(changed, name) {
 				u.Info("Service %s: secrets unchanged", name)
 			}
-		}
-		for _, name := range changedServicesNotRequested(changed, services) {
-			u.Info("Service %s also changed; omitted (not named)", name)
 		}
 		changed = intersectServices(changed, services)
 	}
@@ -168,6 +182,27 @@ func (a *app) rotateSecrets(ctx context.Context, services []string, dryRun bool)
 	}
 	u.Finished(nil, fmt.Sprintf("Rotated secrets for %s@%s on %s in %s; restarted %s",
 		a.cfg.App, shortVersion(rel.Version), a.destName, time.Since(start).Round(100*time.Millisecond), strings.Join(changed, ", ")))
+	return nil
+}
+
+// gitSHARe matches a version taken from git (version.FromGit).
+var gitSHARe = regexp.MustCompile(`^[0-9a-f]{40}(` + version.UncommittedMarker + `[0-9a-f]+)?$`)
+
+// checkRotateVersion refuses to rotate from compose files other than the
+// deployed Version's: rotate recompiles the local project, so local edits
+// would ship with the new secrets.
+func (a *app) checkRotateVersion(deployed string) error {
+	if !gitSHARe.MatchString(deployed) {
+		a.ui.Warn("Version %s is not a git commit; rotate uses the local compose files as they are", shortVersion(deployed))
+		return nil
+	}
+	local, err := version.FromGit(a.dir)
+	if err != nil {
+		return err
+	}
+	if local != deployed {
+		return fmt.Errorf("local checkout is %s but %s runs %s", shortVersion(local), a.destName, shortVersion(deployed))
+	}
 	return nil
 }
 

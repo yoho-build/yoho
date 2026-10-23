@@ -3,7 +3,9 @@ package deploy
 import (
 	"context"
 	"encoding/hex"
+	"errors"
 	"fmt"
+	"os"
 	"path"
 	"strings"
 
@@ -84,7 +86,14 @@ func DetectChangedServices(ctx context.Context, d *plan.Deploy, cur *release.Rel
 	generated := map[string]string{}
 	for _, name := range sortedKeys(kinds) {
 		b, err := h.ReadFile(ctx, path.Join(dir, "generated", name), false)
-		if err == nil && len(b) > 0 {
+		if errors.Is(err, os.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			// A missing value would make every Service using it look changed.
+			return nil, fmt.Errorf("read generated secret %s: %w", name, err)
+		}
+		if len(b) > 0 {
 			generated[name] = string(b)
 		}
 	}
@@ -114,7 +123,9 @@ func DetectChangedServices(ctx context.Context, d *plan.Deploy, cur *release.Rel
 }
 
 func readRemoteSecretsGeneration(ctx context.Context, h remote.Host, dir string) (map[string]map[string]string, error) {
-	listing, err := h.Output(ctx, remote.Cmd{Script: "set -eu\nls -1 " + remote.Quote(dir) + " 2>/dev/null || true"})
+	// A missing generation would make every Service look changed. macOS ls
+	// colors names under CLICOLOR_FORCE (see prune).
+	listing, err := h.Output(ctx, remote.Cmd{Script: "set -eu\nif [ ! -d " + remote.Quote(dir) + " ]; then echo 'secrets generation " + path.Base(dir) + " is gone; run yoho deploy' >&2; exit 1; fi\nenv -u CLICOLOR_FORCE -u CLICOLOR ls -1 " + remote.Quote(dir)})
 	if err != nil {
 		return nil, fmt.Errorf("list secrets generation: %w", err)
 	}
@@ -133,7 +144,7 @@ func readRemoteSecretsGeneration(ctx context.Context, h remote.Host, dir string)
 			out[strings.TrimSuffix(name, ".env")] = m
 			continue
 		}
-		files, err := h.Output(ctx, remote.Cmd{Script: "set -eu\nif [ -d " + remote.Quote(p) + " ]; then ls -1 " + remote.Quote(p) + "; fi"})
+		files, err := h.Output(ctx, remote.Cmd{Script: "set -eu\nif [ -d " + remote.Quote(p) + " ]; then env -u CLICOLOR_FORCE -u CLICOLOR ls -1 " + remote.Quote(p) + "; fi"})
 		if err != nil {
 			return nil, err
 		}

@@ -110,3 +110,17 @@ func TestSecretsRotateNonemptyBeforeSSH(t *testing.T) {
 		t.Fatalf("error=%v output=%s", err, out.String())
 	}
 }
+
+func TestRotateVersionPattern(t *testing.T) {
+	sha := strings.Repeat("a1", 20)
+	for v, want := range map[string]bool{
+		sha:                     true,
+		sha + "_uncommitted_0f": true,
+		"v1.2.3":                false,
+		sha[:12]:                false,
+	} {
+		if gitSHARe.MatchString(v) != want {
+			t.Errorf("%s: want %v", v, want)
+		}
+	}
+}

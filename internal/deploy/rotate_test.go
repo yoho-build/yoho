@@ -159,3 +159,16 @@ func TestRestartSelected(t *testing.T) {
 		t.Fatal("named Restart must be exact")
 	}
 }
+
+func TestDetectChangedServicesMissingGeneration(t *testing.T) {
+	withRoot(t)
+	h := &remote.Local{}
+	d := testDeploy(t, h, nil)
+	if _, err := ensureGenerated(context.Background(), h, release.AppDir(d.App, d.Destination), map[string]string{"POSTGRES_PASSWORD": "password32"}); err != nil {
+		t.Fatal(err)
+	}
+	cur := &release.Release{App: d.App, Destination: d.Destination, Version: "v1", Status: "deployed", SecretsGeneration: "GONE"}
+	if _, err := DetectChangedServices(context.Background(), d, cur); err == nil || !strings.Contains(err.Error(), "is gone") {
+		t.Fatalf("want missing generation error, got %v", err)
+	}
+}

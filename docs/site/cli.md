@@ -34,7 +34,7 @@ Global flags (every command): `-c, --config FILE`, `-d, --destination NAME` (def
 | `tunnel up \| status \| down` | Managed Cloudflare Tunnel (cloudflared connector; Quick Tunnel without a token). |
 | `secrets list` | Keys, sources, lengths. |
 | `secrets print KEY... --reveal` | Print values; terminal only. |
-| `secrets rotate [SERVICE...] [--dry-run]` | Re-resolve secrets (no rebuild), restart only Services whose values changed, record a Release. `--dry-run` lists what would restart. |
+| `secrets rotate [SERVICE...] [--dry-run]` | Re-resolve secrets (no rebuild), restart only Services whose values changed, record the current Release again. Needs a checkout of the deployed Version. Named Services must be the only ones that changed. `--dry-run` lists what would restart. |
 | `backup run [JOB]` | Take a Backup now. |
 | `backup list [JOB]` | Stored Backups, newest first. |
 | `backup pull [JOB] [--to DIR] [--limit N]` | Mirror new archives of an `archive` target to a local directory; never deletes. |
