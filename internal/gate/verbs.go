@@ -68,6 +68,9 @@ type HelloResult struct {
 	Verbs       []string   `json:"verbs"`
 	Platform    string     `json:"platform,omitempty"`
 	Apps        []AppGrant `json:"apps"`
+	// Rollouts: deploy and rollback accept Rollout and Attach, so a client
+	// can reconnect after its SSH session drops.
+	Rollouts bool `json:"rollouts,omitempty"`
 }
 
 func hello(ctx context.Context, c *call) (any, error) {
@@ -78,7 +81,7 @@ func hello(ctx context.Context, c *call) (any, error) {
 	res := HelloResult{
 		Protocol: remote.GateProtocol, Version: c.o.Version, Member: c.o.Member,
 		App: c.req.App, Destination: c.req.Destination, Verbs: members.Members[c.o.Member].Verbs,
-		Apps: grantsOf(c.o.Member),
+		Apps: grantsOf(c.o.Member), Rollouts: true,
 	}
 	if p, err := build.ServerPlatform(ctx, c.host); err == nil {
 		res.Platform = p
@@ -306,9 +309,11 @@ type DeployArgs struct {
 	Pull []string `json:"pull,omitempty"`
 	// Performer as the CLI sees it (user@host), recorded next to the Member.
 	Performer string `json:"performer,omitempty"`
-	// Attach reconnects to a rollout of Version (running or just finished)
-	// instead of starting a new one.
-	Attach bool `json:"attach,omitempty"`
+	// Rollout is an id the CLI picks for this deploy (sent when hello
+	// reports Rollouts); Attach reconnects to that rollout, running or
+	// finished, instead of starting a new one.
+	Rollout string `json:"rollout,omitempty"`
+	Attach  bool   `json:"attach,omitempty"`
 }
 
 func deployVerb(ctx context.Context, c *call) (any, error) {
@@ -327,7 +332,7 @@ func deployVerb(ctx context.Context, c *call) (any, error) {
 		}
 	}
 	if !c.o.RolloutWorker {
-		if res, err, ok := c.maybeAttach(ctx, VerbDeploy, a.Version, a.Attach); ok {
+		if res, err, ok := c.checkRollout(ctx, VerbDeploy, a.Rollout, a.Attach); ok {
 			return res, err
 		}
 	}
@@ -378,10 +383,11 @@ func deployVerb(ctx context.Context, c *call) (any, error) {
 	}
 
 	if !c.o.RolloutWorker {
-		if err := c.startRollout(VerbDeploy, a.Version, a); err != nil {
+		id, err := c.startRollout(VerbDeploy, a.Version, a.Rollout, a)
+		if err != nil {
 			return nil, err
 		}
-		return c.attachRollout(ctx)
+		return c.attachRollout(ctx, id)
 	}
 	return c.finishDeploy(ctx, s, r, a)
 }
@@ -711,8 +717,9 @@ func accessGeneration(app, dest string) (string, error) {
 type RollbackArgs struct {
 	Version   string `json:"version"`
 	Performer string `json:"performer,omitempty"`
-	// Attach reconnects to a rollback of Version instead of starting a new one.
-	Attach bool `json:"attach,omitempty"`
+	// Rollout and Attach as in DeployArgs.
+	Rollout string `json:"rollout,omitempty"`
+	Attach  bool   `json:"attach,omitempty"`
 }
 
 func rollbackVerb(ctx context.Context, c *call) (any, error) {
@@ -738,13 +745,15 @@ func rollbackVerb(ctx context.Context, c *call) (any, error) {
 	}
 	c.audit["version"] = version
 	if !c.o.RolloutWorker {
-		if res, err, ok := c.maybeAttach(ctx, VerbRollback, version, a.Attach); ok {
+		if res, err, ok := c.checkRollout(ctx, VerbRollback, a.Rollout, a.Attach); ok {
 			return res, err
 		}
-		if err := c.startRollout(VerbRollback, version, a); err != nil {
+		a.Version = version
+		id, err := c.startRollout(VerbRollback, version, a.Rollout, a)
+		if err != nil {
 			return nil, err
 		}
-		return c.attachRollout(ctx)
+		return c.attachRollout(ctx, id)
 	}
 	c.clearStaleLock()
 	d := &plan.Deploy{

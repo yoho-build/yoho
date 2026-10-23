@@ -3,6 +3,7 @@ package gate
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -58,6 +59,7 @@ func startWorker(job rolloutJob) (int, error) {
 
 // rolloutState is <access>/rollout/state.json.
 type rolloutState struct {
+	ID      string          `json:"id,omitempty"`
 	Verb    string          `json:"verb"`
 	Version string          `json:"version"`
 	Member  string          `json:"member"`
@@ -117,32 +119,28 @@ func RunWorker(ctx context.Context, o Options, app, dest string) int {
 	}
 	defer log.Close()
 	o.In, o.Out = req, log
-	if st, _ := readRolloutState(app, dest); st != nil {
+	updateRolloutState(app, dest, func(st *rolloutState) {
 		st.PID = os.Getpid()
 		if o.Boot != "" {
 			st.Boot = o.Boot
 		}
-		_ = writeRolloutState(app, dest, st)
-	}
+	})
 	return Serve(ctx, o)
 }
 
 func writeRolloutFailed(app, dest string, err error) {
-	st, _ := readRolloutState(app, dest)
-	if st == nil {
-		st = &rolloutState{Status: "failed"}
-	}
-	st.Status = "failed"
-	st.Error = err.Error()
-	st.Code = "failed"
-	_ = writeRolloutState(app, dest, st)
+	updateRolloutState(app, dest, func(st *rolloutState) {
+		st.Status = "failed"
+		st.Error = err.Error()
+		st.Code = "failed"
+	})
 }
 
 func finishRolloutState(app, dest string, result any, err error) {
-	st, _ := readRolloutState(app, dest)
-	if st == nil {
-		st = &rolloutState{}
-	}
+	updateRolloutState(app, dest, func(st *rolloutState) { setRolloutOutcome(st, result, err) })
+}
+
+func setRolloutOutcome(st *rolloutState, result any, err error) {
 	if err != nil {
 		ge := gateError(err)
 		st.Status = "failed"
@@ -150,7 +148,6 @@ func finishRolloutState(app, dest string, result any, err error) {
 		st.Hint = ge.Hint
 		st.Code = ge.Code
 		st.Result = nil
-		_ = writeRolloutState(app, dest, st)
 		return
 	}
 	st.Error, st.Hint, st.Code = "", "", ""
@@ -172,6 +169,21 @@ func finishRolloutState(app, dest string, result any, err error) {
 	if st.Status == "" || st.Status == rolloutStatusRunning {
 		st.Status = "deployed"
 	}
+}
+
+// updateRolloutState changes state.json under the rollout lock, so the
+// worker and the Gate that started it never overwrite each other.
+func updateRolloutState(app, dest string, fn func(*rolloutState)) {
+	lock, err := lockRollout(app, dest)
+	if err != nil {
+		return
+	}
+	defer unlockRollout(lock)
+	st, _ := readRolloutState(app, dest)
+	if st == nil {
+		st = &rolloutState{}
+	}
+	fn(st)
 	_ = writeRolloutState(app, dest, st)
 }
 
@@ -230,49 +242,57 @@ func lockRollout(app, dest string) (*os.File, error) {
 	return f, nil
 }
 
-func (c *call) maybeAttach(ctx context.Context, verb, version string, attach bool) (any, error, bool) {
-	st, err := readRolloutState(c.req.App, c.req.Destination)
-	if err != nil || st == nil {
-		if attach {
-			return nil, invalid("no rollout of " + version + " to attach; see `yoho releases`"), true
-		}
-		return nil, nil, false
-	}
-	if st.Verb != verb || st.Version != version {
-		if attach {
-			return nil, invalid("no rollout of " + version + " to attach; see `yoho releases`"), true
-		}
-		return nil, nil, false
-	}
-	if st.Status == rolloutStatusRunning && !rolloutAlive(st, c.o.Boot) {
-		if attach {
-			return nil, &remote.GateError{
-				Message: "the last rollout of " + version + " did not finish",
-				Hint:    "see `yoho releases` and deploy again",
-				Code:    "failed",
-			}, true
-		}
-		return nil, nil, false
-	}
-	if st.Status == rolloutStatusRunning || attach {
-		res, aerr := c.attachRollout(ctx)
-		return res, aerr, true
-	}
-	return nil, nil, false
+func unlockRollout(f *os.File) {
+	syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
+	f.Close()
 }
 
-func (c *call) startRollout(verb, version string, args any) error {
+// rolloutBusy is the error for a request while another rollout is live.
+func rolloutBusy(st *rolloutState) error {
+	return &remote.GateError{
+		Message: fmt.Sprintf("another %s is running: %s %s since %s", st.Verb, st.Member, st.Version, st.Started.UTC().Format(time.RFC3339)),
+		Hint:    "wait for it to finish, then see `yoho releases`",
+		Code:    "locked",
+	}
+}
+
+// checkRollout handles an Attach request, and refuses a new rollout while
+// another one is live (before any image is loaded). ok reports that the
+// request was answered.
+func (c *call) checkRollout(ctx context.Context, verb, id string, attach bool) (any, error, bool) {
+	st, _ := readRolloutState(c.req.App, c.req.Destination)
+	if !attach {
+		if st != nil && st.Status == rolloutStatusRunning && rolloutAlive(st, c.o.Boot) {
+			return nil, rolloutBusy(st), true
+		}
+		return nil, nil, false
+	}
+	if id == "" || st == nil || st.ID != id || st.Verb != verb {
+		return nil, &remote.GateError{
+			Message: "the " + verb + " did not start on the Server",
+			Hint:    "see `yoho releases` and " + verb + " again",
+			Code:    "failed",
+		}, true
+	}
+	res, err := c.attachRollout(ctx, id)
+	return res, err, true
+}
+
+// startRollout records a new rollout and starts its worker. The lock is
+// held until the worker's pid is recorded; the worker's own state updates
+// wait for it.
+func (c *call) startRollout(verb, version, id string, args any) (string, error) {
 	lock, err := lockRollout(c.req.App, c.req.Destination)
 	if err != nil {
-		return fmt.Errorf("rollout lock: %w", err)
+		return "", fmt.Errorf("rollout lock: %w", err)
 	}
-	defer func() {
-		syscall.Flock(int(lock.Fd()), syscall.LOCK_UN)
-		lock.Close()
-	}()
+	defer unlockRollout(lock)
 	if st, err := readRolloutState(c.req.App, c.req.Destination); err == nil && st != nil &&
-		st.Verb == verb && st.Version == version && st.Status == rolloutStatusRunning && rolloutAlive(st, c.o.Boot) {
-		return nil
+		st.Status == rolloutStatusRunning && rolloutAlive(st, c.o.Boot) {
+		return "", rolloutBusy(st)
+	}
+	if id == "" {
+		id = rand.Text()
 	}
 
 	switch a := args.(type) {
@@ -286,24 +306,24 @@ func (c *call) startRollout(verb, version string, args any) error {
 	}
 	line, err := remote.EncodeGateRequest(c.req.App, c.req.Destination, verb, args)
 	if err != nil {
-		return err
+		return "", err
 	}
 	dir := rolloutDir(c.req.App, c.req.Destination)
 	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return err
+		return "", err
 	}
 	if err := os.WriteFile(rolloutRequestPath(c.req.App, c.req.Destination), line, 0o600); err != nil {
-		return err
+		return "", err
 	}
 	if err := os.WriteFile(rolloutLogPath(c.req.App, c.req.Destination), nil, 0o600); err != nil {
-		return err
+		return "", err
 	}
 	st := &rolloutState{
-		Verb: verb, Version: version, Member: c.o.Member, Key: c.o.Key,
+		ID: id, Verb: verb, Version: version, Member: c.o.Member, Key: c.o.Key,
 		Boot: c.o.Boot, Started: c.o.Now().UTC(), Status: rolloutStatusRunning,
 	}
 	if err := writeRolloutState(c.req.App, c.req.Destination, st); err != nil {
-		return err
+		return "", err
 	}
 	pid, err := startWorker(rolloutJob{Options: c.o, App: c.req.App, Dest: c.req.Destination})
 	if err != nil {
@@ -311,17 +331,18 @@ func (c *call) startRollout(verb, version string, args any) error {
 		st.Error = err.Error()
 		st.Code = "failed"
 		_ = writeRolloutState(c.req.App, c.req.Destination, st)
-		return err
+		return "", err
 	}
 	if pid > 0 {
 		st.PID = pid
 		_ = writeRolloutState(c.req.App, c.req.Destination, st)
 	}
 	c.audit["detached"] = true
-	return nil
+	c.audit["rollout"] = id
+	return id, nil
 }
 
-func (c *call) attachRollout(ctx context.Context) (any, error) {
+func (c *call) attachRollout(ctx context.Context, id string) (any, error) {
 	c.watchClient()
 	app, dest := c.req.App, c.req.Destination
 	var (
@@ -333,7 +354,24 @@ func (c *call) attachRollout(ctx context.Context) (any, error) {
 	for {
 		offset, carry = c.copyRolloutLog(app, dest, offset, carry)
 		st, err := readRolloutState(app, dest)
+		if err == nil && st != nil && st.ID != id {
+			return nil, &remote.GateError{Message: "the rollout was replaced by another one", Hint: "see `yoho releases`", Code: "failed"}
+		}
+		if err == nil && st != nil && st.Status == rolloutStatusRunning && !rolloutAlive(st, c.o.Boot) {
+			// The worker may have finished between the two reads.
+			if st2, _ := readRolloutState(app, dest); st2 != nil && st2.ID == id && st2.Status != rolloutStatusRunning {
+				st = st2
+			} else {
+				c.copyRolloutLog(app, dest, offset, carry)
+				return nil, &remote.GateError{
+					Message: "the " + st.Verb + " of " + st.Version + " stopped without recording a result",
+					Hint:    "see `yoho releases` and `yoho app ps`, then deploy again",
+					Code:    "failed",
+				}
+			}
+		}
 		if err == nil && st != nil && st.Status != "" && st.Status != rolloutStatusRunning {
+			c.copyRolloutLog(app, dest, offset, carry)
 			if len(st.Result) > 0 {
 				var rel release.Release
 				if err := json.Unmarshal(st.Result, &rel); err != nil {

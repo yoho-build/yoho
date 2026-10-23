@@ -45,7 +45,7 @@ func TestDeploySurvivesDroppedClient(t *testing.T) {
 		return rel, nil
 	}
 
-	req, err := remote.EncodeGateRequest("shop", "production", VerbDeploy, DeployArgs{Version: "v1", Compose: plainCompose})
+	req, err := remote.EncodeGateRequest("shop", "production", VerbDeploy, DeployArgs{Version: "v1", Compose: plainCompose, Rollout: "r1"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -100,19 +100,65 @@ func TestDeploySurvivesDroppedClient(t *testing.T) {
 	}
 
 	var got release.Release
-	if err := client(t, "alice", &fakeHost{}).Call(context.Background(), VerbDeploy, DeployArgs{Version: "v1", Attach: true}, nil, io.Discard, &got); err != nil {
+	if err := client(t, "alice", &fakeHost{}).Call(context.Background(), VerbDeploy, DeployArgs{Version: "v1", Rollout: "r1", Attach: true}, nil, io.Discard, &got); err != nil {
 		t.Fatalf("attach: %v", err)
 	}
 	if got.Status != "deployed" || got.Version != "v1" {
 		t.Fatalf("attach release %+v", got)
+	}
+	// Another attempt at v1 whose session dropped before it started must
+	// not report r1's outcome as its own.
+	err = client(t, "alice", &fakeHost{}).Call(context.Background(), VerbDeploy, DeployArgs{Version: "v1", Rollout: "r2", Attach: true}, nil, io.Discard, nil)
+	if err == nil || !strings.Contains(err.Error(), "did not start") {
+		t.Fatalf("attach to another rollout: %v", err)
+	}
+}
+
+func TestRolloutRefusesWhileAnotherRuns(t *testing.T) {
+	setup(t, "")
+	writeSettings(t, Settings{Server: "srv"})
+	st := &rolloutState{ID: "r1", Verb: VerbDeploy, Version: "v1", Member: "bob", PID: os.Getpid(), Status: rolloutStatusRunning}
+	if err := writeRolloutState("shop", "production", st); err != nil {
+		t.Fatal(err)
+	}
+	err := client(t, "alice", &fakeHost{}).Call(context.Background(), VerbDeploy, DeployArgs{Version: "v2", Compose: plainCompose, Rollout: "r2"}, nil, io.Discard, nil)
+	if err == nil || !strings.Contains(err.Error(), "another deploy is running") {
+		t.Fatalf("got %v", err)
+	}
+	if got, _ := readRolloutState("shop", "production"); got == nil || got.ID != "r1" {
+		t.Fatalf("state replaced: %+v", got)
+	}
+}
+
+func TestAttachDetectsDeadWorker(t *testing.T) {
+	setup(t, "")
+	writeSettings(t, Settings{Server: "srv"})
+	old := gateRunning
+	t.Cleanup(func() { gateRunning = old })
+	gateRunning = func(int) bool { return false }
+	st := &rolloutState{ID: "r1", Verb: VerbDeploy, Version: "v1", PID: 999999, Status: rolloutStatusRunning}
+	if err := writeRolloutState("shop", "production", st); err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	go func() {
+		done <- client(t, "alice", &fakeHost{}).Call(context.Background(), VerbDeploy, DeployArgs{Version: "v1", Rollout: "r1", Attach: true}, nil, io.Discard, nil)
+	}()
+	select {
+	case err := <-done:
+		if err == nil || !strings.Contains(err.Error(), "stopped without recording a result") {
+			t.Fatalf("got %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("attach waits on a dead worker")
 	}
 }
 
 func TestAttachMissingRollout(t *testing.T) {
 	setup(t, "")
 	writeSettings(t, Settings{Server: "srv"})
-	err := client(t, "alice", &fakeHost{}).Call(context.Background(), VerbDeploy, DeployArgs{Version: "v9", Compose: plainCompose, Attach: true}, nil, io.Discard, nil)
-	if err == nil || !strings.Contains(err.Error(), "no rollout of v9") {
+	err := client(t, "alice", &fakeHost{}).Call(context.Background(), VerbDeploy, DeployArgs{Version: "v9", Compose: plainCompose, Rollout: "r9", Attach: true}, nil, io.Discard, nil)
+	if err == nil || !strings.Contains(err.Error(), "did not start") {
 		t.Fatalf("got %v", err)
 	}
 }

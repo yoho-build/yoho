@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"crypto/rand"
 	"errors"
 	"fmt"
 	"io"
@@ -127,10 +128,23 @@ var (
 )
 
 // gateCallOrAttach runs verb, and if the SSH session drops mid-rollout
-// reconnects with attach so the client reads the worker's outcome.
-func (a *app) gateCallOrAttach(ctx context.Context, g *remote.Gate, verb string, args any, payload io.Reader, out io.Writer, result any) error {
+// reconnects with attach so the client reads the worker's outcome. The
+// rollout id makes sure it reads this rollout's outcome, not an earlier
+// one; Gates that predate rollouts (h.Rollouts false) get neither.
+func (a *app) gateCallOrAttach(ctx context.Context, g *remote.Gate, h *gate.HelloResult, verb string, args any, payload io.Reader, out io.Writer, result any) error {
+	if h != nil && h.Rollouts {
+		id := rand.Text()
+		switch x := args.(type) {
+		case gate.DeployArgs:
+			x.Rollout = id
+			args = x
+		case gate.RollbackArgs:
+			x.Rollout = id
+			args = x
+		}
+	}
 	err := g.Call(ctx, verb, args, payload, out, result)
-	if !remote.IsDisconnect(err) {
+	if !remote.IsDisconnect(err) || h == nil || !h.Rollouts {
 		return err
 	}
 	a.ui.Warn("SSH session dropped; waiting for the rollout on the Server")
@@ -315,7 +329,7 @@ func (a *app) scopedDeploy(ctx context.Context, ver string, skipBuild bool) (err
 	}
 	step = u.Step(g.Name(), "Deploy %s through the Gate", shortVersion(ver))
 	var rel release.Release
-	if err := a.gateCallOrAttach(ctx, g, gate.VerbDeploy, args, payload, step.Output(), &rel); err != nil {
+	if err := a.gateCallOrAttach(ctx, g, hello, gate.VerbDeploy, args, payload, step.Output(), &rel); err != nil {
 		var ge *remote.GateError
 		hint := "see `yoho app ps` and `yoho releases`"
 		if errors.As(err, &ge) && ge.Hint != "" {
@@ -428,7 +442,7 @@ func (a *app) scopedShip(ctx context.Context, g *remote.Gate, built []string, pl
 
 // scopedRollback is `yoho rollback` through the Gate.
 func (a *app) scopedRollback(ctx context.Context, v string) error {
-	g, _, err := a.hello(ctx, gate.VerbRollback)
+	g, h, err := a.hello(ctx, gate.VerbRollback)
 	if err != nil {
 		a.ui.Finished(err, "")
 		return err
@@ -441,7 +455,7 @@ func (a *app) scopedRollback(ctx context.Context, v string) error {
 	a.ui.Warn("volumes and database migrations are not reverted")
 	step := a.ui.Step(g.Name(), "Redeploy %s", shortVersion(target))
 	var rel release.Release
-	if err := a.gateCallOrAttach(ctx, g, gate.VerbRollback, gate.RollbackArgs{Version: target, Performer: performer()}, nil, step.Output(), &rel); err != nil {
+	if err := a.gateCallOrAttach(ctx, g, h, gate.VerbRollback, gate.RollbackArgs{Version: target, Performer: performer()}, nil, step.Output(), &rel); err != nil {
 		step.Fail(err, hintFor(err, "see `yoho releases`"))
 		a.ui.Finished(err, "")
 		return &silentError{err}
