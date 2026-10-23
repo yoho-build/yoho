@@ -609,6 +609,15 @@ func (pol Policy) checkRoutes(e config.ServiceExt, add func(string, ...any)) {
 	if e.Proxy == nil {
 		return
 	}
+	// On-demand TLS mints certificates for any hostname the allow check
+	// approves, and the Proxy calls that endpoint: only the operator's
+	// exact allow value is accepted, never a plain catch-all grant.
+	if allow := e.Proxy.CustomDomainsAllow(); allow != "" {
+		if !slices.Contains(pol.Routes, CustomDomainsRoute(allow)) {
+			add("custom_domains with allow %s is not allowed for this App; the operator allows: %s", allow, routeList(pol.Routes))
+		}
+		return
+	}
 	hosts := e.Proxy.Hosts
 	if len(hosts) == 0 {
 		hosts = []string{""}
@@ -618,11 +627,7 @@ func (pol Policy) checkRoutes(e config.ServiceExt, add func(string, ...any)) {
 			continue
 		}
 		if h == "" {
-			if e.Proxy.CustomDomainsAllow() != "" {
-				add("the catch-all custom_domains Proxy route is not allowed for this App")
-			} else {
-				add("the catch-all Proxy route (x-yoho.proxy without hosts) is not allowed for this App")
-			}
+			add("the catch-all Proxy route (x-yoho.proxy without hosts) is not allowed for this App")
 		} else {
 			add("Proxy host %s is not allowed for this App; the operator allows: %s", h, routeList(pol.Routes))
 		}
@@ -635,20 +640,40 @@ func routeList(r []string) string {
 	}
 	out := make([]string, len(r))
 	for i, h := range r {
-		if h == "" {
-			h = "(catch-all)"
-		}
-		out[i] = h
+		out[i] = RouteLabel(h)
 	}
 	return strings.Join(out, ", ")
 }
 
-// Routes lists the Proxy hostnames of ext ("" for a catch-all route),
-// lowercased, sorted and unique.
+// customDomainsRoutePrefix marks a custom_domains route in Settings.Routes.
+const customDomainsRoutePrefix = "custom_domains:"
+
+// CustomDomainsRoute is the Settings.Routes entry for a custom_domains
+// route with this allow endpoint.
+func CustomDomainsRoute(allow string) string { return customDomainsRoutePrefix + allow }
+
+// RouteLabel is how a Settings.Routes entry reads in output.
+func RouteLabel(r string) string {
+	if r == "" {
+		return "(catch-all)"
+	}
+	if allow, ok := strings.CutPrefix(r, customDomainsRoutePrefix); ok {
+		return "custom domains via " + allow
+	}
+	return r
+}
+
+// Routes lists the Proxy hostnames of ext ("" for a catch-all route,
+// CustomDomainsRoute for on-demand TLS), hostnames lowercased, sorted
+// and unique.
 func Routes(ext map[string]config.ServiceExt) []string {
 	var out []string
 	for _, e := range ext {
 		if e.Proxy == nil {
+			continue
+		}
+		if allow := e.Proxy.CustomDomainsAllow(); allow != "" {
+			out = append(out, CustomDomainsRoute(allow))
 			continue
 		}
 		if len(e.Proxy.Hosts) == 0 {

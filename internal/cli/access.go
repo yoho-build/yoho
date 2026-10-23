@@ -456,7 +456,8 @@ func accessSecretsCmd(g *globals) *cobra.Command {
 them on the Server as a new secrets generation, plus the operator settings
 scoped deploys use instead of the Member's Yoho file: Proxy, Registry
 (without its password), retained Releases, and the Proxy hostnames the App
-may claim (today's x-yoho.proxy hosts, including a catch-all for custom_domains). Members never see the values. Run it
+may claim (today's x-yoho.proxy hosts, and custom_domains with its allow
+endpoint). Members never see the values. Run it
 again after changing secrets or hostnames.`,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			a, err := g.loadOperator(cmd)
@@ -567,10 +568,7 @@ func displayRoutes(r []string) []string {
 	}
 	out := make([]string, len(r))
 	for i, h := range r {
-		if h == "" {
-			h = "(catch-all)"
-		}
-		out[i] = h
+		out[i] = gate.RouteLabel(h)
 	}
 	return out
 }

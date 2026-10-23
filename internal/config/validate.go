@@ -369,6 +369,9 @@ func validateTLSOnDemandAllow(allow string) error {
 	if u.Host == "" {
 		return fmt.Errorf("x-yoho.proxy.custom_domains.allow URL is missing a host")
 	}
+	if u.User != nil {
+		return fmt.Errorf("x-yoho.proxy.custom_domains.allow must not contain credentials (they would show in the Server's process list)")
+	}
 	return nil
 }
 

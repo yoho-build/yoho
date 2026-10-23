@@ -384,6 +384,7 @@ func TestServiceProxyCustomDomains(t *testing.T) {
 	bad(ServiceProxy{TLS: true, CustomDomains: &CustomDomains{Allow: "http://"}}, "missing a host")
 	bad(ServiceProxy{TLS: true, CustomDomains: &CustomDomains{Allow: "//evil.example/check"}}, "path or an absolute")
 	bad(ServiceProxy{TLS: true, CustomDomains: &CustomDomains{Allow: "check"}}, "path or an absolute")
+	bad(ServiceProxy{TLS: true, CustomDomains: &CustomDomains{Allow: "https://ci:sekret@allow.example.com/check"}}, "must not contain credentials")
 	e, err := DecodeServiceExt(map[string]any{"proxy": map[string]any{"tls": true, "custom_domains": map[string]any{"allow": "/allow"}}})
 	if err != nil {
 		t.Fatal(err)
