@@ -49,7 +49,7 @@ Swarm convergence diagnostics report bounded task state metadata from the manage
 
 ## Ports
 
-Defaults are 80/443. If the Server already uses them: `proxy.http_port: 8080`, `proxy.https_port: 0`. Behind Cloudflare Tunnel, no published ports and no TLS are needed; see [Cloudflare Tunnel](cloudflare-tunnel.md).
+Defaults are 80/443. If the Server already uses them: `proxy.http_port: 8080`, `proxy.https_port: 0`. Behind Cloudflare Tunnel, no published ports and no TLS are needed; see [Cloudflare Tunnel](cloudflare-tunnel.md). Customer-owned hostnames that are not listed on `proxy.hosts` use on-demand TLS; see [Customer-owned domains](custom-domains.md).
 
 ## Proxy logging
 
@@ -62,6 +62,8 @@ yoho proxy boot     # start or reconfigure the Proxy
 yoho proxy status   # container and routes
 yoho proxy logs
 ```
+
+`yoho secrets rotate` uses the same cutover for Services whose secret values changed and does not rebuild images.
 
 ## Rollback
 

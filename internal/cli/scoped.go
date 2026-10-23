@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"crypto/rand"
 	"errors"
 	"fmt"
 	"io"
@@ -119,6 +120,67 @@ func (a *app) gateFail(err error) error {
 	return a.fail(err)
 }
 
+// gateAttachFor / gateAttachDelay bound reconnects after a dropped SSH
+// session: a tunnel whose connector the rollout restarts comes back only
+// when that Service is healthy again. Tests shrink them.
+var (
+	gateAttachFor   = 10 * time.Minute
+	gateAttachDelay = 5 * time.Second
+)
+
+// gateCallOrAttach runs verb, and if the SSH session drops mid-rollout
+// reconnects with attach so the client reads the worker's outcome. The
+// rollout id makes sure it reads this rollout's outcome, not an earlier
+// one; Gates that predate rollouts (h.Rollouts false) get neither.
+func (a *app) gateCallOrAttach(ctx context.Context, g *remote.Gate, h *gate.HelloResult, verb string, args any, payload io.Reader, out io.Writer, result any) error {
+	if h != nil && h.Rollouts {
+		id := rand.Text()
+		switch x := args.(type) {
+		case gate.DeployArgs:
+			x.Rollout = id
+			args = x
+		case gate.RollbackArgs:
+			x.Rollout = id
+			args = x
+		}
+	}
+	err := g.Call(ctx, verb, args, payload, out, result)
+	if !remote.IsDisconnect(err) || h == nil || !h.Rollouts {
+		return err
+	}
+	a.ui.Warn("SSH session dropped; waiting for the rollout on the Server")
+	switch x := args.(type) {
+	case gate.DeployArgs:
+		x.Attach, x.Archive = true, false
+		args = x
+	case gate.RollbackArgs:
+		x.Attach = true
+		args = x
+	}
+	var last error = err
+	for deadline := time.Now().Add(gateAttachFor); time.Now().Before(deadline); {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(gateAttachDelay):
+		}
+		g2, _, herr := a.hello(ctx, verb)
+		if herr != nil {
+			last = herr
+			continue
+		}
+		last = g2.Call(ctx, verb, args, nil, out, result)
+		g2.Close()
+		if last == nil || !remote.IsDisconnect(last) {
+			return last
+		}
+	}
+	if last == nil {
+		last = err
+	}
+	return fmt.Errorf("%w\nthe rollout may still be running on the Server; see `yoho releases`", last)
+}
+
 // gateHint is the step hint when the Gate cannot be reached.
 func (a *app) gateHint(target string) string {
 	h := "check that `ssh " + target + "` reaches the Gate: the operator runs `yoho access install` and `yoho access key add` with your public key"
@@ -203,6 +265,7 @@ func (a *app) scopedDeploy(ctx context.Context, ver string, skipBuild bool) (err
 		}
 	}
 	findings := composefile.Check(r, "compose", keys)
+	findings = append(findings, composefile.CheckCloudflareSSH(a.destName, a.dest, r.Project)...)
 	for _, f := range findings {
 		u.Finding(f.Level, f.Service, f.Message)
 	}
@@ -267,7 +330,7 @@ func (a *app) scopedDeploy(ctx context.Context, ver string, skipBuild bool) (err
 	}
 	step = u.Step(g.Name(), "Deploy %s through the Gate", shortVersion(ver))
 	var rel release.Release
-	if err := g.Call(ctx, gate.VerbDeploy, args, payload, step.Output(), &rel); err != nil {
+	if err := a.gateCallOrAttach(ctx, g, hello, gate.VerbDeploy, args, payload, step.Output(), &rel); err != nil {
 		var ge *remote.GateError
 		hint := "see `yoho app ps` and `yoho releases`"
 		if errors.As(err, &ge) && ge.Hint != "" {
@@ -380,7 +443,7 @@ func (a *app) scopedShip(ctx context.Context, g *remote.Gate, built []string, pl
 
 // scopedRollback is `yoho rollback` through the Gate.
 func (a *app) scopedRollback(ctx context.Context, v string) error {
-	g, _, err := a.hello(ctx, gate.VerbRollback)
+	g, h, err := a.hello(ctx, gate.VerbRollback)
 	if err != nil {
 		a.ui.Finished(err, "")
 		return err
@@ -393,7 +456,7 @@ func (a *app) scopedRollback(ctx context.Context, v string) error {
 	a.ui.Warn("volumes and database migrations are not reverted")
 	step := a.ui.Step(g.Name(), "Redeploy %s", shortVersion(target))
 	var rel release.Release
-	if err := g.Call(ctx, gate.VerbRollback, gate.RollbackArgs{Version: target, Performer: performer()}, nil, step.Output(), &rel); err != nil {
+	if err := a.gateCallOrAttach(ctx, g, h, gate.VerbRollback, gate.RollbackArgs{Version: target, Performer: performer()}, nil, step.Output(), &rel); err != nil {
 		step.Fail(err, hintFor(err, "see `yoho releases`"))
 		a.ui.Finished(err, "")
 		return &silentError{err}

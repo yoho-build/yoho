@@ -185,6 +185,7 @@ func (a *app) openSession(ctx context.Context, ver string, readOnly bool) (_ *se
 	}
 	keys, _ := a.secretKeys(r)
 	findings := composefile.Check(r, a.dest.Runtime, keys)
+	findings = append(findings, composefile.CheckCloudflareSSH(a.destName, a.dest, r.Project)...)
 	for _, f := range findings {
 		u.Finding(f.Level, f.Service, f.Message)
 	}

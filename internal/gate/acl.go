@@ -2,7 +2,9 @@
 // sshd from a forced command of the yoho-gate user, reads one structured
 // request, checks it against the App Destination's Members file and the
 // deploy Policy, runs it with the existing runtime code as the owner of the
-// App directory, appends an audit line and exits. Nothing stays running.
+// App directory, appends an audit line and exits. A deploy or rollback is
+// detached so it finishes after the SSH session drops; nothing else stays
+// running.
 package gate
 
 import (

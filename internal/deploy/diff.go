@@ -13,6 +13,7 @@ import (
 
 	"go.yaml.in/yaml/v3"
 
+	"github.com/yoho-build/yoho/internal/config"
 	"github.com/yoho-build/yoho/internal/plan"
 	"github.com/yoho-build/yoho/internal/proxy"
 	"github.com/yoho-build/yoho/internal/release"
@@ -133,7 +134,7 @@ func loadCurrent(ctx context.Context, h remote.Host, app, dest string) (*current
 		}
 		for _, p := range ps {
 			if p.Proxy != nil {
-				if err := p.Proxy.ValidateHealthCheck(); err != nil {
+				if err := p.Proxy.Validate(); err != nil {
 					return nil, fmt.Errorf("parse %s/plan.json: service %s: %w", relDir, p.Name, err)
 				}
 			}
@@ -434,9 +435,12 @@ func (c Compose) Diff(ctx context.Context, d *plan.Deploy) ([]plan.Change, error
 		r, ok := have[name]
 		switch {
 		case !ok:
-			add("route", name, plan.ActionCreate, false, "hosts "+hostsLabel(sp.Proxy.Hosts))
+			add("route", name, plan.ActionCreate, false, "hosts "+routeHostsLabel(sp.Proxy))
 		case !sameHosts(r.Hosts, sp.Proxy.Hosts):
-			add("route", name, plan.ActionUpdate, false, "hosts "+hostsLabel(r.Hosts)+" → "+hostsLabel(sp.Proxy.Hosts))
+			add("route", name, plan.ActionUpdate, false, "hosts "+hostsLabel(r.Hosts)+" → "+routeHostsLabel(sp.Proxy))
+		case cur != nil && currentAllow(cur, sp.Name) != sp.Proxy.CustomDomainsAllow():
+			// kamal-proxy lists no on-demand URL; the current plan has it.
+			add("route", name, plan.ActionUpdate, false, "hosts "+routeHostsLabel(cur.plans[sp.Name].Proxy)+" → "+routeHostsLabel(sp.Proxy))
 		}
 	}
 	for _, r := range StaleRoutes(routes, d.App, d.Destination, wantRoutes) {
@@ -488,6 +492,23 @@ func sameHosts(a, b []string) bool { return slices.Equal(normHosts(a), normHosts
 func hostsLabel(hs []string) string {
 	if n := normHosts(hs); len(n) > 0 {
 		return strings.Join(n, ",")
+	}
+	return "*"
+}
+
+func currentAllow(cur *currentState, name string) string {
+	if p := cur.plans[name].Proxy; p != nil {
+		return p.CustomDomainsAllow()
+	}
+	return ""
+}
+
+func routeHostsLabel(p *config.ServiceProxy) string {
+	if p != nil {
+		if allow := p.CustomDomainsAllow(); allow != "" {
+			return "custom domains via " + allow
+		}
+		return hostsLabel(p.Hosts)
 	}
 	return "*"
 }

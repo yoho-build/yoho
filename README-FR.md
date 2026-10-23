@@ -140,7 +140,7 @@ Voir `examples/basic` pour un fichier plus complet.
 | `plan`, `apply`, `deploy`, `releases`, `rollback VERSION` | examen et cycle de vie des versions déployées (Release) |
 | `app ps\|logs\|stats\|exec` | inspecter l’application en cours d’exécution |
 | `proxy boot\|status\|logs`, `tunnel up\|status\|down` | proxy et Cloudflare Tunnel |
-| `secrets list\|print` | inspecter les secrets |
+| `secrets list\|print\|rotate` | inspecter ou faire tourner les secrets |
 | `backup run\|list\|restore`, `schedule install\|status\|remove` | sauvegardes et tâches planifiées |
 | `swarm init\|join\|status` | environnement d’exécution Swarm |
 | `builder status\|setup` | machine de construction locale (Builder) |

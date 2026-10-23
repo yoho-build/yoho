@@ -36,7 +36,7 @@ yoho tunnel status   # connector state, connections, mode, Quick Tunnel URL
 yoho tunnel down     # remove the connector(s) and the token file
 ```
 
-These commands take no flags besides the global ones. `yoho apply` and `yoho deploy` also converge the Tunnel, and `yoho plan` shows it. `yoho setup` opens no Proxy ports in the firewall when a Tunnel is configured. Set `x-yoho.proxy.tls` off for tunneled Services.
+These commands take no flags besides the global ones. `yoho apply` and `yoho deploy` also converge the Tunnel, and `yoho plan` shows it. `yoho setup` opens no Proxy ports in the firewall when a Tunnel is configured. Set `x-yoho.proxy.tls` off for tunneled Services. Customer domains that should terminate TLS at Cloudflare use Cloudflare for SaaS, not `custom_domains`; see [Customer-owned domains](custom-domains.md).
 
 ## SSH through the tunnel
 
@@ -45,3 +45,5 @@ A remotely managed tunnel can also carry SSH to the Server, for Servers without 
 ## Alternative: your own cloudflared Service
 
 See `examples/basic`: a `cloudflared` Service in compose joined to the `yoho` network, with `secrets: [TUNNEL_TOKEN]` and `secrets_as_env: true`.
+
+Do not send deploy SSH through that same Service. A Destination with `ssh: {via: cloudflare, hostname: …}` whose hostname is routed by a `cloudflared` in this App will drop the session (exit 255) when the rollout restarts the connector. Scoped (Gate) rollouts still finish on the Server and record the real Release status; `yoho deploy` reconnects, or `yoho releases` shows the outcome. An operator deploy is not detached and can stop mid-rollout. `yoho config check` and `yoho plan` warn. Prefer a dedicated SSH tunnel outside the App (the managed `yoho-tunnel` connector, or a cloudflared that is not a Service of this App).

@@ -146,7 +146,7 @@ See `examples/quickstart` for a runnable web + worker + Postgres App, and `examp
 | `app ps\|logs\|stats\|exec` | inspect the running App |
 | `tui`, `ui` | read-only dashboards of Servers, Services, Releases and logs, in the terminal or a local browser |
 | `proxy boot\|status\|logs`, `tunnel up\|status\|down` | Proxy and Cloudflare Tunnel |
-| `secrets list\|print` | inspect secrets |
+| `secrets list\|print\|rotate` | inspect or rotate secrets |
 | `backup run\|list\|restore`, `schedule install\|status\|remove` | Backups and Scheduled Jobs |
 | `swarm init\|join\|status` | Swarm runtime |
 | `builder status\|setup` | local Builder |

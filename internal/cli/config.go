@@ -88,7 +88,7 @@ func schemaCmd(g *globals) *cobra.Command {
 }
 
 func secretsCmd(g *globals) *cobra.Command {
-	c := &cobra.Command{Use: "secrets", Short: "Inspect secrets (values are never printed unless revealed on a terminal)"}
+	c := &cobra.Command{Use: "secrets", Short: "Inspect or rotate secrets (values are never printed unless revealed on a terminal)"}
 	c.AddCommand(&cobra.Command{
 		Use:   "list",
 		Short: "Resolve secrets and list keys, sources and lengths",
@@ -134,6 +134,7 @@ func secretsCmd(g *globals) *cobra.Command {
 	}
 	p.Flags().BoolVar(&reveal, "reveal", false, "Confirm printing values")
 	c.AddCommand(p)
+	c.AddCommand(secretsRotateCmd(g))
 	return c
 }
 
@@ -272,6 +273,7 @@ func runConfigCheck(cmd *cobra.Command, g *globals, offline bool) error {
 	}
 	keyCount = len(keys)
 	findings := composefile.Check(r, a.dest.Runtime, keys)
+	findings = append(findings, composefile.CheckCloudflareSSH(a.destName, a.dest, r.Project)...)
 	for _, warning := range config.RcloneWarnings(a.cfg) {
 		findings = append(findings, composefile.Finding{Level: composefile.LevelWarning, Message: warning})
 	}
@@ -282,6 +284,22 @@ func runConfigCheck(cmd *cobra.Command, g *globals, offline bool) error {
 				findings = append(findings, composefile.Finding{Level: composefile.LevelWarning, Service: name,
 					Message: "Quick Tunnel requests use a *.trycloudflare.com Host and won't match proxy.hosts; leave hosts empty or set proxy.tunnel.token_secret"})
 			}
+		}
+	}
+	px := a.proxyConfig()
+	httpOff, httpsOff := portDisabled(px.HTTPPort), portDisabled(px.HTTPSPort)
+	for _, name := range sortedKeys(r.Ext) {
+		p := r.Ext[name].Proxy
+		if p == nil || p.CustomDomainsAllow() == "" {
+			continue
+		}
+		if px.Tunnel != nil {
+			findings = append(findings, composefile.Finding{Level: composefile.LevelWarning, Service: name,
+				Message: "custom_domains issues Let's Encrypt certificates at the Proxy; behind a Cloudflare Tunnel leave tls and custom_domains off and terminate TLS at Cloudflare"})
+		}
+		if httpOff && httpsOff {
+			findings = append(findings, composefile.Finding{Level: composefile.LevelWarning, Service: name,
+				Message: "custom_domains needs a published Proxy port for ACME (HTTP-01 on 80 or TLS-ALPN on 443); http_port and https_port are both 0"})
 		}
 	}
 	for _, f := range findings {
@@ -304,4 +322,8 @@ func runConfigCheck(cmd *cobra.Command, g *globals, offline bool) error {
 	step.Done(fmt.Sprintf("%d services, %d secret keys, runtime %s", services, keyCount, a.dest.Runtime))
 	a.ui.Check(true, 0, offline, services, keyCount)
 	return nil
+}
+
+func portDisabled(p *int) bool {
+	return p != nil && *p == 0
 }

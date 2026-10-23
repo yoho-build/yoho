@@ -172,7 +172,11 @@ func (Runtime) Deploy(ctx context.Context, d *plan.Deploy) (_ *release.Release, 
 		err = deploy.AnnotatePoolExhausted(ctx, h, r.stack, []string{proxy.Network}, err)
 	}()
 
-	unlock, err := deploy.AcquireLock(ctx, h, d.App, d.Destination, deploy.LockInfo{Performer: d.Performer, Version: d.Version, Command: "deploy", Time: start})
+	cmd := "deploy"
+	if len(d.Restart) > 0 {
+		cmd = "secrets rotate"
+	}
+	unlock, err := deploy.AcquireLock(ctx, h, d.App, d.Destination, deploy.LockInfo{Performer: d.Performer, Version: d.Version, Command: cmd, Time: start})
 	if err != nil {
 		return nil, err
 	}
@@ -181,6 +185,9 @@ func (Runtime) Deploy(ctx context.Context, d *plan.Deploy) (_ *release.Release, 
 			err = uerr
 		}
 	}()
+	if err := deploy.CheckRestartBase(ctx, h, d); err != nil {
+		return nil, err
+	}
 
 	pinHost, err := checkSwarm(ctx, d)
 	if err != nil {
@@ -313,8 +320,10 @@ func (Runtime) Deploy(ctx context.Context, d *plan.Deploy) (_ *release.Release, 
 	}
 	auth := registryAuth(d, c.Plan)
 	stackTouched = true // release_command may deploy dependencies first
-	if err := r.releaseCommands(ctx, c, relDir, auth); err != nil {
-		return nil, err
+	if len(d.Restart) == 0 {
+		if err := r.releaseCommands(ctx, c, relDir, auth); err != nil {
+			return nil, err
+		}
 	}
 	r.logf("deploying stack %s", r.stack)
 	if err := r.deployStack(ctx, stackFile, r.stack, true, auth, stackServiceNames(c.Plan)...); err != nil {
@@ -1159,7 +1168,7 @@ func readPlan(ctx context.Context, h remote.Host, relDir string) (*stackPlan, er
 	}
 	for _, sp := range p.Services {
 		if sp.Proxy != nil {
-			if err := sp.Proxy.ValidateHealthCheck(); err != nil {
+			if err := sp.Proxy.Validate(); err != nil {
 				return nil, fmt.Errorf("parse %s/plan.json: service %s: %w", relDir, sp.Name, err)
 			}
 		}

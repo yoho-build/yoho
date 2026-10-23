@@ -11,6 +11,7 @@ const guide = [
   ['Configuration', 'configuration'],
   ['Secrets', 'secrets'],
   ['Zero-downtime & proxy', 'zero-downtime'],
+  ['Customer-owned domains', 'custom-domains'],
   ['Cloudflare Tunnel', 'cloudflare-tunnel'],
   ['Builds & image transport', 'builds'],
   ['Backups & restore', 'backups'],

@@ -105,7 +105,7 @@ curl -fsS "$url/version"   # marker hello-v2
 
 ## 7. Change a secret, no web downtime
 
-There is no `yoho secrets rotate` yet. That command is [issue #24](https://github.com/yoho-build/yoho/issues/24). Today, change the resolved value and redeploy. `--skip-build` reuses the images you just shipped:
+Change the resolved value and redeploy. `--skip-build` reuses the images you just shipped. ([`yoho secrets rotate`](secrets.md#rotating-values) does the same from a checkout of the deployed Version and restarts only the Services whose values changed.)
 
 ```sh
 # edit .yoho/secrets: APP_GREETING=hello-rotated
@@ -148,7 +148,7 @@ A short screen recording, about four minutes of A-roll. Use a large terminal fon
 | 9 | Cost table from this page | One Server vs listed hosted instances | 15 s |
 | 10 | End card | `curl -fsSL https://yohobuild.com/install.sh \| sh` and this URL | 5 s |
 
-Optional voice-over beats: Compose stays the source of truth; secrets are files, not `docker inspect`; workers restart stop-first; `yoho secrets rotate` is coming in #24.
+Optional voice-over beats: Compose stays the source of truth; secrets are files, not `docker inspect`; workers restart stop-first; `yoho secrets rotate` restarts only the Services whose values changed.
 
 ## Locally, without a Server
 

@@ -45,7 +45,8 @@ func newRunner(d *plan.Deploy, composeFile string) *runner {
 	}
 	return &runner{
 		h: s.Host, out: out, server: s.Name, app: d.App, dest: d.Destination, registry: d.Registry,
-		cc: composeCLI{project: release.ProjectName(d.App, d.Destination), dir: release.AppDir(d.App, d.Destination), file: composeFile},
+		cc:      composeCLI{project: release.ProjectName(d.App, d.Destination), dir: release.AppDir(d.App, d.Destination), file: composeFile},
+		restart: d.Restart,
 	}
 }
 
@@ -112,7 +113,11 @@ func (c Compose) Deploy(ctx context.Context, d *plan.Deploy) (_ *release.Release
 	}()
 
 	if !c.LockHeld {
-		unlock, err := AcquireLock(ctx, h, d.App, d.Destination, lockInfo(d, LockInfo{Performer: d.Performer, Version: d.Version, Command: "deploy", Time: start}))
+		cmd := "deploy"
+		if len(d.Restart) > 0 {
+			cmd = "secrets rotate"
+		}
+		unlock, err := AcquireLock(ctx, h, d.App, d.Destination, lockInfo(d, LockInfo{Performer: d.Performer, Version: d.Version, Command: cmd, Time: start}))
 		if err != nil {
 			return nil, err
 		}
@@ -121,6 +126,16 @@ func (c Compose) Deploy(ctx context.Context, d *plan.Deploy) (_ *release.Release
 				err = uerr
 			}
 		}()
+	}
+	if err := CheckRestartBase(ctx, h, d); err != nil {
+		return nil, err
+	}
+	if b := d.RestartFrom; len(d.Restart) > 0 && b != nil {
+		// A rotate changes secrets only: run the image the Release ran,
+		// even if its tag was rebuilt since.
+		if err := r.pinImages(ctx, b.Images, b.ImageIDs, b.Built, b.Version); err != nil {
+			return nil, err
+		}
 	}
 
 	// Read-only preflight must precede generated values, env/App files and
@@ -252,11 +267,13 @@ func (c Compose) Deploy(ctx context.Context, d *plan.Deploy) (_ *release.Release
 			return nil, err
 		}
 	}
-	if err := r.startDependencies(ctx, plans); err != nil {
-		return nil, err
-	}
-	if err := r.releaseCommands(ctx, plans); err != nil {
-		return nil, err
+	if len(d.Restart) == 0 {
+		if err := r.startDependencies(ctx, plans); err != nil {
+			return nil, err
+		}
+		if err := r.releaseCommands(ctx, plans); err != nil {
+			return nil, err
+		}
 	}
 	if err := r.cutover(ctx, plans); err != nil {
 		return nil, err
@@ -422,7 +439,7 @@ func (c Compose) Rollback(ctx context.Context, d *plan.Deploy, version string) (
 	}
 	for _, sp := range plans {
 		if sp.Proxy != nil {
-			if err := sp.Proxy.ValidateHealthCheck(); err != nil {
+			if err := sp.Proxy.Validate(); err != nil {
 				return nil, fmt.Errorf("release %s: service %s: %w", version, sp.Name, err)
 			}
 		}

@@ -123,6 +123,20 @@ func TestFrames(t *testing.T) {
 	}
 }
 
+func TestGateCallDisconnect(t *testing.T) {
+	s := newTestSSH(t, "yoho-gate@host", false, &fakeExec{})
+	s.opts.Exec = func(ctx context.Context, _ []string, stdin io.Reader, stdout, stderr io.Writer) error {
+		return osExec(ctx, []string{"sh", "-c", "echo dropped >&2; exit 255"}, stdin, stdout, stderr)
+	}
+	err := NewGate(s, "shop", "production").Call(context.Background(), "deploy", nil, nil, nil, nil)
+	if !IsDisconnect(err) {
+		t.Fatalf("want DisconnectError, got %v", err)
+	}
+	if !strings.Contains(err.Error(), "did not answer") {
+		t.Fatalf("error: %v", err)
+	}
+}
+
 func TestGateCallReportsErrorFrame(t *testing.T) {
 	f := &fakeExec{}
 	s := newTestSSH(t, "yoho-gate@host", false, f)
