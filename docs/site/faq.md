@@ -2,6 +2,8 @@
 
 **Is there a 5-minute demo?** Yes. [5-minute quickstart](quickstart.md) takes a fresh Server to web + worker + Postgres, then a zero-downtime redeploy and a secret change. The App lives in `examples/quickstart`.
 
+**Moving an app off Railway?** [Migrating from Railway](migrating-from-railway.md) maps services, variable names, volumes, and Postgres onto Compose and `x-yoho`, then cuts over with rollback. The same App is the sample (`examples/quickstart/railway/inventory.json`).
+
 **Do I need a registry?** No. Images are pushed over SSH. A registry is optional.
 
 **Does it run anything on my Server?** Only Docker, kamal-proxy, and your App. Scheduled Jobs (systemd timers) and the tunnel connector are opt-in.

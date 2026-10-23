@@ -14,7 +14,7 @@ Why curl: a fetch tool that summarizes the page can drop commands and flags. The
 
 ## What the agent does
 
-1. Asks what you want (new deploy, migrate from Kamal, Coolify, Dokploy or Ansible, or operate an existing App) and which Server (`user@host`). It confirms before running any remote command.
+1. Asks what you want (new deploy, migrate from Kamal, Coolify, Dokploy, Railway or Ansible, or operate an existing App) and which Server (`user@host`). It confirms before running any remote command.
 2. Checks `yoho version`. If missing, it asks, then runs the installer (`curl -fsSL https://yohobuild.com/install.sh | sh`) or `go install`. It never uses sudo.
 3. Offers `yoho skill install` so the skill stays available in later sessions.
 4. Runs `yoho init`, then edits `yoho.yml` and the `x-yoho` blocks using the config reference. Secrets are only references in `.yoho/secrets`, never values in the repo.

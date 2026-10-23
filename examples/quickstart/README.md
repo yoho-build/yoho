@@ -26,3 +26,7 @@ docker compose -f compose.yaml -f compose.local.yaml down
 ```
 
 `APP_GREETING` and `POSTGRES_PASSWORD` stay out of `compose.yaml`. Yoho delivers them as files at `/run/secrets`; the local overlay uses environment variables.
+
+## From Railway
+
+This App is the sample for [Migrating from Railway](../../docs/site/migrating-from-railway.md). `railway/inventory.json` is names only. `yoho migrate draft --from railway/inventory.json` prints the files checked in as `railway/compose.draft.yaml` and `railway/yoho.draft.yml`. Deploy with this directory's `yoho.yml` first (no `migrate` block). The drafted Yoho file is the switch, after Postgres is restored.

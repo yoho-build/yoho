@@ -1,6 +1,6 @@
 ---
 name: yoho
-description: Deploy and operate Docker Compose apps on your own servers with the yoho CLI (yoho.yml, x-yoho in compose.yaml, .yoho/secrets, zero-downtime deploys, backups, Cloudflare Tunnel). Use when the user wants to deploy a compose app over SSH, edit yoho.yml or x-yoho, run yoho commands, or migrate from Kamal, Coolify, Dokploy or Ansible rsync+compose playbooks. Also use for first-time setup: installing the yoho CLI and walking the user through their first deploy.
+description: Deploy and operate Docker Compose apps on your own servers with the yoho CLI (yoho.yml, x-yoho in compose.yaml, .yoho/secrets, zero-downtime deploys, backups, Cloudflare Tunnel). Use when the user wants to deploy a compose app over SSH, edit yoho.yml or x-yoho, run yoho commands, or migrate from Kamal, Coolify, Dokploy, Railway or Ansible rsync+compose playbooks. Also use for first-time setup: installing the yoho CLI and walking the user through their first deploy.
 ---
 
 # Yoho
@@ -13,7 +13,7 @@ Always run `yoho config check` after editing config. It warns when a Service's `
 
 Follow in order. Ask before installing anything, editing files, or running any command against a Server. Never use sudo.
 
-1. Ask what the user wants: new deploy, migrate from Kamal/Coolify/Dokploy/Ansible (read the matching migrate reference), or operate an existing App. Ask for the target Server (`ssh user@host`) and confirm before any remote command.
+1. Ask what the user wants: new deploy, migrate from Kamal/Coolify/Dokploy/Railway/Ansible (read the matching migrate reference), or operate an existing App. Ask for the target Server (`ssh user@host`) and confirm before any remote command.
 2. Run `yoho version`. If missing, ask, then install with `curl -fsSL https://yohobuild.com/install.sh | sh` (fallback `curl -fsSL https://raw.githubusercontent.com/yoho-build/yoho/main/scripts/install.sh | sh`) or `go install github.com/yoho-build/yoho/cmd/yoho@latest`.
 3. Offer `yoho skill install` so this skill persists in the project. Once `yoho.yml` exists, `yoho skill install --project --only yoho` adds a generated `yoho-deploy-<app>` skill for this repo.
 4. Run `yoho init`. Edit `yoho.yml` and `x-yoho` in `compose.yaml` using the config reference. Secrets only as refs in `.yoho/secrets`; never write values into the repo.
@@ -98,6 +98,9 @@ yoho plan [--version V] [--detailed-exitcode]   # read-only diff; exit 2 = chang
 yoho apply [--auto-approve] [--skip-build] [--version V]   # plan, confirm, deploy
 yoho deploy [--skip-build] [--version V]   # apply --auto-approve without the plan
 yoho releases ; yoho rollback VERSION
+yoho rollback --cutover [--force]   # undo a migrate cutover (not volumes or DNS)
+yoho migrate plan [--cutover-allow-empty] | status
+yoho migrate draft --from FILE [--out DIR] [--service NAME] [--project NAME]
 yoho app ps | logs [SERVICE...] [--all] [-f] [-n N] | stats [SERVICE...] [--no-stream] | exec SERVICE -- CMD...
 yoho proxy boot | status | logs
 yoho tunnel up | status | down    # Cloudflare Tunnel (Quick Tunnel when no token)
@@ -173,3 +176,4 @@ Fetch with `curl -sL <url>` (not a summarizing fetch tool). Relative paths are u
 - Skill `yoho-offsite-backup` (encrypted off-Server Backups with rclone: OneDrive/Google Drive/S3 remotes, 7z or zip with a password, `rclone_config_secret`, expired-token reconnect, restore without Yoho): https://raw.githubusercontent.com/yoho-build/yoho/main/skills/yoho-offsite-backup/SKILL.md
 - `references/migrate-dokploy.md`: https://raw.githubusercontent.com/yoho-build/yoho/main/skills/yoho/references/migrate-dokploy.md
 - `references/migrate-ansible.md`: https://raw.githubusercontent.com/yoho-build/yoho/main/skills/yoho/references/migrate-ansible.md
+- `references/migrate-railway.md`: https://raw.githubusercontent.com/yoho-build/yoho/main/skills/yoho/references/migrate-railway.md

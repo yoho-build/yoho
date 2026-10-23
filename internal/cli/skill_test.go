@@ -142,7 +142,7 @@ func TestSkillInstallNoMigrateRefs(t *testing.T) {
 	if !exists(filepath.Join(base, "yoho-migrate-coolify", "SKILL.md")) {
 		t.Error("the migrate skill itself should still install")
 	}
-	if !strings.Contains(out, "skipped 4 references/migrate-* files of skill yoho") {
+	if !strings.Contains(out, "skipped 5 references/migrate-* files of skill yoho") {
 		t.Errorf("missing skipped line:\n%s", out)
 	}
 }

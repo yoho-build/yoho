@@ -22,7 +22,7 @@ Read https://raw.githubusercontent.com/yoho-build/yoho/main/skills/yoho/SKILL.md
 
 The agent will:
 
-1. Ask what you want (new deploy, migrate from Kamal, Coolify, Dokploy or Ansible, or operate an existing App) and which Server (`user@host`).
+1. Ask what you want (new deploy, migrate from Kamal, Coolify, Dokploy, Railway or Ansible, or operate an existing App) and which Server (`user@host`).
 2. Install `yoho` if missing, after asking. No sudo.
 3. Run `yoho init` and write `yoho.yml`, `x-yoho` and `.yoho/secrets` references. No secret values in the repo.
 4. Run `yoho config check`, then `yoho setup --plan`. `yoho setup` is interactive, so you run it (or approve `-y`).
@@ -50,7 +50,7 @@ From source (Go 1.26): `go install github.com/yoho-build/yoho/cmd/yoho@latest`.
 
 ## 5-minute quickstart
 
-From a blank Debian/Ubuntu Server to a live App (web + worker + Postgres), then a zero-downtime redeploy and a secret change: [docs/site/quickstart.md](docs/site/quickstart.md). The matching App is [`examples/quickstart`](examples/quickstart).
+From a blank Debian/Ubuntu Server to a live App (web + worker + Postgres), then a zero-downtime redeploy and a secret change: [docs/site/quickstart.md](docs/site/quickstart.md). The matching App is [`examples/quickstart`](examples/quickstart). Moving that App off Railway: [docs/site/migrating-from-railway.md](docs/site/migrating-from-railway.md).
 
 ## 60-second quickstart
 

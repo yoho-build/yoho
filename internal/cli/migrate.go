@@ -20,13 +20,18 @@ func init() { extraCommands = append(extraCommands, migrateCmd) }
 func migrateCmd(g *globals) *cobra.Command {
 	c := &cobra.Command{
 		Use:   "migrate",
-		Short: "Inspect the one-shot migration cutover of destinations.<name>.migrate",
+		Short: "Inspect or draft a one-shot migration cutover",
 		Long: `A Destination's migrate block makes the next deploy or apply cut over from
 another platform once: stop the old containers after the build, check that no
 running container still mounts the claimed data, deploy, then repoint the
-Cloudflare Tunnel ingress. Undo it with 'yoho rollback --cutover'.`,
+Cloudflare Tunnel ingress. Undo it with 'yoho rollback --cutover'.
+
+yoho migrate draft reads a names-only Railway inventory, or a railway.json /
+railway.toml config-as-code file, and prints a compose file and a Yoho file.
+It does not contact Railway or a Server and it never writes secret values.`,
 	}
-	c.AddCommand(&cobra.Command{
+	var allowEmpty bool
+	plan := &cobra.Command{
 		Use:   "plan",
 		Short: "Run the cutover preflight (read-only): old containers, claimed data, ingress rules",
 		RunE: func(cmd *cobra.Command, _ []string) error {
@@ -34,9 +39,11 @@ Cloudflare Tunnel ingress. Undo it with 'yoho rollback --cutover'.`,
 			if err != nil {
 				return err
 			}
-			return a.migratePlan(cmd.Context())
+			return a.migratePlan(cmd.Context(), allowEmpty)
 		},
-	})
+	}
+	plan.Flags().BoolVar(&allowEmpty, "cutover-allow-empty", false, "Accept a migrate.stop that matches no running container")
+	c.AddCommand(plan)
 	c.AddCommand(&cobra.Command{
 		Use:   "status",
 		Short: "Show the cutover journal on the Server",
@@ -48,6 +55,7 @@ Cloudflare Tunnel ingress. Undo it with 'yoho rollback --cutover'.`,
 			return a.migrateStatus(cmd.Context())
 		},
 	})
+	c.AddCommand(migrateDraftCmd(g))
 	return c
 }
 
@@ -73,7 +81,7 @@ func (a *app) cutoverSecrets(ctx context.Context) (*secrets.Store, error) {
 	return store, nil
 }
 
-func (a *app) migratePlan(ctx context.Context) (err error) {
+func (a *app) migratePlan(ctx context.Context, allowEmpty bool) (err error) {
 	if err := a.requireMigrate(); err != nil {
 		return err
 	}
@@ -92,11 +100,11 @@ func (a *app) migratePlan(ctx context.Context) (err error) {
 		return err
 	}
 	defer closeHosts()
-	return a.migratePlanOn(ctx, hosts[0], store)
+	return a.migratePlanOn(ctx, hosts[0], store, allowEmpty)
 }
 
 // migratePlanOn runs the preflight on h and prints what it found.
-func (a *app) migratePlanOn(ctx context.Context, h plan.NamedHost, store *secrets.Store) error {
+func (a *app) migratePlanOn(ctx context.Context, h plan.NamedHost, store *secrets.Store, allowEmpty bool) error {
 	u := a.ui
 	j, err := migrate.ReadJournal(ctx, h.Host, a.cfg.App, a.destName)
 	if err != nil {
@@ -116,7 +124,7 @@ func (a *app) migratePlanOn(ctx context.Context, h plan.NamedHost, store *secret
 		return err
 	}
 	step := u.Step(h.Name, "Cutover preflight")
-	p, perr := migrate.Preflight(ctx, h.Host, migrate.Options{App: a.cfg.App, Destination: a.destName, Migrate: *a.dest.Migrate, CF: cf}, resume)
+	p, perr := migrate.Preflight(ctx, h.Host, migrate.Options{App: a.cfg.App, Destination: a.destName, Migrate: *a.dest.Migrate, CF: cf, AllowEmpty: allowEmpty}, resume)
 	if perr != nil {
 		step.Fail(perr, "nothing was changed")
 	} else {

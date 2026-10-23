@@ -76,7 +76,7 @@ Yoho is one static Go binary. `compose.yaml` stays the source of truth; Yoho add
 - [Set up with your AI agent](agents.md)
 - [Configuration](configuration.md)
 - [CLI reference](cli.md)
-- Coming from another tool? [Kamal](migrating-from-kamal.md), [Coolify](migrating-from-coolify.md), [Dokploy](migrating-from-dokploy.md)
+- Coming from another tool? [Kamal](migrating-from-kamal.md), [Coolify](migrating-from-coolify.md), [Dokploy](migrating-from-dokploy.md), [Railway](migrating-from-railway.md)
 
 ## Terms
 
