@@ -10,6 +10,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"syscall"
 	"time"
@@ -27,11 +28,15 @@ import (
 //	request.json   GateRequest line the worker re-reads
 //	state.json     running | deployed | failed | rolled_back
 //	log            NDJSON Gate frames from the worker
+//	done/<id>.json final state of a finished rollout, for a late attach
 
 const (
 	rolloutStatusRunning = "running"
 	rolloutPollInterval  = 100 * time.Millisecond
+	rolloutDoneRetention = 24 * time.Hour
 )
+
+var rolloutIDRe = regexp.MustCompile(`^[A-Za-z0-9_-]{1,64}$`)
 
 // errDetached means the client went away while a worker is still running.
 // Serve exits 0 without a result frame; the client reattaches.
@@ -88,6 +93,34 @@ func rolloutStatePath(app, dest string) string {
 
 func rolloutLogPath(app, dest string) string {
 	return filepath.Join(rolloutDir(app, dest), "log")
+}
+
+func rolloutDonePath(app, dest, id string) string {
+	return filepath.Join(rolloutDir(app, dest), "done", id+".json")
+}
+
+// readRolloutDone is the final state of rollout id, if it finished.
+func readRolloutDone(app, dest, id string) *rolloutState {
+	b, err := os.ReadFile(rolloutDonePath(app, dest, id))
+	if err != nil {
+		return nil
+	}
+	var st rolloutState
+	if json.Unmarshal(b, &st) != nil {
+		return nil
+	}
+	return &st
+}
+
+// pruneRolloutDone removes finished-rollout records older than a day.
+func pruneRolloutDone(app, dest string, now time.Time) {
+	dir := filepath.Dir(rolloutDonePath(app, dest, "x"))
+	entries, _ := os.ReadDir(dir)
+	for _, e := range entries {
+		if info, err := e.Info(); err == nil && now.Sub(info.ModTime()) > rolloutDoneRetention {
+			os.Remove(filepath.Join(dir, e.Name()))
+		}
+	}
 }
 
 func rolloutLockPath(app, dest string) string {
@@ -185,6 +218,14 @@ func updateRolloutState(app, dest string, fn func(*rolloutState)) {
 	}
 	fn(st)
 	_ = writeRolloutState(app, dest, st)
+	if st.ID != "" && st.Status != rolloutStatusRunning {
+		p := rolloutDonePath(app, dest, st.ID)
+		if os.MkdirAll(filepath.Dir(p), 0o700) == nil {
+			if b, err := json.Marshal(st); err == nil {
+				_ = os.WriteFile(p, b, 0o600)
+			}
+		}
+	}
 }
 
 func readRolloutState(app, dest string) (*rolloutState, error) {
@@ -260,12 +301,21 @@ func rolloutBusy(st *rolloutState) error {
 // another one is live (before any image is loaded). ok reports that the
 // request was answered.
 func (c *call) checkRollout(ctx context.Context, verb, id string, attach bool) (any, error, bool) {
+	if id != "" && !rolloutIDRe.MatchString(id) {
+		return nil, invalid(fmt.Sprintf("invalid rollout id %q", id)), true
+	}
 	st, _ := readRolloutState(c.req.App, c.req.Destination)
 	if !attach {
 		if st != nil && st.Status == rolloutStatusRunning && rolloutAlive(st, c.o.Boot) {
 			return nil, rolloutBusy(st), true
 		}
 		return nil, nil, false
+	}
+	if id != "" && (st == nil || st.ID != id) {
+		if done := readRolloutDone(c.req.App, c.req.Destination, id); done != nil && done.Verb == verb {
+			res, err := rolloutOutcome(done)
+			return res, err, true
+		}
 	}
 	if id == "" || st == nil || st.ID != id || st.Verb != verb {
 		return nil, &remote.GateError{
@@ -294,6 +344,7 @@ func (c *call) startRollout(verb, version, id string, args any) (string, error) 
 	if id == "" {
 		id = rand.Text()
 	}
+	pruneRolloutDone(c.req.App, c.req.Destination, c.o.Now())
 
 	switch a := args.(type) {
 	case DeployArgs:
@@ -355,6 +406,9 @@ func (c *call) attachRollout(ctx context.Context, id string) (any, error) {
 		offset, carry = c.copyRolloutLog(app, dest, offset, carry)
 		st, err := readRolloutState(app, dest)
 		if err == nil && st != nil && st.ID != id {
+			if done := readRolloutDone(app, dest, id); done != nil {
+				return rolloutOutcome(done)
+			}
 			return nil, &remote.GateError{Message: "the rollout was replaced by another one", Hint: "see `yoho releases`", Code: "failed"}
 		}
 		if err == nil && st != nil && st.Status == rolloutStatusRunning && !rolloutAlive(st, c.o.Boot) {
@@ -372,35 +426,39 @@ func (c *call) attachRollout(ctx context.Context, id string) (any, error) {
 		}
 		if err == nil && st != nil && st.Status != "" && st.Status != rolloutStatusRunning {
 			c.copyRolloutLog(app, dest, offset, carry)
-			if len(st.Result) > 0 {
-				var rel release.Release
-				if err := json.Unmarshal(st.Result, &rel); err != nil {
-					return nil, fmt.Errorf("rollout result: %w", err)
-				}
-				return &rel, nil
-			}
-			code := st.Code
-			if code == "" {
-				code = "failed"
-			}
-			msg := st.Error
-			if msg == "" {
-				msg = "rollout " + st.Status
-			}
-			return nil, &remote.GateError{Message: msg, Hint: st.Hint, Code: code}
+			return rolloutOutcome(st)
 		}
 		if c.out.gone() {
 			return nil, errDetached
 		}
 		select {
 		case <-ctx.Done():
-			if c.out.gone() {
-				return nil, errDetached
-			}
-			return nil, ctx.Err()
+			// sshd/sudo signal the Gate when the session drops; the
+			// worker keeps going and the client reattaches.
+			return nil, errDetached
 		case <-ticker.C:
 		}
 	}
+}
+
+// rolloutOutcome is the result or error a finished rollout recorded.
+func rolloutOutcome(st *rolloutState) (any, error) {
+	if len(st.Result) > 0 {
+		var rel release.Release
+		if err := json.Unmarshal(st.Result, &rel); err != nil {
+			return nil, fmt.Errorf("rollout result: %w", err)
+		}
+		return &rel, nil
+	}
+	code := st.Code
+	if code == "" {
+		code = "failed"
+	}
+	msg := st.Error
+	if msg == "" {
+		msg = "rollout " + st.Status
+	}
+	return nil, &remote.GateError{Message: msg, Hint: st.Hint, Code: code}
 }
 
 // watchClient marks the client gone when stdin closes, without cancelling

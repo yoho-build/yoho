@@ -363,17 +363,21 @@ func deployVerb(ctx context.Context, c *call) (any, error) {
 			return nil, err
 		}
 	}
-	for _, ref := range a.Pull {
-		if !allowed[NormalizeRef(ref)] {
-			return nil, denied("pull "+ref+": not an image built for this deploy", "")
+	// The Gate that started a rollout already pulled; the worker only
+	// checks that the images are there.
+	if !c.o.RolloutWorker {
+		for _, ref := range a.Pull {
+			if !allowed[NormalizeRef(ref)] {
+				return nil, denied("pull "+ref+": not an image built for this deploy", "")
+			}
+			fmt.Fprintf(c.fw, "pulling %s\n", ref)
+			if err := c.host.Run(ctx, remote.Cmd{Script: "docker pull -q " + remote.Quote(ref), Stdout: io.Discard, Stderr: c.fw}); err != nil {
+				return nil, fmt.Errorf("pull %s: %w", ref, err)
+			}
 		}
-		fmt.Fprintf(c.fw, "pulling %s\n", ref)
-		if err := c.host.Run(ctx, remote.Cmd{Script: "docker pull -q " + remote.Quote(ref), Stdout: io.Discard, Stderr: c.fw}); err != nil {
-			return nil, fmt.Errorf("pull %s: %w", ref, err)
+		if err := c.pullImages(ctx, pol, r.Project); err != nil {
+			return nil, err
 		}
-	}
-	if err := c.pullImages(ctx, pol, r.Project); err != nil {
-		return nil, err
 	}
 	for _, svc := range sortedKeys(pol.Built) {
 		ref := pol.Built[svc]

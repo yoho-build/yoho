@@ -32,7 +32,7 @@ func CheckCloudflareSSH(destName string, dest config.Destination, p *types.Proje
 	return []Finding{{
 		Level:   LevelWarning,
 		Service: names[0],
-		Message: fmt.Sprintf("destinations.%s.ssh hostname %s is reached through Cloudflare; %s in this App is a cloudflared connector, so a deploy that restarts it drops the SSH session (exit 255). Gate rollouts finish on the Server; yoho deploy reconnects, or yoho releases shows the outcome. Prefer a dedicated SSH tunnel outside this App", destName, dest.SSH.Hostname, who),
+		Message: fmt.Sprintf("destinations.%s.ssh hostname %s is reached through Cloudflare; %s in this App is a cloudflared connector, so a deploy that restarts it drops the SSH session (exit 255). A scoped deploy through the Gate finishes on the Server and reconnects; an operator deploy can stop mid-rollout. Prefer a dedicated SSH tunnel outside this App; after a drop, yoho releases shows the outcome", destName, dest.SSH.Hostname, who),
 	}}
 }
 

@@ -106,6 +106,15 @@ func TestDeploySurvivesDroppedClient(t *testing.T) {
 	if got.Status != "deployed" || got.Version != "v1" {
 		t.Fatalf("attach release %+v", got)
 	}
+	// A late attach still finds r1's outcome after another rollout took
+	// state.json.
+	if err := writeRolloutState("shop", "production", &rolloutState{ID: "r3", Verb: VerbDeploy, Version: "v3", Status: "failed"}); err != nil {
+		t.Fatal(err)
+	}
+	got = release.Release{}
+	if err := client(t, "alice", &fakeHost{}).Call(context.Background(), VerbDeploy, DeployArgs{Version: "v1", Rollout: "r1", Attach: true}, nil, io.Discard, &got); err != nil || got.Status != "deployed" {
+		t.Fatalf("late attach: %+v %v", got, err)
+	}
 	// Another attempt at v1 whose session dropped before it started must
 	// not report r1's outcome as its own.
 	err = client(t, "alice", &fakeHost{}).Call(context.Background(), VerbDeploy, DeployArgs{Version: "v1", Rollout: "r2", Attach: true}, nil, io.Discard, nil)

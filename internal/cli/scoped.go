@@ -120,11 +120,12 @@ func (a *app) gateFail(err error) error {
 	return a.fail(err)
 }
 
-// gateAttachAttempts / gateAttachDelay bound reconnects after a dropped
-// SSH session (the tunnel may still be coming back). Tests shrink them.
+// gateAttachFor / gateAttachDelay bound reconnects after a dropped SSH
+// session: a tunnel whose connector the rollout restarts comes back only
+// when that Service is healthy again. Tests shrink them.
 var (
-	gateAttachAttempts = 8
-	gateAttachDelay    = 2 * time.Second
+	gateAttachFor   = 10 * time.Minute
+	gateAttachDelay = 5 * time.Second
 )
 
 // gateCallOrAttach runs verb, and if the SSH session drops mid-rollout
@@ -157,7 +158,7 @@ func (a *app) gateCallOrAttach(ctx context.Context, g *remote.Gate, h *gate.Hell
 		args = x
 	}
 	var last error = err
-	for i := 0; i < gateAttachAttempts; i++ {
+	for deadline := time.Now().Add(gateAttachFor); time.Now().Before(deadline); {
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
@@ -177,7 +178,7 @@ func (a *app) gateCallOrAttach(ctx context.Context, g *remote.Gate, h *gate.Hell
 	if last == nil {
 		last = err
 	}
-	return last
+	return fmt.Errorf("%w\nthe rollout may still be running on the Server; see `yoho releases`", last)
 }
 
 // gateHint is the step hint when the Gate cannot be reached.
