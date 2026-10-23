@@ -68,6 +68,9 @@ type HelloResult struct {
 	Verbs       []string   `json:"verbs"`
 	Platform    string     `json:"platform,omitempty"`
 	Apps        []AppGrant `json:"apps"`
+	// Rollouts: deploy and rollback accept Rollout and Attach, so a client
+	// can reconnect after its SSH session drops.
+	Rollouts bool `json:"rollouts,omitempty"`
 }
 
 func hello(ctx context.Context, c *call) (any, error) {
@@ -78,7 +81,7 @@ func hello(ctx context.Context, c *call) (any, error) {
 	res := HelloResult{
 		Protocol: remote.GateProtocol, Version: c.o.Version, Member: c.o.Member,
 		App: c.req.App, Destination: c.req.Destination, Verbs: members.Members[c.o.Member].Verbs,
-		Apps: grantsOf(c.o.Member),
+		Apps: grantsOf(c.o.Member), Rollouts: true,
 	}
 	if p, err := build.ServerPlatform(ctx, c.host); err == nil {
 		res.Platform = p
@@ -306,6 +309,11 @@ type DeployArgs struct {
 	Pull []string `json:"pull,omitempty"`
 	// Performer as the CLI sees it (user@host), recorded next to the Member.
 	Performer string `json:"performer,omitempty"`
+	// Rollout is an id the CLI picks for this deploy (sent when hello
+	// reports Rollouts); Attach reconnects to that rollout, running or
+	// finished, instead of starting a new one.
+	Rollout string `json:"rollout,omitempty"`
+	Attach  bool   `json:"attach,omitempty"`
 }
 
 func deployVerb(ctx context.Context, c *call) (any, error) {
@@ -321,6 +329,11 @@ func deployVerb(ctx context.Context, c *call) (any, error) {
 	for _, svc := range a.Built {
 		if !serviceRe.MatchString(svc) {
 			return nil, invalid(fmt.Sprintf("invalid Service name %q", svc))
+		}
+	}
+	if !c.o.RolloutWorker {
+		if res, err, ok := c.checkRollout(ctx, VerbDeploy, a.Rollout, a.Attach); ok {
+			return res, err
 		}
 	}
 	s, err := c.settings()
@@ -350,17 +363,21 @@ func deployVerb(ctx context.Context, c *call) (any, error) {
 			return nil, err
 		}
 	}
-	for _, ref := range a.Pull {
-		if !allowed[NormalizeRef(ref)] {
-			return nil, denied("pull "+ref+": not an image built for this deploy", "")
+	// The Gate that started a rollout already pulled; the worker only
+	// checks that the images are there.
+	if !c.o.RolloutWorker {
+		for _, ref := range a.Pull {
+			if !allowed[NormalizeRef(ref)] {
+				return nil, denied("pull "+ref+": not an image built for this deploy", "")
+			}
+			fmt.Fprintf(c.fw, "pulling %s\n", ref)
+			if err := c.host.Run(ctx, remote.Cmd{Script: "docker pull -q " + remote.Quote(ref), Stdout: io.Discard, Stderr: c.fw}); err != nil {
+				return nil, fmt.Errorf("pull %s: %w", ref, err)
+			}
 		}
-		fmt.Fprintf(c.fw, "pulling %s\n", ref)
-		if err := c.host.Run(ctx, remote.Cmd{Script: "docker pull -q " + remote.Quote(ref), Stdout: io.Discard, Stderr: c.fw}); err != nil {
-			return nil, fmt.Errorf("pull %s: %w", ref, err)
+		if err := c.pullImages(ctx, pol, r.Project); err != nil {
+			return nil, err
 		}
-	}
-	if err := c.pullImages(ctx, pol, r.Project); err != nil {
-		return nil, err
 	}
 	for _, svc := range sortedKeys(pol.Built) {
 		ref := pol.Built[svc]
@@ -369,6 +386,18 @@ func deployVerb(ctx context.Context, c *call) (any, error) {
 		}
 	}
 
+	if !c.o.RolloutWorker {
+		id, err := c.startRollout(VerbDeploy, a.Version, a.Rollout, a)
+		if err != nil {
+			return nil, err
+		}
+		return c.attachRollout(ctx, id)
+	}
+	return c.finishDeploy(ctx, s, r, a)
+}
+
+// finishDeploy is the detached worker: secrets, compose rollout, vetted record.
+func (c *call) finishDeploy(ctx context.Context, s *Settings, r *composefile.Result, a DeployArgs) (any, error) {
 	svcSecrets, gen, err := storedSecrets(c.req.App, c.req.Destination, r.Ext)
 	if err != nil {
 		return nil, err
@@ -389,7 +418,7 @@ func deployVerb(ctx context.Context, c *call) (any, error) {
 		ServiceSecrets: svcSecrets, Registry: s.Registry, Proxy: s.Proxy, RetainReleases: s.RetainReleases, Out: out,
 		Scoped: c.scoped(nil),
 	}
-	rel, err := deploy.Compose{}.Deploy(ctx, d)
+	rel, err := composeDeploy(ctx, d)
 	if err != nil {
 		return nil, secrets.RedactError(lockedError(err), values...)
 	}
@@ -398,6 +427,15 @@ func deployVerb(ctx context.Context, c *call) (any, error) {
 	}
 	rel.Secrets = nil
 	return rel, nil
+}
+
+// composeDeploy is deploy.Compose.Deploy; tests replace it to drop the client mid-rollout.
+var composeDeploy = func(ctx context.Context, d *plan.Deploy) (*release.Release, error) {
+	return deploy.Compose{}.Deploy(ctx, d)
+}
+
+var composeRollback = func(ctx context.Context, d *plan.Deploy, version string) (*release.Release, error) {
+	return deploy.Compose{}.Rollback(ctx, d, version)
 }
 
 // vet loads a Member's resolved compose project and checks it against the
@@ -683,6 +721,9 @@ func accessGeneration(app, dest string) (string, error) {
 type RollbackArgs struct {
 	Version   string `json:"version"`
 	Performer string `json:"performer,omitempty"`
+	// Rollout and Attach as in DeployArgs.
+	Rollout string `json:"rollout,omitempty"`
+	Attach  bool   `json:"attach,omitempty"`
 }
 
 func rollbackVerb(ctx context.Context, c *call) (any, error) {
@@ -707,6 +748,17 @@ func rollbackVerb(ctx context.Context, c *call) (any, error) {
 		return nil, err
 	}
 	c.audit["version"] = version
+	if !c.o.RolloutWorker {
+		if res, err, ok := c.checkRollout(ctx, VerbRollback, a.Rollout, a.Attach); ok {
+			return res, err
+		}
+		a.Version = version
+		id, err := c.startRollout(VerbRollback, version, a.Rollout, a)
+		if err != nil {
+			return nil, err
+		}
+		return c.attachRollout(ctx, id)
+	}
 	c.clearStaleLock()
 	d := &plan.Deploy{
 		App: c.req.App, Destination: c.req.Destination, Performer: c.performer(a.Performer),
@@ -714,7 +766,7 @@ func rollbackVerb(ctx context.Context, c *call) (any, error) {
 		RetainReleases: s.RetainReleases, Out: c.fw,
 		Scoped: c.scoped(func(compose []byte, rel *release.Release) error { return c.vetRollback(ctx, s, version, compose, rel) }),
 	}
-	rel, err := deploy.Compose{}.Rollback(ctx, d, version)
+	rel, err := composeRollback(ctx, d, version)
 	if err != nil {
 		return nil, lockedError(err)
 	}

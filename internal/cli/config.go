@@ -273,6 +273,7 @@ func runConfigCheck(cmd *cobra.Command, g *globals, offline bool) error {
 	}
 	keyCount = len(keys)
 	findings := composefile.Check(r, a.dest.Runtime, keys)
+	findings = append(findings, composefile.CheckCloudflareSSH(a.destName, a.dest, r.Project)...)
 	for _, warning := range config.RcloneWarnings(a.cfg) {
 		findings = append(findings, composefile.Finding{Level: composefile.LevelWarning, Message: warning})
 	}

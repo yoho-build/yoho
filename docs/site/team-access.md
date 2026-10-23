@@ -142,6 +142,8 @@ With scoped access, the CLI connects as `yoho-gate@<host from servers.*.ssh>` wi
 
 `rollback` returns only to Releases that the Gate deployed. The Gate checks them again with today's rules before it redeploys, including the limits it wrote into the Release's compiled compose file. A Release that the operator deployed can do anything the operator can, so the Gate refuses it: ask the operator to roll back, or deploy that version again.
 
+A Gate deploy or rollback is detached on the Server after images are loaded. If the Member's SSH session drops mid-rollout (exit 255) — for example SSH rides a Cloudflare Tunnel whose `cloudflared` is a Service of the App being deployed — the rollout still finishes and records the real Release status. `yoho deploy` reconnects and waits for that outcome; `yoho releases` shows it either way. While one Gate rollout runs, another deploy or rollback of that Destination is refused. `yoho config check` and `yoho plan` warn when `ssh: {via: cloudflare}` would go through a `cloudflared` in the same App.
+
 An operator who shares the Yoho file sets `YOHO_ACCESS=operator` to use full SSH. The `yoho access …` commands always use full SSH.
 
 ### Deploy from CI
