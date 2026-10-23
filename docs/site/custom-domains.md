@@ -53,7 +53,7 @@ A **static list in Yoho config** would still need an HTTP check at certificate t
 
 ### Scoped access
 
-`custom_domains` is a catch-all Proxy route that also mints certificates and makes the Proxy call the allow endpoint. `yoho access secrets push` records it together with its `allow` value. A Member's deploy may use custom domains only with exactly that `allow`; a plain catch-all grant is not enough. An absolute `allow` URL must not carry credentials (it is passed to kamal-proxy on the command line). See [Sharing one App with a team](team-access.md).
+`custom_domains` is a catch-all Proxy route that also mints certificates and makes the Proxy call the allow endpoint. `yoho access secrets push` records it together with its `allow` value. A Member's deploy may use custom domains only with exactly that `allow`; a plain catch-all grant is not enough. Keep secrets out of an absolute `allow` URL, query string included: kamal-proxy gets it on the command line and `yoho plan` prints it (userinfo is refused). Protect the endpoint by network instead. See [Sharing one App with a team](team-access.md).
 
 ## Cloudflare Tunnel / Cloudflare for SaaS (documented follow-up)
 

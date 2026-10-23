@@ -640,6 +640,11 @@ func routeList(r []string) string {
 	}
 	out := make([]string, len(r))
 	for i, h := range r {
+		// The allow endpoint may be an internal URL; Members see only
+		// that the route exists.
+		if strings.HasPrefix(h, customDomainsRoutePrefix) {
+			h = customDomainsRoutePrefix + "(operator's allow)"
+		}
 		out[i] = RouteLabel(h)
 	}
 	return strings.Join(out, ", ")

@@ -245,13 +245,13 @@ func TestValidate(t *testing.T) {
 		servers int
 		want    string
 	}{
-		"stateful proxy": {"services:\n  web:\n    image: x\n", config.ServiceExt{Stateful: true, Proxy: &config.ServiceProxy{}}, 1, "stateful"},
-		"ports":          {"services:\n  web:\n    image: x\n    ports: ['80:80']\n", config.ServiceExt{Proxy: &config.ServiceProxy{}}, 1, "publish ports"},
-		"container_name": {"services:\n  web:\n    image: x\n    container_name: web\n", config.ServiceExt{Proxy: &config.ServiceProxy{}}, 1, "container_name"},
-		"tls no hosts":   {"services:\n  web:\n    image: x\n", config.ServiceExt{Proxy: &config.ServiceProxy{TLS: true}}, 1, "tls requires hosts"},
-		"custom domains no tls": {"services:\n  web:\n    image: x\n", config.ServiceExt{Proxy: &config.ServiceProxy{CustomDomains: &config.CustomDomains{Allow: "/allow"}}}, 1, "requires tls: true"},
+		"stateful proxy":            {"services:\n  web:\n    image: x\n", config.ServiceExt{Stateful: true, Proxy: &config.ServiceProxy{}}, 1, "stateful"},
+		"ports":                     {"services:\n  web:\n    image: x\n    ports: ['80:80']\n", config.ServiceExt{Proxy: &config.ServiceProxy{}}, 1, "publish ports"},
+		"container_name":            {"services:\n  web:\n    image: x\n    container_name: web\n", config.ServiceExt{Proxy: &config.ServiceProxy{}}, 1, "container_name"},
+		"tls no hosts":              {"services:\n  web:\n    image: x\n", config.ServiceExt{Proxy: &config.ServiceProxy{TLS: true}}, 1, "tls requires hosts"},
+		"custom domains no tls":     {"services:\n  web:\n    image: x\n", config.ServiceExt{Proxy: &config.ServiceProxy{CustomDomains: &config.CustomDomains{Allow: "/allow"}}}, 1, "requires tls: true"},
 		"custom domains with hosts": {"services:\n  web:\n    image: x\n", config.ServiceExt{Proxy: &config.ServiceProxy{TLS: true, Hosts: []string{"a.example.com"}, CustomDomains: &config.CustomDomains{Allow: "/allow"}}}, 1, "cannot be set with proxy.hosts"},
-		"two servers":    {"services:\n  web:\n    image: x\n", config.ServiceExt{}, 2, "exactly one Server"},
+		"two servers":               {"services:\n  web:\n    image: x\n", config.ServiceExt{}, 2, "exactly one Server"},
 	}
 	for name, c := range cases {
 		t.Run(name, func(t *testing.T) {
