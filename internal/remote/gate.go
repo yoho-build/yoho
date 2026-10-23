@@ -133,16 +133,42 @@ func (g *Gate) Call(ctx context.Context, verb string, args any, payload io.Reade
 	if runErr != nil {
 		var ee *ExitError
 		if errors.As(runErr, &ee) && ee.Code == 255 {
-			return fmt.Errorf("gate on %s did not answer (exit %d): %s\nhint: check that `yoho access key add` authorized your key and `yoho access install` ran on the Server", g.Name(), ee.Code, strings.TrimSpace(ee.Stderr))
+			return &DisconnectError{Host: g.Name(), Code: ee.Code, Stderr: ee.Stderr}
 		}
 		if errors.As(runErr, &ee) {
 			// sshd connected but the Gate ended without a result (killed,
 			// or the Server went away mid-request).
-			return fmt.Errorf("gate on %s stopped without a result (exit %d)%s\nhint: see `yoho releases` and `yoho app ps`; a deploy may have finished on the Server", g.Name(), ee.Code, stderrSuffix(ee.Stderr))
+			return &DisconnectError{Host: g.Name(), Code: ee.Code, Stderr: ee.Stderr}
 		}
 		return runErr
 	}
-	return fmt.Errorf("gate on %s ended without a result", g.Name())
+	return &DisconnectError{Host: g.Name(), Code: 0, empty: true}
+}
+
+// DisconnectError is a Gate session that ended without a result or error
+// frame: the SSH connection dropped (exit 255) or the Gate was killed.
+// The rollout may still be running on the Server.
+type DisconnectError struct {
+	Host   string
+	Code   int
+	Stderr string
+	empty  bool // ssh exited 0 with no result frame
+}
+
+func (e *DisconnectError) Error() string {
+	if e.empty {
+		return fmt.Sprintf("gate on %s ended without a result", e.Host)
+	}
+	if e.Code == 255 {
+		return fmt.Sprintf("gate on %s did not answer (exit %d): %s\nhint: check that `yoho access key add` authorized your key and `yoho access install` ran on the Server; if a deploy was in progress, `yoho deploy` reconnects or `yoho releases` shows the outcome", e.Host, e.Code, strings.TrimSpace(e.Stderr))
+	}
+	return fmt.Sprintf("gate on %s stopped without a result (exit %d)%s\nhint: see `yoho releases` and `yoho app ps`; a deploy may have finished on the Server", e.Host, e.Code, stderrSuffix(e.Stderr))
+}
+
+// IsDisconnect reports whether err is a dropped Gate SSH session.
+func IsDisconnect(err error) bool {
+	var de *DisconnectError
+	return errors.As(err, &de)
 }
 
 func stderrSuffix(s string) string {
