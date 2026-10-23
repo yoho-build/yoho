@@ -266,3 +266,43 @@ func TestConfigCheckWarnsAboutSharedRcloneConfig(t *testing.T) {
 		}
 	}
 }
+
+func TestConfigCheckWarnsSelfRoutedCloudflareSSH(t *testing.T) {
+	oldRoot := release.Root
+	t.Cleanup(func() { release.Root = oldRoot })
+	p := appDir(t, "compose", "services:\n  web: {image: nginx, restart: unless-stopped}\n  cloudflared: {image: cloudflare/cloudflared:latest, restart: unless-stopped}\n")
+	cfg, err := config.Load(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	d := cfg.Destinations["production"]
+	d.SSH = &config.DestinationSSH{Via: "cloudflare", Hostname: "ssh.example.com"}
+	cfg.Destinations["production"] = d
+	data, err := json.Marshal(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(p, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	out, err := runCheck(t, p, "--offline")
+	if err != nil {
+		t.Fatalf("%v\n%s", err, out)
+	}
+	if !strings.Contains(out, "ssh.example.com") || !strings.Contains(out, "cloudflared") || !strings.Contains(out, "exit 255") {
+		t.Fatalf("missing self-routed SSH warning:\n%s", out)
+	}
+	e := checkEvent(t, out)
+	if e["ok"] != true || e["warnings"].(float64) < 1 {
+		t.Fatalf("check event: %v", e)
+	}
+
+	plain := appDir(t, "compose", "services:\n  web: {image: nginx, restart: unless-stopped}\n")
+	out, err = runCheck(t, plain, "--offline")
+	if err != nil {
+		t.Fatalf("%v\n%s", err, out)
+	}
+	if strings.Contains(out, "exit 255") {
+		t.Fatalf("warning without ssh.via cloudflare:\n%s", out)
+	}
+}

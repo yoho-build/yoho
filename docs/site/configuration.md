@@ -117,7 +117,7 @@ destinations:
 ```
 
 - `access: scoped` sends `deploy`, `rollback`, `releases`, `app ps/logs/stats`, `tui` and `ui` through the Gate as the `gate_user`, and makes every other command that connects fail fast. `YOHO_ACCESS=operator|scoped` overrides it per shell. This option needs the compose runtime. See [Sharing one App with a team](team-access.md).
-- `ssh.via: cloudflare` reaches the Destination's only Server through a Cloudflare Tunnel `ssh://` ingress (`cloudflared access ssh --hostname …` as ssh's ProxyCommand), on the operator path and the scoped path. `hostname` must be a plain DNS name.
+- `ssh.via: cloudflare` reaches the Destination's only Server through a Cloudflare Tunnel `ssh://` ingress (`cloudflared access ssh --hostname …` as ssh's ProxyCommand), on the operator path and the scoped path. `hostname` must be a plain DNS name. `yoho config check` and `yoho plan` warn when that hostname would be routed by a `cloudflared` Service in the same App (a deploy that restarts the connector drops the SSH session). Gate rollouts still finish on the Server; see [Sharing one App with a team](team-access.md).
 
 ### Migration cutover (`migrate`)
 

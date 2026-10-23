@@ -63,6 +63,9 @@ type runner struct {
 	facts              []ServiceFailure
 	diagnosed          bool
 	omitDiagnosticText bool // rollback cannot resolve all retained secret values
+	// restart, when non-empty, limits cutover starts to these Services.
+	// removeOrphans and route cleanup still see every Service.
+	restart []string
 }
 
 // redact masks secret values in s.
@@ -352,7 +355,7 @@ func (r *runner) cutover(ctx context.Context, plans []servicePlan) (err error) {
 		start := time.Now()
 		var batch []servicePlan
 		for _, sp := range level {
-			if !sp.proxied() {
+			if !sp.proxied() && restartSelected(r.restart, sp.Name) {
 				batch = append(batch, sp)
 			}
 		}
@@ -366,7 +369,7 @@ func (r *runner) cutover(ctx context.Context, plans []servicePlan) (err error) {
 			}
 		}
 		for _, sp := range level {
-			if !sp.proxied() {
+			if !sp.proxied() || !restartSelected(r.restart, sp.Name) {
 				continue
 			}
 			failedService = sp.Name

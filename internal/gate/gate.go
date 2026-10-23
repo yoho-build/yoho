@@ -39,6 +39,9 @@ type Options struct {
 	// Boot is the kernel boot id, recorded in deploy locks with the pid
 	// (default: read from /proc; "" disables stale-lock detection).
 	Boot string
+	// RolloutWorker is set on the detached process that finishes a deploy
+	// or rollback after the Member's SSH session is gone.
+	RolloutWorker bool
 }
 
 // DefaultRequestTimeout is how long the Gate waits for a request line.
@@ -66,16 +69,20 @@ type call struct {
 
 type handler func(ctx context.Context, c *call) (any, error)
 
-var handlers = map[string]handler{
-	VerbHello:    hello,
-	VerbPS:       ps,
-	VerbStats:    stats,
-	VerbLogs:     logs,
-	VerbDash:     dashVerb,
-	VerbReleases: releasesVerb,
-	verbImages:   imagesVerb,
-	VerbDeploy:   deployVerb,
-	VerbRollback: rollbackVerb,
+var handlers map[string]handler
+
+func init() {
+	handlers = map[string]handler{
+		VerbHello:    hello,
+		VerbPS:       ps,
+		VerbStats:    stats,
+		VerbLogs:     logs,
+		VerbDash:     dashVerb,
+		VerbReleases: releasesVerb,
+		verbImages:   imagesVerb,
+		VerbDeploy:   deployVerb,
+		VerbRollback: rollbackVerb,
+	}
 }
 
 func denied(msg, hint string) error {
@@ -123,7 +130,10 @@ func Serve(ctx context.Context, o Options) int {
 	c := &call{o: o, req: req, fw: fw, out: out, payload: payload, audit: map[string]any{}, cancel: cancel}
 	result, err := c.serve(ctx)
 	code := ExitOK
-	if err != nil {
+	switch {
+	case errors.Is(err, errDetached):
+		c.audit["detached"] = true
+	case err != nil:
 		ge := gateError(err)
 		code = ExitFailed
 		if ge.Code == "denied" {
@@ -131,8 +141,13 @@ func Serve(ctx context.Context, o Options) int {
 		}
 		fw.Fail(ge)
 		entry.Error = truncate(ge.Message, 500)
-	} else if werr := fw.Result(result); werr != nil {
-		code = ExitFailed
+	default:
+		if werr := fw.Result(result); werr != nil {
+			code = ExitFailed
+		}
+	}
+	if o.RolloutWorker {
+		finishRolloutState(req.App, req.Destination, result, err)
 	}
 	entry.Exit = code
 	entry.Seconds = o.Now().Sub(start).Seconds()
@@ -251,6 +266,18 @@ func (w *clientWriter) onError(cancel func()) {
 	if w.failed {
 		cancel()
 	}
+}
+
+func (w *clientWriter) gone() bool {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.failed
+}
+
+func (w *clientWriter) markGone() {
+	w.mu.Lock()
+	w.failed = true
+	w.mu.Unlock()
 }
 
 var errClientGone = errors.New("client disconnected")

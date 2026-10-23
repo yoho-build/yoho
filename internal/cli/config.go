@@ -88,7 +88,7 @@ func schemaCmd(g *globals) *cobra.Command {
 }
 
 func secretsCmd(g *globals) *cobra.Command {
-	c := &cobra.Command{Use: "secrets", Short: "Inspect secrets (values are never printed unless revealed on a terminal)"}
+	c := &cobra.Command{Use: "secrets", Short: "Inspect or rotate secrets (values are never printed unless revealed on a terminal)"}
 	c.AddCommand(&cobra.Command{
 		Use:   "list",
 		Short: "Resolve secrets and list keys, sources and lengths",
@@ -134,6 +134,7 @@ func secretsCmd(g *globals) *cobra.Command {
 	}
 	p.Flags().BoolVar(&reveal, "reveal", false, "Confirm printing values")
 	c.AddCommand(p)
+	c.AddCommand(secretsRotateCmd(g))
 	return c
 }
 
@@ -272,6 +273,7 @@ func runConfigCheck(cmd *cobra.Command, g *globals, offline bool) error {
 	}
 	keyCount = len(keys)
 	findings := composefile.Check(r, a.dest.Runtime, keys)
+	findings = append(findings, composefile.CheckCloudflareSSH(a.destName, a.dest, r.Project)...)
 	for _, warning := range config.RcloneWarnings(a.cfg) {
 		findings = append(findings, composefile.Finding{Level: composefile.LevelWarning, Message: warning})
 	}

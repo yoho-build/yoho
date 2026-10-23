@@ -7,13 +7,13 @@ Global flags (every command): `-c, --config FILE`, `-d, --destination NAME` (def
 | Command | Description |
 |---|---|
 | `init` | Create `yoho.yml`, `.yoho/secrets`, sample hooks. |
-| `config check [--offline]` | Validate Yoho file, compose files, `x-yoho` and secret names; resolves local secrets only when `secrets.nonempty` is nonempty. `--offline` (or `YOHO_OFFLINE=1`) never resolves secrets. Exit 0 ok, 1 findings, 2 files could not be loaded. See [CI check](#ci-check). |
+| `config check [--offline]` | Validate Yoho file, compose files, `x-yoho` and secret names; resolves local secrets only when `secrets.nonempty` is nonempty. `--offline` (or `YOHO_OFFLINE=1`) never resolves secrets. Exit 0 ok, 1 findings, 2 files could not be loaded. Warns when `ssh.via: cloudflare` would go through a `cloudflared` Service in the same App. See [CI check](#ci-check). |
 | `config show` | Print the resolved Yoho file with defaults as JSON. |
 | `schema [--ext]` | JSON Schema of the Yoho file, or of `x-yoho` with `--ext`. |
 | `setup [--plan] [-y] [--containerd-image-store]` | Provision the Destination's Servers (interactive). `--plan` only shows the checklist, `-y` applies every needed step. See [Server setup](setup.md). |
 | `plan [--version V] [--detailed-exitcode]` | Read-only diff of the configuration against the Server: containers, Proxy routes, Proxy, Tunnel, Scheduled Jobs. Nothing is built or changed. With `--detailed-exitcode`: exit 0 no changes, 1 error, 2 changes. |
 | `apply [--auto-approve] [--version V] [--skip-build] [--cutover-resume] [--cutover-allow-empty]` | Show the plan, ask `yes`, then build, ship, deploy, converge Tunnel and Scheduled Jobs, and remove what was deleted from config. Refuses without a terminal unless `--auto-approve`; `--json` requires `--auto-approve`. With a Destination `migrate` block, cuts over once; see [Migration cutover](configuration.md#migration-cutover-migrate). |
-| `deploy [--skip-build] [--version V] [--cutover-resume] [--cutover-allow-empty]` | Kamal-compatible `apply --auto-approve` without printing the plan (also converges Tunnel and Scheduled Jobs, and runs a pending migration cutover). Version defaults to the git SHA. `--cutover-resume` continues an unfinished cutover; `--cutover-allow-empty` accepts a `migrate.stop` that matches no running container. |
+| `deploy [--skip-build] [--version V] [--cutover-resume] [--cutover-allow-empty]` | Kamal-compatible `apply --auto-approve` without printing the plan (also converges Tunnel and Scheduled Jobs, and runs a pending migration cutover). Version defaults to the git SHA. `--cutover-resume` continues an unfinished cutover; `--cutover-allow-empty` accepts a `migrate.stop` that matches no running container. A Gate deploy whose SSH session drops (exit 255) still finishes on the Server; `yoho deploy` reconnects, or `yoho releases` shows the outcome. |
 | `releases` | List Releases on the Server, newest first. |
 | `rollback VERSION` | Redeploy a previous Release. Volumes and migrations are not reverted. |
 | `rollback --cutover [--force]` | Undo the migration cutover: stop this App's containers, start the old ones, restore the saved tunnel ingress. Refuses when the ingress changed since, unless `--force`. |
@@ -34,6 +34,7 @@ Global flags (every command): `-c, --config FILE`, `-d, --destination NAME` (def
 | `tunnel up \| status \| down` | Managed Cloudflare Tunnel (cloudflared connector; Quick Tunnel without a token). |
 | `secrets list` | Keys, sources, lengths. |
 | `secrets print KEY... --reveal` | Print values; terminal only. |
+| `secrets rotate [SERVICE...] [--dry-run]` | Re-resolve secrets (no rebuild), restart only Services whose values changed, record the current Release again. Needs a checkout of the deployed Version. Named Services must be the only ones that changed. `--dry-run` lists what would restart. |
 | `backup run [JOB]` | Take a Backup now. |
 | `backup list [JOB]` | Stored Backups, newest first. |
 | `backup pull [JOB] [--to DIR] [--limit N]` | Mirror new archives of an `archive` target to a local directory; never deletes. |

@@ -65,6 +65,16 @@ type Deploy struct {
 	// Scoped is set by the Gate for a Member's deploy or rollback (ADR
 	// 0011); nil for the operator.
 	Scoped *Scoped
+
+	// Restart, when non-empty, restarts only these Services through the
+	// usual zero-downtime cutover. Other Services stay running. The compiled
+	// compose and Release still describe the whole App. Used by
+	// `yoho secrets rotate`. An empty list is treated as unset (every Service).
+	Restart []string
+	// RestartFrom is the Release a Restart compared secrets against. Under
+	// the deploy lock the runtime refuses if it is no longer current, and
+	// Compose restores its image IDs.
+	RestartFrom *release.Release
 }
 
 // Scoped is what the Gate adds to a runtime deploy or rollback.
