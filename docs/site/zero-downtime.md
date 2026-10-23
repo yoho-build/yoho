@@ -63,6 +63,8 @@ yoho proxy status   # container and routes
 yoho proxy logs
 ```
 
+`yoho secrets rotate` uses the same cutover for Services whose secret values changed and does not rebuild images.
+
 ## Rollback
 
 `yoho releases` lists Releases (image digests and compiled compose). `yoho rollback VERSION` redeploys one with the same zero-downtime cutover. Volumes and migrations are not reverted. The last `retain_releases` (5) are kept.

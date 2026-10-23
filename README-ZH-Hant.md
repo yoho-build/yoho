@@ -140,7 +140,7 @@ volumes: { pgdata: {} }
 | `plan`, `apply`, `deploy`, `releases`, `rollback VERSION` | 審閱與發佈（Release）生命週期 |
 | `app ps\|logs\|stats\|exec` | 檢查執行中的應用程式 |
 | `proxy boot\|status\|logs`, `tunnel up\|status\|down` | 代理與 Cloudflare Tunnel |
-| `secrets list\|print` | 檢查機密 |
+| `secrets list\|print\|rotate` | 檢查或輪替機密 |
 | `backup run\|list\|restore`, `schedule install\|status\|remove` | 備份與排程工作 |
 | `swarm init\|join\|status` | Swarm 執行環境 |
 | `builder status\|setup` | 本機建置機器（Builder） |

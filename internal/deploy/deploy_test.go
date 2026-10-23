@@ -419,3 +419,66 @@ func TestProxyHealthProbeSavedRollback(t *testing.T) {
 		}
 	}
 }
+
+func TestDeployRestartOnlyAffectedServices(t *testing.T) {
+	withRoot(t)
+	ctx := context.Background()
+	h := &dockerHost{local: &remote.Local{}, respond: respond(nil)}
+	var out bytes.Buffer
+	d := testDeploy(t, h, &out)
+	first, err := (Compose{}).Deploy(ctx, d)
+	if err != nil {
+		t.Fatalf("first deploy: %v\n%s", err, out.String())
+	}
+	rotated := "rotated-secret-value-ABC"
+	d.ServiceSecrets["web"]["SECRET_KEY_BASE"] = rotated
+	// secrets rotate refuses on any non-secret drift; a value change alone
+	// must not look like one.
+	changes, err := Compose{}.Diff(ctx, d)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, ch := range changes {
+		for _, r := range ch.Reasons {
+			if strings.HasPrefix(r, "config changed") || r == "proxy settings changed" {
+				t.Fatalf("secret change shows as drift: %+v", ch)
+			}
+		}
+	}
+	d.Restart = []string{"web"}
+	stale := *first
+	stale.SecretsGeneration = "OLD"
+	d.RestartFrom = &stale
+	if _, err := (Compose{}).Deploy(ctx, d); err == nil || !strings.Contains(err.Error(), "changed since secrets were compared") {
+		t.Fatalf("stale base: %v", err)
+	}
+	d.RestartFrom = first
+	h.scripts = nil
+	out.Reset()
+	rel, err := Compose{}.Deploy(ctx, d)
+	if err != nil {
+		t.Fatalf("rotate deploy: %v\n%s\n%s", err, out.String(), h.all())
+	}
+	if rel.Status != "deployed" || rel.SecretsGeneration == "" {
+		t.Fatalf("release %+v", rel)
+	}
+	second := h.all()
+	if !strings.Contains(second, "'--scale' 'web=2' 'web'") {
+		t.Fatalf("web not restarted:\n%s", second)
+	}
+	for _, leaked := range []string{
+		"'up' '-d' '--no-deps' 'cloudflared' 'db'",
+		"'up' '-d' '--no-recreate' 'db'",
+		"db:migrate",
+		"'up' '-d' '--no-deps' 'cloudflared'",
+		"'up' '-d' '--no-deps' 'db'",
+	} {
+		if strings.Contains(second, leaked) {
+			t.Fatalf("unaffected Service or release command ran (%s):\n%s", leaked, second)
+		}
+	}
+	progress := out.String()
+	if strings.Contains(progress, rotated) || strings.Contains(progress, webSecret) || strings.Contains(progress, tunnelSecret) {
+		t.Fatalf("secret value in output:\n%s", progress)
+	}
+}

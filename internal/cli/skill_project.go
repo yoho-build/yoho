@@ -253,7 +253,7 @@ Take VERSION from ` + "`yoho releases`" + `. Rollback does not revert volumes or
 {{else}}
 No secrets files or providers are configured.
 {{end}}
-Never print, log or commit secret values. ` + "`yoho secrets list`" + ` shows keys only.
+Never print, log or commit secret values. ` + "`yoho secrets list`" + ` shows keys only. After rotating a value in the password manager, ` + "`yoho secrets rotate`" + ` restarts only the Services that changed.
 
 ## Backups
 {{if .Jobs}}
