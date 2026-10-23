@@ -51,6 +51,12 @@ APP_GREETING=hello-from-yoho
 
 In a real App that line is `$(op read …)` or `$(bw get …)`. Postgres gets `POSTGRES_PASSWORD` from `x-yoho.generate` on the Server, once. See [Secrets](secrets.md).
 
+Yoho names each Release after the git commit, so make the copy a repository (`.gitignore` keeps `.yoho/secrets` out of it):
+
+```sh
+git init -q && git add -A && git commit -qm "Quickstart"
+```
+
 ## 4. Check and provision
 
 ```sh
@@ -97,6 +103,7 @@ while true; do curl -fsS -o /dev/null -w "%{http_code} %{time_total}\n" "$url/up
 Then:
 
 ```sh
+git commit -qam "hello-v2"
 yoho deploy
 curl -fsS "$url/version"   # marker hello-v2
 ```
@@ -105,7 +112,7 @@ curl -fsS "$url/version"   # marker hello-v2
 
 ## 7. Change a secret, no web downtime
 
-Change the resolved value and redeploy. `--skip-build` reuses the images you just shipped. ([`yoho secrets rotate`](secrets.md#rotating-values) does the same from a checkout of the deployed Version and restarts only the Services whose values changed.)
+Change the resolved value and redeploy. `--skip-build` reuses the images you just shipped (`.yoho/secrets` is git-ignored, so the Version stays the same). ([`yoho secrets rotate`](secrets.md#rotating-values) does the same from a checkout of the deployed Version and restarts only the Services whose values changed.)
 
 ```sh
 # edit .yoho/secrets: APP_GREETING=hello-rotated
@@ -117,6 +124,14 @@ curl -fsS "$url/greeting"  # sha256_8 changed
 `yoho plan` reports `secrets changed` on Services that consume the key. `web` updates in place through the Proxy. `worker` is replaced stop-first again. Do not rotate `POSTGRES_PASSWORD` in this demo: that is a generated secret on the Stateful Service, and changing it is a planned database step, not a Proxy cutover.
 
 Keep a request loop on `/up` during this deploy too. The greeting endpoint never returns the value.
+
+## 8. Clean up
+
+The Quick Tunnel URL is public and `POST /jobs` takes anyone's input. When the demo is over:
+
+```sh
+yoho tunnel down
+```
 
 ## Monthly cost
 

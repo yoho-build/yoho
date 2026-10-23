@@ -21,6 +21,9 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
+// maxPayload is the largest POST /jobs body, in bytes.
+const maxPayload = 256
+
 // marker is compiled into the binary so a one-line edit changes the image.
 const marker = "hello-v1"
 
@@ -130,9 +133,14 @@ func serve() error {
 			}
 			writeJSON(w, out)
 		case http.MethodPost:
-			body, err := io.ReadAll(io.LimitReader(r.Body, 1<<20))
+			// The demo is public behind a Quick Tunnel: keep payloads small.
+			body, err := io.ReadAll(io.LimitReader(r.Body, maxPayload+1))
 			if err != nil {
 				http.Error(w, "body", http.StatusBadRequest)
+				return
+			}
+			if len(body) > maxPayload {
+				http.Error(w, "payload too large", http.StatusRequestEntityTooLarge)
 				return
 			}
 			payload := strings.TrimSpace(string(body))

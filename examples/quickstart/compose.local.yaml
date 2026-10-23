@@ -5,13 +5,13 @@ services:
     environment:
       POSTGRES_PASSWORD: localdev
     ports:
-      - "5432:5432"
+      - "127.0.0.1:5432:5432"
   web:
     environment:
       POSTGRES_PASSWORD: localdev
       APP_GREETING: hello-local
     ports:
-      - "8080:8080"
+      - "127.0.0.1:8080:8080"
   worker:
     environment:
       POSTGRES_PASSWORD: localdev
