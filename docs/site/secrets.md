@@ -112,5 +112,6 @@ Each Service receives only what it declares. Apps read files via the `*_FILE` co
 - A provider call that runs longer than 3 s prints "waiting for secrets provider approval…" (`step_wait` in `--json`). On a terminal Yoho reruns an approval timeout once; set `--secrets-retries N` or `YOHO_SECRETS_RETRIES` to change it (default 0 without a terminal). The first provider value is read alone, so one approval covers the rest.
 - `yoho secrets list` shows keys, sources, and lengths. `yoho secrets print KEY --reveal` works only on a terminal.
 - `yoho secrets rotate [service...]` re-resolves values from the provider with no rebuild and no code change, shows which Services changed (names only), and does a zero-downtime rolling restart of only those Services. Stateful Services follow their normal stop-first rules. It records the current Release again, so its pre-rotation values are not kept. `--dry-run` lists what would restart.
+- A timed walkthrough of a secret change is in the [5-minute quickstart](quickstart.md#7-change-a-secret-no-web-downtime).
 - Build-time secrets: list keys in `builder.secrets` and use `RUN --mount=type=secret`.
 - Server-side jobs (Scheduled Backups) read stored files, not your password manager.

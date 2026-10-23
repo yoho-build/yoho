@@ -6,6 +6,7 @@ const site = 'https://yohobuild.com'
 
 const guide = [
   ['Getting started', 'getting-started'],
+  ['5-minute quickstart', 'quickstart'],
   ['Set up with your AI agent', 'agents'],
   ['Configuration', 'configuration'],
   ['Secrets', 'secrets'],
