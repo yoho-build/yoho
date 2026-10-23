@@ -127,6 +127,16 @@ func (c Compose) Deploy(ctx context.Context, d *plan.Deploy) (_ *release.Release
 			}
 		}()
 	}
+	if err := CheckRestartBase(ctx, h, d); err != nil {
+		return nil, err
+	}
+	if b := d.RestartFrom; len(d.Restart) > 0 && b != nil {
+		// A rotate changes secrets only: run the image the Release ran,
+		// even if its tag was rebuilt since.
+		if err := r.pinImages(ctx, b.Images, b.ImageIDs, b.Built, b.Version); err != nil {
+			return nil, err
+		}
+	}
 
 	// Read-only preflight must precede generated values, env/App files and
 	// Release records as well as runtime operations. The route plan does not

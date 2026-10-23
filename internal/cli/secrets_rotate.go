@@ -16,6 +16,7 @@ import (
 	"github.com/yoho-build/yoho/internal/deploy"
 	"github.com/yoho-build/yoho/internal/plan"
 	"github.com/yoho-build/yoho/internal/release"
+	"github.com/yoho-build/yoho/internal/remote"
 	"github.com/yoho-build/yoho/internal/version"
 )
 
@@ -27,12 +28,15 @@ func secretsRotateCmd(g *globals) *cobra.Command {
 		Long: `Re-resolve secrets from the configured provider (1Password, Bitwarden, or
 .yoho/secrets) without rebuilding images or changing code. Services whose
 values changed are restarted through the Proxy (zero downtime). Stateful
-Services follow their normal stop-first rules. The current Release is
-recorded again with the new secrets generation; yoho rollback does not
-bring old secret values back (restore them in the provider and rotate).
+Services follow their normal stop-first rules. pre-deploy and post-deploy
+Hooks run with YOHO_COMMAND="secrets rotate". The current Release is
+recorded again with the new secrets generation, so its old values are not
+kept: to undo, restore them in the provider and rotate again. (Rolling
+back to an earlier Version still runs that Version's secrets.)
 
-The local compose files must be the deployed Version (same git commit and
-uncommitted changes), so rotate changes secrets and nothing else.
+The local project must match the deployed one (same git commit and
+uncommitted changes, and no other config change), so rotate changes
+secrets and nothing else.
 
 Pass Service names to require that only those changed. --dry-run lists
 what would restart and changes nothing. Secret values are never printed.`,
@@ -155,6 +159,10 @@ func (a *app) rotateSecrets(ctx context.Context, services []string, dryRun bool)
 		}
 		changed = intersectServices(changed, services)
 	}
+	if err = a.checkRotateConfig(ctx, d); err != nil {
+		step.Fail(err, "deploy those changes with `yoho deploy`, or undo them, then rotate")
+		return &silentError{err}
+	}
 	if len(changed) == 0 {
 		step.Done("no values changed")
 	} else {
@@ -175,10 +183,14 @@ func (a *app) rotateSecrets(ctx context.Context, services []string, dryRun bool)
 	if err != nil {
 		return err
 	}
-	d.Restart = changed
+	d.Restart, d.RestartFrom = changed, cur
 	rel, err := a.rollout(ctx, s, d, a.runtime())
 	if err != nil {
 		return err
+	}
+	// Scoped deploys read the generation the operator last pushed.
+	if err := hosts[0].Host.Run(ctx, remote.Cmd{Script: "test -f " + remote.Quote(release.AccessSecretsFile(a.cfg.App, a.destName))}); err == nil {
+		u.Warn("Members' scoped deploys still use the secrets last pushed; run `yoho access secrets push`")
 	}
 	u.Finished(nil, fmt.Sprintf("Rotated secrets for %s@%s on %s in %s; restarted %s",
 		a.cfg.App, shortVersion(rel.Version), a.destName, time.Since(start).Round(100*time.Millisecond), strings.Join(changed, ", ")))
@@ -202,6 +214,39 @@ func (a *app) checkRotateVersion(deployed string) error {
 	}
 	if local != deployed {
 		return fmt.Errorf("local checkout is %s but %s runs %s", shortVersion(local), a.destName, shortVersion(deployed))
+	}
+	return nil
+}
+
+// checkRotateConfig refuses when the local project differs from the
+// deployed one in more than secrets (a git-ignored .env, say): rotate
+// recompiles it, so that change would ship too.
+func (a *app) checkRotateConfig(ctx context.Context, d *plan.Deploy) error {
+	p, ok := a.runtime().(plan.Planner)
+	if !ok {
+		return nil
+	}
+	changes, err := p.Diff(ctx, d)
+	if err != nil {
+		return err
+	}
+	var drift []string
+	for _, ch := range changes {
+		if ch.Kind != "service" {
+			continue
+		}
+		if ch.Action == plan.ActionDelete {
+			drift = append(drift, ch.Name+": no longer in the compose files")
+			continue
+		}
+		for _, r := range ch.Reasons {
+			if strings.HasPrefix(r, "config changed") || r == "proxy settings changed" || r == "release_command changed" {
+				drift = append(drift, ch.Name+": "+r)
+			}
+		}
+	}
+	if len(drift) > 0 {
+		return fmt.Errorf("the local project differs from the deployed one in more than secrets (%s)", strings.Join(drift, "; "))
 	}
 	return nil
 }

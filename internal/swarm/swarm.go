@@ -185,6 +185,9 @@ func (Runtime) Deploy(ctx context.Context, d *plan.Deploy) (_ *release.Release, 
 			err = uerr
 		}
 	}()
+	if err := deploy.CheckRestartBase(ctx, h, d); err != nil {
+		return nil, err
+	}
 
 	pinHost, err := checkSwarm(ctx, d)
 	if err != nil {

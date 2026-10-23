@@ -125,7 +125,7 @@ func DetectChangedServices(ctx context.Context, d *plan.Deploy, cur *release.Rel
 func readRemoteSecretsGeneration(ctx context.Context, h remote.Host, dir string) (map[string]map[string]string, error) {
 	// A missing generation would make every Service look changed. macOS ls
 	// colors names under CLICOLOR_FORCE (see prune).
-	listing, err := h.Output(ctx, remote.Cmd{Script: "set -eu\nif [ ! -d " + remote.Quote(dir) + " ]; then echo 'secrets generation " + path.Base(dir) + " is gone; run yoho deploy' >&2; exit 1; fi\nenv -u CLICOLOR_FORCE -u CLICOLOR ls -1 " + remote.Quote(dir)})
+	listing, err := h.Output(ctx, remote.Cmd{Script: "set -eu\nif [ ! -d " + remote.Quote(dir) + " ]; then echo " + remote.Quote("secrets generation "+path.Base(dir)+" is gone; run yoho deploy") + " >&2; exit 1; fi\nenv -u CLICOLOR_FORCE -u CLICOLOR ls -1 " + remote.Quote(dir)})
 	if err != nil {
 		return nil, fmt.Errorf("list secrets generation: %w", err)
 	}
@@ -164,6 +164,24 @@ func readRemoteSecretsGeneration(ctx context.Context, h remote.Host, dir string)
 		}
 	}
 	return out, nil
+}
+
+// CheckRestartBase runs under the deploy lock: a Restart deploy compared
+// secrets against d.RestartFrom, so that must still be the current Release.
+func CheckRestartBase(ctx context.Context, h remote.Host, d *plan.Deploy) error {
+	if len(d.Restart) == 0 || d.RestartFrom == nil {
+		return nil
+	}
+	dir := release.AppDir(d.App, d.Destination)
+	link, err := h.Output(ctx, remote.Cmd{Script: "readlink " + remote.Quote(path.Join(dir, "current")) + " 2>/dev/null || true"})
+	if err != nil {
+		return err
+	}
+	cur, err := readRelease(ctx, h, path.Join(dir, "releases", path.Base(strings.TrimSpace(link)), "release.json"))
+	if err != nil || cur.Version != d.RestartFrom.Version || cur.SecretsGeneration != d.RestartFrom.SecretsGeneration {
+		return fmt.Errorf("the current Release of %s/%s changed since secrets were compared; run yoho secrets rotate again", d.App, d.Destination)
+	}
+	return nil
 }
 
 // restartSelected reports whether name should be started on this run.

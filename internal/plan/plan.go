@@ -71,6 +71,10 @@ type Deploy struct {
 	// compose and Release still describe the whole App. Used by
 	// `yoho secrets rotate`. An empty list is treated as unset (every Service).
 	Restart []string
+	// RestartFrom is the Release a Restart compared secrets against. Under
+	// the deploy lock the runtime refuses if it is no longer current, and
+	// Compose restores its image IDs.
+	RestartFrom *release.Release
 }
 
 // Scoped is what the Gate adds to a runtime deploy or rollback.
