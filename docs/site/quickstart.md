@@ -57,6 +57,8 @@ Yoho names each Release after the git commit, so make the copy a repository (`.g
 git init -q && git add -A && git commit -qm "Quickstart"
 ```
 
+If `git commit` asks who you are, set `git config user.name` and `user.email` first; without a commit there is no Version to deploy.
+
 ## 4. Check and provision
 
 ```sh
@@ -169,6 +171,7 @@ Optional voice-over beats: Compose stays the source of truth; secrets are files,
 
 ```sh
 cd examples/quickstart
+docker compose -f compose.yaml -f compose.local.yaml run --rm --build web /app migrate
 docker compose -f compose.yaml -f compose.local.yaml up --build
 ```
 

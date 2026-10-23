@@ -19,9 +19,10 @@ Needs Docker. This overlay is not loaded by Yoho:
 
 ```sh
 docker compose -f compose.yaml -f compose.local.yaml run --rm --build web /app migrate
-docker compose -f compose.yaml -f compose.local.yaml up --build
+docker compose -f compose.yaml -f compose.local.yaml up -d --build
 curl -fsS http://127.0.0.1:8080/up
 curl -fsS -X POST --data 'from-laptop' http://127.0.0.1:8080/jobs
+docker compose -f compose.yaml -f compose.local.yaml down
 ```
 
 `APP_GREETING` and `POSTGRES_PASSWORD` stay out of `compose.yaml`. Yoho delivers them as files at `/run/secrets`; the local overlay uses environment variables.

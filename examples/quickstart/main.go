@@ -194,15 +194,21 @@ code,pre{background:#eef4f1;padding:.1rem .35rem}
 `, html.EscapeString(marker), html.EscapeString(os.Getenv("YOHO_VERSION")), html.EscapeString(host), html.EscapeString(prefix), length)
 	})
 
-	srv := &http.Server{Addr: ":8080", Handler: mux, ReadHeaderTimeout: 5 * time.Second}
+	srv := &http.Server{Addr: ":8080", Handler: mux, ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 10 * time.Second, WriteTimeout: 30 * time.Second}
+	shutdown := make(chan error, 1)
 	go func() {
 		<-ctx.Done()
 		shut, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
-		_ = srv.Shutdown(shut)
+		shutdown <- srv.Shutdown(shut)
 	}()
 	log.Printf("listen :8080 %s", marker)
-	return srv.ListenAndServe()
+	if err := srv.ListenAndServe(); !errors.Is(err, http.ErrServerClosed) {
+		return err
+	}
+	// ListenAndServe returns as soon as Shutdown starts; let in-flight
+	// requests finish before the pool closes.
+	return <-shutdown
 }
 
 func runWorker() error {
