@@ -69,7 +69,9 @@ memory, disk, Docker), the App's containers with health and resource usage,
 the Proxy, Release history, and container logs.
 
 Everything is read over SSH; nothing is installed or left running on the
-Servers. Keys: tab/←→ switch Server, ↑↓ select, enter logs, r refresh, q quit.`,
+Servers. Keys: tab/←→ switch Server, ↑↓ select, d details, enter logs,
+r refresh, q quit. Details show CPU, memory, network and disk I/O, and PIDs;
+esc returns to the overview.`,
 		Example: "  yoho tui\n  yoho tui -d staging --interval 10s",
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			a, err := g.load(cmd)

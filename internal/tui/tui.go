@@ -30,6 +30,7 @@ type Model struct {
 	Server   int // selected Server tab
 	Sel      int // selected row: 0 is the Proxy when present, then containers
 	Logs     *LogView
+	Details  *DetailView
 	Color    bool
 	Now      time.Time
 	Interval time.Duration
@@ -157,7 +158,7 @@ const (
 
 // Update applies a key to the model.
 func (m *Model) Update(k Key, height int) Action {
-	if k == KeyCtrlC || k == "q" && m.Logs == nil {
+	if k == KeyCtrlC || k == "q" && m.Logs == nil && m.Details == nil {
 		return ActQuit
 	}
 	if m.Logs != nil {
@@ -182,6 +183,9 @@ func (m *Model) Update(k Key, height int) Action {
 		}
 		return ActNone
 	}
+	if m.Details != nil {
+		return m.updateDetails(k, height)
+	}
 	n := 0
 	if m.Snap != nil {
 		n = len(m.Snap.Servers)
@@ -203,13 +207,17 @@ func (m *Model) Update(k Key, height int) Action {
 		m.Sel--
 	case KeyDown, "j":
 		m.Sel++
-	case KeyEnter:
+	case KeyEnter, "d":
 		rows := m.rows()
 		m.clamp()
 		if len(rows) == 0 {
 			return ActNone
 		}
 		c := rows[m.Sel]
+		if k == "d" {
+			m.Details = &DetailView{Server: m.server().Name, Container: c.Name, ID: c.ID}
+			return ActNone
+		}
 		m.Logs = &LogView{Server: m.server().Name, Container: c.Name, Service: c.Service, Loading: true}
 		return ActLogs
 	}

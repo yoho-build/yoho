@@ -16,6 +16,21 @@ yoho ui -d staging --port 7300 --no-open
 
 Both run on your machine and read the Servers over SSH, like `yoho app ps`. Nothing is installed or left running on a Server, and nothing can be changed from them. Only Yoho-owned containers are listed: the App's compose project (or swarm stack) and `yoho-proxy`; other containers on the Server are never shown or read.
 
+## Service details in `yoho tui`
+
+Select a Service with `↑↓` and press `d` for Details: CPU percentage, memory usage
+and limit, memory percentage, network I/O (received / transmitted), disk I/O
+(read / written), and PIDs. The page also shows state, health, image, ports,
+and container identity. Each replica has its own row and Details page.
+
+Details refresh at the configured interval (5 seconds by default); press `r`
+to refresh immediately. Network and disk I/O are cumulative counters, not
+per-second rates. Stopped containers and unavailable stats show `—`.
+
+Use `↑↓` or `pgup`/`pgdn` to scroll, `g`/`G` for the top/bottom, and `esc` or `q`
+to return. `Enter` opens logs from either the overview or Details; leaving logs
+returns to the page you opened them from.
+
 ## `yoho ui` access
 
 The dashboard listens on `127.0.0.1` only. `yoho ui` prints a one-time login link and opens it unless `--no-open`. The link signs in that browser (new tabs on the same address stay signed in) and then stops working; to use another browser, restart `yoho ui`. Several `yoho ui` instances, one per Destination, can run side by side. Requests with a non-loopback `Host` header are refused, and the API answers only `GET`.
