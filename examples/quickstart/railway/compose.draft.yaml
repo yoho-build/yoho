@@ -1,0 +1,63 @@
+# compose.yaml — drafted by `yoho migrate draft` from inventory inventory.json.
+# Review before use. Nothing here is deployed by the draft.
+# Railway volumes are not Docker volumes on this Server. Postgres is filled with pg_restore.
+# HTTP healthchecks use wget. The image must include wget; change the test to curl if it does not.
+services:
+  web:
+    build: .
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8080/up"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    x-yoho:
+      proxy:
+        hosts: ["shop.example.com"]
+        port: 8080
+      secrets:
+        - APP_GREETING
+        - POSTGRES_PASSWORD
+      release_command: ["/app", "migrate"]
+  worker:
+    build: .
+    command: ["/app", "worker"]
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "/app", "health"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    x-yoho:
+      secrets:
+        - APP_GREETING
+        - POSTGRES_PASSWORD
+  # Starts empty. Restore the dump after the first deploy, before the cutover.
+  db:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: postgres
+      POSTGRES_USER: postgres
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    x-yoho:
+      stateful: true
+      generate:
+        POSTGRES_PASSWORD: password32
+      backup:
+        dump: ["pg_dump", "-U", "postgres", "postgres"]
+        volumes: [pgdata]
+volumes:
+  pgdata:

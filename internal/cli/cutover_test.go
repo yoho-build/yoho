@@ -477,7 +477,7 @@ func TestCutoverRestartOldRefusesPortsHeldBySharedProxy(t *testing.T) {
 func TestMigratePlanDisplaysRollbackPortWarning(t *testing.T) {
 	a, s, h, _, out := cutoverFixture(t, "")
 	h.Container("old-web").PortBindings = map[string][]migratetest.PortBinding{"3000/tcp": {{HostPort: "80"}}}
-	if err := a.migratePlanOn(context.Background(), s.hosts[0], s.store); err != nil {
+	if err := a.migratePlanOn(context.Background(), s.hosts[0], s.store, false); err != nil {
 		t.Fatal(err)
 	}
 	if !strings.Contains(out.String(), "old-web publishes host port 80/tcp") || !strings.Contains(out.String(), "yoho-proxy") {

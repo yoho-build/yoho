@@ -92,7 +92,8 @@ export default defineConfig({
       { text: 'Migrating', items: [
         { text: 'From Kamal', link: '/migrating-from-kamal/' },
         { text: 'From Coolify', link: '/migrating-from-coolify/' },
-        { text: 'From Dokploy', link: '/migrating-from-dokploy/' }
+        { text: 'From Dokploy', link: '/migrating-from-dokploy/' },
+        { text: 'From Railway', link: '/migrating-from-railway/' }
       ] },
       { text: 'FAQ', link: '/faq/' },
       { text: 'Contributing', link: '/contributing/' }

@@ -1,0 +1,45 @@
+# yoho.yml — drafted by `yoho migrate draft` from inventory inventory.json.
+# Switch configuration. On the first deploy, delete the migrate block so
+# ingress stays on Railway while you restore Postgres. A finished cutover
+# does not run again. from: compose is a label; Railway is not a migrate.from value.
+# stop names nothing on this Server, so the switch is:
+#   yoho migrate plan --cutover-allow-empty
+#   yoho deploy --skip-build --cutover-allow-empty
+# No claim: Railway volumes are not on this Server.
+# HTTP healthchecks use wget. The image must include wget; change the test to curl if it does not.
+# POSTGRES_PASSWORD is generated on the Server. Do not copy Railway's value.
+# yaml-language-server: $schema=https://yohobuild.com/schema/yoho.schema.json
+app: shop
+
+servers:
+  primary:
+    ssh: root@203.0.113.10 # replace with root@YOUR_SERVER
+
+destinations:
+  production:
+    servers: [primary]
+    migrate:
+      from: compose
+      stop:
+        containers: [railway-shop-web]
+      tunnel:
+        api_token_secret: CF_API_TOKEN
+        hostnames: ["shop.example.com"]
+
+builder:
+  location: local
+
+proxy:
+  http_port: 0
+  https_port: 0
+  tunnel:
+    token_secret: CF_TUNNEL_TOKEN
+
+setup:
+  user: yoho
+
+# Copy into .yoho/secrets. These are references, not values.
+# Bitwarden alternative: KEY=$(bw get password item)
+# APP_GREETING=$(op read op://Production/shop/APP_GREETING)
+# CF_API_TOKEN=$(op read op://Production/shop/CF_API_TOKEN)
+# CF_TUNNEL_TOKEN=$(op read op://Production/shop/CF_TUNNEL_TOKEN)

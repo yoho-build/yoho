@@ -1,0 +1,37 @@
+{
+  "project": "shop",
+  "hostnames": ["shop.example.com"],
+  "services": [
+    {
+      "name": "web",
+      "dockerfile": "Dockerfile",
+      "public": true,
+      "port": 8080,
+      "healthcheck_path": "/up",
+      "release_command": ["/app", "migrate"],
+      "restart": "unless-stopped",
+      "depends_on": ["db"],
+      "secret_keys": ["APP_GREETING", "POSTGRES_PASSWORD"]
+    },
+    {
+      "name": "worker",
+      "dockerfile": "Dockerfile",
+      "command": ["/app", "worker"],
+      "healthcheck": ["CMD", "/app", "health"],
+      "restart": "unless-stopped",
+      "depends_on": ["db"],
+      "secret_keys": ["APP_GREETING", "POSTGRES_PASSWORD"]
+    },
+    {
+      "name": "db",
+      "image": "postgres:17-alpine",
+      "volume": "pgdata",
+      "volume_mount": "/var/lib/postgresql/data",
+      "restart": "unless-stopped",
+      "env": {
+        "POSTGRES_USER": "postgres",
+        "POSTGRES_DB": "postgres"
+      }
+    }
+  ]
+}
