@@ -26,6 +26,22 @@ Missing/unsupported `gh`, authentication or network failures, missing attestatio
 
 This option verifies binary provenance, **not the installer script itself**; review or obtain that script through a trusted channel. It does not establish that an App, build, Backup or restore is safe. Separately, the Linux binary Yoho downloads for Scheduled Jobs verifies the same provenance policy by default, in Go and without `gh` (see [Where the binary comes from](scheduled-jobs.md#where-the-binary-comes-from)). Future GitHub Releases attest the exact published `dist/yoho-*` files after checksum generation. The Release workflow follows the latest Go 1.26 patch (`1.26.x` with `check-latest`) for security fixes without changing the project's minimum Go version.
 
+Update an existing Yoho installation with either command (available from v0.5.2):
+
+```sh
+yoho upgrade
+# alias:
+yoho update
+```
+
+This resolves the latest stable GitHub release once, verifies its SHA-256 and signed build provenance in Go, and atomically replaces the running executable. Verification is required; `YOHO_VERIFY_PROVENANCE=0` does not disable it. A failed download or verification leaves the executable intact.
+
+It works outside an App directory and supports `--json`. A current or newer stable version is left in place. Symlinks keep pointing to the updated executable; package manager installations must be updated with their package manager. The executable's directory must be writable by your user.
+
+GitHub authentication follows `GITHUB_TOKEN`, then `GH_TOKEN`, then an existing `gh auth` login; public releases also work without a token. Network access to GitHub and Sigstore trust services is required.
+
+Older binaries do not have this command: rerun the installer above once to obtain it.
+
 Build from source with Go 1.26: `go install github.com/yoho-build/yoho/cmd/yoho@latest`.
 
 ## 60 seconds

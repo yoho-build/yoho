@@ -6,6 +6,7 @@ Global flags (every command): `-c, --config FILE`, `-d, --destination NAME` (def
 
 | Command | Description |
 |---|---|
+| `upgrade` / `update` | Update the running local CLI to the latest stable GitHub release, checking SHA-256 and signed build provenance before atomic replacement. No Yoho file required. Skips current/newer stable versions; package manager installs use their package manager. |
 | `init` | Create `yoho.yml`, `.yoho/secrets`, sample hooks. |
 | `config check [--offline]` | Validate Yoho file, compose files, `x-yoho` and secret names; resolves local secrets only when `secrets.nonempty` is nonempty. `--offline` (or `YOHO_OFFLINE=1`) never resolves secrets. Exit 0 ok, 1 findings, 2 files could not be loaded. Warns when `ssh.via: cloudflare` would go through a `cloudflared` Service in the same App. See [CI check](#ci-check). |
 | `config show` | Print the resolved Yoho file with defaults as JSON. |
