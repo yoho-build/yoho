@@ -126,6 +126,8 @@ func Render(m *Model, width, height int) string {
 		ls = m.logLines(height)
 	} else if m.Details != nil {
 		ls = m.detailLines(width, height)
+	} else if m.Disk != nil {
+		ls = m.diskLines(width, height)
 	} else {
 		ls = m.mainLines(width, height)
 	}
@@ -276,7 +278,7 @@ func (m *Model) mainLines(width, height int) []line {
 }
 
 func (m *Model) withFooter(ls []line, height int) []line {
-	help := line{{" q", bold}, {" quit  ", dim}, {"r", bold}, {" refresh  ", dim}, {"d", bold}, {" details  ", dim}, {"enter", bold}, {" logs  ", dim}, {"tab", bold}, {" server  ", dim}, {"↑↓", bold}, {" select", dim}, {fmt.Sprintf("   read-only · every %s", m.Interval), dim}}
+	help := line{{" q", bold}, {" quit  ", dim}, {"r", bold}, {" refresh  ", dim}, {"d", bold}, {" details  ", dim}, {"enter", bold}, {" logs  ", dim}, {"v", bold}, {" disk  ", dim}, {"tab", bold}, {" server  ", dim}, {"↑↓", bold}, {" select", dim}, {fmt.Sprintf("   read-only · every %s", m.Interval), dim}}
 	if len(ls) > height-1 {
 		ls = ls[:max(0, height-1)]
 	}

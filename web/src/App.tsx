@@ -1,7 +1,10 @@
-import { useCallback, useEffect, useRef, useState } from "react"
+import { Fragment, useCallback, useEffect, useRef, useState } from "react"
 import {
   ActivityIcon,
   BoxIcon,
+  ChevronDownIcon,
+  ChevronRightIcon,
+  DatabaseIcon,
   CircleAlertIcon,
   HardDriveIcon,
   HistoryIcon,
@@ -18,7 +21,7 @@ import {
 
 import { api, ApiError } from "@/api"
 import { ago, bytes, duration, shortVersion } from "@/format"
-import type { Container, Meta, Release, Server, Snapshot } from "@/types"
+import type { Container, Disk, DiskUsage, Meta, Release, Server, ServerDisk, Snapshot } from "@/types"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
@@ -49,6 +52,7 @@ export default function App() {
   const [now, setNow] = useState(() => Date.now())
   const [logs, setLogs] = useState<{ server: string; container: Container } | null>(null)
   const inflight = useRef<AbortController | null>(null)
+  const disk = useDisk()
 
   useEffect(() => {
     document.documentElement.classList.toggle("dark", theme === "dark")
@@ -155,7 +159,7 @@ export default function App() {
         <>
           <Summary snap={snap} />
           {snap.servers.length === 1 ? (
-            <ServerView server={snap.servers[0]} now={now} onLogs={(c) => setLogs({ server: snap.servers[0].name, container: c })} />
+            <ServerView server={snap.servers[0]} now={now} disk={disk} onLogs={(c) => setLogs({ server: snap.servers[0].name, container: c })} />
           ) : (
             <Tabs defaultValue={snap.servers[0]?.name}>
               <TabsList>
@@ -169,7 +173,7 @@ export default function App() {
               </TabsList>
               {snap.servers.map((s) => (
                 <TabsContent key={s.name} value={s.name}>
-                  <ServerView server={s} now={now} onLogs={(c) => setLogs({ server: s.name, container: c })} />
+                  <ServerView server={s} now={now} disk={disk} onLogs={(c) => setLogs({ server: s.name, container: c })} />
                 </TabsContent>
               ))}
             </Tabs>
@@ -245,7 +249,7 @@ function Summary({ snap }: { snap: Snapshot }) {
   )
 }
 
-function ServerView({ server, now, onLogs }: { server: Server; now: number; onLogs: (c: Container) => void }) {
+function ServerView({ server, now, disk, onLogs }: { server: Server; now: number; disk: DiskState; onLogs: (c: Container) => void }) {
   const h = server.host
   const memUsed = h.mem_total_bytes - h.mem_available_bytes
   const memPct = h.mem_total_bytes ? (memUsed / h.mem_total_bytes) * 100 : 0
@@ -296,6 +300,8 @@ function ServerView({ server, now, onLogs }: { server: Server; now: number; onLo
         </Card>
         <ProxyCard proxy={server.proxy} onLogs={onLogs} />
       </div>
+
+      <VolumesCard server={server} disk={disk} now={now} />
 
       <Card>
         <CardHeader>
@@ -533,5 +539,152 @@ function LogsDialog({ target, onClose }: { target: { server: string; container: 
         </p>
       </DialogContent>
     </Dialog>
+  )
+}
+
+type DiskState = {
+  data: DiskUsage | null
+  loading: boolean
+  error: Error | null
+  load: (fresh: boolean) => void
+}
+
+// useDisk loads volume sizes on demand only: du walks every file, so the
+// page never polls it. One request covers every Server.
+function useDisk(): DiskState {
+  const [data, setData] = useState<DiskUsage | null>(null)
+  const [loading, setLoading] = useState(false)
+  const [error, setError] = useState<Error | null>(null)
+  const busy = useRef(false)
+  const load = useCallback(async (fresh: boolean) => {
+    if (busy.current) return
+    busy.current = true
+    setLoading(true)
+    try {
+      setData(await api.disk(fresh))
+      setError(null)
+    } catch (e) {
+      setError(e as Error)
+    } finally {
+      busy.current = false
+      setLoading(false)
+    }
+  }, [])
+  return { data, loading, error, load }
+}
+
+// dockerDisk is the filesystem holding Docker's root, where plain local
+// volumes live; the Yoho root's when Docker shares it.
+function dockerDisk(server: Server): Disk | undefined {
+  const disks = server.host.disks ?? []
+  return disks.find((d) => d.label === "docker") ?? disks[0]
+}
+
+function accessLabel(d: ServerDisk): string {
+  if (d.access === "root") return "as root"
+  if (d.access === "sudo") return `${d.user ?? "SSH user"} via sudo`
+  if (d.access === "scoped") return "scoped access"
+  return "not sized"
+}
+
+function VolumesCard({ server, disk, now }: { server: Server; disk: DiskState; now: number }) {
+  const [open, setOpen] = useState<Record<string, boolean>>({})
+  const d = disk.data?.servers.find((s) => s.name === server.name)
+  const fs = dockerDisk(server)
+  return (
+    <Card>
+      <CardHeader>
+        <div className="min-w-0">
+          <CardTitle className="flex items-center gap-2">
+            <DatabaseIcon className="size-4" /> Volumes
+          </CardTitle>
+          <CardDescription>
+            {disk.data
+              ? <>sized {ago(disk.data.collected_at, now)}{d && <> · {accessLabel(d)} · {d.elapsed_seconds.toFixed(1)}s</>}</>
+              : "Sizes of the App directory and the App's volumes, measured with du on demand."}
+          </CardDescription>
+        </div>
+        <Button variant="outline" size="sm" onClick={() => disk.load(!!disk.data)} disabled={disk.loading}>
+          <HardDriveIcon className={disk.loading ? "animate-pulse" : undefined} />
+          {disk.loading ? "Sizing…" : disk.data ? "Rescan" : "Show disk usage"}
+        </Button>
+      </CardHeader>
+      {(disk.error || d) && (
+        <CardContent className="flex flex-col gap-3">
+          {disk.error && <p className="font-mono text-xs break-all text-destructive">{disk.error.message}</p>}
+          {d?.error && <p className="font-mono text-xs break-all text-destructive">{d.error}</p>}
+          {d?.note && (
+            <div className="flex items-start gap-2 rounded-lg border border-warning/40 bg-warning/10 px-3 py-2 text-sm">
+              <CircleAlertIcon className="mt-0.5 size-4 shrink-0" />
+              <span className="break-words">{d.note}</span>
+            </div>
+          )}
+          {d && (
+            <p className="text-sm">
+              <span className="font-medium">App dir</span>{" "}
+              <span className="tabular-nums">{d.app_dir_sized ? `${d.app_dir_partial ? "≥" : ""}${bytes(d.app_dir_bytes)}` : "—"}</span>{" "}
+              <code className="text-xs text-muted-foreground break-all">{d.app_dir}</code>
+            </p>
+          )}
+          {d && d.volumes.length === 0 && <p className="text-sm text-muted-foreground">No volumes for this App on {server.name}.</p>}
+          {d && d.volumes.length > 0 && (
+            <Table>
+              <TableHeader>
+                <TableRow>
+                  <TableHead>Volume</TableHead>
+                  <TableHead className="hidden sm:table-cell">Services</TableHead>
+                  <TableHead className="text-right">Size</TableHead>
+                  <TableHead className="hidden md:table-cell w-48">{fs ? `Of disk ${fs.mount}` : "Of disk"}</TableHead>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {d.volumes.map((v) => {
+                  const expandable = v.sized && v.top.length > 0
+                  const isOpen = !!open[v.name]
+                  const pct = v.sized && fs?.total_bytes ? (v.bytes / fs.total_bytes) * 100 : null
+                  return (
+                    <Fragment key={v.name}>
+                      <TableRow>
+                        <TableCell>
+                          <button
+                            type="button"
+                            className="flex items-center gap-1 text-left disabled:cursor-default"
+                            disabled={!expandable}
+                            aria-expanded={expandable ? isOpen : undefined}
+                            onClick={() => setOpen((o) => ({ ...o, [v.name]: !o[v.name] }))}
+                          >
+                            {expandable ? (isOpen ? <ChevronDownIcon className="size-3.5" /> : <ChevronRightIcon className="size-3.5" />) : <span className="w-3.5" />}
+                            <span className="max-w-72 truncate font-mono text-xs" title={v.name}>{v.name}</span>
+                          </button>
+                          {v.error && <div className="pl-4.5 text-xs text-warning break-words">{v.error}</div>}
+                        </TableCell>
+                        <TableCell className="hidden sm:table-cell text-xs">{v.services.join(", ") || "—"}</TableCell>
+                        <TableCell className="text-right tabular-nums">
+                          {v.sized ? <span className={v.partial ? "text-warning" : undefined}>{v.partial ? "≥" : ""}{bytes(v.bytes)}</span> : "—"}
+                        </TableCell>
+                        <TableCell className="hidden md:table-cell">
+                          {pct !== null && <Meter label={v.name} value={pct} detail={`${pct.toFixed(pct < 1 ? 1 : 0)}%`} className="[&_span:first-child]:sr-only" />}
+                        </TableCell>
+                      </TableRow>
+                      {isOpen &&
+                        v.top.map((e) => (
+                          <TableRow key={v.name + "/" + e.name} className="text-muted-foreground">
+                            <TableCell className="pl-9">
+                              <span className="max-w-72 truncate font-mono text-xs block" title={e.name}>{e.name}</span>
+                            </TableCell>
+                            <TableCell className="hidden sm:table-cell" />
+                            <TableCell className="text-right tabular-nums text-xs">{bytes(e.bytes)}</TableCell>
+                            <TableCell className="hidden md:table-cell" />
+                          </TableRow>
+                        ))}
+                    </Fragment>
+                  )
+                })}
+              </TableBody>
+            </Table>
+          )}
+        </CardContent>
+      )}
+    </Card>
   )
 }

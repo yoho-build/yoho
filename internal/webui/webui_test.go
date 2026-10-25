@@ -15,7 +15,15 @@ import (
 	"github.com/yoho-build/yoho/internal/dash"
 )
 
-type fakeData struct{ logsFor []string }
+type fakeData struct {
+	logsFor   []string
+	diskFresh []bool
+}
+
+func (f *fakeData) Disk(_ context.Context, fresh bool) (*dash.DiskUsage, error) {
+	f.diskFresh = append(f.diskFresh, fresh)
+	return &dash.DiskUsage{Servers: []dash.ServerDisk{{Name: "web-1", Access: "sudo", Volumes: []dash.Volume{{Name: "yoho-shop-production_pgdata", Sized: true, Bytes: 1 << 30}}}}}, nil
+}
 
 func (f *fakeData) Snapshot(context.Context, bool) (*dash.Snapshot, error) {
 	return &dash.Snapshot{App: "shop", Destination: "production", Servers: []dash.Server{{Name: "web-1"}}}, nil
@@ -227,5 +235,23 @@ func TestEmbeddedAssets(t *testing.T) {
 	}
 	if !strings.Contains(string(b), "/assets/") {
 		t.Errorf("index.html does not reference built assets:\n%s", b)
+	}
+}
+
+func TestDiskAPI(t *testing.T) {
+	_, link, data := start(t)
+	base := strings.SplitN(link, "/login", 2)[0]
+	if res, _ := get(t, base+"/api/disk", ""); res.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("disk without session: %d", res.StatusCode)
+	}
+	tok := login(t, link)
+	res, body := get(t, base+"/api/disk", tok)
+	var du dash.DiskUsage
+	if res.StatusCode != 200 || json.Unmarshal([]byte(body), &du) != nil || du.Servers[0].Volumes[0].Bytes != 1<<30 {
+		t.Fatalf("disk: %d %s", res.StatusCode, body)
+	}
+	get(t, base+"/api/disk?fresh=1", tok)
+	if len(data.diskFresh) != 2 || data.diskFresh[0] || !data.diskFresh[1] {
+		t.Errorf("fresh must pass through: %v", data.diskFresh)
 	}
 }

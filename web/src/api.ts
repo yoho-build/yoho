@@ -1,4 +1,4 @@
-import type { Meta, Snapshot } from "./types"
+import type { DiskUsage, Meta, Snapshot } from "./types"
 
 export class ApiError extends Error {
   status: number
@@ -62,6 +62,7 @@ async function get<T>(path: string, signal?: AbortSignal): Promise<T> {
 export const api = {
   meta: (signal?: AbortSignal) => get<Meta>("/api/meta", signal),
   snapshot: (fresh: boolean, signal?: AbortSignal) => get<Snapshot>(`/api/snapshot${fresh ? "?fresh=1" : ""}`, signal),
+  disk: (fresh: boolean, signal?: AbortSignal) => get<DiskUsage>(`/api/disk${fresh ? "?fresh=1" : ""}`, signal),
   logs: (server: string, container: string, lines: number, signal?: AbortSignal) =>
     get<{ logs: string }>(
       `/api/logs?${new URLSearchParams({ server, container, lines: String(lines) })}`,

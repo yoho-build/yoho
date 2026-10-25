@@ -20,6 +20,7 @@ import (
 type Data interface {
 	Snapshot(ctx context.Context, fresh bool) (*dash.Snapshot, error)
 	Logs(ctx context.Context, server, name string, lines int) (string, error)
+	Disk(ctx context.Context, fresh bool) (*dash.DiskUsage, error)
 }
 
 // Model is the TUI state. Render is a pure function of it.
@@ -31,6 +32,7 @@ type Model struct {
 	Sel      int // selected row: 0 is the Proxy when present, then containers
 	Logs     *LogView
 	Details  *DetailView
+	Disk     *DiskView
 	Color    bool
 	Now      time.Time
 	Interval time.Duration
@@ -154,11 +156,13 @@ const (
 	ActQuit
 	ActRefresh
 	ActLogs
+	ActDisk // load DiskUsage, fresh
+	ActDiskOpen
 )
 
 // Update applies a key to the model.
 func (m *Model) Update(k Key, height int) Action {
-	if k == KeyCtrlC || k == "q" && m.Logs == nil && m.Details == nil {
+	if k == KeyCtrlC || k == "q" && m.Logs == nil && m.Details == nil && m.Disk == nil {
 		return ActQuit
 	}
 	if m.Logs != nil {
@@ -186,6 +190,9 @@ func (m *Model) Update(k Key, height int) Action {
 	if m.Details != nil {
 		return m.updateDetails(k, height)
 	}
+	if m.Disk != nil {
+		return m.updateDisk(k)
+	}
 	n := 0
 	if m.Snap != nil {
 		n = len(m.Snap.Servers)
@@ -193,6 +200,9 @@ func (m *Model) Update(k Key, height int) Action {
 	switch k {
 	case "r":
 		return ActRefresh
+	case "v":
+		m.Disk = &DiskView{Open: map[string]bool{}, Loading: true}
+		return ActDiskOpen
 	case KeyTab, KeyRight, "l":
 		if n > 0 {
 			m.Server = (m.Server + 1) % n
@@ -271,8 +281,27 @@ func Run(ctx context.Context, data Data, in *os.File, out io.Writer, opt Options
 		text string
 		err  error
 	}
+	type diskResult struct {
+		usage *dash.DiskUsage
+		err   error
+	}
 	snaps := make(chan snapResult, 1)
 	logs := make(chan logResult, 1)
+	disks := make(chan diskResult, 1)
+	sizing := false
+	fetchDisk := func(fresh bool) {
+		if sizing {
+			return
+		}
+		sizing = true
+		go func() {
+			u, err := data.Disk(ctx, fresh)
+			select {
+			case disks <- diskResult{u, err}:
+			case <-ctx.Done():
+			}
+		}()
+	}
 	collecting, pendingFresh := false, false
 	collect := func(fresh bool) {
 		if collecting {
@@ -330,6 +359,11 @@ func Run(ctx context.Context, data Data, in *os.File, out io.Writer, opt Options
 					collect(true)
 				case ActLogs:
 					fetchLogs(m.Logs)
+				case ActDiskOpen:
+					fetchDisk(false)
+				case ActDisk:
+					m.Disk.Loading = true
+					fetchDisk(true)
 				}
 			}
 			draw()
@@ -354,6 +388,20 @@ func Run(ctx context.Context, data Data, in *os.File, out io.Writer, opt Options
 		case r := <-logs:
 			if m.Logs != nil && m.Logs.Server+"/"+m.Logs.Container == r.key {
 				m.Logs.Text, m.Logs.Err, m.Logs.Loading = r.text, r.err, false
+			}
+			draw()
+		case r := <-disks:
+			sizing = false
+			if m.Disk != nil {
+				m.Disk.Loading = false
+				if r.err != nil {
+					if ctx.Err() != nil {
+						return nil
+					}
+					m.Disk.Err = r.err
+				} else {
+					m.Disk.Usage, m.Disk.Err = r.usage, nil
+				}
 			}
 			draw()
 		case <-ticker.C:
