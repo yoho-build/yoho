@@ -6,7 +6,8 @@
 - the App's containers with state, health, CPU, memory, network I/O, image and ports;
 - the Proxy (`yoho-proxy`);
 - Release history, with the current Release marked;
-- the last lines of any listed container's logs.
+- the last lines of any listed container's logs;
+- on demand, the size of the App directory and each of the App's volumes.
 
 ```sh
 yoho tui                     # q to quit
@@ -30,6 +31,19 @@ per-second rates. Stopped containers and unavailable stats show `—`.
 Use `↑↓` or `pgup`/`pgdn` to scroll, `g`/`G` for the top/bottom, and `esc` or `q`
 to return. `Enter` opens logs from either the overview or Details; leaving logs
 returns to the page you opened them from.
+
+## Volume disk usage
+
+Press `v` in `yoho tui`, or **Show disk usage** on a Server in `yoho ui`, to size the App directory and each of the App's named volumes, with the largest files and directories at the top of each volume. Sizes come from `du` over SSH; nothing is installed. A scan walks every file, so it runs only when asked (`r` / **Rescan**) and is reused for 10 minutes. It runs at idle CPU and I/O priority, stops each volume after 120 s, and sizes no more volumes after 300 s. A size shown as `≥` is a lower bound because `du` hit an error or was stopped.
+
+Volume data belongs to root, so volumes are sized only when the SSH user is root or may run `du` through passwordless sudo. Otherwise the volumes are listed without sizes, with a note. A rule for `du` alone is enough, and it doesn't need `servers.<name>.sudo: true`:
+
+```sh
+echo 'deploy ALL=(root) NOPASSWD: /usr/bin/du' | sudo tee /etc/sudoers.d/yoho-du
+sudo chmod 440 /etc/sudoers.d/yoho-du && sudo visudo -c
+```
+
+Only plain local volumes are sized. A volume with driver options (NFS, CIFS, or a bind of another host directory) or another driver is listed as not sized. Volume sizes aren't available through scoped access yet.
 
 ## `yoho ui` access
 

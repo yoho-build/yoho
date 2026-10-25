@@ -47,6 +47,7 @@ func Assets() fs.FS {
 type Data interface {
 	Snapshot(ctx context.Context, fresh bool) (*dash.Snapshot, error)
 	Logs(ctx context.Context, server, name string, lines int) (string, error)
+	Disk(ctx context.Context, fresh bool) (*dash.DiskUsage, error)
 }
 
 // Meta is static information for the page header.
@@ -213,6 +214,13 @@ func (s *Server) api(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		writeJSON(w, http.StatusOK, map[string]string{"logs": out})
+	case "/api/disk":
+		du, err := s.data.Disk(ctx, r.URL.Query().Get("fresh") == "1")
+		if err != nil {
+			writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusOK, du)
 	default:
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": "not found"})
 	}

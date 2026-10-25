@@ -508,9 +508,16 @@ func Logs(ctx context.Context, src *Source, snap *Snapshot, server, name string,
 type Live struct {
 	Src    *Source
 	MaxAge time.Duration
+	// DiskMaxAge is how long Disk serves a cached DiskUsage (default 10m).
+	DiskMaxAge time.Duration
 
 	mu   sync.Mutex
 	last *Snapshot
+
+	diskMu   sync.Mutex
+	disk     *DiskUsage
+	diskAt   time.Time // when disk finished collecting
+	diskCall *diskCall
 }
 
 // Snapshot returns the cached Snapshot when younger than MaxAge, else

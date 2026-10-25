@@ -141,3 +141,49 @@ func TestWideCharacters(t *testing.T) {
 		t.Error(s)
 	}
 }
+
+func diskUsage() *dash.DiskUsage {
+	return &dash.DiskUsage{CollectedAt: snap().CollectedAt.Add(-2 * time.Minute), Servers: []dash.ServerDisk{
+		{Name: "web-1", Access: "sudo", User: "deploy", AppDir: "/var/lib/yoho/apps/shop/production", AppDirSized: true, AppDirBytes: 12 << 20,
+			Volumes: []dash.Volume{
+				{Name: "yoho-shop-production_pgdata", Services: []string{"db"}, Sized: true, Bytes: 8 << 30,
+					Top: []dash.DirEntry{{Name: "base", Bytes: 7 << 30}, {Name: "evil\x1b[2J", Bytes: 4096}}},
+				{Name: "yoho-shop-production_cache", Services: []string{"web"}, Sized: true, Partial: true, Bytes: 1 << 30, Error: "du stopped after 120s"},
+				{Name: "yoho-shop-production_nfs", Error: "volume options (device,o,type): not sized"},
+			}},
+		{Name: "web-2", Access: "none", User: "deploy", Note: "Volume sizes need root: connect as root, or allow passwordless sudo for du",
+			Volumes: []dash.Volume{{Name: "yoho-shop-production_pgdata"}}},
+	}}
+}
+
+func TestDiskScreen(t *testing.T) {
+	m := &Model{Snap: snap(), Now: snap().CollectedAt, Interval: 5 * time.Second}
+	if m.Update("v", 30) != ActDiskOpen || m.Disk == nil || !m.Disk.Loading {
+		t.Fatal("v opens the disk screen and loads")
+	}
+	if out := Render(m, 120, 30); !strings.Contains(out, "sizing") {
+		t.Errorf("loading state:\n%s", out)
+	}
+	m.Disk.Usage, m.Disk.Loading = diskUsage(), false
+	m.Update(KeyEnter, 30)
+	out := Render(m, 120, 30)
+	for _, want := range []string{"disk", "sized 2m ago", "deploy via sudo", "12.0 MiB", "VOLUME", "yoho-shop-production_pgdata", "8.0 GiB", "base", "7.0 GiB", "≥1.0 GiB", "du stopped", "not sized", "Disk /", "rescan"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("missing %q in\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "\x1b[2J") {
+		t.Error("file names must not inject escape sequences")
+	}
+	if m.Update("r", 30) != ActDisk {
+		t.Error("r rescans")
+	}
+	m.Update(KeyTab, 30)
+	out = Render(m, 120, 30)
+	if !strings.Contains(out, "need root") || !strings.Contains(out, "—") {
+		t.Errorf("web-2 shows the note and no sizes:\n%s", out)
+	}
+	if m.Update("q", 30) != ActNone || m.Disk != nil {
+		t.Error("q leaves the disk screen, not yoho")
+	}
+}

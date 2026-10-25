@@ -76,3 +76,40 @@ export interface Meta {
   version: string
   interval_seconds: number
 }
+
+// Mirrors dash.DiskUsage: on-demand sizes from du (GET /api/disk).
+export interface DiskUsage {
+  collected_at: string
+  servers: ServerDisk[]
+}
+
+export interface ServerDisk {
+  name: string
+  error?: string
+  access: "root" | "sudo" | "none" | "no-timeout" | "scoped" | string
+  user?: string
+  note?: string
+  app_dir: string
+  app_dir_sized: boolean
+  app_dir_partial: boolean
+  app_dir_bytes: number
+  volumes: Volume[]
+  elapsed_seconds: number
+}
+
+export interface Volume {
+  name: string
+  key: string
+  driver: string
+  services: string[]
+  sized: boolean
+  partial: boolean
+  bytes: number
+  top: DirEntry[]
+  error?: string
+}
+
+export interface DirEntry {
+  name: string
+  bytes: number
+}
