@@ -2,7 +2,7 @@ name: yoho deploy
 
 # Reusable workflow: deploy one Yoho Destination from CI through the Gate
 # (scoped access, docs/site/team-access.md). Call it as
-#   uses: yoho-build/yoho/.github/workflows/deploy.yml@v0.5.2
+#   uses: yoho-build/yoho/.github/workflows/deploy.yml@v0.5.3
 #
 # The Yoho install step below is pinned to the same tag as this file. `uses:`
 # cannot take an expression, and a reusable workflow cannot read the ref it was
@@ -27,9 +27,9 @@ on:
         type: string
         default: scoped
       yoho-version:
-        description: Yoho release to install (a tag such as v0.5.2, or latest).
+        description: Yoho release to install (a tag such as v0.5.3, or latest).
         type: string
-        default: v0.5.2
+        default: v0.5.3
       runs-on:
         description: JSON for runs-on, for example '["self-hosted","macOS","ARM64"]'.
         type: string
@@ -144,7 +144,7 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
-      - uses: yoho-build/yoho/.github/actions/setup-yoho@v0.5.2
+      - uses: yoho-build/yoho/.github/actions/setup-yoho@v0.5.3
         with:
           version: ${{ inputs.yoho-version }}
 
