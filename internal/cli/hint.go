@@ -78,6 +78,9 @@ func secretsHint(err error, def string) string {
 		if pe.Inferred {
 			h += " (inferred from the long wait: the provider gave no reason, so this may be another failure)"
 		}
+		if pe.Provider == "op" {
+			h += "; to be asked less often see https://yohobuild.com/secrets#1password-approvals"
+		}
 		return h
 	case secrets.NotSignedIn:
 		return "sign in to " + pe.Provider + " (`op signin`, `bw unlock`, or set BWS_ACCESS_TOKEN) and rerun"

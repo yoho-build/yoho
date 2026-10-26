@@ -25,6 +25,22 @@ By default, secrets are resolved on your machine at deploy time, written to the 
 
 3. `x-yoho.generate`: created once on the Server, never in your password manager unless you back them up.
 
+## 1Password approvals
+
+Yoho reads all `op` references of an account in one `op inject`, so each Yoho command asks for 1Password approval at most once. How long that approval lasts is up to 1Password:
+
+- **Desktop app integration.** In a terminal, approval lasts for that terminal session: 10 minutes of inactivity, at most 12 hours, and locking the app revokes it. Coding agents (Claude Code, Codex) and scripts run every command in a new process without a terminal. On macOS, 1Password CLI 2.40 and later shares one approval across those processes, so a parent session and its sub-agents are asked once instead of once per command. Check with `op --version` and update the CLI if it is older. Older versions, and other platforms, may ask again for every Yoho command.
+- **Service account, no prompts.** For unattended runs (CI, a long agent session), give a 1Password service account read access to only the vaults the App needs and export its token before running Yoho:
+
+  ```sh
+  export OP_SERVICE_ACCOUNT_TOKEN="$(security find-generic-password -w -s yoho-op-sa)"  # keep the token in the keychain, not in .yoho/secrets
+  yoho deploy
+  ```
+
+  `op read` and `op inject` work with service accounts. Service accounts cannot read Personal or Private vaults, and their hourly and daily request limits are shared across the account, so prefer item and vault IDs in refs (`op read` makes one request instead of three). Server-side jobs never call 1Password (ADR 0006), so a crash loop on the Server cannot use up those limits.
+
+Yoho does not cache resolved values between commands and does not keep a session token on disk. Do not start an agent under `op run` to avoid prompts: that puts every secret into the agent's environment.
+
 ## Requiring nonempty values (opt-in)
 
 Empty secret values remain valid by default. To require particular **source keys**
