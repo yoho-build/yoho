@@ -7,6 +7,7 @@ const publicDir = join(siteDir, 'public')
 mkdirSync(join(publicDir, 'schema'), { recursive: true })
 mkdirSync(join(publicDir, 'assets'), { recursive: true })
 copyFileSync(join(repoDir, 'scripts/install.sh'), join(publicDir, 'install.sh'))
+copyFileSync(join(repoDir, 'skills/yoho/SKILL.md'), join(publicDir, 'skill.md'))
 copyFileSync(join(siteDir, 'assets/logo.svg'), join(publicDir, 'assets/logo.svg'))
 for (const [name, flags] of [['yoho', []], ['x-yoho', ['--ext']]]) {
   const result = spawnSync('go', ['run', './cmd/yoho', 'schema', ...flags], {
@@ -18,4 +19,4 @@ for (const [name, flags] of [['yoho', []], ['x-yoho', ['--ext']]]) {
   JSON.parse(result.stdout)
   writeFileSync(join(publicDir, `schema/${name}.schema.json`), result.stdout)
 }
-console.log('Docs assets ready: /install.sh, /schema/{yoho,x-yoho}.schema.json, /assets/logo.svg')
+console.log('Docs assets ready: /install.sh, /skill.md, /schema/{yoho,x-yoho}.schema.json, /assets/logo.svg')

@@ -49,6 +49,7 @@ for (const source of sourcePaths) {
   }
 }
 assert.equal(readFileSync(join(outDir, 'install.sh'), 'utf8'), readFileSync(join(repoDir, 'scripts/install.sh'), 'utf8'))
+assert.equal(readFileSync(join(outDir, 'skill.md'), 'utf8'), readFileSync(join(repoDir, 'skills/yoho/SKILL.md'), 'utf8'))
 for (const name of ['yoho', 'x-yoho']) {
   const path = `schema/${name}.schema.json`
   const schema = JSON.parse(readFileSync(join(outDir, path), 'utf8'))
@@ -82,4 +83,4 @@ const searchIndex = JSON.parse((await import(pathToFileURL(searchFile).href)).de
 for (const source of sourcePaths) {
   assert.ok(Object.values(searchIndex.documentIds).some(id => id.startsWith(pageURL(source) + '#')), `${source}: missing from local search`)
 }
-console.log(`Docs checks passed: ${sourcePaths.length} directory pages, preserved heading anchors, ${links} local links, installer, schemas, logo, social cards, CNAME and local search.`)
+console.log(`Docs checks passed: ${sourcePaths.length} directory pages, preserved heading anchors, ${links} local links, installer, skill, schemas, logo, social cards, CNAME and local search.`)

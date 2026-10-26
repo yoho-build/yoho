@@ -31,6 +31,8 @@ export default defineConfig({
   // Rewrites emit directories, not extensionless .html aliases or SPA fallbacks.
   cleanUrls: true,
   rewrites,
+  // public/skill.md is served as a file, not rendered as a page.
+  srcExclude: ['public/**'],
   ignoreDeadLinks: false,
   head: [
     ['link', { rel: 'icon', type: 'image/svg+xml', href: '/assets/logo.svg' }],

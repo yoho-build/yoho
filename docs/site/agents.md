@@ -1,3 +1,7 @@
+<script setup>
+import { agentPrompt } from './.vitepress/theme/prompt.js'
+</script>
+
 # Set up with your AI agent
 
 No manual install needed. Your coding agent (Claude Code, Codex, Cursor, ...) reads the Yoho skill, installs the CLI, writes the config, and asks before it touches any Server.
@@ -6,11 +10,9 @@ No manual install needed. Your coding agent (Claude Code, Codex, Cursor, ...) re
 
 Paste this into your agent, in the repo you want to deploy:
 
-```text
-Read https://raw.githubusercontent.com/yoho-build/yoho/main/skills/yoho/SKILL.md with curl (not a summarizing fetch tool) and follow its "First-time setup" section to deploy this repo with Yoho. Ask me before installing anything, editing files, or connecting to a server.
-```
+<CopyBox :text="agentPrompt" label="Prompt" />
 
-Why curl: a fetch tool that summarizes the page can drop commands and flags. The skill is plain Markdown; the agent should read it verbatim.
+`https://yohobuild.com/skill.md` is the Yoho skill ([`skills/yoho/SKILL.md`](https://github.com/yoho-build/yoho/blob/main/skills/yoho/SKILL.md)). Why curl: a fetch tool that summarizes the page can drop commands and flags. The skill is plain Markdown; the agent should read it verbatim.
 
 ## What the agent does
 
