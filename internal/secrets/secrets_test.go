@@ -456,7 +456,7 @@ func TestQuoteValueRoundTrip(t *testing.T) {
 		if err != nil {
 			t.Fatalf("%q: %v", v, err)
 		}
-		got, err := evalEntry(context.Background(), entries[0], nil, nil, LoadOptions{Getenv: noEnv})
+		got, err := evalEntry(context.Background(), entries[0], nil, nil, nil, LoadOptions{Getenv: noEnv})
 		if err != nil || got != v {
 			t.Errorf("%q round-tripped to %q (%v)", v, got, err)
 		}

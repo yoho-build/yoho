@@ -17,13 +17,30 @@ type Runner interface {
 	Run(ctx context.Context, argv []string, env []string) (stdout, stderr []byte, err error)
 }
 
+// inputRunner is a Runner that can also feed stdin. Batched op reads need
+// it; without it each reference is read on its own.
+type inputRunner interface {
+	RunInput(ctx context.Context, argv []string, stdin []byte) (stdout, stderr []byte, err error)
+}
+
 // ExecRunner runs commands with os/exec.
 type ExecRunner struct{}
 
 func (ExecRunner) Run(ctx context.Context, argv []string, env []string) ([]byte, []byte, error) {
+	return execRun(ctx, argv, env, nil)
+}
+
+func (ExecRunner) RunInput(ctx context.Context, argv []string, stdin []byte) ([]byte, []byte, error) {
+	return execRun(ctx, argv, nil, stdin)
+}
+
+func execRun(ctx context.Context, argv []string, env []string, stdin []byte) ([]byte, []byte, error) {
 	cmd := exec.CommandContext(ctx, argv[0], argv[1:]...)
 	if len(env) > 0 {
 		cmd.Env = append(os.Environ(), env...)
+	}
+	if stdin != nil {
+		cmd.Stdin = bytes.NewReader(stdin)
 	}
 	var out, errb bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &out, &errb
@@ -53,6 +70,15 @@ func memoKey(argv []string, env []string) string {
 func (m *memoRunner) Run(ctx context.Context, argv []string, env []string) ([]byte, []byte, error) {
 	out, stderr, err, _ := m.run(ctx, argv, env)
 	return out, stderr, err
+}
+
+// RunInput is not memoized: Load makes each batched call once.
+func (m *memoRunner) RunInput(ctx context.Context, argv []string, stdin []byte) ([]byte, []byte, error) {
+	ir, ok := m.r.(inputRunner)
+	if !ok {
+		return nil, nil, fmt.Errorf("%s: runner cannot pass stdin", argv[0])
+	}
+	return ir.RunInput(ctx, argv, stdin)
 }
 
 // run is Run that also returns the cache entry that answered, so a caller can

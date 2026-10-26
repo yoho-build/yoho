@@ -166,13 +166,14 @@ func Load(ctx context.Context, dir, destination string, cfg config.SecretsConfig
 	}
 
 	s := &Store{values: map[string]string{}, refs: map[string]string{}}
-	if err := resolveProviders(ctx, s, destination, cfg, fileKey, run, opts); err != nil {
+	ops, err := resolveProviders(ctx, s, destination, cfg, fileKey, fileOpWants(ctx, entries, cfg), run, opts)
+	if err != nil {
 		return nil, err
 	}
 
 	// Files are evaluated in order so later entries can expand earlier ones.
 	for _, e := range entries {
-		v, err := evalEntry(ctx, e, s.values, run, opts)
+		v, err := evalEntry(ctx, e, s.values, run, ops, opts)
 		if err != nil {
 			if len(cfg.Nonempty) > 0 {
 				return nil, contractResolutionError(ctx, e.key)
@@ -203,7 +204,45 @@ func contractResolutionError(ctx context.Context, key string) error {
 	return fmt.Errorf("secret %s: resolution failed", key)
 }
 
-func resolveProviders(ctx context.Context, s *Store, destination string, cfg config.SecretsConfig, fileKey map[string]string, run Runner, opts LoadOptions) error {
+// fileOpWants lists the $(op read ...) substitutions of the secrets files for
+// the op batch. None when a key could set OP_* in their environment, which
+// would change how op read resolves.
+func fileOpWants(ctx context.Context, entries []fileEntry, cfg config.SecretsConfig) []opWant {
+	for _, e := range entries {
+		if strings.HasPrefix(e.key, "OP_") {
+			return nil
+		}
+	}
+	for k := range cfg.Values {
+		if strings.HasPrefix(k, "OP_") {
+			return nil
+		}
+	}
+	var wants []opWant
+	for _, e := range entries {
+		for _, p := range e.parts {
+			if p.kind != cmdPart {
+				continue
+			}
+			r, ok := parseOpRead(p.s)
+			if !ok {
+				continue
+			}
+			wants = append(wants, opWant{opRef: r, key: e.key, fail: func(err error) error {
+				if len(cfg.Nonempty) > 0 {
+					return contractResolutionError(ctx, e.key)
+				}
+				return fmt.Errorf("%s:%d: %s: %w", e.file, e.line, e.key, err)
+			}})
+		}
+	}
+	return wants
+}
+
+// resolveProviders fills s from the provider values in cfg. It first reads
+// all op references, its own and fileWants, in one batch per account, and
+// returns those values for the $(...) substitutions.
+func resolveProviders(ctx context.Context, s *Store, destination string, cfg config.SecretsConfig, fileKey map[string]string, fileWants []opWant, run Runner, opts LoadOptions) (opCache, error) {
 	type job struct {
 		key, provider, ref string
 		p                  config.SecretProvider
@@ -232,11 +271,24 @@ func resolveProviders(ctx context.Context, s *Store, destination string, cfg con
 		jobs = append(jobs, job{k, sv.Provider, sv.Ref, p})
 	}
 	if len(errs) > 0 {
-		return errors.Join(errs...)
+		return nil, errors.Join(errs...)
 	}
 
 	res := &providerResolver{run: run, getenv: opts.Getenv, clock: opts.Clock, retries: opts.Retries,
 		onWait: opts.OnWait, waitAfter: opts.WaitAfter, warn: opts.Warn}
+	var wants []opWant
+	for _, j := range jobs {
+		if j.p.Type == "op" {
+			wants = append(wants, opWant{opRef: opRef{j.p.Account, j.ref}, key: j.key, fail: func(err error) error {
+				return providerJobError(cfg, j.key, j.provider, j.p.Type, j.ref, err, ctx)
+			}})
+		}
+	}
+	ops, err := res.opPrefetch(ctx, append(wants, fileWants...))
+	if err != nil {
+		return nil, err
+	}
+	res.ops = ops
 	vals := make([]string, len(jobs))
 	jobErrs := make([]error, len(jobs))
 	resolve := func(i int) {
@@ -256,7 +308,7 @@ func resolveProviders(ctx context.Context, s *Store, destination string, cfg con
 		resolve(0)
 		var pe *ProviderError
 		if errors.As(jobErrs[0], &pe) && (pe.Class == ApprovalTimeout || pe.Class == NotSignedIn) {
-			return jobErrs[0]
+			return nil, jobErrs[0]
 		}
 	}
 	sem := make(chan struct{}, opts.Concurrency)
@@ -272,12 +324,12 @@ func resolveProviders(ctx context.Context, s *Store, destination string, cfg con
 	}
 	wg.Wait()
 	if err := errors.Join(jobErrs...); err != nil {
-		return err
+		return nil, err
 	}
 	for i, j := range jobs {
 		s.values[j.key], s.refs[j.key] = vals[i], j.provider+":"+j.ref
 	}
-	return nil
+	return ops, nil
 }
 
 // providerJobError wraps a failed provider call. Under a secrets.nonempty
@@ -295,7 +347,7 @@ func providerJobError(cfg config.SecretsConfig, key, provider, typ, ref string, 
 	return contractResolutionError(ctx, key)
 }
 
-func evalEntry(ctx context.Context, e fileEntry, defined map[string]string, run Runner, opts LoadOptions) (string, error) {
+func evalEntry(ctx context.Context, e fileEntry, defined map[string]string, run Runner, ops opCache, opts LoadOptions) (string, error) {
 	getenv := opts.Getenv
 	var b strings.Builder
 	for _, p := range e.parts {
@@ -309,6 +361,12 @@ func evalEntry(ctx context.Context, e fileEntry, defined map[string]string, run 
 				b.WriteString(v)
 			}
 		case cmdPart:
+			if r, ok := parseOpRead(p.s); ok {
+				if v, ok := ops.get(r); ok {
+					b.WriteString(strings.TrimRight(v, "\n"))
+					continue
+				}
+			}
 			env := make([]string, 0, len(defined))
 			known := make([]string, 0, len(defined))
 			for k, v := range defined {

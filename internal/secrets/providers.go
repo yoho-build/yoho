@@ -23,6 +23,8 @@ type providerResolver struct {
 	onWait    func(WaitEvent)
 	waitAfter time.Duration
 	warn      func(string)
+	// ops holds values already read by opPrefetch.
+	ops opCache
 }
 
 func (r *providerResolver) resolve(ctx context.Context, key string, p config.SecretProvider, ref string) (string, error) {
@@ -52,6 +54,11 @@ func (r *providerResolver) resolve(ctx context.Context, key string, p config.Sec
 // keeps the redacted command error). An ApprovalTimeout is retried up to
 // r.retries times.
 func (r *providerResolver) call(ctx context.Context, provider, key string, argv []string) ([]byte, error) {
+	return r.callInput(ctx, provider, key, argv, nil)
+}
+
+// callInput is call with stdin. Calls with stdin bypass the memo.
+func (r *providerResolver) callInput(ctx context.Context, provider, key string, argv []string, stdin []byte) ([]byte, error) {
 	clock := r.clock
 	if clock == nil {
 		clock = time.Now
@@ -62,7 +69,9 @@ func (r *providerResolver) call(ctx context.Context, provider, key string, argv 
 		var entry *memoCall
 		var out, stderr []byte
 		var err error
-		if m, ok := r.run.(*memoRunner); ok {
+		if stdin != nil {
+			out, stderr, err = r.run.(inputRunner).RunInput(ctx, argv, stdin)
+		} else if m, ok := r.run.(*memoRunner); ok {
 			out, stderr, err, entry = m.run(ctx, argv, nil)
 		} else {
 			out, stderr, err = r.run.Run(ctx, argv, nil)
@@ -73,7 +82,7 @@ func (r *providerResolver) call(ctx context.Context, provider, key string, argv 
 		}
 		pe := classifiedError(ctx, provider, argv[0], err, out, stderr, clock().Sub(start))
 		if pe.Class == ApprovalTimeout && attempt < r.retries && ctx.Err() == nil {
-			if m, ok := r.run.(*memoRunner); ok {
+			if m, ok := r.run.(*memoRunner); ok && stdin == nil {
 				m.forget(argv, entry)
 			}
 			if r.warn != nil {
@@ -88,6 +97,9 @@ func (r *providerResolver) call(ctx context.Context, provider, key string, argv 
 // op read prints the field verbatim with --no-newline, preserving values
 // that legitimately end in a newline (PEM keys).
 func (r *providerResolver) op(ctx context.Context, key string, p config.SecretProvider, ref string) (string, error) {
+	if v, ok := r.ops.get(opRef{p.Account, ref}); ok {
+		return v, nil
+	}
 	argv := []string{"op", "read", "--no-newline"}
 	if p.Account != "" {
 		argv = append(argv, "--account", p.Account)
