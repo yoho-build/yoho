@@ -2,7 +2,7 @@
 
 With `access: scoped` (or `YOHO_ACCESS=scoped`) only `deploy`, `rollback`, `releases`, `app ps/logs/stats`, `tui`, `ui` and `config check/show` run, through the Gate; see [Sharing one App with a team](team-access.md).
 
-Global flags (every command): `-c, --config FILE`, `-d, --destination NAME` (default: `$YOHO_DESTINATION`, then `production`, then the only Destination), `--json` (NDJSON events), `-v, --verbose` (stream remote output).
+Global flags (every command): `-c, --config FILE`, `-d, --destination NAME` (default: `$YOHO_DESTINATION`, then `production`, then the only Destination), `--json` (NDJSON events), `-v, --verbose` (stream remote output). On a terminal, `deploy`/`apply` show one live line per built Service (current BuildKit step and elapsed time) that freezes as `✓ web 1m12s`; without a terminal only the start and finish lines print, and `-v` streams the full build output. With `--json` each build emits `build_service` (start), throttled `build_progress` (`service`, `index`, `total`, `step`, `done`, `steps_total`, `cached`; at most one per 500 ms per Service) and `build_service_done` (`service`, `duration_ms`, `cached`, `ok`). Progress needs `docker buildx` with `--progress=rawjson`; older buildx falls back to plain output.
 
 | Command | Description |
 |---|---|
