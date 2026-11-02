@@ -15,6 +15,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -60,6 +61,9 @@ type SSH struct {
 	ttyExec ExecFunc
 
 	controlPath string
+
+	hopMu sync.Mutex
+	hop   *Hop // cached by Hop
 }
 
 var _ Host = (*SSH)(nil)
@@ -255,6 +259,34 @@ func (s *SSH) SSHArgs() []string {
 	return append(a, s.opts.ExtraArgs...)
 }
 
+// Hop describes how a machine other than the operator's opens its own
+// connection to a Server.
+type Hop struct {
+	// Args is the ssh argv (binary + options, no destination).
+	Args []string
+	// Dest is the ssh destination: user@host, or the target as written.
+	Dest string
+	// User, Host and Port are what the hop connects to. Port is 22 when the
+	// target has none.
+	User, Host string
+	Port       int
+	// Resolved: the operator's `ssh -G` output replaced the target as
+	// written (an ssh config alias with no proxy).
+	Resolved bool
+}
+
+// Target renders the hop as user@host:port (IPv6 bracketed).
+func (h Hop) Target() string {
+	host := h.Host
+	if strings.Contains(host, ":") {
+		host = "[" + host + "]"
+	}
+	if h.User != "" {
+		host = h.User + "@" + host
+	}
+	return host + ":" + strconv.Itoa(h.Port)
+}
+
 // HopArgs returns ssh argv (binary + options, no destination) and the
 // destination for a machine other than the operator's to open its own
 // connection to this Server (for example a remote Builder). It shares no
@@ -262,16 +294,82 @@ func (s *SSH) SSHArgs() []string {
 // StrictHostKeyChecking=yes mean a missing key or known_hosts entry fails.
 // ok is false when the Server is only reachable through this machine's
 // Cloudflare Tunnel setup, which the other machine does not have.
-func (s *SSH) HopArgs() (args []string, dest string, ok bool) {
+//
+// The target is resolved through this machine's `ssh -G` first, so a Host
+// alias from ~/.ssh/config becomes the real user, host and port the other
+// machine can reach. A configured ProxyJump or ProxyCommand, or a failing
+// `ssh -G`, keeps the target as written.
+func (s *SSH) HopArgs(ctx context.Context) (args []string, dest string, ok bool) {
+	h, ok := s.Hop(ctx)
+	return h.Args, h.Dest, ok
+}
+
+// Hop is HopArgs with the resolved details.
+func (s *SSH) Hop(ctx context.Context) (Hop, bool) {
 	if s.opts.CloudflareHostname != "" {
-		return nil, "", false
+		return Hop{}, false
 	}
-	args = []string{"ssh", "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=yes",
+	s.hopMu.Lock()
+	defer s.hopMu.Unlock()
+	if s.hop == nil {
+		h := s.resolveHop(ctx)
+		s.hop = &h
+	}
+	return *s.hop, true
+}
+
+func (s *SSH) resolveHop(ctx context.Context) Hop {
+	h := Hop{Dest: s.Destination(), User: s.user, Host: s.host, Port: s.port}
+	if h.Port == 0 {
+		h.Port = 22
+	}
+	if user, host, port, ok := s.sshG(ctx); ok {
+		h.User, h.Host, h.Port, h.Resolved = user, host, port, true
+		h.Dest = host
+		if user != "" {
+			h.Dest = user + "@" + host
+		}
+	}
+	h.Args = []string{"ssh", "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=yes",
 		"-o", "ConnectTimeout=" + strconv.Itoa(s.opts.ConnectTimeout)}
-	if s.port != 0 {
-		args = append(args, "-p", strconv.Itoa(s.port))
+	if h.Port != 22 || (s.port != 0 && !h.Resolved) {
+		h.Args = append(h.Args, "-p", strconv.Itoa(h.Port))
 	}
-	return args, s.Destination(), true
+	return h
+}
+
+// sshG asks the local ssh how it would reach the target. ok is false when it
+// fails, uses a proxy, or prints values unsafe to pass on.
+func (s *SSH) sshG(ctx context.Context) (user, host string, port int, ok bool) {
+	argv := []string{s.opts.Binary, "-G"}
+	if s.port != 0 {
+		argv = append(argv, "-p", strconv.Itoa(s.port))
+	}
+	argv = append(argv, "--", s.Destination())
+	var out bytes.Buffer
+	if err := s.opts.Exec(ctx, argv, nil, &out, io.Discard); err != nil {
+		return "", "", 0, false
+	}
+	vals := map[string]string{}
+	for _, line := range strings.Split(out.String(), "\n") {
+		k, v, _ := strings.Cut(strings.TrimSpace(line), " ")
+		if _, seen := vals[k]; !seen {
+			vals[k] = strings.TrimSpace(v)
+		}
+	}
+	for _, k := range []string{"proxyjump", "proxycommand"} {
+		if v := vals[k]; v != "" && v != "none" {
+			return "", "", 0, false
+		}
+	}
+	user, host = vals["user"], vals["hostname"]
+	port, err := strconv.Atoi(vals["port"])
+	if err != nil || port < 1 || port > 65535 || host == "" ||
+		strings.HasPrefix(host, "-") || strings.HasPrefix(user, "-") ||
+		strings.ContainsAny(host+user, " \t\n'\"`$;&|<>\\") {
+		return "", "", 0, false
+	}
+	return user, host, port, true
 }
 
 // RshCommand is SSHArgs as one string for rsync -e.

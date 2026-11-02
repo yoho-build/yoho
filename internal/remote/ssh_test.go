@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path"
+	"reflect"
 	"strconv"
 	"strings"
 	"testing"
@@ -361,5 +362,74 @@ func TestRunTerminalArgv(t *testing.T) {
 		if f.calls[0].stdin != "keys" {
 			t.Errorf("tty=%v: stdin %q", tty, f.calls[0].stdin)
 		}
+	}
+}
+
+const aliasG = "user hostinger-user\nhostname 203.0.113.9\nport 2200\nidentityfile ~/.ssh/id\n"
+
+func hopFake(out string, err error) *fakeExec {
+	return &fakeExec{respond: func(_ int, _ call, stdout io.Writer) error {
+		io.WriteString(stdout, out)
+		return err
+	}}
+}
+
+func TestHopResolvesAlias(t *testing.T) {
+	f := hopFake(aliasG+"proxyjump none\nproxycommand none\n", nil)
+	s := newTestSSH(t, "hostinger", false, f)
+	h, ok := s.Hop(context.Background())
+	if !ok || !h.Resolved || h.Dest != "hostinger-user@203.0.113.9" || h.Port != 2200 {
+		t.Fatalf("hop %+v ok=%v", h, ok)
+	}
+	if got := strings.Join(h.Args, " "); !strings.HasSuffix(got, "-p 2200") {
+		t.Errorf("args %q", got)
+	}
+	if h.Target() != "hostinger-user@203.0.113.9:2200" {
+		t.Errorf("target %q", h.Target())
+	}
+	if want := []string{"ssh", "-G", "--", "hostinger"}; !reflect.DeepEqual(f.calls[0].argv, want) {
+		t.Errorf("argv %q", f.calls[0].argv)
+	}
+	s.HopArgs(context.Background())
+	if len(f.calls) != 1 {
+		t.Errorf("ssh -G must be cached, ran %d times", len(f.calls))
+	}
+}
+
+func TestHopDefaultPortOmitted(t *testing.T) {
+	s := newTestSSH(t, "deploy@web.example.com:2222", false, hopFake("user deploy\nhostname web.example.com\nport 2222\n", nil))
+	args, dest, _ := s.HopArgs(context.Background())
+	if dest != "deploy@web.example.com" || !strings.HasSuffix(strings.Join(args, " "), "-p 2222") {
+		t.Errorf("%q %q", args, dest)
+	}
+	s = newTestSSH(t, "deploy@web", false, hopFake("user deploy\nhostname web\nport 22\n", nil))
+	args, _, _ = s.HopArgs(context.Background())
+	if strings.Contains(strings.Join(args, " "), "-p") {
+		t.Errorf("default port must not be passed: %q", args)
+	}
+}
+
+func TestHopKeepsAliasWithProxyOrFailure(t *testing.T) {
+	for name, f := range map[string]*fakeExec{
+		"proxyjump":    hopFake(aliasG+"proxyjump bastion\n", nil),
+		"proxycommand": hopFake(aliasG+"proxycommand nc %h %p\n", nil),
+		"failure":      hopFake("", errors.New("ssh -G failed")),
+		"no hostname":  hopFake("user x\nport 22\n", nil),
+	} {
+		s := newTestSSH(t, "hostinger", false, f)
+		h, ok := s.Hop(context.Background())
+		if !ok || h.Resolved || h.Dest != "hostinger" || h.Port != 22 {
+			t.Errorf("%s: hop %+v", name, h)
+		}
+	}
+}
+
+func TestHopCloudflare(t *testing.T) {
+	s, err := NewSSH("x", "deploy@web", false, SSHOptions{ControlDir: t.TempDir(), CloudflareHostname: "ssh.example.com", Exec: (&fakeExec{}).exec})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, ok := s.HopArgs(context.Background()); ok {
+		t.Error("cloudflare Servers have no hop")
 	}
 }
