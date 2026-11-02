@@ -38,7 +38,7 @@ type Stats struct {
 // non-interactive SSH connection to dst. Failure wraps ErrDirectUnavailable.
 // Yoho never copies keys or accepts new host keys for the builder.
 func DirectProbe(ctx context.Context, src, dst remote.Host) error {
-	hop, err := hopTo(dst)
+	hop, err := hopTo(ctx, dst)
 	if err != nil {
 		return err
 	}
@@ -49,35 +49,57 @@ func DirectProbe(ctx context.Context, src, dst remote.Host) error {
 }
 
 // hopTo is the quoted `ssh ... dest` prefix run on the builder.
-func hopTo(dst remote.Host) (string, error) {
+func hopTo(ctx context.Context, dst remote.Host) (string, error) {
 	s, ok := dst.(*remote.SSH)
 	if !ok {
 		return "", fmt.Errorf("%w: %s is not reached over SSH", ErrDirectUnavailable, dst.Name())
 	}
-	args, dest, ok := s.HopArgs()
+	args, dest, ok := s.HopArgs(ctx)
 	if !ok {
 		return "", fmt.Errorf("%w: %s is reached through Cloudflare Access, which the builder lacks", ErrDirectUnavailable, dst.Name())
 	}
 	return remote.QuoteArgs(args...) + " -- " + remote.Quote(dest), nil
 }
 
-// directScript runs on the builder: docker save | gzip | ssh dst docker load.
+// IsProbeReason reports whether a UseDirect reason came from DirectProbe
+// (the Builder cannot reach a Server), as opposed to a config mismatch.
+func IsProbeReason(reason string) bool {
+	return strings.HasPrefix(reason, ErrDirectUnavailable.Error())
+}
+
+// hasZstd reports whether `command -v zstd` finds zstd on h, or on the
+// machine h's hop reaches when hop is not empty.
+func hasZstd(ctx context.Context, h remote.Host, hop string) bool {
+	script := "command -v zstd"
+	if hop != "" {
+		script = hop + " 'command -v zstd'"
+	}
+	out, err := h.Output(ctx, remote.Cmd{Script: script})
+	return err == nil && strings.TrimSpace(out) != ""
+}
+
+// directScript runs on the builder: docker save | gzip (or zstd when both
+// ends have it) | ssh dst docker load.
 // The compressed stream is counted by a fifo reader (POSIX sh has no pipefail
 // or process substitution) and the total goes to stdout as one marker line;
 // everything else is sent to stderr. A failed docker save fails the script.
-func directScript(hop string, refs []string, platform string) string {
+func directScript(hop string, refs []string, platform string, zstd bool) string {
 	save := "docker save "
 	if platform != "" {
 		save += "--platform " + remote.Quote(platform) + " "
 	}
 	save += remote.QuoteArgs(refs...)
+	compress, load := "gzip -1", "docker load >&2"
+	if zstd {
+		compress, load = "zstd -1 -T0 -q -c", "zstd -dc | docker load >&2"
+	}
 	return `set -eu
 d=$(mktemp -d)
 trap 'rm -rf "$d"' EXIT
 mkfifo "$d/c"
 wc -c <"$d/c" >"$d/n" &
 w=$!
-{ ` + save + ` || : >"$d/fail"; } | gzip -1 | tee "$d/c" | ` + hop + ` 'docker load >&2'
+{ ` + save + ` || : >"$d/fail"; } | ` + compress + ` | tee "$d/c" | ` + hop + ` ` + remote.Quote(load) + `
 wait "$w"
 [ ! -e "$d/fail" ] || { echo "docker save failed on the builder" >&2; exit 1; }
 printf '` + directMarker + `%s\n' "$(tr -d ' \n' <"$d/n")"
@@ -94,6 +116,12 @@ const directMarker = "YOHO_DIRECT_BYTES="
 // (transport.Fingerprint). Nothing secret is sent: no registry credentials,
 // no build secrets.
 func Direct(ctx context.Context, src, dst remote.Host, refs []string, platform string, out io.Writer) (Stats, error) {
+	return direct(ctx, src, dst, refs, platform, out, func() bool { return hasZstd(ctx, src, "") })
+}
+
+// direct is Direct with the Builder's zstd detection supplied (and cached)
+// by the caller; it runs after the probe succeeds.
+func direct(ctx context.Context, src, dst remote.Host, refs []string, platform string, out io.Writer, builderZstd func() bool) (Stats, error) {
 	if len(refs) == 0 {
 		return Stats{}, nil
 	}
@@ -103,14 +131,15 @@ func Direct(ctx context.Context, src, dst remote.Host, refs []string, platform s
 	if err := DirectProbe(ctx, src, dst); err != nil {
 		return Stats{}, err
 	}
-	hop, err := hopTo(dst)
+	hop, err := hopTo(ctx, dst)
 	if err != nil {
 		return Stats{}, err
 	}
+	zstd := builderZstd() && hasZstd(ctx, src, hop)
 	st := Stats{Image: strings.Join(refs, ", ")}
 	start := time.Now()
 	var stdout strings.Builder
-	err = src.Run(ctx, remote.Cmd{Script: directScript(hop, refs, platform), Stdout: &stdout, Stderr: out})
+	err = src.Run(ctx, remote.Cmd{Script: directScript(hop, refs, platform, zstd), Stdout: &stdout, Stderr: out})
 	st.Duration = time.Since(start)
 	if err != nil {
 		return st, fmt.Errorf("stream %s from %s to %s: %w", st.Image, src.Name(), dst.Name(), err)
@@ -232,6 +261,7 @@ func ShipDirect(ctx context.Context, src remote.Host, dsts []remote.Host, refs [
 			platform = ""
 		}
 	}
+	builderZstd := sync.OnceValue(func() bool { return hasZstd(ctx, src, "") })
 	res := make([]DirectResult, len(dsts))
 	errs := make([]error, len(dsts))
 	var mu sync.Mutex
@@ -258,7 +288,7 @@ func ShipDirect(ctx context.Context, src remote.Host, dsts []remote.Host, refs [
 				return
 			}
 			fmt.Fprintf(w, "%s: streaming %d image(s) from %s\n", d.Name(), len(need), src.Name())
-			st, err := Direct(ctx, src, d, need, platform, w)
+			st, err := direct(ctx, src, d, need, platform, w, builderZstd)
 			res[i].Stats = st
 			if err != nil {
 				errs[i] = err

@@ -22,7 +22,7 @@ Direct shipping needs:
 - `transport.mode` `auto` or `load`. `pussh` and `registry` ship from your machine.
 - A Builder whose own Docker runs that platform (`docker info` on the Builder): the Builder's Docker driver does not cross-build, so an amd64 Builder building for arm64 Servers ships from your machine.
 - No `cache_to` other than `type=inline`: the Builder's Docker driver cannot export build cache.
-- SSH from the Builder to every Server that works without a prompt: the Builder's user needs its own key authorized on each Server and a `known_hosts` entry for each one. Yoho never copies keys or accepts host keys for the Builder; it probes with `ssh -o BatchMode=yes -o StrictHostKeyChecking=yes <server> true` before the build. The Builder connects to the Server's `ssh` address (user, host and port), so a name from your `~/.ssh/config` must resolve on the Builder too. Servers reached through a [Cloudflare Tunnel](cloudflare-tunnel.md) ship from your machine.
+- SSH from the Builder to every Server that works without a prompt: the Builder's user needs its own key authorized on each Server and a `known_hosts` entry for each one. Yoho never copies keys or accepts host keys for the Builder; it probes with `ssh -o BatchMode=yes -o StrictHostKeyChecking=yes <server> true` before the build. Yoho resolves the Server's `ssh` value through your own `ssh -G` first, so a `Host` alias from your `~/.ssh/config` reaches the Builder as the real `user@host` and port. When the alias uses `ProxyJump` or `ProxyCommand`, or `ssh -G` fails, the Builder gets the value as written and must resolve it itself. Servers reached through a [Cloudflare Tunnel](cloudflare-tunnel.md) ship from your machine.
 
 ```yaml
 builder:
@@ -31,7 +31,20 @@ builder:
   direct: auto # default
 ```
 
-On the direct path Yoho builds with the Builder's own Docker through a docker context named `yoho-remote-<hash>-d` (`docker context ls`), so the image stays in that Docker. It then runs `docker save | gzip -1 | ssh <server> docker load` on the Builder, once per Server, in parallel, and skips Servers that already have the same image. The Ship step reports per Server `web via direct, 412.0 MB in 38s (10.8 MB/s)`, and `--json` adds the same in `transfers`. The fallback path builds with a `docker-container` buildx builder (`yoho-remote-<hash>`) and `--load`s the image to your machine first.
+`yoho builder check` probes every Server of the Destination from the Builder and prints a table of SERVER, HOP TARGET (the `user@host:port` the Builder connects to) and RESULT. For each Server that fails it prints the commands to fix it, with your real values filled in. You run them; Yoho never creates, copies or installs keys on the Builder or a Server:
+
+```sh
+# 1. a key on the Builder, if it has none
+ssh build@10.0.0.2 'mkdir -p -m 700 ~/.ssh && { test -f ~/.ssh/id_ed25519 || ssh-keygen -t ed25519 -N "" -f ~/.ssh/id_ed25519; }'
+# 2. authorize it on the Server
+ssh build@10.0.0.2 'cat ~/.ssh/id_ed25519.pub' | ssh hostinger 'mkdir -p ~/.ssh && cat >> ~/.ssh/authorized_keys'
+# 3. compare the Server's host key with the one you trust (ssh-keygen -l -F HOST), then add it
+ssh build@10.0.0.2 'ssh-keyscan -p 22 203.0.113.9 >> ~/.ssh/known_hosts'
+```
+
+Then run `yoho builder check` again. It exits non-zero while any Server fails, and supports `--json`. Servers behind a Cloudflare Tunnel cannot use direct ship. A deploy that falls back prints `run \`yoho builder check\` for setup steps`.
+
+On the direct path Yoho builds with the Builder's own Docker through a docker context named `yoho-remote-<hash>-d` (`docker context ls`), so the image stays in that Docker. It then runs `docker save | gzip -1 | ssh <server> docker load` on the Builder (`zstd -1 -T0` and `zstd -dc` instead of gzip when both the Builder and the Server have `zstd` installed), once per Server, in parallel, and skips Servers that already have the same image. The Ship step reports per Server `web via direct, 412.0 MB in 38s (10.8 MB/s)`, and `--json` adds the same in `transfers`. The fallback path builds with a `docker-container` buildx builder (`yoho-remote-<hash>`) and `--load`s the image to your machine first.
 
 Build secrets travel as before, through BuildKit's session from your machine; nothing secret reaches the Builder's shell or the Server. Built images accumulate in the Builder's Docker; prune them there (`docker image prune`) like on any build host.
 

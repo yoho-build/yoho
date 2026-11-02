@@ -23,6 +23,7 @@ import (
 
 	"github.com/yoho-build/yoho/internal/build"
 	"github.com/yoho-build/yoho/internal/config"
+	"github.com/yoho-build/yoho/internal/remote"
 )
 
 // minContainerVersion is the oldest Apple container release `yoho builder
@@ -54,7 +55,136 @@ func builderCmd(g *globals) *cobra.Command {
 	}
 	setup.Flags().BoolVarP(&yes, "yes", "y", false, "Run every step without asking (including sudo installer)")
 	c.AddCommand(setup)
+	c.AddCommand(&cobra.Command{
+		Use:   "check",
+		Short: "Check that a remote Builder can ship images straight to each Server, and print setup steps for the ones it cannot",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			return builderCheck(cmd, g)
+		},
+	})
 	return c
+}
+
+// builderCheck probes, from the remote Builder, every Server of the
+// Destination (the check behind direct ship). It never installs keys or
+// changes the Builder; failures come with commands the operator runs.
+func builderCheck(cmd *cobra.Command, g *globals) error {
+	a, err := g.load(cmd)
+	if err != nil {
+		return err
+	}
+	u, b := a.ui, a.cfg.Builder
+	if b.Location != "remote" {
+		u.Info("Direct ship only applies to remote Builders (builder.location: remote); this App builds with location %s.", orDefault(b.Location, "local"))
+		return nil
+	}
+	ctx := cmd.Context()
+	if b.Direct.Mode() == config.DirectOff {
+		u.Warn("builder.direct is false: deploys ship through this machine whatever this check finds")
+	}
+	step := u.Step("builder", "Connect %s", b.Remote)
+	bh, err := remote.NewSSH("builder", b.Remote, false, remote.SSHOptions{})
+	if err == nil {
+		_, err = bh.Output(ctx, remote.Cmd{Script: "true"})
+	}
+	if err != nil {
+		step.Fail(err, "check `"+sshCommand(b.Remote)+"` works without a password")
+		return &silentError{err}
+	}
+	defer bh.Close()
+	step.Done()
+
+	rows := [][]string{}
+	var details, hints []string
+	failed := 0
+	for _, name := range a.dest.Servers {
+		srv := a.cfg.Servers[name]
+		row := []string{name, "-", "ok"}
+		h, err := remote.NewSSH(name, srv.SSH, srv.Sudo, a.sshOptions())
+		if err != nil {
+			return err
+		}
+		hop, hasHop := h.Hop(ctx)
+		if hasHop {
+			row[1] = hop.Target()
+		}
+		if perr := build.DirectProbe(ctx, bh, h); perr != nil {
+			failed++
+			row[2] = "error"
+			details = append(details, fmt.Sprintf("%s: %v", name, perr))
+			hints = append(hints, directSetupHints(name, b.Remote, srv.SSH, hop, hasHop)...)
+		}
+		h.Close()
+		rows = append(rows, row)
+	}
+	u.Table([]string{"SERVER", "HOP TARGET", "RESULT"}, rows)
+	for _, d := range details {
+		u.Warn("%s", d)
+	}
+	if failed == 0 {
+		u.Info("The Builder %s can ship images directly to every Server.", b.Remote)
+		return nil
+	}
+	for _, h := range hints {
+		u.Info("%s", h)
+	}
+	err = fmt.Errorf("direct ship is not ready for %d of %d Server(s)", failed, len(rows))
+	u.Error(err, "")
+	return &silentError{err}
+}
+
+func orDefault(v, def string) string {
+	if v == "" {
+		return def
+	}
+	return v
+}
+
+// sshCommand is the ssh command line that reaches target ([user@]host[:port]).
+func sshCommand(target string) string {
+	user, host, port, err := remote.ParseTarget(target)
+	if err != nil {
+		return "ssh " + remote.Quote(target)
+	}
+	cmd := "ssh "
+	if port != 0 {
+		cmd += "-p " + strconv.Itoa(port) + " "
+	}
+	if user != "" {
+		host = user + "@" + host
+	}
+	return cmd + host
+}
+
+// directSetupHints are the commands the operator runs to let the Builder ssh
+// to one Server without a prompt. Yoho prints them and never runs them: it
+// does not create, copy or install keys. builder and server are the
+// targets as the operator reaches them; hop is what the Builder connects to.
+// A Server without a hop (hasHop false, Cloudflare Tunnel) cannot use direct ship.
+func directSetupHints(name, builder, server string, hop remote.Hop, hasHop bool) []string {
+	if !hasHop {
+		return []string{"", name + ": reached through a Cloudflare Tunnel, which the Builder lacks, so it cannot use direct ship; images for it ship through this machine."}
+	}
+	b := sshCommand(builder)
+	scan := "ssh-keyscan -p " + strconv.Itoa(hop.Port) + " " + hop.Host
+	known := hop.Host
+	if hop.Port != 22 {
+		known = "[" + hop.Host + "]:" + strconv.Itoa(hop.Port)
+	}
+	lines := []string{"",
+		"To let the Builder reach " + name + " (" + hop.Target() + ") without a prompt, run these yourself (Yoho never installs keys):",
+		"  1. Create a key on the Builder if it has none:",
+		"       " + b + " " + remote.Quote(`mkdir -p -m 700 ~/.ssh && { test -f ~/.ssh/id_ed25519 || ssh-keygen -t ed25519 -N "" -f ~/.ssh/id_ed25519; }`),
+		"  2. Authorize it on " + name + ":",
+		"       " + b + " 'cat ~/.ssh/id_ed25519.pub' | " + sshCommand(server) + " 'mkdir -p ~/.ssh && cat >> ~/.ssh/authorized_keys'",
+		"  3. Check the host key of " + hop.Host + " against the fingerprint your machine trusts, then add it to the Builder's known_hosts:",
+		"       ssh-keygen -l -F " + remote.Quote(known) + "   # on your machine: the fingerprint you trust",
+		"       " + b + " " + remote.Quote(scan+" 2>/dev/null | ssh-keygen -lf -") + "   # must match",
+		"       " + b + " " + remote.Quote(scan+" >> ~/.ssh/known_hosts"),
+		"  4. Run `yoho builder check` again.",
+	}
+	return lines
 }
 
 // builderConfig is the Yoho file's builder section, or defaults when there

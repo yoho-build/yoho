@@ -20,6 +20,8 @@ type scriptHost struct {
 	name    string
 	scripts []string
 	failOn  string
+	// zstd: `command -v zstd` finds it (on the Builder and, through the hop, the Server).
+	zstd bool
 }
 
 func (h *scriptHost) Name() string { return h.name }
@@ -27,6 +29,9 @@ func (h *scriptHost) Output(ctx context.Context, c remote.Cmd) (string, error) {
 	h.scripts = append(h.scripts, c.Script)
 	if h.failOn != "" && strings.Contains(c.Script, h.failOn) {
 		return "", errors.New("Permission denied (publickey)")
+	}
+	if h.zstd && strings.Contains(c.Script, "command -v zstd") {
+		return "/usr/bin/zstd\n", nil
 	}
 	return "", nil
 }
@@ -41,6 +46,12 @@ func (h *scriptHost) Run(ctx context.Context, c remote.Cmd) error {
 func sshServer(t *testing.T, target string, opts remote.SSHOptions) *remote.SSH {
 	t.Helper()
 	opts.ControlDir = t.TempDir()
+	if opts.Exec == nil {
+		// No ssh -G: keep the target as written.
+		opts.Exec = func(context.Context, []string, io.Reader, io.Writer, io.Writer) error {
+			return errors.New("no ssh -G in tests")
+		}
+	}
 	s, err := remote.NewSSH("web", target, false, opts)
 	if err != nil {
 		t.Fatal(err)
@@ -58,10 +69,10 @@ func TestDirectScriptAndStats(t *testing.T) {
 	if st.Bytes != 4242 || st.Duration <= 0 || !strings.Contains(st.Image, "reg/app-web:v1") {
 		t.Fatalf("stats %+v", st)
 	}
-	if len(src.scripts) != 2 {
-		t.Fatalf("want probe then stream, got %d scripts", len(src.scripts))
+	if len(src.scripts) != 3 {
+		t.Fatalf("want probe, builder zstd check, stream; got %d scripts: %q", len(src.scripts), src.scripts)
 	}
-	probe, script := src.scripts[0], src.scripts[1]
+	probe, script := src.scripts[0], src.scripts[2]
 	if !strings.HasSuffix(probe, "-- 'deploy@10.0.0.5' true") {
 		t.Errorf("probe %q", probe)
 	}
@@ -75,6 +86,32 @@ func TestDirectScriptAndStats(t *testing.T) {
 		if strings.Contains(probe+script, bad) {
 			t.Errorf("must not contain %q", bad)
 		}
+	}
+}
+
+func TestDirectScriptZstd(t *testing.T) {
+	gz := directScript("ssh -- 'u@h'", []string{"app:v1"}, "", false)
+	if !strings.Contains(gz, "| gzip -1 | tee") || !strings.Contains(gz, "'docker load >&2'") || strings.Contains(gz, "zstd") {
+		t.Errorf("gzip script:\n%s", gz)
+	}
+	zs := directScript("ssh -- 'u@h'", []string{"app:v1"}, "", true)
+	if !strings.Contains(zs, "| zstd -1 -T0 -q -c | tee") || !strings.Contains(zs, "'zstd -dc | docker load >&2'") || strings.Contains(zs, "gzip") {
+		t.Errorf("zstd script:\n%s", zs)
+	}
+	if !strings.Contains(zs, `wc -c <"$d/c"`) {
+		t.Errorf("zstd script must still count bytes:\n%s", zs)
+	}
+}
+
+func TestDirectUsesZstdWhenBothHaveIt(t *testing.T) {
+	src := &scriptHost{name: "builder", zstd: true}
+	dst := sshServer(t, "deploy@10.0.0.5", remote.SSHOptions{})
+	if _, err := Direct(context.Background(), src, dst, []string{"app:v1"}, "", nil); err != nil {
+		t.Fatal(err)
+	}
+	stream := src.scripts[len(src.scripts)-1]
+	if !strings.Contains(stream, "zstd -1 -T0 -q -c") || !strings.Contains(stream, "zstd -dc | docker load") {
+		t.Errorf("want zstd stream:\n%s", stream)
 	}
 }
 
@@ -271,5 +308,33 @@ func TestShipDirectSkipAndOldDocker(t *testing.T) {
 	// A non-SSH Server cannot be reached from the Builder.
 	if _, err := ShipDirect(context.Background(), src, []remote.Host{dst}, []string{"app:v1"}, "linux/amd64", nil); !errors.Is(err, ErrDirectUnavailable) {
 		t.Fatalf("want ErrDirectUnavailable, got %v", err)
+	}
+}
+
+// TestDirectProbeResolvesAlias: the Builder gets the real address behind an
+// ssh config alias, and keeps the alias when ssh -G fails or a proxy is set.
+func TestDirectProbeResolvesAlias(t *testing.T) {
+	g := func(out string, err error) remote.SSHOptions {
+		return remote.SSHOptions{Exec: func(_ context.Context, _ []string, _ io.Reader, stdout, _ io.Writer) error {
+			io.WriteString(stdout, out)
+			return err
+		}}
+	}
+	for _, tc := range []struct {
+		name string
+		opts remote.SSHOptions
+		want string
+	}{
+		{"alias resolved", g("user root\nhostname 203.0.113.9\nport 2200\nproxyjump none\n", nil), "'-p' '2200' -- 'root@203.0.113.9' true"},
+		{"proxyjump keeps alias", g("user root\nhostname 10.1.1.1\nport 22\nproxyjump bastion\n", nil), "-- 'hostinger' true"},
+		{"ssh -G failure keeps alias", g("", errors.New("boom")), "-- 'hostinger' true"},
+	} {
+		src := &scriptHost{name: "builder"}
+		if err := DirectProbe(context.Background(), src, sshServer(t, "hostinger", tc.opts)); err != nil {
+			t.Fatal(err)
+		}
+		if !strings.HasSuffix(src.scripts[0], tc.want) {
+			t.Errorf("%s: probe %q, want suffix %q", tc.name, src.scripts[0], tc.want)
+		}
 	}
 }

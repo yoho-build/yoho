@@ -272,7 +272,7 @@ func (a *app) buildAndShip(ctx context.Context, s *session, skipBuild bool) (map
 		builder, derr = a.directBuilder(ctx, hosts, platforms, cacheTo)
 	}
 	if derr != nil {
-		step.Fail(derr, "give the Builder its own SSH key and known_hosts entry for each Server, or set builder.direct: auto")
+		step.Fail(derr, "run `yoho builder check` for the Builder setup steps, or set builder.direct: auto")
 		return nil, &silentError{derr}
 	}
 	if builder != nil {
@@ -387,7 +387,11 @@ func (a *app) directBuilder(ctx context.Context, hosts []plan.NamedHost, platfor
 	if !use {
 		h.Close()
 		if reason != "" {
-			a.ui.Info("  direct ship off (%s); images come back through this machine", reason)
+			more := ""
+			if build.IsProbeReason(reason) {
+				more = "; run `yoho builder check` for setup steps"
+			}
+			a.ui.Info("  direct ship off (%s); images come back through this machine%s", reason, more)
 		}
 		return nil, err
 	}
