@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"strings"
@@ -212,7 +213,9 @@ func TestServerBuild(t *testing.T) {
 	h := &recHost{}
 	h.HostName = "web1"
 	var sum SourceSummary
+	var built []string
 	o := Options{Dir: dir, App: "shop", Version: "v1", Project: project(dir), OnSource: func(s SourceSummary) { sum = s },
+		OnBuild:  func(svc string, i, n int) { built = append(built, fmt.Sprintf("%s %d/%d", svc, i, n)) },
 		Builder:  config.Builder{Location: "server", Exclude: []string{"node_modules"}},
 		BuildEnv: []string{"NPM_TOKEN=npm_secret"}, Host: h, RsyncTarget: "deploy@web1", SourceDir: "/srv/source", Exec: r.exec}
 	imgs, err := Images(context.Background(), o)
@@ -221,6 +224,9 @@ func TestServerBuild(t *testing.T) {
 	}
 	if imgs["web"].ID != "sha256:srv" {
 		t.Fatalf("%+v", imgs)
+	}
+	if len(built) != 1 || built[0] != "web 1/1" {
+		t.Fatalf("OnBuild calls %v", built)
 	}
 	c, _ := r.find("rsync")
 	got := strings.Join(c.Argv, " ")

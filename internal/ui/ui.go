@@ -37,6 +37,10 @@ type UI struct {
 	depth      int
 }
 
+// heartbeatInterval is how long a step may stay silent before a "still
+// running" line is printed. Tests shorten it.
+var heartbeatInterval = 30 * time.Second
+
 // nowFn is the clock for progress deltas. Tests replace it.
 var nowFn = time.Now
 
@@ -202,6 +206,7 @@ type Step struct {
 	start time.Time
 	tail  *tailBuffer
 	done  bool
+	stop  chan struct{} // closes when the step finishes (heartbeat)
 	// fields are extra step_done fields set by DoneWith.
 	fields map[string]any
 }
@@ -217,7 +222,55 @@ func (u *UI) Step(host, format string, args ...any) *Step {
 	}
 	fmt.Fprintln(u.w, u.indent()+u.paint(blue, "▸ ")+s.label())
 	u.stamp()
+	if !u.Verbose {
+		s.stop = make(chan struct{})
+		go s.heartbeat(heartbeatInterval, s.stop)
+	}
 	return s
+}
+
+// heartbeat prints a dim "still running" line whenever the UI (any writer)
+// has been silent for a full interval while the step runs.
+func (s *Step) heartbeat(every time.Duration, stop <-chan struct{}) {
+	t := time.NewTicker(every)
+	defer t.Stop()
+	for {
+		select {
+		case <-stop:
+			return
+		case <-t.C:
+		}
+		u := s.u
+		u.mu.Lock()
+		if s.done {
+			u.mu.Unlock()
+			return
+		}
+		if nowFn().Sub(u.progressAt) < every {
+			u.mu.Unlock()
+			continue
+		}
+		msg := "… still running"
+		if l := lastNonEmpty(s.tail.lines()); l != "" {
+			r := []rune(l)
+			if len(r) > 80 {
+				l = string(r[:79]) + "…"
+			}
+			msg += " (last: " + l + ")"
+		}
+		fmt.Fprintln(u.w, u.indent()+"    "+u.paint(dim, msg+" "+fmtDur(time.Since(s.start))))
+		u.stamp()
+		u.mu.Unlock()
+	}
+}
+
+func lastNonEmpty(lines []string) string {
+	for i := len(lines) - 1; i >= 0; i-- {
+		if t := strings.TrimSpace(lines[i]); t != "" {
+			return t
+		}
+	}
+	return ""
 }
 
 func (s *Step) label() string {
@@ -290,12 +343,21 @@ func (s *Step) Skip(reason string) {
 		return
 	}
 	s.done = true
+	s.stopHeartbeat()
 	if u.mode == JSON {
 		u.event("step_skip", map[string]any{"step": s.name, "host": s.host, "reason": reason})
 		return
 	}
 	fmt.Fprintln(u.w, u.indent()+u.paint(dim, "- "+s.name+" (skipped: "+reason+")"))
 	u.stamp()
+}
+
+// stopHeartbeat ends the heartbeat goroutine. Caller holds u.mu.
+func (s *Step) stopHeartbeat() {
+	if s.stop != nil {
+		close(s.stop)
+		s.stop = nil
+	}
 }
 
 func (s *Step) finish(err error, extra string) {
@@ -306,6 +368,7 @@ func (s *Step) finish(err error, extra string) {
 		return
 	}
 	s.done = true
+	s.stopHeartbeat()
 	d := time.Since(s.start)
 	if u.mode == JSON {
 		f := map[string]any{"step": s.name, "host": s.host, "duration_ms": d.Milliseconds()}
