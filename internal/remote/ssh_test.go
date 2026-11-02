@@ -404,8 +404,16 @@ func TestHopDefaultPortOmitted(t *testing.T) {
 	}
 	s = newTestSSH(t, "deploy@web", false, hopFake("user deploy\nhostname web\nport 22\n", nil))
 	args, _, _ = s.HopArgs(context.Background())
+	if !strings.HasSuffix(strings.Join(args, " "), "-p 22") {
+		t.Errorf("resolved port must always be passed: %q", args)
+	}
+}
+
+func TestHopUnresolvedWithoutPortOmitsP(t *testing.T) {
+	s := newTestSSH(t, "hostinger", false, hopFake("", errors.New("ssh -G failed")))
+	args, _, _ := s.HopArgs(context.Background())
 	if strings.Contains(strings.Join(args, " "), "-p") {
-		t.Errorf("default port must not be passed: %q", args)
+		t.Errorf("unresolved target without port must not pass -p: %q", args)
 	}
 }
 

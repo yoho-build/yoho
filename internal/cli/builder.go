@@ -175,7 +175,7 @@ func directSetupHints(name, builder, server string, hop remote.Hop, hasHop bool)
 	lines := []string{"",
 		"To let the Builder reach " + name + " (" + hop.Target() + ") without a prompt, run these yourself (Yoho never installs keys):",
 		"  1. Create a key on the Builder if it has none:",
-		"       " + b + " " + remote.Quote(`test -f ~/.ssh/id_ed25519 || ssh-keygen -t ed25519 -N "" -f ~/.ssh/id_ed25519`),
+		"       " + b + " " + remote.Quote(`mkdir -p -m 700 ~/.ssh && { test -f ~/.ssh/id_ed25519 || ssh-keygen -t ed25519 -N "" -f ~/.ssh/id_ed25519; }`),
 		"  2. Authorize it on " + name + ":",
 		"       " + b + " 'cat ~/.ssh/id_ed25519.pub' | " + sshCommand(server) + " 'mkdir -p ~/.ssh && cat >> ~/.ssh/authorized_keys'",
 		"  3. Check the host key of " + hop.Host + " against the fingerprint your machine trusts, then add it to the Builder's known_hosts:",

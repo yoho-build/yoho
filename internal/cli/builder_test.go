@@ -37,7 +37,7 @@ func TestDirectSetupHints(t *testing.T) {
 	hop := remote.Hop{User: "root", Host: "203.0.113.9", Port: 2200, Resolved: true}
 	text := strings.Join(directSetupHints("hostinger", "build@10.0.0.2:2022", "hostinger", hop, true), "\n")
 	for _, want := range []string{
-		"ssh -p 2022 build@10.0.0.2 'test -f ~/.ssh/id_ed25519 || ssh-keygen -t ed25519 -N \"\" -f ~/.ssh/id_ed25519'",
+		"ssh -p 2022 build@10.0.0.2 'mkdir -p -m 700 ~/.ssh && { test -f ~/.ssh/id_ed25519 || ssh-keygen -t ed25519 -N \"\" -f ~/.ssh/id_ed25519; }'",
 		"ssh -p 2022 build@10.0.0.2 'cat ~/.ssh/id_ed25519.pub' | ssh hostinger 'mkdir -p ~/.ssh && cat >> ~/.ssh/authorized_keys'",
 		"ssh-keyscan -p 2200 203.0.113.9 >> ~/.ssh/known_hosts'",
 		"ssh-keygen -l -F '[203.0.113.9]:2200'",

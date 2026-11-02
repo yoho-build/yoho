@@ -35,7 +35,7 @@ builder:
 
 ```sh
 # 1. a key on the Builder, if it has none
-ssh build@10.0.0.2 'test -f ~/.ssh/id_ed25519 || ssh-keygen -t ed25519 -N "" -f ~/.ssh/id_ed25519'
+ssh build@10.0.0.2 'mkdir -p -m 700 ~/.ssh && { test -f ~/.ssh/id_ed25519 || ssh-keygen -t ed25519 -N "" -f ~/.ssh/id_ed25519; }'
 # 2. authorize it on the Server
 ssh build@10.0.0.2 'cat ~/.ssh/id_ed25519.pub' | ssh hostinger 'mkdir -p ~/.ssh && cat >> ~/.ssh/authorized_keys'
 # 3. compare the Server's host key with the one you trust (ssh-keygen -l -F HOST), then add it

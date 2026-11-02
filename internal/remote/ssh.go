@@ -332,7 +332,7 @@ func (s *SSH) resolveHop(ctx context.Context) Hop {
 	}
 	h.Args = []string{"ssh", "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=yes",
 		"-o", "ConnectTimeout=" + strconv.Itoa(s.opts.ConnectTimeout)}
-	if h.Port != 22 || (s.port != 0 && !h.Resolved) {
+	if h.Resolved || s.port != 0 {
 		h.Args = append(h.Args, "-p", strconv.Itoa(h.Port))
 	}
 	return h
