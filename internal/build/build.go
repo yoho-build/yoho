@@ -92,6 +92,9 @@ type Options struct {
 	// OnSource, when set, receives what a location=server build ships,
 	// before the transfer.
 	OnSource func(SourceSummary)
+	// OnBuild, when set, is called before each Service build with the
+	// Service name and its 1-based position i of n.
+	OnBuild func(service string, i, n int)
 	// cacheDir is the shared seed copy of the source (location=server); the
 	// build itself runs in the private SourceDir, inside runDir.
 	cacheDir string
@@ -246,7 +249,10 @@ func Images(ctx context.Context, o Options) (_ map[string]Image, err error) {
 		return nil, fmt.Errorf("unknown builder.location %q", loc)
 	}
 
-	for _, name := range names {
+	for i, name := range names {
+		if o.OnBuild != nil {
+			o.OnBuild(name, i+1, len(names))
+		}
 		svc := o.Project.Services[name]
 		ref := ImageName(o.Registry, o.App, o.Destination, name, o.Version)
 		fmt.Fprintf(o.Out, "Building %s (%s) on %s builder\n", name, ref, loc)

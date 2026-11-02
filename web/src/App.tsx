@@ -1,4 +1,4 @@
-import { Fragment, useCallback, useEffect, useRef, useState } from "react"
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react"
 import {
   ActivityIcon,
   BoxIcon,
@@ -21,6 +21,7 @@ import {
 
 import { api, ApiError } from "@/api"
 import { ago, bytes, duration, shortVersion } from "@/format"
+import { parseLogs, shortTime, spanClass } from "@/logs"
 import type { Container, Disk, DiskUsage, Meta, Release, Server, ServerDisk, Snapshot } from "@/types"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
@@ -506,6 +507,9 @@ function LogsDialog({ target, onClose }: { target: { server: string; container: 
     if (pre.current) pre.current.scrollTop = pre.current.scrollHeight
   }, [text])
 
+  const parsed = useMemo(() => parseLogs(text), [text])
+  const hasTs = parsed.some((l) => l.ts)
+
   return (
     <Dialog open={target !== null} onOpenChange={(open) => !open && onClose()}>
       <DialogContent>
@@ -530,9 +534,29 @@ function LogsDialog({ target, onClose }: { target: { server: string; container: 
         {err && <p className="font-mono text-xs break-all text-destructive">{err}</p>}
         <pre
           ref={pre}
-          className="min-h-48 flex-1 overflow-auto rounded-lg bg-muted p-3 font-mono text-xs leading-relaxed whitespace-pre-wrap break-all"
+          className="min-h-48 flex-1 overflow-auto rounded-lg bg-muted p-3 font-mono text-xs leading-relaxed"
         >
-          {text || (busy ? "Loading…" : "No output.")}
+          {parsed.length === 0 ? (
+            <span className="text-muted-foreground">{busy ? "Loading…" : "No output."}</span>
+          ) : (
+            parsed.map((l, i) => (
+              <div key={i} className="flex gap-3 hover:bg-foreground/5">
+                {hasTs && (
+                  <span className="shrink-0 text-muted-foreground select-none" title={l.ts}>
+                    {l.ts ? shortTime(l.ts) : ""}
+                  </span>
+                )}
+                <span className="min-w-0 flex-1 whitespace-pre-wrap [overflow-wrap:anywhere]">
+                  {l.spans.map((s, j) => (
+                    <span key={j} className={spanClass(s)}>
+                      {s.text}
+                    </span>
+                  ))}
+                  {l.spans.length === 0 && "\u00a0"}
+                </span>
+              </div>
+            ))
+          )}
         </pre>
         <p className="flex items-center gap-1.5 text-xs text-muted-foreground">
           <HardDriveIcon className="size-3" /> Container output is shown as Docker returns it. Avoid printing secrets in application logs.
