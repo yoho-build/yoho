@@ -287,3 +287,13 @@ func redactString(s string, values []string) string {
 	}
 	return redactAccessTokens(s)
 }
+
+// RedactString replaces every secret value in the Store found in s with
+// "***". Use it for short text shown outside a Redactor stream.
+func (s *Store) RedactString(text string) string {
+	vals := make([]string, 0, len(s.values))
+	for _, v := range s.values {
+		vals = append(vals, v)
+	}
+	return redactString(text, vals)
+}

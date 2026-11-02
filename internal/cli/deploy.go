@@ -281,6 +281,11 @@ func (a *app) buildAndShip(ctx context.Context, s *session, skipBuild bool) (map
 	if a.cfg.Builder.Location == "remote" && builder == nil {
 		u.Info("  remote builder: each image is downloaded to this machine after it builds")
 	}
+	live := &buildLive{u: u, redact: store.RedactString}
+	var progress func(build.BuildProgress)
+	if !u.Verbose {
+		progress = live.progress
+	}
 	imgs, berr := build.Images(ctx, build.Options{
 		Dir: a.dir, App: a.cfg.App, Destination: a.destName, Version: ver,
 		Project: r.Project, Builder: a.cfg.Builder, Registry: a.cfg.Registry, Direct: builder != nil,
@@ -289,10 +294,9 @@ func (a *app) buildAndShip(ctx context.Context, s *session, skipBuild bool) (map
 		OnSource: func(src build.SourceSummary) {
 			u.Info("  source: %s (%d files, %s)", src.Root, src.Files, humanBytes(src.Bytes))
 		},
-		OnBuild: func(svc string, i, n int) {
-			u.Event("build_service", fmt.Sprintf("  · building %s (%d/%d)", svc, i, n),
-				map[string]any{"service": svc, "index": i, "total": n})
-		},
+		OnBuild:  live.started,
+		OnBuilt:  live.built,
+		Progress: progress,
 	})
 	if berr != nil {
 		step.Fail(berr, "rerun with -v to see the full build output")

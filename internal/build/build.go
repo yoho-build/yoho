@@ -95,6 +95,15 @@ type Options struct {
 	// OnBuild, when set, is called before each Service build with the
 	// Service name and its 1-based position i of n.
 	OnBuild func(service string, i, n int)
+	// OnBuilt, when set, is called after each Service build with its error
+	// (nil on success) and how long it took.
+	OnBuilt func(service string, err error, d time.Duration)
+	// Progress, when set, makes local/remote buildx builds run with
+	// --progress=rawjson and reports step progress; the text log still goes
+	// to Out. Nil keeps buildx's own output (verbose mode).
+	Progress func(BuildProgress)
+	// index and total of the Service being built (for Progress).
+	index, total int
 	// cacheDir is the shared seed copy of the source (location=server); the
 	// build itself runs in the private SourceDir, inside runDir.
 	cacheDir string
@@ -253,6 +262,8 @@ func Images(ctx context.Context, o Options) (_ map[string]Image, err error) {
 		if o.OnBuild != nil {
 			o.OnBuild(name, i+1, len(names))
 		}
+		o.index, o.total = i+1, len(names)
+		started := time.Now()
 		svc := o.Project.Services[name]
 		ref := ImageName(o.Registry, o.App, o.Destination, name, o.Version)
 		fmt.Fprintf(o.Out, "Building %s (%s) on %s builder\n", name, ref, loc)
@@ -265,6 +276,9 @@ func Images(ctx context.Context, o Options) (_ map[string]Image, err error) {
 			id, err = buildContainer(ctx, o, name, svc, ref)
 		default:
 			id, err = buildLocal(ctx, o, name, svc, ref, builder)
+		}
+		if o.OnBuilt != nil {
+			o.OnBuilt(name, err, time.Since(started))
 		}
 		if err != nil {
 			return nil, fmt.Errorf("build %s: %w", name, err)
@@ -463,11 +477,29 @@ func buildLocal(ctx context.Context, o Options, service string, svc types.Servic
 		argv = append(argv, "--platform", strings.Join(o.Platforms, ","))
 	}
 	argv = append(argv, flags...)
-	c := Command{Argv: argv, Env: o.BuildEnv, Stdout: o.Out, Stderr: o.Out}
-	if s.inline != "" {
-		c.Stdin = strings.NewReader(s.inline)
+	run := func(argv []string, stderr io.Writer) error {
+		c := Command{Argv: argv, Env: o.BuildEnv, Stdout: o.Out, Stderr: stderr}
+		if s.inline != "" {
+			c.Stdin = strings.NewReader(s.inline)
+		}
+		return o.Exec(ctx, c)
 	}
-	if err := o.Exec(ctx, c); err != nil {
+	if o.Progress == nil {
+		err = run(argv, o.Out)
+	} else {
+		// --progress goes right after "build" (before the flags).
+		at := len(argv) - len(flags)
+		pargv := append(append(append([]string(nil), argv[:at]...), "--progress=rawjson"), argv[at:]...)
+		pp := newProgressParser(o.Out, func(step string, done, steps, cached int) {
+			o.Progress(BuildProgress{Service: service, Index: o.index, Total: o.total, Step: step, Done: done, Steps: steps, Cached: cached})
+		})
+		err = run(pargv, pp)
+		pp.Close()
+		if err != nil && pp.rejectedRawJSON() {
+			err = run(argv, o.Out) // old buildx: plain output, once
+		}
+	}
+	if err != nil {
 		return "", err
 	}
 	inspect := []string{"docker", "image", "inspect", "--format", "{{.Id}}", ref}

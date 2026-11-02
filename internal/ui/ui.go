@@ -27,9 +27,13 @@ const (
 // UI writes progress. Safe for concurrent use.
 type UI struct {
 	mu         sync.Mutex
-	w          io.Writer
+	w          io.Writer // all output; clears and redraws the live line around writes
+	out        io.Writer // the underlying writer
 	mode       Mode
 	color      bool
+	tty        bool       // human output to a terminal (independent of NO_COLOR)
+	cols       func() int // terminal width
+	live       string     // live line text; "" when none is shown
 	Verbose    bool
 	warnings   int
 	start      time.Time
@@ -47,12 +51,95 @@ var nowFn = time.Now
 // New returns a UI writing to w. Color is enabled when w is a terminal and
 // NO_COLOR is unset.
 func New(w io.Writer, mode Mode, verbose bool) *UI {
-	color := false
-	if f, ok := w.(*os.File); ok && term.IsTerminal(int(f.Fd())) && os.Getenv("NO_COLOR") == "" && mode == Human {
-		color = true
+	color, tty := false, false
+	cols := func() int { return 100 }
+	if f, ok := w.(*os.File); ok && term.IsTerminal(int(f.Fd())) && mode == Human {
+		tty = true
+		color = os.Getenv("NO_COLOR") == ""
+		cols = func() int {
+			if c, _, err := term.GetSize(int(f.Fd())); err == nil && c > 0 {
+				return c
+			}
+			return 100
+		}
 	}
 	now := nowFn()
-	return &UI{w: w, mode: mode, color: color, Verbose: verbose, start: now, progressAt: now}
+	u := &UI{out: w, mode: mode, color: color, tty: tty, cols: cols, Verbose: verbose, start: now, progressAt: now}
+	u.w = liveWriter{u}
+	return u
+}
+
+// liveWriter keeps the live line on the last row: it is erased before any
+// other output and redrawn after. Callers hold u.mu.
+type liveWriter struct{ u *UI }
+
+func (l liveWriter) Write(p []byte) (int, error) {
+	u := l.u
+	if u.live == "" {
+		return u.out.Write(p)
+	}
+	io.WriteString(u.out, "\r\x1b[K")
+	n, err := u.out.Write(p)
+	u.drawLive()
+	return n, err
+}
+
+// drawLive rewrites the live line in place, cut to the terminal width.
+func (u *UI) drawLive() {
+	t := []rune(u.live)
+	if w := u.cols(); len(t) > w-1 && w > 1 {
+		t = append(t[:w-2], '…')
+	}
+	io.WriteString(u.out, "\r\x1b[K"+u.paint(dim, string(t)))
+}
+
+// LiveStart begins a Service's live line (rewritten in place by LiveUpdate
+// and frozen by LiveFinish). Without a terminal, or with -v, it prints text
+// as a normal line instead.
+func (u *UI) LiveStart(text string) {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	if u.mode == JSON {
+		return
+	}
+	if !u.tty || u.Verbose {
+		fmt.Fprintln(u.w, u.indent()+text)
+		u.stamp()
+		return
+	}
+	u.live = u.indent() + text
+	u.drawLive()
+}
+
+// LiveUpdate replaces the live line text. It prints nothing without one.
+func (u *UI) LiveUpdate(text string) {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	if u.live == "" {
+		return
+	}
+	u.live = u.indent() + text
+	u.drawLive()
+}
+
+// LiveFinish freezes the live line as a normal line showing text (or prints
+// text when there is no live line). ok colors the leading mark.
+func (u *UI) LiveFinish(text string, ok bool) {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	if u.mode == JSON {
+		return
+	}
+	if u.live != "" {
+		io.WriteString(u.out, "\r\x1b[K")
+		u.live = ""
+	}
+	mark := u.paint(green, "✓")
+	if !ok {
+		mark = u.paint(red, "✗")
+	}
+	fmt.Fprintln(u.w, u.indent()+"  "+mark+" "+text)
+	u.stamp()
 }
 
 // stamp marks a human line so the next progress delta starts here.
@@ -246,7 +333,7 @@ func (s *Step) heartbeat(every time.Duration, stop <-chan struct{}) {
 			u.mu.Unlock()
 			return
 		}
-		if nowFn().Sub(u.progressAt) < every {
+		if u.live != "" || nowFn().Sub(u.progressAt) < every {
 			u.mu.Unlock()
 			continue
 		}
