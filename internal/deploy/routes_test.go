@@ -265,7 +265,7 @@ func TestComposeDesiredDuplicateCompilation(t *testing.T) {
 	if err := validate(d); err == nil {
 		t.Fatal("duplicate route hosts accepted")
 	}
-	if _, _, err := compile(d, "primary", planGenDir, nil, planKey, ""); err == nil {
+	if _, _, err := compile(d, "primary", planGenDir, nil, planKey, "", ""); err == nil {
 		t.Fatal("compiler accepted duplicate desired route hosts")
 	}
 	// Retained legacy rows are still compared by their saved hosts.

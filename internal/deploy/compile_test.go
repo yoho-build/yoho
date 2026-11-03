@@ -20,7 +20,7 @@ func compileTest(t *testing.T, d *plan.Deploy) ([]byte, []servicePlan, map[strin
 	if err != nil {
 		t.Fatal(err)
 	}
-	out, plans, err := compile(d, "primary", "/srv/yoho/apps/shop/production/secrets/G1", svc, []byte("0123456789abcdef0123456789abcdef"), "")
+	out, plans, err := compile(d, "primary", "/srv/yoho/apps/shop/production/secrets/G1", svc, []byte("0123456789abcdef0123456789abcdef"), "", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -167,7 +167,7 @@ func TestCompileFastStartHealth(t *testing.T) {
 		t.Fatal(err)
 	}
 	key := []byte("0123456789abcdef0123456789abcdef")
-	out, _, err := compile(d, "primary", "/srv/yoho/apps/shop/production/secrets/G1", svc, key, "25.0.3")
+	out, _, err := compile(d, "primary", "/srv/yoho/apps/shop/production/secrets/G1", svc, key, "25.0.3", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -194,7 +194,7 @@ func TestCompileFastStartHealth(t *testing.T) {
 	// User-set start_period is kept, and the missing start_interval is not filled in.
 	src = strings.Replace(src, "http://localhost:3000/up\"]\n", "http://localhost:3000/up\"]\n      start_period: 10s\n", 1)
 	d.Project = loadProject(t, src)
-	out, _, err = compile(d, "primary", "/srv/yoho/apps/shop/production/secrets/G1", svc, key, "29.1.0")
+	out, _, err = compile(d, "primary", "/srv/yoho/apps/shop/production/secrets/G1", svc, key, "29.1.0", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -210,7 +210,7 @@ func TestCompileFastStartHealth(t *testing.T) {
 	}
 
 	d.Project = loadProject(t, testCompose)
-	out, _, err = compile(d, "primary", "/srv/yoho/apps/shop/production/secrets/G1", svc, key, "24.0.9")
+	out, _, err = compile(d, "primary", "/srv/yoho/apps/shop/production/secrets/G1", svc, key, "24.0.9", "")
 	if err != nil {
 		t.Fatal(err)
 	}

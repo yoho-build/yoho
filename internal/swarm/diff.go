@@ -126,12 +126,17 @@ func compileDesired(ctx context.Context, d *plan.Deploy, key []byte, generated m
 	if err != nil {
 		return nil, err
 	}
+	logDriver, err := deploy.DockerLogDriver(ctx, d.Servers[0].Host)
+	if err != nil {
+		return nil, err
+	}
 	return compile(d, compileInput{
 		PinHost:       pin,
 		GenerationDir: release.SecretsDir(d.App, d.Destination, "planned"),
 		SvcSecrets:    svcSecrets,
 		HMACKey:       key,
 		DockerVersion: deploy.DockerServerVersion(ctx, d.Servers[0].Host),
+		LogDriver:     logDriver,
 	})
 }
 

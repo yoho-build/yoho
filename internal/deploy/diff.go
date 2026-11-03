@@ -234,7 +234,11 @@ func (c Compose) Diff(ctx context.Context, d *plan.Deploy) ([]plan.Change, error
 	if fpKey == nil {
 		fpKey = planKey
 	}
-	composeYAML, plans, err := compile(d, srv.Name, planGenDir, svcSecrets, fpKey, DockerServerVersion(ctx, h))
+	logDriver, err := DockerLogDriver(ctx, h)
+	if err != nil {
+		return nil, err
+	}
+	composeYAML, plans, err := compile(d, srv.Name, planGenDir, svcSecrets, fpKey, DockerServerVersion(ctx, h), logDriver)
 	if err != nil {
 		return nil, err
 	}

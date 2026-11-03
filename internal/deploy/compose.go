@@ -141,7 +141,11 @@ func (c Compose) Deploy(ctx context.Context, d *plan.Deploy) (_ *release.Release
 	// Read-only preflight must precede generated values, env/App files and
 	// Release records as well as runtime operations. The route plan does not
 	// depend on secrets, generation paths, or the Docker healthcheck version.
-	preflightYAML, preflightPlans, err := compile(d, srv.Name, planGenDir, nil, planKey, "")
+	logDriver, err := DockerLogDriver(ctx, h)
+	if err != nil {
+		return nil, err
+	}
+	preflightYAML, preflightPlans, err := compile(d, srv.Name, planGenDir, nil, planKey, "", logDriver)
 	if err != nil {
 		return nil, err
 	}
@@ -210,7 +214,7 @@ func (c Compose) Deploy(ctx context.Context, d *plan.Deploy) (_ *release.Release
 	if err != nil {
 		return nil, err
 	}
-	composeYAML, plans, err := compile(d, srv.Name, genDir, svcSecrets, key, DockerServerVersion(ctx, h))
+	composeYAML, plans, err := compile(d, srv.Name, genDir, svcSecrets, key, DockerServerVersion(ctx, h), logDriver)
 	if err != nil {
 		return nil, err
 	}

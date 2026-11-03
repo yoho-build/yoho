@@ -166,8 +166,9 @@ func versioned(image, version string) bool {
 // compile produces the per-Server compose file and the cutover plan. The
 // file references secrets by path only; it never contains secret values.
 // dockerVersion is the server engine version from `docker version`; empty
-// or below 25 skips fast-start healthcheck fields.
-func compile(d *plan.Deploy, server, generationDir string, svcSecrets map[string]map[string]string, hmacKey []byte, dockerVersion string) ([]byte, []servicePlan, error) {
+// or below 25 skips fast-start healthcheck fields. logDriver is the daemon's
+// default logging driver (see UseDefaultLogging).
+func compile(d *plan.Deploy, server, generationDir string, svcSecrets map[string]map[string]string, hmacKey []byte, dockerVersion, logDriver string) ([]byte, []servicePlan, error) {
 	if _, err := proxy.ProjectRoutes(d.App, d.Destination, d.Project, d.Ext, "compose"); err != nil {
 		return nil, nil, err
 	}
@@ -224,6 +225,11 @@ func compile(d *plan.Deploy, server, generationDir string, svcSecrets map[string
 		s.Labels[LabelService] = name
 		if isVersioned {
 			s.Labels[LabelVersion] = d.Version
+		}
+
+		// Rotate logs unless the Service chose its own logging (issue #47).
+		if s.Logging == nil && UseDefaultLogging(logDriver) {
+			s.Logging = &types.LoggingConfig{Driver: LogDriver, Options: types.Options{"max-size": LogMaxSize, "max-file": LogMaxFile}}
 		}
 
 		if s.Environment == nil {

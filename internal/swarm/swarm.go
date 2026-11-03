@@ -215,6 +215,10 @@ func (Runtime) Deploy(ctx context.Context, d *plan.Deploy) (_ *release.Release, 
 	if err := preflightRoutes(ctx, d, desiredRoutes); err != nil {
 		return nil, err
 	}
+	logDriver, err := deploy.DockerLogDriver(ctx, h)
+	if err != nil {
+		return nil, err
+	}
 	r.logf("preparing release %s", d.Version)
 	if err := h.Run(ctx, remote.Cmd{Script: "set -eu\numask 077\nmkdir -p " + remote.QuoteArgs(r.dir, path.Join(r.dir, "releases"), path.Join(r.dir, "secrets"), path.Join(r.dir, "generated"), relDir)}); err != nil {
 		return nil, fmt.Errorf("prepare %s: %w", r.dir, err)
@@ -239,7 +243,7 @@ func (Runtime) Deploy(ctx context.Context, d *plan.Deploy) (_ *release.Release, 
 	generation := start.Format("20060102T150405Z") + "-" + d.Version
 	genDir := release.SecretsDir(d.App, d.Destination, generation)
 
-	c, err := compile(d, compileInput{PinHost: pinHost, GenerationDir: genDir, SvcSecrets: svcSecrets, HMACKey: key, DockerVersion: deploy.DockerServerVersion(ctx, h)})
+	c, err := compile(d, compileInput{PinHost: pinHost, GenerationDir: genDir, SvcSecrets: svcSecrets, HMACKey: key, DockerVersion: deploy.DockerServerVersion(ctx, h), LogDriver: logDriver})
 	if err != nil {
 		return nil, err
 	}
