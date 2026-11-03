@@ -1,6 +1,6 @@
 // Package audit is the operator audit log of an App Destination: an
-// append-only JSON-lines file on the Server, <root>/apps/<app>/<dest>/audit.log,
-// recording who ran which mutating command, with what, and how it ended.
+// append-only JSON-lines file on the Server, <root>/audit/<app>/<dest>.log
+// (outside the App directory, so it survives `yoho remove`), recording who ran which mutating command, with what, and how it ended.
 //
 // Every command writes a "started" record before it changes anything and a
 // "finished" record after, paired by Run, so a killed command still leaves a
@@ -43,7 +43,7 @@ const (
 	ViaGate = "gate"
 )
 
-// Record is one line of audit.log.
+// Record is one line of the audit log.
 type Record struct {
 	Time        time.Time `json:"time"` // UTC
 	Run         string    `json:"run"`  // pairs the started and finished records of one command
@@ -127,59 +127,65 @@ func ArgvArgs(service string, argv []string) map[string]any {
 	return map[string]any{"service": service, "argv": out}
 }
 
-// Path is the audit log of an App Destination, through the canonical App
-// directory (an app_dir link resolves on the Server).
-func Path(app, destination string) string {
-	return path.Join(release.AppDir(app, destination), "audit.log")
-}
+// Dir is the audit directory of an App: <root>/audit/<app>. It lives
+// outside the App directory so `yoho remove` keeps the log, and the first
+// deploy can write before the App directory exists.
+func Dir(app string) string { return path.Join(release.Root, "audit", app) }
 
-// MaxBytes is the size at which audit.log is rotated to audit.log.1.
+// Path is the audit log of an App Destination: <root>/audit/<app>/<dest>.log.
+func Path(app, destination string) string { return path.Join(Dir(app), destination+".log") }
+
+// legacyDir is where earlier versions kept audit.log: the App directory.
+func legacyDir(app, destination string) string { return release.AppDir(app, destination) }
+
+// MaxBytes is the size at which the log is rotated to <dest>.log.1.
 var MaxBytes int64 = 5 << 20
 
-// Keep is how many rotated files are kept (audit.log.1, audit.log.2).
+// Keep is how many rotated files are kept (<dest>.log.1, <dest>.log.2).
 const Keep = 2
 
 // AppendScript returns the remote script that appends the record read from
 // stdin (one line) to the audit log of app/destination. Nothing but paths
 // and numbers is in the script; the record travels on stdin.
 //
-// The App directory must exist: otherwise the script does nothing (a first
-// deploy writes its records once the directory is there). It is checked
-// with the same trust functions as the lock; the log is created 0600; at
-// MaxBytes it rotates before the append. The append is one printf >> write,
-// so concurrent commands do not interleave lines.
+// The audit directories (<root>/audit, <root>/audit/<app>) are created
+// 0700 on the first write, one component at a time and checked with the
+// same trust functions as the App directory, so a first deploy gets its
+// "started" record; the log is created 0600 and never followed through a
+// link. At MaxBytes it rotates before the append. The append is one
+// printf >> write, so concurrent commands do not interleave lines.
+//
+// A legacy <app dir>/audit.log (and .1, .2) is appended into the new log
+// once and removed. A legacy file that fails the trust checks is left alone.
 func AppendScript(app, destination string) string {
+	log := remote.Quote(Path(app, destination))
+	old := legacyDir(app, destination)
 	var b strings.Builder
-	b.WriteString(prelude(app, destination))
-	b.WriteString("yoho_log=$yoho_dir_/audit.log\n")
+	b.WriteString(safepath.AppLink(app, destination) + safepath.Script("audit log") + safepath.Creation)
+	b.WriteString("yoho_make " + remote.Quote(Dir(app)) + "\n")
+	b.WriteString("yoho_log=" + log + "\n")
 	b.WriteString("yoho_line=$(cat)\n")
-	b.WriteString("if [ -e \"$yoho_log\" ] || [ -L \"$yoho_log\" ]; then\n")
-	b.WriteString(" yoho_file \"$yoho_log\"\n")
-	b.WriteString(" yoho_size=$(wc -c < \"$yoho_log\" | tr -d ' ')\n")
-	b.WriteString(" if [ \"$yoho_size\" -ge " + strconv.FormatInt(MaxBytes, 10) + " ]; then\n")
-	b.WriteString("  rm -f \"$yoho_log." + strconv.Itoa(Keep) + "\"\n")
+	b.WriteString("if [ -e \"$yoho_log\" ] || [ -L \"$yoho_log\" ]; then yoho_file \"$yoho_log\"; else : > \"$yoho_log\"; yoho_file \"$yoho_log\"; fi\n")
+	// Migration of the legacy log, in a subshell: any refusal skips it.
+	b.WriteString("yoho_old=" + remote.Quote(old) + "\n")
+	b.WriteString("(\n for yoho_f in audit.log.2 audit.log.1 audit.log; do\n")
+	b.WriteString("  [ -e \"$yoho_old/$yoho_f\" ] || [ -L \"$yoho_old/$yoho_f\" ] || continue\n")
+	b.WriteString("  yoho_file \"$yoho_old/$yoho_f\"\n  cat \"$yoho_old/$yoho_f\" >> \"$yoho_log\"\n  rm -f \"$yoho_old/$yoho_f\"\n")
+	b.WriteString(" done\n) >/dev/null 2>&1 || true\n")
+	b.WriteString("yoho_size=$(wc -c < \"$yoho_log\" | tr -d ' ')\n")
+	b.WriteString("if [ \"$yoho_size\" -ge " + strconv.FormatInt(MaxBytes, 10) + " ]; then\n")
+	b.WriteString(" rm -f \"$yoho_log." + strconv.Itoa(Keep) + "\"\n")
 	for i := Keep - 1; i >= 1; i-- {
 		from := "\"$yoho_log." + strconv.Itoa(i) + "\""
-		b.WriteString("  [ ! -e " + from + " ] || mv -f " + from + " \"$yoho_log." + strconv.Itoa(i+1) + "\"\n")
+		b.WriteString(" [ ! -e " + from + " ] || mv -f " + from + " \"$yoho_log." + strconv.Itoa(i+1) + "\"\n")
 	}
-	b.WriteString("  mv -f \"$yoho_log\" \"$yoho_log.1\"\n")
-	b.WriteString(" fi\n")
+	b.WriteString(" mv -f \"$yoho_log\" \"$yoho_log.1\"\n")
 	b.WriteString("fi\n")
 	b.WriteString("printf '%s\\n' \"$yoho_line\" >> \"$yoho_log\"\n")
 	return b.String()
 }
 
-// prelude is the trust functions and the check of the App directory; the
-// script exits 0 when the directory does not exist.
-func prelude(app, destination string) string {
-	return safepath.AppLink(app, destination) + safepath.Script("App directory") +
-		"yoho_dir_=" + remote.Quote(release.AppDir(app, destination)) + "\n" +
-		"[ -e \"$yoho_dir_\" ] || [ -L \"$yoho_dir_\" ] || exit 0\n" +
-		"if [ -L \"$yoho_dir_\" ]; then yoho_private \"$yoho_dir_\"; else [ -d \"$yoho_dir_\" ] || yoho_bad \"$yoho_dir_\"; fi\n"
-}
-
-// Append writes r to the audit log on h. A missing App directory is not an
-// error.
+// Append writes r to the audit log on h.
 func Append(ctx context.Context, h remote.Host, r Record) error {
 	line, err := r.Line()
 	if err != nil {
@@ -191,14 +197,21 @@ func Append(ctx context.Context, h remote.Host, r Record) error {
 	return nil
 }
 
-// ReadScript prints the last lines of audit.log.2, .1 and audit.log (those
-// that exist and are trusted), oldest first.
+// ReadScript prints the last lines of the log files that exist and are
+// trusted, oldest first: an unmigrated legacy <app dir>/audit.log{.2,.1,}
+// (skipped when it fails the trust checks), then <dest>.log.2, .1 and
+// <dest>.log. Read-only: it does not migrate.
 func ReadScript(app, destination string, lines int) string {
 	var b strings.Builder
-	b.WriteString(prelude(app, destination))
 	n := strconv.Itoa(lines)
-	for _, f := range []string{"audit.log.2", "audit.log.1", "audit.log"} {
-		p := "\"$yoho_dir_/" + f + "\""
+	b.WriteString(safepath.AppLink(app, destination) + safepath.Script("audit log"))
+	b.WriteString("yoho_old=" + remote.Quote(legacyDir(app, destination)) + "\n")
+	b.WriteString("(\n for yoho_f in audit.log.2 audit.log.1 audit.log; do\n")
+	b.WriteString("  [ -e \"$yoho_old/$yoho_f\" ] || continue\n")
+	b.WriteString("  yoho_file \"$yoho_old/$yoho_f\"\n  tail -n " + n + " \"$yoho_old/$yoho_f\"\n done\n) 2>/dev/null || true\n")
+	log := Path(app, destination)
+	for _, f := range []string{log + ".2", log + ".1", log} {
+		p := remote.Quote(f)
 		b.WriteString("if [ -e " + p + " ]; then yoho_file " + p + "; tail -n " + n + " " + p + "; fi\n")
 	}
 	return b.String()

@@ -130,6 +130,10 @@ func TestRemoveAppDirKeepsOtherDestinationsAndBackups(t *testing.T) {
 	mk("apps/shop/production2/releases/v1")
 	mk("apps/shopx/production/releases/v1")
 	mk("backups/shop/production")
+	mk("audit/shop")
+	if err := os.WriteFile(filepath.Join(root, "audit/shop/production.log"), []byte("{}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	mk("appdirs/shop/d/production")
 	h := &remote.Local{}
 	if err := RemoveAppDir(context.Background(), h, removeOpts()); err != nil {
@@ -142,6 +146,7 @@ func TestRemoveAppDirKeepsOtherDestinationsAndBackups(t *testing.T) {
 		"apps/shop/production2":     true,
 		"apps/shopx/production":     true,
 		"backups/shop/production":   true,
+		"audit/shop/production.log": true,
 	} {
 		if _, err := os.Stat(filepath.Join(root, p)); (err == nil) != want {
 			t.Errorf("%s exists=%v, want %v", p, err == nil, want)
