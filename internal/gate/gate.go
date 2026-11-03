@@ -199,7 +199,9 @@ func (c *call) serve(ctx context.Context) (any, error) {
 }
 
 // watchStdin cancels the request when the client closes stdin (it went
-// away). Only open-ended verbs (logs -f) use it: a deploy or rollback whose
+// away), and the Host then kills the request's process group. Only reads
+// use it (logs, with or without -f: a search that matches nothing writes
+// nothing, so no failed write would stop it): a deploy or rollback whose
 // client disconnects runs to completion rather than stopping halfway.
 func (c *call) watchStdin() {
 	if c.watching {

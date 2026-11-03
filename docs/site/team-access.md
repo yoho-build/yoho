@@ -138,6 +138,8 @@ yoho app stats --no-stream -d production
 yoho ui -d production                     # or yoho tui
 ```
 
+`app logs --grep` runs `grep` on the Server under `nice`. A Member's search without `-f` reads at most the last 100000 lines and stops after 60 seconds (`--grep search took longer than 60s`), and any logs read stops when the Member's client exits or the connection drops. `-E` patterns may not use back-references (`\1` to `\9`), which can make `grep` run for hours. The audit log records only that a read used `--grep` or `-E`, never the pattern.
+
 With scoped access, the CLI connects as `yoho-gate@<host from servers.*.ssh>` with your own key. Commands that the Gate does not serve fail before they connect and tell you to ask the operator. These include `setup`, `apply`, `plan`, `proxy`, `tunnel`, `backup`, `schedule`, `app exec` and `secrets`.
 
 `rollback` returns only to Releases that the Gate deployed. The Gate checks them again with today's rules before it redeploys, including the limits it wrote into the Release's compiled compose file. A Release that the operator deployed can do anything the operator can, so the Gate refuses it: ask the operator to roll back, or deploy that version again.

@@ -135,7 +135,9 @@ func logsCmd(g *globals) *cobra.Command {
 10m, 2h) or a timestamp (2026-11-03T15:04:05Z, 2026-11-03, Unix seconds).
 --grep keeps lines containing a fixed string, filtered on the Server with
 grep; -i ignores case and -E makes it an extended regular expression. With
---grep (and not -f), -n counts matching lines.
+--grep (and not -f), -n counts matching lines. grep runs under nice, and
+without -f the Server stops a search after 60s. With scoped access, -E
+patterns may not use back-references (\1 to \9).
 
 -n 0 shows no history: with -f, only new lines. -n -1 shows every line.
 Without -n, --since and --grep show every line they select; add -n to bound
@@ -189,6 +191,10 @@ the output, e.g. --since 10m -n 200.`,
 				// grep's own message is already on stderr.
 				return a.fail(&hintError{"invalid --grep pattern", badPatternHint})
 			}
+			if opts.Grep != "" && errors.As(err, &ee) && ee.Code == dash.ExitGrepTimeout && strings.Contains(ee.Stderr, "--grep search took longer") {
+				// The Server stopped grep at dash.GrepLimit.
+				return a.fail(&hintError{fmt.Sprintf("--grep search took longer than %ds", dash.GrepLimit), grepTimeoutHint})
+			}
 			return err
 		},
 	}
@@ -208,6 +214,10 @@ the output, e.g. --since 10m -n 200.`,
 // badPatternHint is the hint for a --grep -E pattern the Server's grep
 // refuses.
 const badPatternHint = "-E takes an extended regular expression, as the Server's grep reads it; drop -E to match the text as is"
+
+// grepTimeoutHint is the hint for a search the Server stopped at
+// dash.GrepLimit.
+const grepTimeoutHint = "narrow it with --since or -n, or simplify the -E pattern"
 
 // gateLines is LogsOptions.Lines as gate.LogsArgs.Lines. Every line is
 // MaxLogLines, which Gates of every version read as their bound.

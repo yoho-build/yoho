@@ -183,7 +183,7 @@ func TestLogsScriptClampsLines(t *testing.T) {
 		t.Error(s)
 	}
 	// A search reads at most MaxScan lines, then keeps the last matches.
-	if s := ContainerLogsScript("x", 100, LogFilter{Grep: "e", IgnoreCase: true}); !strings.Contains(s, "docker logs --timestamps --tail 100000 'x' 2>&1") || !strings.Contains(s, "grep -i -F -e 'e' | tail -n 100 >&4") {
+	if s := ContainerLogsScript("x", 100, LogFilter{Grep: "e", IgnoreCase: true}); !strings.Contains(s, "docker logs --timestamps --tail 100000 'x' 2>&1") || !strings.Contains(s, "$gw grep -i -F -e 'e' || echo \"g$?\" >&3; } | tail -n 100 >&4") || !strings.Contains(s, "timeout --foreground 60") {
 		t.Error(s)
 	}
 }

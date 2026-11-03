@@ -250,8 +250,31 @@ func TestPSAndLogs(t *testing.T) {
 	if err := g.Call(context.Background(), VerbLogs, filtered, nil, io.Discard, nil); err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(h.all(), "logs --since '1h' --tail 100000 'web' 2>&1 && echo 0 >&3 || echo \"$?\" >&3; } | grep -F -e 'a'\\''; id' | tail -n 10000 >&4;") {
+	if !strings.Contains(h.all(), "logs --since '1h' --tail 100000 'web' 2>&1 && echo 0 >&3 || echo \"$?\" >&3; } | { $gw grep -F -e 'a'\\''; id' || echo \"g$?\" >&3; } | tail -n 10000 >&4;") ||
+		!strings.Contains(h.all(), "then gw=nice; fi") || !strings.Contains(h.all(), "to=\"timeout --foreground 60\"") {
 		t.Fatalf("scripts: %s", h.all())
+	}
+	// The audit records that there was a search, never the pattern.
+	if e := lastAudit(t); e.Args["grep"] != true {
+		t.Fatalf("audit: %+v", e.Args)
+	}
+	// A Member's -E pattern may not use back-references; plain -E may.
+	for _, p := range []string{`^(.*)(.*)(.*)(.*)\4\3\2\1\4$`, `(a)\1`, `x\9`} {
+		err := g.Call(context.Background(), VerbLogs, LogsArgs{LogFilter: dash.LogFilter{Grep: p, Regex: true}}, nil, io.Discard, nil)
+		if err == nil || !strings.Contains(err.Error(), "back-references") {
+			t.Fatalf("%q: %v", p, err)
+		}
+	}
+	for _, f := range []dash.LogFilter{{Grep: `(a)\1`}, {Grep: `^(ERROR|WARN) [0-9]+\\1$`, Regex: true}, {Grep: `a\.b\0`, Regex: true}} {
+		if err := g.Call(context.Background(), VerbLogs, LogsArgs{LogFilter: f}, nil, io.Discard, nil); err != nil {
+			t.Fatalf("%+v: %v", f, err)
+		}
+	}
+	if e := lastAudit(t); e.Args["regex"] != true || e.Args["grep"] != true {
+		t.Fatalf("audit: %+v", e.Args)
+	}
+	if b, _ := os.ReadFile(AuditPath("shop", "production")); strings.Contains(string(b), "a'") || strings.Contains(string(b), `a\\.b`) || strings.Contains(string(b), "ERROR|WARN") {
+		t.Fatalf("audit holds a pattern: %s", b)
 	}
 	for _, bad := range []dash.LogFilter{{Since: "1h; id"}, {Until: "banana"}, {Grep: "a\nb"}} {
 		err := g.Call(context.Background(), VerbLogs, LogsArgs{LogFilter: bad}, nil, io.Discard, nil)

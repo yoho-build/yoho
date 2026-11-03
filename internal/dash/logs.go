@@ -177,25 +177,65 @@ func LogsScript(cmd, args string, o LogsOptions) string {
 	if o.Grep == "" {
 		return s
 	}
-	g := "grep"
-	pre := "set -eu\n" + patternCheck(o)
+	pre := "set -eu\n" + patternCheck(o) + grepGuard(grepRead)
+	g := "$gw grep"
 	if o.Follow {
 		// Print matches as they arrive; busybox grep lacks --line-buffered.
 		pre += "lb=\nif printf 'x\\n' | grep --line-buffered x >/dev/null 2>&1; then lb=--line-buffered; fi\n"
 		g += " $lb"
 	}
-	g += grepFlags(o) + " -e " + remote.Quote(o.Grep)
+	g = "{ " + g + grepFlags(o) + " -e " + remote.Quote(o.Grep) + " || echo \"g$?\" >&3; }"
 	if grepRead && o.Lines >= 0 {
 		g += " | tail -n " + strconv.Itoa(o.Lines)
 	}
 	// POSIX sh has no pipefail, and docker's own errors share stderr with the
 	// container's, so grep would hide a failing docker. Carry docker's exit
-	// status out on fd 3, from an &&/|| list that set -e leaves running;
-	// matches go to the real stdout (fd 4). grep exiting 1 (nothing
-	// matched) is not an error.
+	// status out on fd 3, from an &&/|| list that set -e leaves running,
+	// and grep's after a "g" (1, nothing matched, is not an error; running
+	// into the time limit is); matches go to the real stdout (fd 4).
 	return pre + "exec 4>&1\n" +
 		"rc=$( { { " + s + " && echo 0 >&3 || echo \"$?\" >&3; } | " + g + " >&4; } 3>&1 ) || :\n" +
-		"if [ \"${rc:-0}\" -ne 0 ]; then echo \"docker logs exited $rc; run without --grep to see its output\" >&2; exit \"$rc\"; fi\n"
+		"drc=0 grc=0\n" +
+		"for w in $rc; do case $w in g*) grc=${w#g} ;; *) drc=$w ;; esac; done\n" +
+		"if [ -n \"$to\" ] && { [ \"$grc\" -eq 124 ] || [ \"$grc\" -eq 143 ]; }; then echo " + remote.Quote(GrepTimeoutMessage()) + " >&2; exit " + strconv.Itoa(ExitGrepTimeout) + "; fi\n" +
+		"if [ \"$drc\" -ne 0 ]; then echo \"docker logs exited $drc; run without --grep to see its output\" >&2; exit \"$drc\"; fi\n"
+}
+
+// GrepLimit bounds, in seconds, how long grep may run in a logs read
+// without Follow. A search reads at most MaxScan lines (where the caller
+// asks), so only a pathological -E pattern comes near it, and it must not
+// pin the Server's CPUs for hours. Follow reads have no limit: the
+// client's leaving stops them (FollowGrepScript, the Gate's stdin watcher).
+var GrepLimit = 60
+
+// ExitGrepTimeout is the exit status of a logs script whose grep ran into
+// GrepLimit.
+const ExitGrepTimeout = 124
+
+// GrepTimeoutMessage is the error of a search that ran into GrepLimit.
+func GrepTimeoutMessage() string {
+	return "--grep search took longer than " + strconv.Itoa(GrepLimit) + "s; narrow it with --since or -n"
+}
+
+// grepGuard sets gw, the words before grep: nice, so a search yields the
+// CPU to the Apps, and with limit a time limit of GrepLimit seconds, also
+// in to (empty without a timeout command: no limit then). GNU timeout
+// needs --foreground to stay in the script's process group, which the
+// Gate kills as a whole when its client leaves; BusyBox timeout has no
+// such option and needs none, and BusyBox before 1.30 spells it -t SECS.
+// On the limit grep exits 124 (GNU) or 143 (BusyBox: SIGTERM). BusyBox's
+// watcher holds grep's pipes until it next looks, so a search there ends
+// up to a second late.
+func grepGuard(limit bool) string {
+	s := "gw= to=\nif command -v nice >/dev/null 2>&1; then gw=nice; fi\n"
+	if limit {
+		n := strconv.Itoa(GrepLimit)
+		s += "if timeout --foreground 1 true >/dev/null 2>&1; then to=\"timeout --foreground " + n + "\"\n" +
+			"elif timeout 1 true >/dev/null 2>&1; then to=\"timeout " + n + "\"\n" +
+			"elif timeout -t 1 true >/dev/null 2>&1; then to=\"timeout -t " + n + "\"\n" +
+			"fi\n"
+	}
+	return s + "gw=\"$gw $to\"\n"
 }
 
 // FollowGrepScript is LogsScript for Follow with Grep when the script runs
@@ -209,9 +249,10 @@ func LogsScript(cmd, args string, o LogsOptions) string {
 func FollowGrepScript(cmd, args string, o LogsOptions) string {
 	s := LogsScript(cmd, args, LogsOptions{LogFilter: LogFilter{Since: o.Since, Until: o.Until}, Lines: o.Lines, Follow: true, Timestamps: o.Timestamps})
 	s = strings.TrimSuffix(s, " 2>&1") // redirected to the fifo below, in order
-	g := "grep $lb" + grepFlags(o) + " -e " + remote.Quote(o.Grep)
+	// nice, but no time limit: the watcher stops grep when the client leaves.
+	g := "$gw grep $lb" + grepFlags(o) + " -e " + remote.Quote(o.Grep)
 	return `set -eu
-` + patternCheck(o) + `lb=
+` + patternCheck(o) + grepGuard(false) + `lb=
 if printf 'x\n' | grep --line-buffered x >/dev/null 2>&1; then lb=--line-buffered; fi
 dp= gp= wp=
 d=$(mktemp -d "${TMPDIR:-/tmp}/yoho-logs.XXXXXX")
