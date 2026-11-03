@@ -38,6 +38,9 @@ type backupJob struct {
 	env        map[string]string
 	rcloneConf string         // resolved rclone_config_secret; never stored on the Server as a secret file
 	store      *secrets.Store // nil when the target needs no secrets
+	// local is the restored Destination's own store when store is another
+	// Destination's (restore --from): output is redacted with both.
+	local *secrets.Store
 	// generatedOwners maps x-yoho.generate keys to the Services declaring
 	// them (set by resolveServices).
 	generatedOwners map[string][]string
@@ -189,6 +192,11 @@ func (a *app) resolveTargetSecrets(ctx context.Context, j *backupJob) error {
 		store, err = a.loadSecrets(ctx, nil)
 	} else {
 		store, err = a.loadSourceSecrets(ctx, dest, j.target.SecretKeys())
+		if err == nil {
+			// The restore runs in this Destination, whose own secrets can
+			// show up in its output too.
+			j.local, err = a.loadSecrets(ctx, nil)
+		}
 	}
 	if err != nil {
 		return err
@@ -252,8 +260,13 @@ func (j *backupJob) redact(w io.Writer) (io.Writer, func()) {
 	if j.store == nil {
 		return w, func() {}
 	}
-	r := j.store.Redactor(w)
-	return r, func() { r.Flush() }
+	if j.local == nil {
+		r := j.store.Redactor(w)
+		return r, func() { r.Flush() }
+	}
+	outer := j.local.Redactor(w)
+	r := j.store.Redactor(outer)
+	return r, func() { r.Flush(); outer.Flush() }
 }
 
 // prepareBackup resolves job, Services and secrets with UI steps.
