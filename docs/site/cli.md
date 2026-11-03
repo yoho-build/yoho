@@ -32,7 +32,8 @@ Global flags (every command): `-c, --config FILE`, `-d, --destination NAME` (def
 | `access add MEMBER [--verbs all\|read\|deploy,logs,...]` / `access rm MEMBER` / `access ls` | Operator: grant, revoke and list Members' verbs on the App Destination. |
 | `access key add MEMBER PUBKEY_FILE` / `access key rm MEMBER` | Operator: authorize or remove a Member's restricted SSH key (forced command `yoho gate`). |
 | `access audit [-n 50]` | Operator: last Gate requests (JSON lines). |
-| `proxy boot \| status \| logs` | Manage the shared kamal-proxy. |
+| `proxy boot \| status \| logs` | Manage the shared kamal-proxy. `status` also shows the running kamal-proxy version and whether the pinned (or `proxy.image`) one is newer. |
+| `proxy upgrade [-y] [--allow-downgrade]` | Upgrade `yoho-proxy` on every Server of the Destination to the pinned or `proxy.image` kamal-proxy: pull first, recreate with the same ports/flags/volume, verify every route again. Brief interruption; see [Upgrading the Proxy](zero-downtime.md#upgrading-the-proxy). |
 | `tunnel up \| status \| down` | Managed Cloudflare Tunnel (cloudflared connector; Quick Tunnel without a token). |
 | `secrets list` | Keys, sources, lengths. |
 | `secrets print KEY... --reveal` | Print values; terminal only. |

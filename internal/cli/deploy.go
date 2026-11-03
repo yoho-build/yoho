@@ -900,10 +900,7 @@ func releasesCmd(g *globals) *cobra.Command {
 // proxyHook runs `yoho proxy boot` Hooks: YOHO_COMMAND=proxy,
 // YOHO_SUBCOMMAND=boot, without the Destination lock.
 func (a *app) proxyHook(version string, hosts []plan.NamedHost) func(context.Context, string) error {
-	h := a.hookFunc(version, "proxy", hosts)
-	return func(ctx context.Context, name string) error {
-		return h(ctx, name, map[string]string{"YOHO_SUBCOMMAND": "boot"})
-	}
+	return a.proxyHookFor("boot", version, hosts)
 }
 
 func proxyCmd(g *globals) *cobra.Command {
@@ -948,8 +945,7 @@ after pre-connect.`,
 			return nil
 		},
 	})
-	c.AddCommand(remoteShow(g, "status", "Show the Proxy container and its routes",
-		"docker ps --filter name=^/"+proxy.ContainerName+"$ --format '{{.Names}}\\t{{.Status}}\\t{{.Ports}}'; docker exec "+proxy.ContainerName+" kamal-proxy list"))
+	c.AddCommand(proxyUpgradeCmd(g), proxyStatusCmd(g))
 	c.AddCommand(remoteShow(g, "logs", "Show recent Proxy logs", "docker logs --tail 200 "+proxy.ContainerName+" 2>&1"))
 	return c
 }

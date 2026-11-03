@@ -50,10 +50,7 @@ func runArgs(cfg config.ProxyConfig) []string {
 // runArgsForDriver respects the daemon default: no --log-driver override.
 // Rotation options are supported only by json-file and local logging.
 func runArgsForDriver(cfg config.ProxyConfig, driver string) []string {
-	image := cfg.Image
-	if image == "" {
-		image = DefaultImage
-	}
+	image := Image(cfg)
 	args := []string{
 		"--name", ContainerName,
 		"--network", Network,
@@ -173,10 +170,7 @@ func BootWith(ctx context.Context, host remote.Host, cfg config.ProxyConfig, out
 		return err
 	}
 	want := configHash(args)
-	image := cfg.Image
-	if image == "" {
-		image = DefaultImage
-	}
+	image := Image(cfg)
 	if exists && label == want {
 		if !running {
 			fmt.Fprintf(out, "[%s] starting proxy %s\n", host.Name(), ContainerName)
@@ -278,19 +272,27 @@ func proxyLockScript(base string) string {
 
 // inspectProxy reads the Proxy container's config label and running state.
 func inspectProxy(ctx context.Context, host remote.Host) (label string, running, exists bool, err error) {
-	// Prints "<label>|<running>" or nothing when the container is missing.
-	state, err := host.Output(ctx, remote.Cmd{Script: "docker container inspect -f '{{index .Config.Labels \"" + configLabel + "\"}}|{{.State.Running}}' " + ContainerName + " 2>/dev/null || true"})
+	label, running, _, exists, err = inspectProxyImage(ctx, host)
+	return
+}
+
+// inspectProxyImage is inspectProxy plus the image the container was created
+// from (as configured, normally a tag).
+func inspectProxyImage(ctx context.Context, host remote.Host) (label string, running bool, image string, exists bool, err error) {
+	// Prints "<label>|<running>|<image>" or nothing when the container is missing.
+	state, err := host.Output(ctx, remote.Cmd{Script: "docker container inspect -f '{{index .Config.Labels \"" + configLabel + "\"}}|{{.State.Running}}|{{.Config.Image}}' " + ContainerName + " 2>/dev/null || true"})
 	if err != nil {
-		return "", false, false, fmt.Errorf("inspect proxy: %w", err)
+		return "", false, "", false, fmt.Errorf("inspect proxy: %w", err)
 	}
-	label, r, exists := strings.Cut(strings.TrimSpace(state), "|")
-	return label, r == "true", exists, nil
+	label, rest, exists := strings.Cut(strings.TrimSpace(state), "|")
+	r, image, _ := strings.Cut(rest, "|")
+	return label, r == "true", image, exists, nil
 }
 
 // NeedsBoot reports, read-only, whether Boot would create, recreate or start
 // the Proxy for cfg, and why.
 func NeedsBoot(ctx context.Context, host remote.Host, cfg config.ProxyConfig) (bool, string, error) {
-	label, running, exists, err := inspectProxy(ctx, host)
+	label, running, current, exists, err := inspectProxyImage(ctx, host)
 	if err != nil {
 		return false, "", err
 	}
@@ -303,6 +305,13 @@ func NeedsBoot(ctx context.Context, host remote.Host, cfg config.ProxyConfig) (b
 		return true, "proxy container " + ContainerName + " is missing", nil
 	case label != configHash(args):
 		why := "proxy configuration changed (recreated, brief proxy downtime)"
+		if want := Image(cfg); current != "" && current != want {
+			kind := "upgrade"
+			if CompareImages(current, want) > 0 {
+				kind = "downgrade"
+			}
+			why = kind + " " + VersionLabel(current) + " -> " + VersionLabel(want) + " (recreated, brief proxy downtime; routes are kept)"
+		}
 		if cfg.Metrics {
 			why += "; metrics on 127.0.0.1:" + strconv.Itoa(MetricsPort)
 		}

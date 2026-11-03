@@ -64,11 +64,26 @@ proxy:
   metrics: true
 ```
 
+## Upgrading the Proxy
+
+Yoho pins one kamal-proxy version (`basecamp/kamal-proxy:v0.10.2`, the newest release when this was written). A newer Yoho may pin a newer one; `proxy.image` pins any tag yourself. The image is part of the Proxy's configuration fingerprint, so when the running `yoho-proxy` differs from the configured one:
+
+- `yoho plan` shows `proxy yoho-proxy: upgrade v0.10.0 -> v0.10.2 (recreated, brief proxy downtime; routes are kept)` (or `downgrade`), and `yoho deploy` performs it as part of the deploy.
+- `yoho proxy status` shows the running version and `upgrade available: vY` against the pinned one (no network call).
+- `yoho proxy upgrade [-y]` does only the upgrade, on every Server of the Destination, one at a time. Use it in a maintenance window, outside a deploy.
+
+`proxy upgrade` pulls the new image first: when the pull fails, nothing was stopped. It then recreates `yoho-proxy` with the same ports, flags, network and `yoho-proxy-config` volume. The volume holds the routes of **every** App on the Server, so other Apps keep their routes; they are not redeployed. Finally it lists the routes again and requires each to be identical (hosts, paths, TLS, targets, running) and to answer through the Proxy as it did before the upgrade. The probe is an HTTP request from the Server to the published HTTP port with the route's `Host` header, at the Service's `health_path` (`/up` for Apps other than the current one; a route that did not answer before is reported, not failed). Routes of a Tunnel-only Proxy (`http_port: 0`) are verified by the route list alone. On a failed check the new Proxy keeps running, the `post-proxy-reboot` Hook is not run, and the error names the route and the previous image. `pre-proxy-reboot` and `post-proxy-reboot` Hooks run around each Server (`YOHO_SUBCOMMAND=upgrade`); use them to drain the Server from a load balancer.
+
+A move to an older version is refused unless `--allow-downgrade`: an older kamal-proxy may not read a newer state file. Yoho needs `kamal-proxy list --json` (v0.10.0 or later); upgrading from an older Proxy still works, but its routes cannot be compared before and after.
+
+**Downtime.** kamal-proxy has no handover between two running versions, and two containers cannot publish the same host port, so the upgrade is a container stop and start: connections to every App on the Server are refused for a moment. Measured on the QA Server (Docker 29, `curl` every ~40 ms for two Apps while running `yoho proxy upgrade` from v0.10.0 to v0.10.2): requests failed for about 0.5 s (12 failed requests per App, none before or after). The command reports its own recreate time (about 1.2 s including the start-up wait). Treat this as "brief interruption, around a second", not zero downtime, and plan a maintenance window or drain the Server in the `pre-proxy-reboot` Hook. Established connections (WebSockets, long downloads) are dropped. Kamal documents the same trade-off for `kamal proxy reboot`.
+
 ## Commands
 
 ```sh
 yoho proxy boot     # start or reconfigure the Proxy
-yoho proxy status   # container and routes
+yoho proxy status   # container, routes, version
+yoho proxy upgrade  # recreate with the pinned kamal-proxy, verify routes
 yoho proxy logs
 ```
 
