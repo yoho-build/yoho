@@ -17,6 +17,7 @@ import (
 	"github.com/yoho-build/yoho/internal/backup"
 	"github.com/yoho-build/yoho/internal/config"
 	"github.com/yoho-build/yoho/internal/deploy"
+	"github.com/yoho-build/yoho/internal/hooks"
 	"github.com/yoho-build/yoho/internal/release"
 	"github.com/yoho-build/yoho/internal/remote"
 	"github.com/yoho-build/yoho/internal/secrets"
@@ -736,7 +737,12 @@ Services that an interrupted restore stopped are not resumed afterwards.`,
 				Host: h.Host, Out: out, Lock: a.backupLock(h.Host, "restore"), ID: found.ID, Confirm: true,
 				Runtime: a.dest.Runtime, GeneratedOwners: j.generatedOwners,
 				AfterRestore: func(ctx context.Context) error {
-					return hook(ctx, "post-restore", hookEnv)
+					// Runs under the restore's Destination lock.
+					env := map[string]string{"YOHO_LOCK": hooks.LockHeld}
+					for k, v := range hookEnv {
+						env[k] = v
+					}
+					return hook(ctx, "post-restore", env)
 				},
 				Leftovers: func(l backup.Leftovers) { left = l },
 			})

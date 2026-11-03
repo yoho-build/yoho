@@ -139,6 +139,10 @@ type BootOptions struct {
 	// Owner (TunnelOwner) labels Cloudflare Tunnel connectors and stops one
 	// App from changing or removing connectors another App manages.
 	Owner string
+	// OnReboot, when set, runs the named Hook ("pre-proxy-reboot" before,
+	// "post-proxy-reboot" after) around recreating an existing Proxy whose
+	// configuration changed. A first boot or a plain start does not call it.
+	OnReboot func(ctx context.Context, hook string) error
 }
 
 // BootWith is Boot with options.
@@ -171,7 +175,13 @@ func BootWith(ctx context.Context, host remote.Host, cfg config.ProxyConfig, out
 		return nil
 	}
 
+	reboot := exists && opts.OnReboot != nil
 	if exists {
+		if reboot {
+			if err := opts.OnReboot(ctx, "pre-proxy-reboot"); err != nil {
+				return err
+			}
+		}
 		fmt.Fprintf(out, "[%s] warning: proxy configuration changed, recreating %s (brief proxy downtime)\n", host.Name(), ContainerName)
 	} else {
 		fmt.Fprintf(out, "[%s] booting proxy %s (%s)\n", host.Name(), ContainerName, image)
@@ -221,6 +231,9 @@ func BootWith(ctx context.Context, host remote.Host, cfg config.ProxyConfig, out
 	}
 	if err := host.Run(ctx, remote.Cmd{Script: b.String()}); err != nil {
 		return fmt.Errorf("boot proxy: %w", err)
+	}
+	if reboot {
+		return opts.OnReboot(ctx, "post-proxy-reboot")
 	}
 	return nil
 }

@@ -138,12 +138,30 @@ func TestDeploySequence(t *testing.T) {
 	h := newFake(sim)
 	var out bytes.Buffer
 	d := testDeploy(t, h, &out)
+	var hooks []string
+	hookAt := map[string]int{} // scripts recorded before each Hook
+	d.Hook = func(_ context.Context, name string, env map[string]string) error {
+		hooks = append(hooks, name+":"+env["YOHO_HOSTS"]+":"+env["YOHO_LOCK"])
+		h.mu.Lock()
+		hookAt[name] = len(h.scripts)
+		h.mu.Unlock()
+		return nil
+	}
 	rel, err := Runtime{}.Deploy(context.Background(), d)
 	if err != nil {
 		t.Fatalf("%v\n%s\n%s", err, out.String(), h.all())
 	}
 	if rel.Status != "deployed" || rel.Runtime != "swarm" || rel.Server != "primary" {
 		t.Errorf("release = %+v", rel)
+	}
+	if got, want := strings.Join(hooks, ","), "pre-deploy:203.0.113.10:true,pre-app-boot:203.0.113.10:true,post-app-boot:203.0.113.10:true,post-deploy:203.0.113.10:true"; got != want {
+		t.Errorf("hooks\n got %s\nwant %s", got, want)
+	}
+	if i := indexOf(h, "docker stack deploy", "dependencies.yaml"); hookAt["pre-app-boot"] > i || hookAt["pre-app-boot"] <= indexOf(h, "docker network create -d overlay --attachable yoho") {
+		t.Errorf("pre-app-boot at %d, dependencies at %d", hookAt["pre-app-boot"], i)
+	}
+	if i := indexOf(h, "kamal-proxy' 'deploy' 'shop-production-web'"); hookAt["post-app-boot"] <= i {
+		t.Errorf("post-app-boot at %d, before the route switch at %d", hookAt["post-app-boot"], i)
 	}
 
 	steps := []int{

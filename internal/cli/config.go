@@ -13,6 +13,7 @@ import (
 
 	"github.com/yoho-build/yoho/internal/composefile"
 	"github.com/yoho-build/yoho/internal/config"
+	"github.com/yoho-build/yoho/internal/hooks"
 	"github.com/yoho-build/yoho/internal/secrets"
 	"github.com/yoho-build/yoho/internal/templates"
 	"github.com/yoho-build/yoho/internal/ui"
@@ -287,11 +288,22 @@ func runInit(u *ui.UI, wd string, names []string) error {
 		name = `"` + name + `"` // a name like 001 must stay a YAML string
 	}
 	files := map[string]string{
-		"yoho.yml":           fmt.Sprintf(initYoho, name),
-		".yoho/secrets":      initSecrets,
-		".yoho/hooks/README": "Executable scripts named after a hook run on your machine: pre-connect, pre-build, pre-deploy, post-deploy, pre-backup, post-backup, ...\nEnv: YOHO_APP, YOHO_DESTINATION, YOHO_VERSION, YOHO_HOSTS, YOHO_COMMAND, YOHO_PERFORMER.\n",
+		"yoho.yml":      fmt.Sprintf(initYoho, name),
+		".yoho/secrets": initSecrets,
+		".yoho/hooks/README": "Executable scripts named after a Hook run on your machine; a non-zero exit aborts the command.\n" +
+			"Enable a sample by dropping .sample: mv pre-deploy.sample pre-deploy\n" +
+			"Hooks: " + strings.Join(hooks.Names, ", ") + ".\n" +
+			"Env: " + strings.Join(hooks.EnvNames, ", ") + ".\n" +
+			"Each *.sample lists when it runs; the Yoho docs (Hooks & env vars) have the details.\n",
 	}
-	for _, rel := range []string{"yoho.yml", ".yoho/secrets", ".yoho/hooks/README"} {
+	order := []string{"yoho.yml", ".yoho/secrets", ".yoho/hooks/README"}
+	var samples []string
+	for _, n := range hooks.Names {
+		rel := ".yoho/hooks/" + n + ".sample"
+		files[rel] = hooks.Sample(n)
+		order = append(order, rel)
+	}
+	for _, rel := range order {
 		p := filepath.Join(wd, rel)
 		if rel == "yoho.yml" && haveYoho {
 			u.Warn("%s exists, left unchanged", filepath.Base(yohoPath))
@@ -308,10 +320,21 @@ func runInit(u *ui.UI, wd string, names []string) error {
 		if strings.HasPrefix(rel, ".yoho/secrets") {
 			mode = 0o600
 		}
+		sample := strings.HasSuffix(rel, ".sample")
+		if sample {
+			mode = 0o755
+		}
 		if err := os.WriteFile(p, []byte(files[rel]), mode); err != nil {
 			return err
 		}
+		if sample {
+			samples = append(samples, filepath.Base(rel))
+			continue
+		}
 		u.Info("created %s", rel)
+	}
+	if len(samples) > 0 {
+		u.Info("created .yoho/hooks/*.sample (%d Hook samples; drop .sample to enable one)", len(samples))
 	}
 	if err := ensureGitignore(wd, ".yoho/secrets*"); err != nil {
 		return err

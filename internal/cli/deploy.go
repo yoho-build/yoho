@@ -91,10 +91,6 @@ func (a *app) tunnelOptions() proxy.BootOptions {
 var swarmRuntime func() plan.Runtime
 
 func (a *app) hookFunc(version, command string, hosts []plan.NamedHost) plan.HookFunc {
-	var hs []string
-	for _, h := range hosts {
-		hs = append(hs, h.Server.SSH)
-	}
 	dir := a.cfg.Hooks.Path
 	if !filepath.IsAbs(dir) {
 		dir = filepath.Join(a.dir, dir)
@@ -103,7 +99,7 @@ func (a *app) hookFunc(version, command string, hosts []plan.NamedHost) plan.Hoo
 		"YOHO_APP":         a.cfg.App,
 		"YOHO_DESTINATION": a.destName,
 		"YOHO_VERSION":     version,
-		"YOHO_HOSTS":       strings.Join(hs, ","),
+		"YOHO_HOSTS":       hooks.Hosts(hosts),
 		"YOHO_COMMAND":     command,
 		"YOHO_PERFORMER":   performer(),
 	}, a.ui.Progress())
@@ -750,6 +746,11 @@ ingress changed since the cutover, unless --force.`,
 			if a.scoped {
 				return a.scopedRollback(ctx, args[0])
 			}
+			// Kamal runs pre-connect for rollback too; the Version is the
+			// one asked for (it is resolved once connected).
+			if err := a.hookFunc(args[0], "rollback", nil)(ctx, "pre-connect", nil); err != nil {
+				return err
+			}
 			hosts, closeHosts, err := a.connect(ctx)
 			if err != nil {
 				return err
@@ -767,6 +768,7 @@ ingress changed since the cutover, unless --force.`,
 			if err != nil {
 				return err
 			}
+			d.Hook = a.hookFunc(target, "rollback", hosts)
 			a.ui.Title("Rolling back %s on %s to %s", a.cfg.App, a.destName, shortVersion(target))
 			a.ui.Warn("volumes and database migrations are not reverted")
 			for _, w := range deploy.RollbackWarnings(ctx, hosts[0].Host, a.cfg.App, a.destName, target) {
@@ -889,28 +891,53 @@ func releasesCmd(g *globals) *cobra.Command {
 	}
 }
 
+// proxyHook runs `yoho proxy boot` Hooks: YOHO_COMMAND=proxy,
+// YOHO_SUBCOMMAND=boot, without the Destination lock.
+func (a *app) proxyHook(version string, hosts []plan.NamedHost) func(context.Context, string) error {
+	h := a.hookFunc(version, "proxy", hosts)
+	return func(ctx context.Context, name string) error {
+		return h(ctx, name, map[string]string{"YOHO_SUBCOMMAND": "boot"})
+	}
+}
+
 func proxyCmd(g *globals) *cobra.Command {
 	c := &cobra.Command{Use: "proxy", Short: "Manage the shared kamal-proxy on the Server"}
 	c.AddCommand(&cobra.Command{
 		Use:   "boot",
 		Short: "Start (or reconfigure) the Proxy",
+		Long: `Start (or reconfigure) the Proxy on each Server, one Server at a time.
+
+The pre-proxy-reboot and post-proxy-reboot Hooks run around each Server's
+boot (YOHO_COMMAND=proxy, YOHO_SUBCOMMAND=boot, YOHO_HOSTS=that Server),
+after pre-connect.`,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			a, err := g.load(cmd)
 			if err != nil {
 				return err
 			}
-			hosts, closeHosts, err := a.connect(cmd.Context())
+			ctx := cmd.Context()
+			if err := a.proxyHook("", nil)(ctx, "pre-connect"); err != nil {
+				return err
+			}
+			hosts, closeHosts, err := a.connect(ctx)
 			if err != nil {
 				return err
 			}
 			defer closeHosts()
 			for _, h := range hosts {
+				hook := a.proxyHook(a.serverVersion(ctx, h.Host), []plan.NamedHost{h})
+				if err := hook(ctx, "pre-proxy-reboot"); err != nil {
+					return err
+				}
 				step := a.ui.Step(h.Name, "Boot %s", proxy.ContainerName)
-				if err := proxy.Boot(cmd.Context(), h.Host, a.proxyConfig(), step.Output()); err != nil {
+				if err := proxy.Boot(ctx, h.Host, a.proxyConfig(), step.Output()); err != nil {
 					step.Fail(err, "check that the Proxy ports are free on the Server")
 					return &silentError{err}
 				}
 				step.Done()
+				if err := hook(ctx, "post-proxy-reboot"); err != nil {
+					return err
+				}
 			}
 			return nil
 		},

@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/yoho-build/yoho/internal/hooks"
 	"github.com/yoho-build/yoho/internal/templates"
 	"github.com/yoho-build/yoho/internal/ui"
 )
@@ -17,6 +18,38 @@ func initIn(t *testing.T, dir string, names ...string) (string, error) {
 	var buf bytes.Buffer
 	err := runInit(ui.New(&buf, ui.JSON, false), dir, names)
 	return buf.String(), err
+}
+
+// init writes an executable <name>.sample for every Hook, and keeps an
+// existing one.
+func TestInitWritesHookSamples(t *testing.T) {
+	dir := t.TempDir()
+	custom := filepath.Join(dir, ".yoho", "hooks", "pre-deploy.sample")
+	if err := os.MkdirAll(filepath.Dir(custom), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(custom, []byte("#!/bin/sh\n# mine\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if out, err := initIn(t, dir); err != nil {
+		t.Fatalf("%v\n%s", err, out)
+	}
+	for _, n := range hooks.Names {
+		p := filepath.Join(dir, ".yoho", "hooks", n+".sample")
+		fi, err := os.Stat(p)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if fi.Mode().Perm()&0o100 == 0 {
+			t.Errorf("%s is not executable: %v", p, fi.Mode())
+		}
+		if _, err := os.Stat(filepath.Join(dir, ".yoho", "hooks", n)); err == nil {
+			t.Errorf("init must not enable hook %s", n)
+		}
+	}
+	if b, _ := os.ReadFile(custom); string(b) != "#!/bin/sh\n# mine\n" {
+		t.Errorf("existing sample overwritten: %q", b)
+	}
 }
 
 // Each template, alone and all together, passes `config check --offline`

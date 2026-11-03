@@ -109,6 +109,41 @@ func TestBootIdempotentAndRecreate(t *testing.T) {
 	}
 }
 
+func TestBootOnRebootOnlyWhenRecreating(t *testing.T) {
+	want := configHash(runArgs(config.ProxyConfig{}))
+	for _, tc := range []struct{ state, calls string }{
+		{"", ""},              // first boot
+		{want + "|true", ""},  // unchanged
+		{want + "|false", ""}, // plain start
+		{"old|true", "pre-proxy-reboot,run,post-proxy-reboot"}, // recreate
+	} {
+		var calls []string
+		h := &fakeHost{output: func(string) string { return tc.state }}
+		opts := BootOptions{OnReboot: func(_ context.Context, name string) error {
+			if name == "post-proxy-reboot" && strings.Contains(strings.Join(h.scripts, "\n"), "docker run -d") {
+				calls = append(calls, "run")
+			}
+			calls = append(calls, name)
+			return nil
+		}}
+		if err := BootWith(context.Background(), h, config.ProxyConfig{}, nil, opts); err != nil {
+			t.Fatal(err)
+		}
+		if got := strings.Join(calls, ","); got != tc.calls {
+			t.Errorf("state %q: calls %q, want %q", tc.state, got, tc.calls)
+		}
+	}
+
+	// A failing pre-proxy-reboot leaves the Proxy alone.
+	h := &fakeHost{output: func(string) string { return "old|true" }}
+	err := BootWith(context.Background(), h, config.ProxyConfig{}, nil, BootOptions{OnReboot: func(context.Context, string) error {
+		return errors.New("hook pre-proxy-reboot failed (exit 1), aborting")
+	}})
+	if err == nil || !strings.Contains(err.Error(), "pre-proxy-reboot") || strings.Contains(strings.Join(h.scripts, "\n"), "docker run") {
+		t.Fatalf("err = %v\n%s", err, strings.Join(h.scripts, "\n"))
+	}
+}
+
 func TestBootLoggingDriverCompatibility(t *testing.T) {
 	for _, driver := range []string{"json-file", "local", "fluentd", "syslog", "journald", "awslogs", "none", "custom/plugin:latest"} {
 		t.Run(driver, func(t *testing.T) {
