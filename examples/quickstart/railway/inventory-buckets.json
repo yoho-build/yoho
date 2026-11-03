@@ -1,0 +1,25 @@
+{
+  "project": "shop",
+  "services": [
+    {
+      "name": "web",
+      "dockerfile": "Dockerfile",
+      "port": 8080,
+      "healthcheck_path": "/up",
+      "restart": "unless-stopped",
+      "depends_on": ["db"],
+      "secret_keys": ["APP_GREETING", "POSTGRES_PASSWORD", "RUSTFS_ACCESS_KEY", "RUSTFS_SECRET_KEY", "S3_ACCESS_KEY_ID", "S3_SECRET_ACCESS_KEY"]
+    },
+    {
+      "name": "db",
+      "image": "postgres:17-alpine",
+      "volume": "pgdata",
+      "volume_mount": "/var/lib/postgresql/data",
+      "restart": "unless-stopped"
+    }
+  ],
+  "buckets": [
+    { "name": "shop-uploads", "size": "12GB", "target": "rustfs" },
+    { "name": "shop-media", "size": "2TB" }
+  ]
+}

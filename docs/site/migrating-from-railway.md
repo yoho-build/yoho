@@ -15,6 +15,7 @@ Railway-specific commands below are from Railway's docs, retrieved 2026-10-23. A
 | `RAILWAY_*` variables | Dropped. They name Railway's own network |
 | Volume mount | A named volume. The bytes do not come with the name |
 | Postgres | `stateful: true`, a volume, and `x-yoho.backup.dump`. No `ports`: Services reach it as `db:5432`; a Railway public TCP proxy has no equivalent, and `"5432:5432"` would bypass the firewall (`yoho config check` warns) |
+| Bucket | An external S3-compatible store (R2, B2, S3) for large data, or the `rustfs` Service for small ones. The objects are copied with `rclone sync`. See [Buckets](#buckets) |
 | `healthcheckPath` | A wget `healthcheck` and, when it is not `/up`, `x-yoho.proxy.health_path` |
 | `preDeployCommand` | `x-yoho.release_command`. A string becomes `sh -c`, because the Railway schema stores one string, not an argv |
 | `startCommand` | `command: ["sh", "-c", "..."]`, or an argv `command` in the inventory |
@@ -104,6 +105,36 @@ yoho app exec db -- psql -U postgres -d postgres -c 'SELECT count(*) FROM jobs'
 
 Compare that count with Railway before you switch. The switch deploy runs `release_command` again, so it must be safe to repeat. The sample's `/app migrate` is `CREATE TABLE IF NOT EXISTS`.
 
+## Buckets
+
+A Railway bucket is S3-compatible storage outside your Server. Pick a home for each one:
+
+- **Large data** (as a rule of thumb, more than about 50 GB, or public downloads): an external S3-compatible store such as Cloudflare R2, Backblaze B2 or AWS S3. Credentials are references in `.yoho/secrets` (`S3_ACCESS_KEY_ID`, `S3_SECRET_ACCESS_KEY`), the endpoint is a plain `environment` value, and the Services that use the bucket list the keys in `x-yoho.secrets`.
+- **Small or self-hosted buckets**: the `rustfs` Service (`yoho init --template rustfs`, see [Object storage](object-storage.md)). Its keys are generated on the Server; the endpoint is `http://rustfs:9000`, path-style.
+
+List the buckets in the inventory, names and sizes only:
+
+```json
+"buckets": [
+  { "name": "shop-uploads", "size": "12GB", "target": "rustfs" },
+  { "name": "shop-media", "size": "2TB" }
+]
+```
+
+`target` is `rustfs` or `external`. Without it, a bucket up to 50 GiB goes to `rustfs` and a larger one to `external`. `size` is a string such as `800MB`, `40GB`, `1.5TB` or `512MiB`. Any other field is refused. The sample is `examples/quickstart/railway/inventory-buckets.json`, with its drafts `compose.buckets.draft.yaml` and `yoho.buckets.draft.yml`.
+
+For `rustfs` targets the draft adds the `rustfs` Service and its volume. For `external` targets it adds the `S3_ACCESS_KEY_ID` and `S3_SECRET_ACCESS_KEY` reference lines. In both cases it prints a checklist (and writes it at the end of `yoho.yml`): the rclone remotes as environment variables, then for each bucket
+
+```sh
+rclone mkdir yoho:shop-uploads                                     # rustfs only
+rclone sync railway:shop-uploads yoho:shop-uploads --checksum --progress
+rclone check railway:shop-uploads yoho:shop-uploads
+```
+
+Keep the Railway bucket's endpoint and keys in your password manager; the checklist reads them with `$(op read ...)` into `RCLONE_CONFIG_RAILWAY_*`, so they reach rclone through the environment, not argv. RustFS has no published port, so the checklist opens an SSH tunnel to the container's address (`ssh -N -L 19000:<ip>:9000`) and reads the generated keys from the Server.
+
+Copy once after the first deploy, then freeze writes with the database and run `rclone sync` again; it only transfers what changed. `rclone check` must report `0 differences found` before you switch. Objects uploaded in parts have no MD5 and are compared by size; add `--download` for a byte-for-byte comparison. Point the App at the new endpoint in the same deploy as the cutover.
+
 ## 6. Rehearse first
 
 For an App that matters, deploy to a second Destination before the real cutover: its own `servers` (a LAN box works), an overlay that points data at a restored copy, side-effect Services (schedulers, off-Server Backups, the tunnel) replaced with `sleep`, and test-mode payment keys. The rehearsal Destination has no `migrate` block, so it never touches Railway or the ingress. Set `proxy: {tunnel: null}` in the rehearsal overlay (`yoho.rehearsal.yml`): it would otherwise inherit `proxy.tunnel.token_secret` and join the live tunnel.
@@ -141,4 +172,5 @@ Retrieved 2026-10-23 from the Railway CLI page, the Postgres backup guide, the c
 - Dashboard clicks beyond what the backup guide describes.
 - A live cutover against Railway and a Server. The draft, `yoho config check --offline` on the sample, and the cutover preflight flag are covered by tests in this repo.
 - Parsing `.railway/railway.ts`.
+- Where the Railway dashboard shows a bucket's S3 endpoint and keys, and whether its objects carry MD5 ETags. The checklist's `rclone sync` and `rclone check` were tested between two S3-compatible stores (RustFS to RustFS through the SSH tunnel), not against Railway.
 - Whether `railway connect <name> --tunnel-only` accepts every service name. The backup guide's example is `postgres`.

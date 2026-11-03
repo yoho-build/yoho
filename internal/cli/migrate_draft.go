@@ -24,6 +24,11 @@ never values. railway.json and railway.toml are Railway's deprecated
 config-as-code files (one service's build and deploy); Yoho does not read
 .railway/railway.ts and does not call Railway.
 
+An inventory may list buckets ({"name","size","target"}; target rustfs or
+external, default rustfs up to 50 GiB). rustfs adds the rustfs Service;
+external adds S3_ACCESS_KEY_ID / S3_SECRET_ACCESS_KEY references. Both print
+rclone sync and rclone check commands to copy and verify the data.
+
 Secret values are refused. With --out, compose.yaml and yoho.yml are written
 only when those names do not already exist. .yoho/secrets is not written.
 
@@ -74,6 +79,7 @@ func runMigrateDraft(cmd *cobra.Command, g *globals, from, out, service, project
 		"services": d.Services, "volumes": d.Volumes, "secret_keys": d.SecretKeys,
 		"generated": d.Generated, "warnings": d.Warnings, "secret_lines": d.SecretLines,
 		"compose": d.Compose, "yoho": d.Yoho, "out": out,
+		"buckets": d.Buckets, "bucket_checklist": d.Checklist,
 	})
 	u.Event("migrate_rotation_checklist", "", map[string]any{"secrets": rotationItems(d.Rotation)})
 	if g.json {
@@ -91,6 +97,12 @@ func runMigrateDraft(cmd *cobra.Command, g *globals, from, out, service, project
 	u.Info("Add to .yoho/secrets (references only; do not paste values):")
 	for _, line := range d.SecretLines {
 		u.Info("%s", line)
+	}
+	if len(d.Checklist) > 0 {
+		u.Info("Buckets: after the first deploy, copy and verify each one (also in yoho.yml):")
+		for _, line := range d.Checklist {
+			u.Info("  %s", line)
+		}
 	}
 	u.Info("Review the files. Nothing was deployed.")
 	printRotationChecklist(cmd.OutOrStdout(), d.Rotation)

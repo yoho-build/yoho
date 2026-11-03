@@ -78,6 +78,26 @@ services:
 
 A proxied Service needs a `/up` endpoint (configurable with `health_path`) that returns 2xx when ready, and a compose `healthcheck` (an error under swarm, a warning under compose). This example executes `wget`, so the image must include it. For a curl-only image, change the healthcheck test to execute `curl` instead.
 
+## Service templates
+
+`yoho init --template` writes ready-to-deploy Stateful Services into the compose file:
+
+```sh
+yoho init --list-templates
+yoho init --template postgres,redis      # also works in a project that already has yoho.yml
+```
+
+| Template | Image | Backup | Generated secrets |
+|---|---|---|---|
+| `postgres` | `postgres:17-alpine` | `pg_dump --clean --if-exists`, restored with `psql` | `POSTGRES_PASSWORD` (`POSTGRES_PASSWORD_FILE`) |
+| `redis` | `valkey/valkey:9.0-alpine` (Redis-compatible, append-only file) | volume `redisdata` | none: reachable only on the App's network |
+| `clickhouse` | `clickhouse/clickhouse-server:26.8-alpine` (LTS) | volume `clickhousedata`, container paused during the copy | `CLICKHOUSE_PASSWORD` (`CLICKHOUSE_PASSWORD_FILE`) |
+| `rustfs` | `rustfs/rustfs:1.0.4` (S3-compatible) | volume `rustfsdata` | `RUSTFS_ACCESS_KEY`, `RUSTFS_SECRET_KEY` (`*_FILE`); see [Object storage](object-storage.md) |
+
+Each Service is `stateful: true`, has `restart: unless-stopped`, a healthcheck over TCP on 127.0.0.1, a named volume, and no published ports; other Services reach it by name (`postgres:5432`, `redis:6379`, `clickhouse:8123`, `rustfs:9000`). Generated secrets are created on the Server at the first deploy; list them in `x-yoho.secrets` of each Service that connects. A ClickHouse volume Backup copies the whole data directory; for very large tables use ClickHouse's own `BACKUP` to an S3 bucket instead.
+
+Without a compose file, `compose.yaml` is created. An existing one keeps its text and gets the Services and volumes appended, indented like the file. A Service or volume name that already exists is refused and no file is written. Image tags are pinned; update them yourself.
+
 ## After the first deploy
 
 ```sh

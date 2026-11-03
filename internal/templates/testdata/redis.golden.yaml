@@ -1,0 +1,24 @@
+# compose.yaml — Services from `yoho init --template`. Review, then `yoho config check`.
+services:
+  # Valkey (Redis-compatible) from `yoho init --template redis`. Connect at
+  # redis://redis:6379. No password: the port is reachable only on this App's
+  # compose network.
+  redis:
+    image: valkey/valkey:9.0-alpine
+    restart: unless-stopped
+    command: ["valkey-server", "--appendonly", "yes", "--appendfsync", "everysec"]
+    volumes:
+      - redisdata:/data
+    healthcheck:
+      test: ["CMD", "valkey-cli", "-h", "127.0.0.1", "-p", "6379", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    x-yoho:
+      stateful: true
+      backup:
+        # The container is paused while the volume is copied.
+        volumes: [redisdata]
+
+volumes:
+  redisdata:

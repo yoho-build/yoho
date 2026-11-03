@@ -52,6 +52,34 @@ func TestMigrateDraftWritesFilesAndChecks(t *testing.T) {
 	}
 }
 
+func TestMigrateDraftBucketsChecks(t *testing.T) {
+	dir := t.TempDir()
+	from := filepath.Join("..", "..", "examples", "quickstart", "railway", "inventory-buckets.json")
+	out, err := runDraft(t, "draft", "--from", from, "--out", dir)
+	if err != nil {
+		t.Fatal(err, out)
+	}
+	for _, want := range []string{"rclone sync railway:shop-uploads yoho:shop-uploads --checksum", "rclone check railway:shop-media target:shop-media", "S3_SECRET_ACCESS_KEY=$(op read"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("missing %q:\n%s", want, out)
+		}
+	}
+	if err := os.MkdirAll(filepath.Join(dir, ".yoho"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	secrets := "APP_GREETING=x\nS3_ACCESS_KEY_ID=x\nS3_SECRET_ACCESS_KEY=x\n"
+	if err := os.WriteFile(filepath.Join(dir, ".yoho", "secrets"), []byte(secrets), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	check, err := runCheck(t, filepath.Join(dir, "yoho.yml"), "--offline")
+	if err != nil {
+		t.Fatalf("config check: %v\n%s", err, check)
+	}
+	if ev := checkEvent(t, check); ev["ok"] != true || ev["services"].(float64) != 3 {
+		t.Fatalf("check event %#v\n%s", ev, check)
+	}
+}
+
 func TestMigrateDraftJSONAndMissingFrom(t *testing.T) {
 	g := &globals{json: true}
 	c := migrateCmd(g)

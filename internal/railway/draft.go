@@ -49,6 +49,10 @@ type Result struct {
 	// that use it: a migration is the time to rotate credentials that lived
 	// at Railway.
 	Rotation []RotationItem
+	// Buckets are the inventory's buckets with their targets. Checklist is
+	// the rclone copy and verify steps for them (shell lines and comments).
+	Buckets   []BucketPlan
+	Checklist []string
 }
 
 // RotationItem is one line of the rotation checklist. Names only.
@@ -122,6 +126,7 @@ type inventory struct {
 	Project   string    `json:"project"`
 	Hostnames []string  `json:"hostnames,omitempty"`
 	Services  []service `json:"services"`
+	Buckets   []bucket  `json:"buckets,omitempty"`
 }
 
 type service struct {

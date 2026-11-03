@@ -1,0 +1,108 @@
+# compose.yaml — Services from `yoho init --template`. Review, then `yoho config check`.
+services:
+  # Postgres from `yoho init --template postgres`. Connect at postgres:5432 as
+  # postgres. List POSTGRES_PASSWORD in the x-yoho.secrets of each Service that
+  # connects; it is read from /run/secrets/POSTGRES_PASSWORD.
+  postgres:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    stop_grace_period: 30s
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_DB: postgres
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      # Over TCP: the image's first-boot temporary server is socket-only.
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U postgres -d postgres"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    x-yoho:
+      stateful: true
+      generate:
+        POSTGRES_PASSWORD: password32 # delivered as POSTGRES_PASSWORD_FILE
+      backup:
+        # A logical dump with DROP statements, so a restore replaces tables.
+        dump: ["pg_dump", "-U", "postgres", "--clean", "--if-exists", "postgres"]
+        restore_dump: ["psql", "-U", "postgres", "-v", "ON_ERROR_STOP=1", "-q", "postgres"]
+
+  # Valkey (Redis-compatible) from `yoho init --template redis`. Connect at
+  # redis://redis:6379. No password: the port is reachable only on this App's
+  # compose network.
+  redis:
+    image: valkey/valkey:9.0-alpine
+    restart: unless-stopped
+    command: ["valkey-server", "--appendonly", "yes", "--appendfsync", "everysec"]
+    volumes:
+      - redisdata:/data
+    healthcheck:
+      test: ["CMD", "valkey-cli", "-h", "127.0.0.1", "-p", "6379", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    x-yoho:
+      stateful: true
+      backup:
+        # The container is paused while the volume is copied.
+        volumes: [redisdata]
+
+  # ClickHouse from `yoho init --template clickhouse`. Connect at
+  # http://clickhouse:8123 or clickhouse:9000 (native) as user default. List
+  # CLICKHOUSE_PASSWORD in the x-yoho.secrets of each Service that connects.
+  clickhouse:
+    image: clickhouse/clickhouse-server:26.8-alpine
+    restart: unless-stopped
+    stop_grace_period: 60s
+    environment:
+      CLICKHOUSE_USER: default
+      CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: "1" # allow CREATE USER / GRANT
+    volumes:
+      - clickhousedata:/var/lib/clickhouse
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://127.0.0.1:8123/ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+    x-yoho:
+      stateful: true
+      generate:
+        CLICKHOUSE_PASSWORD: password32 # delivered as CLICKHOUSE_PASSWORD_FILE
+      backup:
+        # The container is paused while the volume is copied, so the copy is
+        # consistent. Restore puts the whole data directory back.
+        volumes: [clickhousedata]
+
+  # RustFS (S3-compatible object storage) from `yoho init --template rustfs`.
+  # S3 endpoint http://rustfs:9000, path-style addressing, region us-east-1.
+  # List RUSTFS_ACCESS_KEY and RUSTFS_SECRET_KEY in the x-yoho.secrets of each
+  # Service that connects. The console (port 9001) is not published; open it
+  # with an SSH tunnel.
+  rustfs:
+    image: rustfs/rustfs:1.0.4
+    restart: unless-stopped
+    environment:
+      RUSTFS_VOLUMES: /data
+      RUSTFS_CONSOLE_ENABLE: "true"
+      RUSTFS_OBS_LOG_DIRECTORY: "" # log to stdout (yoho app logs)
+    volumes:
+      - rustfsdata:/data
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "-o", "/dev/null", "http://127.0.0.1:9000/health"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    x-yoho:
+      stateful: true
+      generate:
+        RUSTFS_ACCESS_KEY: password32 # delivered as RUSTFS_ACCESS_KEY_FILE
+        RUSTFS_SECRET_KEY: password32 # delivered as RUSTFS_SECRET_KEY_FILE
+      backup:
+        # The container is paused while the volume is copied.
+        volumes: [rustfsdata]
+
+volumes:
+  pgdata:
+  redisdata:
+  clickhousedata:
+  rustfsdata:

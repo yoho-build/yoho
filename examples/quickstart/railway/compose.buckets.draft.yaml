@@ -1,0 +1,76 @@
+# compose.yaml — drafted by `yoho migrate draft` from inventory inventory-buckets.json.
+# Review before use. Nothing here is deployed by the draft.
+# Railway volumes are not Docker volumes on this Server. Postgres is filled with pg_restore.
+# HTTP healthchecks use wget. The image must include wget; change the test to curl if it does not.
+services:
+  web:
+    build: .
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8080/up"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    x-yoho:
+      secrets:
+        - APP_GREETING
+        - POSTGRES_PASSWORD
+        - RUSTFS_ACCESS_KEY
+        - RUSTFS_SECRET_KEY
+        - S3_ACCESS_KEY_ID
+        - S3_SECRET_ACCESS_KEY
+  # Starts empty. Restore the dump after the first deploy, before the cutover.
+  db:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: postgres
+      POSTGRES_USER: postgres
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U postgres"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    x-yoho:
+      stateful: true
+      generate:
+        POSTGRES_PASSWORD: password32
+      backup:
+        dump: ["pg_dump", "-U", "postgres", "postgres"]
+        volumes: [pgdata]
+
+  # RustFS (S3-compatible object storage) from `yoho init --template rustfs`.
+  # S3 endpoint http://rustfs:9000, path-style addressing, region us-east-1.
+  # List RUSTFS_ACCESS_KEY and RUSTFS_SECRET_KEY in the x-yoho.secrets of each
+  # Service that connects. The console (port 9001) is not published; open it
+  # with an SSH tunnel.
+  rustfs:
+    image: rustfs/rustfs:1.0.4
+    restart: unless-stopped
+    environment:
+      RUSTFS_VOLUMES: /data
+      RUSTFS_CONSOLE_ENABLE: "true"
+      RUSTFS_OBS_LOG_DIRECTORY: "" # log to stdout (yoho app logs)
+    volumes:
+      - rustfsdata:/data
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "-o", "/dev/null", "http://127.0.0.1:9000/health"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    x-yoho:
+      stateful: true
+      generate:
+        RUSTFS_ACCESS_KEY: password32 # delivered as RUSTFS_ACCESS_KEY_FILE
+        RUSTFS_SECRET_KEY: password32 # delivered as RUSTFS_SECRET_KEY_FILE
+      backup:
+        # The container is paused while the volume is copied.
+        volumes: [rustfsdata]
+volumes:
+  pgdata:
+  rustfsdata:
