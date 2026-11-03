@@ -34,6 +34,10 @@ func hintFor(err error, def string) string {
 	if errors.As(err, &lk) {
 		return lockHint(lk)
 	}
+	var ms *deploy.MissingSecretsError
+	if errors.As(err, &ms) {
+		return deploy.MissingSecretsHint
+	}
 	var pr *deploy.PendingRotationError
 	if errors.As(err, &pr) {
 		return deploy.PendingRotationHint
@@ -62,7 +66,13 @@ func hintFor(err error, def string) string {
 // nothing was changed. Wait for the holder, or remove a stale lock left by
 // a killed run, as the error message says.
 func lockHint(le *deploy.LockedError) string {
-	h := "nothing was changed: another Yoho command holds the lock of this Destination; wait for it to finish and rerun. If none is running (a run was killed), the lock is stale: remove " + le.Dir + " on the Server, then rerun"
+	if le.Gate() {
+		return "nothing was changed: another Yoho command holds the gate of this Destination; wait for it to finish and rerun. If none is running (a run was killed), remove " + le.Dir + " on the Server, then rerun"
+	}
+	if le.Manual() {
+		return "nothing was changed: the Destination is locked by `yoho lock acquire`; ask the holder, run `yoho lock release` when it may proceed, or pass --lock-wait to wait for it"
+	}
+	h := "nothing was changed: another Yoho command holds the lock of this Destination; wait for it to finish and rerun (or pass --lock-wait). If none is running (a run was killed), the lock is stale: run `yoho lock release --force`, then rerun"
 	if le.Holder.Command == "secrets rotate" {
 		h += "; an interrupted `yoho secrets rotate --generated KEY` is finished by running it again"
 	}

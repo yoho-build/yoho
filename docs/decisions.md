@@ -28,7 +28,8 @@ Small decisions that don't warrant an ADR. ADRs live in `docs/adr/`.
 - Version = git SHA; a dirty tree appends `_uncommitted_<8 hex>` (content hash, with a warning); image tag = version; Release stores digests.
 - The dirty suffix hashes uncommitted content, not a random id, so plan/apply converges: `yoho plan` after `yoho deploy` on the same uncommitted tree does not show a spurious image change (ADR 0008).
 - Migrations: `x-yoho.release_command` in a one-off container from the new image before cutover; failure aborts. Pre-migration Backup off by default.
-- Rollback: redeploy a previous Release (digests + compose), zero-downtime; volumes and migrations untouched, warned. Keep last 5 Releases per Server.
+- Rollback: redeploy a previous Release (digests + compose), zero-downtime; volumes and migrations untouched, warned. Keep last 5 Releases per Server. Secrets are not rolled back: the current values are kept, `--with-release-secrets` opts into the Release's own (ADR 0013).
+- The Destination lock is taken before build and ship and held through the rollout, so a concurrent deploy fails fast instead of retagging the Version's image under a running one. `yoho lock acquire|status|release` (Kamal 2.12 parity) holds it by hand; `--lock-wait` waits for it. A hand-held lock skips Scheduled Backups.
 - Swarm (`docker stack deploy`) supported from the start, not compose-only. Details pending research.
 - Reference projects to study: Coolify, Dokploy, OpenShip.
 - Runtime: compose default, swarm opt-in, switch = downtime migration (ADR 0007). Swarm zero-downtime via start-first + VIP; `strict_drain` option.

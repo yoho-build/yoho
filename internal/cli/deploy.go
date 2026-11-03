@@ -76,7 +76,7 @@ func (a *app) connect(ctx context.Context) ([]plan.NamedHost, func(), error) {
 
 func (a *app) runtime() plan.Runtime {
 	if a.dest.Runtime == "swarm" && swarmRuntime != nil {
-		return swarmRuntime()
+		return swarmRuntime(false)
 	}
 	return deploy.Compose{}
 }
@@ -88,7 +88,7 @@ func (a *app) tunnelOptions() proxy.BootOptions {
 }
 
 // swarmRuntime is set by the swarm package wiring when available.
-var swarmRuntime func() plan.Runtime
+var swarmRuntime func(lockHeld bool) plan.Runtime
 
 func (a *app) hookFunc(version, command string, hosts []plan.NamedHost) plan.HookFunc {
 	var hs []string
@@ -131,6 +131,7 @@ func deployCmd(g *globals) *cobra.Command {
 	c.Flags().StringVar(&o.Version, "version", "", "Version to deploy (default: git SHA)")
 	c.Flags().BoolVar(&o.SkipBuild, "skip-build", false, "Use images already built for this version")
 	addCutoverFlags(c, &o)
+	addLockWaitFlag(c)
 	return c
 }
 
@@ -715,12 +716,18 @@ func runtimeName(d config.Destination) string {
 }
 
 func rollbackCmd(g *globals) *cobra.Command {
-	var cutover, force bool
+	var cutover, force, releaseSecrets bool
 	c := &cobra.Command{
 		Use:   "rollback VERSION | rollback --cutover [--force]",
 		Short: "Redeploy a previous Release with zero downtime (volumes and migrations are not reverted)",
-		Long: `Redeploy a previous Release with zero downtime. Volumes and database
-migrations are not reverted.
+		Long: `Redeploy a previous Release with zero downtime: its images and compiled
+compose. Volumes and database migrations are not reverted.
+
+The Services keep the current secret values (the current Release's, and
+generated values as they are now), so a rotated or leaked secret never
+comes back. A rollback refuses when the Release reads a secret the current
+Release does not have. --with-release-secrets runs the Release's own
+secrets generation instead: values rotated since then come back.
 
 With --cutover, undo the Destination's migration cutover instead: stop this
 App's containers (never removed, volumes kept), start the old containers it
@@ -735,6 +742,12 @@ ingress changed since the cutover, unless --force.`,
 			}
 			return cobra.ExactArgs(1)(cmd, args)
 		},
+		PreRunE: func(cmd *cobra.Command, _ []string) error {
+			if cutover && releaseSecrets {
+				return errors.New("--with-release-secrets does not apply to --cutover")
+			}
+			return nil
+		},
 		RunE: func(cmd *cobra.Command, args []string) error {
 			a, err := g.load(cmd)
 			if err != nil {
@@ -748,45 +761,81 @@ ingress changed since the cutover, unless --force.`,
 				return a.rollbackCutover(ctx, force)
 			}
 			if a.scoped {
+				if releaseSecrets {
+					return a.fail(&hintError{"--with-release-secrets needs operator access", "roll back without it (the current secrets), or ask the operator"})
+				}
 				return a.scopedRollback(ctx, args[0])
 			}
-			hosts, closeHosts, err := a.connect(ctx)
-			if err != nil {
-				return err
-			}
-			defer closeHosts()
-			// Converge (or resume a migration of) the App directory first: the
-			// Release lookup reads it through the canonical path.
-			if err := a.ensureAppDirs(ctx, hosts); err != nil {
-				a.ui.Finished(err, "")
-				return err
-			}
-			d := &plan.Deploy{App: a.cfg.App, Destination: a.destName, Performer: performer(), Servers: hosts,
-				Proxy: a.proxyConfig(), Registry: a.cfg.Registry, RetainReleases: a.cfg.RetainReleases, Out: a.ui.Progress()}
-			target, err := a.resolveVersion(ctx, d, args[0])
-			if err != nil {
-				return err
-			}
-			a.ui.Title("Rolling back %s on %s to %s", a.cfg.App, a.destName, shortVersion(target))
-			a.ui.Warn("volumes and database migrations are not reverted")
-			for _, w := range deploy.RollbackWarnings(ctx, hosts[0].Host, a.cfg.App, a.destName, target) {
-				a.ui.Warn("%s", w)
-			}
-			step := a.ui.Step(hosts[0].Name, "Redeploy %s", shortVersion(target))
-			rel, err := a.runtime().Rollback(ctx, d, target)
-			if err != nil {
-				step.Fail(err, hintFor(err, "see `yoho releases`"))
-				a.ui.Finished(err, "")
-				return &silentError{err}
-			}
-			step.Done()
-			a.ui.Finished(nil, "Rolled back to "+shortVersion(rel.Version))
-			return nil
+			return a.rollback(ctx, args[0], releaseSecrets)
 		},
 	}
 	c.Flags().BoolVar(&cutover, "cutover", false, "Undo the migration cutover (start the old containers, restore the tunnel ingress)")
 	c.Flags().BoolVar(&force, "force", false, "With --cutover: restore the saved ingress even when it changed since the cutover")
+	c.Flags().BoolVar(&releaseSecrets, "with-release-secrets", false, "Run the Release's own secrets generation instead of the current values (rotated secrets come back)")
+	addLockWaitFlag(c)
 	return c
+}
+
+// rollback is `yoho rollback VERSION`: under the Destination lock, the
+// runtime redeploys the Release with the current secrets (or, with
+// releaseSecrets, its own).
+func (a *app) rollback(ctx context.Context, v string, releaseSecrets bool) (err error) {
+	hosts, closeHosts, err := a.connect(ctx)
+	if err != nil {
+		return err
+	}
+	defer closeHosts()
+	// Converge (or resume a migration of) the App directory first: the
+	// Release lookup reads it through the canonical path.
+	if err := a.ensureAppDirs(ctx, hosts); err != nil {
+		a.ui.Finished(err, "")
+		return err
+	}
+	d := &plan.Deploy{App: a.cfg.App, Destination: a.destName, Performer: performer(), Servers: hosts,
+		Proxy: a.proxyConfig(), Registry: a.cfg.Registry, RetainReleases: a.cfg.RetainReleases, Out: a.ui.Progress(),
+		RollbackReleaseSecrets: releaseSecrets}
+	target, err := a.resolveVersion(ctx, d, v)
+	if err != nil {
+		return err
+	}
+	a.ui.Title("Rolling back %s on %s to %s", a.cfg.App, a.destName, shortVersion(target))
+	step := a.ui.Step(hosts[0].Name, "Acquire lock")
+	unlock, err := a.acquireLock(ctx, hosts[0].Host, deploy.LockInfo{Version: target, Command: "rollback"})
+	if err != nil {
+		step.Fail(err, hintFor(err, "check that the Server is reachable"))
+		a.ui.Finished(err, "")
+		return &silentError{err}
+	}
+	step.Done()
+	defer func() {
+		if uerr := unlock(context.WithoutCancel(ctx)); uerr != nil && err == nil {
+			err = uerr
+		}
+	}()
+	a.ui.Warn("volumes and database migrations are not reverted")
+	if releaseSecrets {
+		a.ui.Warn("--with-release-secrets: the Services start with Release %s's own secret values; every secret rotated since (a replaced API key, a leaked password) comes back until the next deploy", shortVersion(target))
+	}
+	for _, w := range deploy.RollbackWarnings(ctx, hosts[0].Host, a.cfg.App, a.destName, target, releaseSecrets) {
+		a.ui.Warn("%s", w)
+	}
+	step = a.ui.Step(hosts[0].Name, "Redeploy %s", shortVersion(target))
+	rel, err := a.lockedRuntime().Rollback(ctx, d, target)
+	if err != nil {
+		step.Fail(err, hintFor(err, "see `yoho releases`"))
+		a.ui.Finished(err, "")
+		return &silentError{err}
+	}
+	detail := "current secrets"
+	if rel.RollbackSecrets == deploy.RollbackSecretsRelease {
+		detail = "the Release's own secrets"
+	}
+	if rel.SecretsGeneration != "" {
+		detail += ", generation " + rel.SecretsGeneration
+	}
+	step.DoneWith(detail, map[string]any{"rollback_secrets": rel.RollbackSecrets, "secrets_generation": rel.SecretsGeneration, "secrets_from": rel.SecretsFrom})
+	a.ui.Finished(nil, "Rolled back to "+shortVersion(rel.Version))
+	return nil
 }
 
 // resolveVersion accepts a full version or a unique prefix.

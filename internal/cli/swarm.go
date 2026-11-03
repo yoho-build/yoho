@@ -17,7 +17,7 @@ import (
 )
 
 func init() {
-	swarmRuntime = func() plan.Runtime { return swarm.Runtime{} }
+	swarmRuntime = func(lockHeld bool) plan.Runtime { return swarm.Runtime{LockHeld: lockHeld} }
 	extraCommands = append(extraCommands, swarmCmd)
 }
 

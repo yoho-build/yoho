@@ -18,11 +18,13 @@ import (
 
 // RollbackWarnings reads what a rollback to version brings back that the
 // volumes warning does not cover, both runtimes: Services that lose
-// Yoho's default log rotation (a Release compiled before v0.6.0) and
-// generated secrets rotated since the Release, whose old value the
-// database no longer accepts. Unreadable files give no warning: these
-// are notes, and the rollback itself checks the Release.
-func RollbackWarnings(ctx context.Context, h remote.Host, app, dest, version string) []string {
+// Yoho's default log rotation (a Release compiled before v0.6.0) and,
+// with releaseSecrets (--with-release-secrets: the Release's own
+// generation, not the current values), generated secrets rotated since
+// the Release, whose old value the database no longer accepts.
+// Unreadable files give no warning: these are notes, and the rollback
+// itself checks the Release.
+func RollbackWarnings(ctx context.Context, h remote.Host, app, dest, version string, releaseSecrets bool) []string {
 	relDir := release.Dir(app, dest, version)
 	target, err := readRelease(ctx, h, path.Join(relDir, "release.json"))
 	if err != nil {
@@ -32,6 +34,13 @@ func RollbackWarnings(ctx context.Context, h remote.Host, app, dest, version str
 	if w := loggingRollbackWarning(ctx, h, app, dest, version); w != "" {
 		warns = append(warns, w)
 	}
+	if !releaseSecrets {
+		return warns
+	}
+	// --with-release-secrets runs the values the Release was first deployed with.
+	base := *target
+	base.Secrets = BaseAudit(target)
+	target = &base
 	out, err := h.Output(ctx, remote.Cmd{Script: "cat " + remote.Quote(RotationsLog(app, dest)) + " 2>/dev/null || true"})
 	if err == nil {
 		warns = append(warns, RotatedSince(target, ParseRotations(out))...)
@@ -151,7 +160,7 @@ func RotatedSince(target *release.Release, recs []RotationRecord) []string {
 	slices.Sort(keys)
 	var warns []string
 	for _, k := range keys {
-		warns = append(warns, fmt.Sprintf("%s was rotated after this Release (%s); its Services start with the old value the database no longer accepts. Run `yoho secrets rotate --generated %s` after the rollback",
+		warns = append(warns, fmt.Sprintf("%s was rotated after this Release (%s); with --with-release-secrets its Services start with the old value the database no longer accepts. Run `yoho secrets rotate --generated %s` after the rollback, or roll back without --with-release-secrets",
 			k, latest[k].Time.UTC().Format(time.RFC3339), k))
 	}
 	return warns

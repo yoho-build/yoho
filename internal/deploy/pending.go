@@ -160,7 +160,8 @@ func isRefusal(err error) bool {
 	var le *LockedError
 	var pe *PendingRotationError
 	var me *MigrationPendingError
-	return errors.As(err, &le) || errors.As(err, &pe) || errors.As(err, &me)
+	var ms *MissingSecretsError
+	return errors.As(err, &le) || errors.As(err, &pe) || errors.As(err, &me) || errors.As(err, &ms)
 }
 
 // IsRefusal is isRefusal for the swarm runtime and the CLI.

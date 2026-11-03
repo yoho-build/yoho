@@ -10,6 +10,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/spf13/cobra"
 
@@ -124,6 +125,9 @@ type app struct {
 	ui       *ui.UI
 	// scoped: the Destination is reached through the Gate (ADR 0011).
 	scoped bool
+	// lockWait is --lock-wait: how long to wait for a held Destination
+	// lock (0: refuse at once).
+	lockWait time.Duration
 }
 
 // load loads the App for cmd. With scoped access only the commands the Gate
@@ -196,6 +200,9 @@ func (g *globals) loadApp(cmd *cobra.Command) (*app, error) {
 	release.Root = a.root()
 	if a.scoped, err = scopedAccess(dest, os.Getenv); err != nil {
 		return nil, err
+	}
+	if f := cmd.Flags().Lookup(lockWaitFlag); f != nil {
+		a.lockWait, _ = cmd.Flags().GetDuration(lockWaitFlag)
 	}
 	return a, nil
 }

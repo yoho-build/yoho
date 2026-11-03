@@ -75,6 +75,12 @@ type Deploy struct {
 	// the deploy lock the runtime refuses if it is no longer current, and
 	// Compose restores its image IDs.
 	RestartFrom *release.Release
+
+	// RollbackReleaseSecrets makes Rollback run the target Release with its
+	// own secrets generation (--with-release-secrets). By default a
+	// rollback keeps the current Release's secret values and generated
+	// values, so rotated secrets never come back.
+	RollbackReleaseSecrets bool
 }
 
 // Scoped is what the Gate adds to a runtime deploy or rollback.

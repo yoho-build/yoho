@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"path"
+	"strconv"
 	"strings"
 	"time"
 
@@ -16,10 +17,12 @@ import (
 
 // LockInfo describes who holds the deploy/backup lock of an App Destination.
 type LockInfo struct {
-	Performer string    `json:"performer"`
-	Version   string    `json:"version,omitempty"`
-	Command   string    `json:"command,omitempty"` // e.g. "deploy", "rollback", "backup"
-	Time      time.Time `json:"time"`
+	Performer string `json:"performer"`
+	Version   string `json:"version,omitempty"`
+	Command   string `json:"command,omitempty"` // e.g. "deploy", "rollback", "backup", "lock" (yoho lock acquire)
+	// Message is the reason given to `yoho lock acquire -m`.
+	Message string    `json:"message,omitempty"`
+	Time    time.Time `json:"time"`
 	// PID and Boot (kernel boot id) of a Gate holder, so a later Gate run
 	// can tell that the holder died (see gate.ClearStaleLock).
 	PID  int    `json:"pid,omitempty"`
@@ -39,7 +42,9 @@ func (e *LockedError) Error() string {
 		who = "unknown"
 	}
 	msg := "locked by " + who
-	if h.Command != "" {
+	if h.Command == ManualLockCommand {
+		msg += " (yoho lock acquire)"
+	} else if h.Command != "" {
 		msg += " (" + h.Command
 		if h.Version != "" {
 			msg += " " + h.Version
@@ -49,7 +54,62 @@ func (e *LockedError) Error() string {
 	if !h.Time.IsZero() {
 		msg += " since " + h.Time.UTC().Format(time.RFC3339)
 	}
-	return msg + "; if the lock is stale, remove " + e.Dir + " on the Server"
+	if h.Message != "" {
+		msg += ": " + strconv.Quote(h.Message)
+	}
+	switch {
+	case e.Gate():
+		return msg + "; if the lock is stale, remove " + e.Dir + " on the Server"
+	case h.Command == ManualLockCommand:
+		return msg + "; `yoho lock release` releases it"
+	}
+	return msg + "; if the lock is stale (its run was killed), run `yoho lock release --force`"
+}
+
+// Gate reports a held Destination gate (held only briefly by lock takers
+// and app_dir migrations), not the lock itself: `yoho lock release` does
+// not remove it.
+func (e *LockedError) Gate() bool { return e.Dir != "" && path.Base(e.Dir) != "lock" }
+
+// ManualLockCommand is the LockInfo.Command of `yoho lock acquire`.
+const ManualLockCommand = "lock"
+
+// Manual reports a lock taken by `yoho lock acquire`, not by a running
+// command.
+func (e *LockedError) Manual() bool { return e.Holder.Command == ManualLockCommand }
+
+// ReadLock returns the holder of the App Destination lock; held is false
+// when nobody holds it.
+func ReadLock(ctx context.Context, host remote.Host, app, destination string) (info LockInfo, held bool, err error) {
+	q := remote.Quote(LockDir(app, destination))
+	out, err := host.Output(ctx, remote.Cmd{Script: "if [ -d " + q + " ]; then echo held; cat " + q + "/info.json 2>/dev/null || true; else echo free; fi"})
+	if err != nil {
+		return info, false, fmt.Errorf("read lock on %s: %w", host.Name(), err)
+	}
+	status, rest, _ := strings.Cut(out, "\n")
+	if strings.TrimSpace(status) != "held" {
+		return info, false, nil
+	}
+	_ = json.Unmarshal([]byte(strings.TrimSpace(rest)), &info)
+	return info, true, nil
+}
+
+// ReleaseLock removes the App Destination lock. Unless force, it removes
+// only a lock taken by `yoho lock acquire` and returns *LockedError for one
+// a running (or killed) command holds. held reports whether there was one.
+func ReleaseLock(ctx context.Context, host remote.Host, app, destination string, force bool) (holder LockInfo, held bool, err error) {
+	holder, held, err = ReadLock(ctx, host, app, destination)
+	if err != nil || !held {
+		return holder, held, err
+	}
+	dir := LockDir(app, destination)
+	if !force && holder.Command != ManualLockCommand {
+		return holder, true, &LockedError{Dir: dir, Holder: holder}
+	}
+	if err := host.Run(ctx, remote.Cmd{Script: "rm -rf " + remote.Quote(dir)}); err != nil {
+		return holder, true, fmt.Errorf("release lock on %s: %w", host.Name(), err)
+	}
+	return holder, true, nil
 }
 
 // LockDir is the mkdir-based lock directory of an App Destination.

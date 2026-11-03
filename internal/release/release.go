@@ -7,6 +7,8 @@
 //	  lock/                         deploy/backup lock (mkdir-based), lock/info.json
 //	  releases/<version>/compose.yaml   compiled, contains no secret values
 //	  releases/<version>/release.json   this Release record
+//	  releases/<version>/compose.release.yaml  compiled file as first deployed, kept when
+//	                                a rollback re-pointed compose.yaml at the current secrets
 //	  current -> releases/<version>
 //	  secrets/<generation>/<NAME>   0444 files inside 0700 dirs (bind-mounted)
 //	  secrets/<generation>/<service>.env  env_file fallback (0600)
@@ -109,6 +111,20 @@ type Release struct {
 	Built []string `json:"built"`
 	// Secrets generation directory name used by this Release.
 	SecretsGeneration string `json:"secrets_generation"`
+	// RollbackSecrets is set when a rollback recorded this Release: whose
+	// secret values it runs with, "current" (the Release that was current
+	// then, the default) or "release" (its own, --with-release-secrets).
+	// SecretsFrom names the generation those values came from.
+	RollbackSecrets string `json:"rollback_secrets,omitempty"`
+	SecretsFrom     string `json:"secrets_from,omitempty"`
+	// BaseComposeSHA256 and BaseSecretsGeneration describe the Release as
+	// first deployed, when a rollback with the current secrets re-pointed
+	// compose.yaml at another generation: compose.release.yaml keeps the
+	// original compiled file, which --with-release-secrets and the Gate's
+	// rollback check use.
+	BaseComposeSHA256     string                 `json:"base_compose_sha256,omitempty"`
+	BaseSecretsGeneration string                 `json:"base_secrets_generation,omitempty"`
+	BaseSecrets           map[string]SecretAudit `json:"base_secrets,omitempty"`
 	// Secret name -> fingerprint (HMAC-SHA256 truncated, keyed per Destination)
 	// plus provider reference. Never the value.
 	Secrets map[string]SecretAudit `json:"secrets,omitempty"`

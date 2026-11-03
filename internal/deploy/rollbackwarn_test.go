@@ -54,7 +54,7 @@ not json
 		"db/KEPT": {Ref: "generated", Fingerprint: "k2"},
 	}}
 	got := RotatedSince(target, recs)
-	if len(got) != 1 || !strings.HasPrefix(got[0], "DB_PASSWORD was rotated after this Release (2026-11-01T12:00:00Z); its Services start with the old value the database no longer accepts. Run `yoho secrets rotate --generated DB_PASSWORD` after the rollback") {
+	if len(got) != 1 || !strings.HasPrefix(got[0], "DB_PASSWORD was rotated after this Release (2026-11-01T12:00:00Z); with --with-release-secrets its Services start with the old value the database no longer accepts. Run `yoho secrets rotate --generated DB_PASSWORD` after the rollback") {
 		t.Fatalf("got %q", got)
 	}
 	if got := RotatedSince(&release.Release{DeployedAt: t0.Add(3 * time.Hour)}, recs); len(got) != 0 {

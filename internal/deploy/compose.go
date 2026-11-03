@@ -389,8 +389,10 @@ func writeJSON(ctx context.Context, h remote.Host, p string, v any) error {
 }
 
 // Rollback implements plan.Runtime: it redeploys a retained Release's
-// compiled compose (and its secrets generation) through the same
-// zero-downtime cutover. No build, no release_command.
+// images and compiled compose through the same zero-downtime cutover. No
+// build, no release_command. Its Services read the current Release's
+// secret values (a new generation in the Release's layout), unless
+// d.RollbackReleaseSecrets runs its own generation.
 func (c Compose) Rollback(ctx context.Context, d *plan.Deploy, version string) (_ *release.Release, err error) {
 	if len(d.Servers) != 1 || d.Servers[0].Host == nil {
 		return nil, fmt.Errorf("compose runtime rolls back exactly one Server, destination %s has %d", d.Destination, len(d.Servers))
@@ -413,15 +415,17 @@ func (c Compose) Rollback(ctx context.Context, d *plan.Deploy, version string) (
 		}
 	}()
 
-	unlock, err := AcquireLock(ctx, h, d.App, d.Destination, lockInfo(d, LockInfo{Performer: d.Performer, Version: version, Command: "rollback", Time: start}))
-	if err != nil {
-		return nil, err
-	}
-	defer func() {
-		if uerr := unlock(ctx); uerr != nil && err == nil {
-			err = uerr
+	if !c.LockHeld {
+		unlock, err := AcquireLock(ctx, h, d.App, d.Destination, lockInfo(d, LockInfo{Performer: d.Performer, Version: version, Command: "rollback", Time: start}))
+		if err != nil {
+			return nil, err
 		}
-	}()
+		defer func() {
+			if uerr := unlock(ctx); uerr != nil && err == nil {
+				err = uerr
+			}
+		}()
+	}
 	if err := CheckPendingRotations(ctx, h, d.App, d.Destination, nil); err != nil {
 		return nil, err
 	}
@@ -437,11 +441,16 @@ func (c Compose) Rollback(ctx context.Context, d *plan.Deploy, version string) (
 	if rel.ComposeSHA256 != "" && sha256Hex(composeYAML) != rel.ComposeSHA256 {
 		return nil, fmt.Errorf("release %s: compose.yaml does not match its recorded sha256", version)
 	}
+	baseYAML, baseGen, err := BaseCompose(ctx, h, d.App, d.Destination, rel, composeYAML)
+	if err != nil {
+		return nil, err
+	}
 	if d.Scoped != nil {
 		if d.Scoped.Vet == nil {
 			return nil, errors.New("scoped rollback without a Release check")
 		}
-		if err := d.Scoped.Vet(composeYAML, rel); err != nil {
+		// The Gate recorded the file as first deployed.
+		if err := d.Scoped.Vet(baseYAML, VetCopy(rel)); err != nil {
 			return nil, err
 		}
 	}
@@ -466,11 +475,6 @@ func (c Compose) Rollback(ctx context.Context, d *plan.Deploy, version string) (
 	if err := checkOwnership(ctx, h, d.App, d.Destination, plans); err != nil {
 		return nil, err
 	}
-	if rel.SecretsGeneration != "" {
-		if err := h.Run(ctx, remote.Cmd{Script: "test -d " + remote.Quote(release.SecretsDir(d.App, d.Destination, rel.SecretsGeneration))}); err != nil {
-			return nil, fmt.Errorf("release %s: secrets generation %s is gone", version, rel.SecretsGeneration)
-		}
-	}
 	for _, f := range rel.Files {
 		if err := h.Run(ctx, remote.Cmd{Script: "test -d " + remote.Quote(path.Join(dir, "files", f))}); err != nil {
 			return nil, fmt.Errorf("release %s: App files %s are gone", version, f)
@@ -478,6 +482,35 @@ func (c Compose) Rollback(ctx context.Context, d *plan.Deploy, version string) (
 	}
 	prev, _ := h.Output(ctx, remote.Cmd{Script: "readlink " + remote.Quote(path.Join(dir, "current")) + " 2>/dev/null || true"})
 	prevVersion := path.Base(strings.TrimSpace(prev))
+
+	if d.RollbackReleaseSecrets && baseGen != "" {
+		if err := h.Run(ctx, remote.Cmd{Script: "test -d " + remote.Quote(release.SecretsDir(d.App, d.Destination, baseGen))}); err != nil {
+			return nil, fmt.Errorf("release %s: secrets generation %s is gone", version, baseGen)
+		}
+	}
+	sec, err := planRollbackSecrets(ctx, h, d.App, d.Destination, rel, composeYAML, baseYAML, baseGen, d.RollbackReleaseSecrets, start.Format("20060102T150405Z")+"-"+version)
+	if err != nil {
+		return nil, err
+	}
+	if sec.gen != "" && sec.gen != baseGen {
+		if err := h.Run(ctx, remote.Cmd{Script: "test -d " + remote.Quote(release.SecretsDir(d.App, d.Destination, sec.gen))}); err != nil {
+			return nil, fmt.Errorf("release %s: secrets generation %s is gone", version, sec.gen)
+		}
+	}
+	r.secretVals = append(r.secretVals, sec.values...)
+	if sec.write {
+		// Keep the record to restore if this rollback fails.
+		snap := snapshotRelease(ctx, h, relDir)
+		defer func() {
+			if err != nil {
+				restoreRelease(ctx, h, relDir, snap, r.logf)
+			}
+		}()
+		if err := writeRollbackFiles(ctx, h, relDir, sec); err != nil {
+			return nil, err
+		}
+	}
+	r.logf("%s", sec.describe(version))
 
 	r.logf("rolling back to %s (volumes, data and migrations are not reverted)", version)
 	// Retained values can differ from today's secrets. Do not print arbitrary
@@ -511,6 +544,7 @@ func (c Compose) Rollback(ctx context.Context, d *plan.Deploy, version string) (
 	rel.Status = "deployed"
 	rel.DeployedAt = start
 	rel.Performer = d.Performer
+	sec.record(rel)
 	r.phase = "record-release"
 	if err := c.finish(ctx, d, r, rel); err != nil {
 		return nil, err
@@ -645,7 +679,7 @@ func prune(ctx context.Context, r *runner, d *plan.Deploy, current string) error
 	retained := RetainedReleases(rels, retain, current)
 	for _, rel := range rels {
 		if retained[rel.Version] {
-			keepGen[rel.SecretsGeneration] = true
+			keepGen[rel.SecretsGeneration], keepGen[rel.BaseSecretsGeneration] = true, true
 			for _, f := range rel.Files {
 				keepFiles[f] = true
 			}

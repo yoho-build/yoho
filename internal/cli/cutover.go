@@ -8,7 +8,6 @@ import (
 	"time"
 
 	"github.com/yoho-build/yoho/internal/config"
-	"github.com/yoho-build/yoho/internal/deploy"
 	"github.com/yoho-build/yoho/internal/migrate"
 	"github.com/yoho-build/yoho/internal/plan"
 	"github.com/yoho-build/yoho/internal/proxy"
@@ -124,12 +123,9 @@ func (a *app) beginCutover(ctx context.Context, s *session, resume, allowEmpty b
 	}, nil
 }
 
-// lock rechecks the Journal after build and ship, under the Destination lock.
-func (c *cutoverRun) lock(ctx context.Context) (func(context.Context) error, error) {
-	unlock, err := deploy.AcquireLock(ctx, c.host.Host, c.opts.App, c.opts.Destination, deploy.LockInfo{Performer: performer(), Command: "deploy --cutover"})
-	if err != nil {
-		return nil, err
-	}
+// recheck rereads the Journal after build and ship. The caller holds the
+// Destination lock (taken before the build).
+func (c *cutoverRun) recheck(ctx context.Context) error {
 	j, err := migrate.ReadJournal(ctx, c.host.Host, c.opts.App, c.opts.Destination)
 	if err == nil {
 		var action migrate.Action
@@ -145,11 +141,7 @@ func (c *cutoverRun) lock(ctx context.Context) (func(context.Context) error, err
 			}
 		}
 	}
-	if err != nil {
-		_ = unlock(ctx)
-		return nil, err
-	}
-	return unlock, nil
+	return err
 }
 
 // deployed also skips rollout when only the post-cutover Hook remains.

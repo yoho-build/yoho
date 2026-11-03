@@ -176,7 +176,7 @@ yoho_mark() {
 }
 yoho_idle() {
  if yoho_exists "$1/lock"; then
-  yoho_refuse "$1/lock exists: a deploy, rollback, Backup or Scheduled Job is running or crashed" "wait for it to finish; if it is stale, remove $1/lock on the Server and rerun"
+  yoho_refuse "$1/lock exists: a deploy, rollback, Backup or Scheduled Job is running or crashed" "wait for it to finish (yoho lock status); if it is stale, run yoho lock release --force and rerun"
  fi
  for yoho_f in "$1"/source.run-*; do
   if yoho_exists "$yoho_f"; then
