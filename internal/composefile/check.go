@@ -129,6 +129,11 @@ func Check(r *Result, runtime string, secretKeys []string) []Finding {
 				svcAdd(LevelError, "x-yoho.generate.%s: unknown kind %q (use password32, password64, hex32, hex64, base64_32, base64_64)", gname, ext.Generate[gname])
 			}
 		}
+		for _, rname := range sortedMapKeys(ext.Rotate) {
+			for _, msg := range checkRotate(rname, ext.Rotate[rname], ext.Generate) {
+				svcAdd(LevelError, "x-yoho.rotate.%s: %s", rname, msg)
+			}
+		}
 		if ext.ReleaseCommand != nil && (len(ext.ReleaseCommand) == 0 || strings.TrimSpace(strings.Join(ext.ReleaseCommand, "")) == "") {
 			svcAdd(LevelError, "x-yoho.release_command must not be empty")
 		}
@@ -340,7 +345,7 @@ func publicPorts(svc types.ServiceConfig) []string {
 	return out
 }
 
-func sortedMapKeys(m map[string]string) []string {
+func sortedMapKeys[V any](m map[string]V) []string {
 	k := make([]string, 0, len(m))
 	for n := range m {
 		k = append(k, n)
@@ -355,4 +360,38 @@ func sortedMapKeys(m map[string]string) []string {
 func slowFirstProbe(hc *types.HealthCheckConfig) bool {
 	return hc != nil && !hc.Disable && len(hc.Test) == 0 && hc.Interval != nil && time.Duration(*hc.Interval) > 5*time.Second &&
 		hc.StartPeriod == nil && hc.StartInterval == nil
+}
+
+// rotateUserRe limits database role names Yoho quotes into SQL.
+var rotateUserRe = regexp.MustCompile(`^[A-Za-z0-9_][A-Za-z0-9_.-]{0,62}$`)
+
+// checkRotate validates one x-yoho.rotate entry.
+func checkRotate(name string, r config.GeneratedRotate, generate map[string]string) []string {
+	var out []string
+	if _, ok := generate[name]; !ok {
+		out = append(out, "not in this Service's x-yoho.generate")
+	}
+	switch r.Strategy {
+	case "postgres", "mysql":
+		if r.User != "" && !rotateUserRe.MatchString(r.User) {
+			out = append(out, fmt.Sprintf("user %q must match %s", r.User, rotateUserRe))
+		}
+		if len(r.Command) > 0 {
+			out = append(out, "command applies to strategy command only")
+		}
+	case "command":
+		if len(r.Command) == 0 || strings.TrimSpace(strings.Join(r.Command, "")) == "" {
+			out = append(out, "strategy command needs a command")
+		}
+		if r.User != "" {
+			out = append(out, "user applies to strategies postgres and mysql only")
+		}
+	case "none":
+		if r.User != "" || len(r.Command) > 0 {
+			out = append(out, "strategy none takes no user or command")
+		}
+	default:
+		out = append(out, fmt.Sprintf("unknown strategy %q (use postgres, mysql, command, none)", r.Strategy))
+	}
+	return out
 }

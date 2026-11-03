@@ -45,7 +45,25 @@ type Result struct {
 	Warnings    []string
 	Services    []string
 	Volumes     []string
+	// Rotation lists every secret name of the inventory with the Services
+	// that use it: a migration is the time to rotate credentials that lived
+	// at Railway.
+	Rotation []RotationItem
 }
+
+// RotationItem is one line of the rotation checklist. Names only.
+type RotationItem struct {
+	Key       string   `json:"key"`
+	Services  []string `json:"services"`
+	Generated bool     `json:"generated,omitempty"`
+	Action    string   `json:"action"`
+}
+
+// Checklist actions.
+const (
+	RotateAtProvider = "rotate at the provider before first deploy"
+	RotateGenerated  = "generated on the Server (Railway's value is not reused); rotate later with yoho secrets rotate --generated"
+)
 
 const maxBytes = 1 << 20
 

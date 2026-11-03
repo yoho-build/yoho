@@ -22,8 +22,9 @@ import (
 
 func secretsRotateCmd(g *globals) *cobra.Command {
 	var dryRun bool
+	var generated []string
 	c := &cobra.Command{
-		Use:   "rotate [service...]",
+		Use:   "rotate [service...] | rotate --generated KEY...",
 		Short: "Re-resolve secrets and zero-downtime restart Services whose values changed",
 		Long: `Re-resolve secrets from the configured provider (1Password, Bitwarden, or
 .yoho/secrets) without rebuilding images or changing code. Services whose
@@ -39,20 +40,59 @@ uncommitted changes, and no other config change), so rotate changes
 secrets and nothing else.
 
 Pass Service names to require that only those changed. --dry-run lists
-what would restart and changes nothing. Secret values are never printed.`,
+what would restart and changes nothing. Secret values are never printed.
+
+--generated KEY (repeatable) replaces a Server-generated secret
+(x-yoho.generate) with a new value from the same generator. The new value
+is applied to the database first (Postgres: ALTER ROLE; MySQL/MariaDB:
+ALTER USER; or the x-yoho.rotate command), then swapped in, and every
+Service that uses it restarts. If the database step fails, the old value
+stays in use and a re-run applies the same pending value.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			a, err := g.load(cmd)
 			if err != nil {
 				return err
 			}
-			return a.rotateSecrets(cmd.Context(), args, dryRun)
+			keys, err := checkGeneratedFlags(generated, args, a.dest.Runtime)
+			if err != nil {
+				return a.fail(err)
+			}
+			return a.rotateSecrets(cmd.Context(), args, keys, dryRun)
 		},
 	}
 	c.Flags().BoolVar(&dryRun, "dry-run", false, "List Services that would restart; change nothing")
+	c.Flags().StringArrayVar(&generated, "generated", nil, "Rotate this x-yoho.generate secret (repeatable); applies it to the database first")
 	return c
 }
 
-func (a *app) rotateSecrets(ctx context.Context, services []string, dryRun bool) (err error) {
+// checkGeneratedFlags validates --generated keys and returns them sorted
+// and unique.
+func checkGeneratedFlags(keys, services []string, runtime string) ([]string, error) {
+	if len(keys) == 0 {
+		return nil, nil
+	}
+	if len(services) > 0 {
+		return nil, &hintError{"--generated cannot be combined with Service names", "rotate restarts every Service that uses the key; drop the Service names"}
+	}
+	if runtime == "swarm" {
+		return nil, &hintError{"--generated supports the compose runtime only", "rotate the value by hand on Swarm; see docs/site/secrets.md"}
+	}
+	var out []string
+	for _, k := range keys {
+		if !secretKeyRe.MatchString(k) {
+			return nil, &hintError{fmt.Sprintf("--generated %q is not a secret key", k), "use a key from x-yoho.generate, e.g. --generated POSTGRES_PASSWORD"}
+		}
+		if !slices.Contains(out, k) {
+			out = append(out, k)
+		}
+	}
+	slices.Sort(out)
+	return out, nil
+}
+
+var secretKeyRe = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
+
+func (a *app) rotateSecrets(ctx context.Context, services, generated []string, dryRun bool) (err error) {
 	u := a.ui
 	start := time.Now()
 	defer func() {
@@ -138,6 +178,57 @@ func (a *app) rotateSecrets(ctx context.Context, services []string, dryRun bool)
 	if err != nil {
 		return err
 	}
+	var gens []*deploy.GeneratedRotation
+	runtime := a.runtime()
+	if len(generated) > 0 {
+		step = u.Step("", "Plan generated secrets")
+		var details []string
+		for _, key := range generated {
+			g, gerr := deploy.PlanGeneratedRotation(d, key)
+			if gerr != nil {
+				err = gerr
+				step.Fail(err, "check x-yoho.generate and x-yoho.rotate; see docs/site/secrets.md#rotating-generated-secrets")
+				return &silentError{err}
+			}
+			gens = append(gens, g)
+			details = append(details, generatedDetail(g))
+			u.Event("generated_rotation_plan", "", map[string]any{
+				"key": g.Key, "service": g.Service, "strategy": g.Strategy, "detected": g.Detected,
+				"user": g.User, "consumers": g.Consumers,
+			})
+		}
+		if err = a.checkRotateConfig(ctx, d); err != nil {
+			step.Fail(err, "deploy those changes with `yoho deploy`, or undo them, then rotate")
+			return &silentError{err}
+		}
+		step.Done(strings.Join(details, "; "))
+	}
+	if len(gens) > 0 && !dryRun {
+		h := hosts[0].Host
+		unlock, lerr := deploy.AcquireLock(ctx, h, a.cfg.App, a.destName, deploy.LockInfo{Performer: performer(), Version: cur.Version, Command: "secrets rotate"})
+		if lerr != nil {
+			err = lerr
+			u.Error(err, appDirHint(err))
+			return &silentError{err}
+		}
+		defer func() {
+			if uerr := unlock(context.WithoutCancel(ctx)); uerr != nil && err == nil {
+				err = uerr
+			}
+		}()
+		runtime = deploy.Compose{LockHeld: true}
+		for _, g := range gens {
+			step = u.Step(hosts[0].Name, "Rotate generated %s (%s via %s)", g.Key, g.Strategy, g.Service)
+			if rerr := deploy.RotateGeneratedSecret(ctx, h, a.cfg.App, a.destName, performer(), g, func(f string, args ...any) {
+				fmt.Fprintf(step.Output(), f+"\n", args...)
+			}); rerr != nil {
+				err = rerr
+				step.Fail(err, fmt.Sprintf("the old %s is still in use; fix the cause and re-run `yoho secrets rotate --generated %s` (it reuses the pending value)", g.Key, g.Key))
+				return &silentError{err}
+			}
+			step.Done("new value in place")
+		}
+	}
 	step = u.Step("", "Compare secrets")
 	changed, err := deploy.DetectChangedServices(ctx, d, cur)
 	if err != nil {
@@ -159,9 +250,19 @@ func (a *app) rotateSecrets(ctx context.Context, services []string, dryRun bool)
 		}
 		changed = intersectServices(changed, services)
 	}
-	if err = a.checkRotateConfig(ctx, d); err != nil {
-		step.Fail(err, "deploy those changes with `yoho deploy`, or undo them, then rotate")
-		return &silentError{err}
+	if len(gens) == 0 {
+		if err = a.checkRotateConfig(ctx, d); err != nil {
+			step.Fail(err, "deploy those changes with `yoho deploy`, or undo them, then rotate")
+			return &silentError{err}
+		}
+	}
+	if dryRun {
+		for _, c := range deploy.ConsumersOf(gens) {
+			if !slices.Contains(changed, c) {
+				changed = append(changed, c)
+			}
+		}
+		slices.Sort(changed)
 	}
 	if len(changed) == 0 {
 		step.Done("no values changed")
@@ -184,8 +285,11 @@ func (a *app) rotateSecrets(ctx context.Context, services []string, dryRun bool)
 		return err
 	}
 	d.Restart, d.RestartFrom = changed, cur
-	rel, err := a.rollout(ctx, s, d, a.runtime())
+	rel, err := a.rollout(ctx, s, d, runtime)
 	if err != nil {
+		if len(gens) > 0 {
+			u.Warn("The new generated values are in place and the database uses them; run `yoho secrets rotate` to restart the remaining Services")
+		}
 		return err
 	}
 	// Scoped deploys read the generation the operator last pushed.
@@ -195,6 +299,18 @@ func (a *app) rotateSecrets(ctx context.Context, services []string, dryRun bool)
 	u.Finished(nil, fmt.Sprintf("Rotated secrets for %s@%s on %s in %s; restarted %s",
 		a.cfg.App, shortVersion(rel.Version), a.destName, time.Since(start).Round(100*time.Millisecond), strings.Join(changed, ", ")))
 	return nil
+}
+
+func generatedDetail(g *deploy.GeneratedRotation) string {
+	s := g.Key + ": " + g.Strategy
+	if g.User != "" {
+		s += " user " + g.User
+	}
+	s += " on " + g.Service
+	if g.Detected {
+		s += " (detected)"
+	}
+	return s
 }
 
 // gitSHARe matches a version taken from git (version.FromGit).

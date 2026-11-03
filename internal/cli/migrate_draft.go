@@ -3,8 +3,10 @@ package cli
 import (
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/spf13/cobra"
 
@@ -73,6 +75,7 @@ func runMigrateDraft(cmd *cobra.Command, g *globals, from, out, service, project
 		"generated": d.Generated, "warnings": d.Warnings, "secret_lines": d.SecretLines,
 		"compose": d.Compose, "yoho": d.Yoho, "out": out,
 	})
+	u.Event("migrate_rotation_checklist", "", map[string]any{"secrets": rotationItems(d.Rotation)})
 	if g.json {
 		return nil
 	}
@@ -80,6 +83,7 @@ func runMigrateDraft(cmd *cobra.Command, g *globals, from, out, service, project
 		fmt.Fprint(cmd.OutOrStdout(), d.Compose)
 		fmt.Fprint(cmd.OutOrStdout(), "\n")
 		fmt.Fprint(cmd.OutOrStdout(), d.Yoho)
+		printRotationChecklist(cmd.ErrOrStderr(), d.Rotation)
 		return nil
 	}
 	u.Info("wrote %s", filepath.Join(out, "compose.yaml"))
@@ -89,7 +93,30 @@ func runMigrateDraft(cmd *cobra.Command, g *globals, from, out, service, project
 		u.Info("%s", line)
 	}
 	u.Info("Review the files. Nothing was deployed.")
+	printRotationChecklist(cmd.OutOrStdout(), d.Rotation)
 	return nil
+}
+
+// rotationItems keeps the JSON field an array when the checklist is empty.
+func rotationItems(items []railway.RotationItem) []railway.RotationItem {
+	if items == nil {
+		return []railway.RotationItem{}
+	}
+	return items
+}
+
+// printRotationChecklist ends a human draft: every secret name that lived
+// at Railway, and who uses it. Names only.
+func printRotationChecklist(w io.Writer, items []railway.RotationItem) {
+	if len(items) == 0 {
+		return
+	}
+	fmt.Fprintln(w)
+	fmt.Fprintln(w, "Rotation checklist (these credentials were readable at Railway):")
+	for _, it := range items {
+		fmt.Fprintf(w, "  [ ] %s (used by %s): %s\n", it.Key, strings.Join(it.Services, ", "), it.Action)
+	}
+	fmt.Fprintln(w, "Rotate before pointing traffic at Yoho; after an incident see the runbook in docs/site/secrets.md.")
 }
 
 // writeDraftFiles creates compose.yaml and yoho.yml. It refuses when either
