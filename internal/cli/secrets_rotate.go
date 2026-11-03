@@ -52,7 +52,15 @@ Service that uses it restarts. If the database step fails, the old value
 stays in use and a re-run applies the same pending value. Keys rotate in
 order; if one fails, later keys are not attempted, the Services that use
 the keys already rotated still restart, and rotate reports which keys
-rotated and which still use the old value.`,
+rotated and which still use the old value.
+
+If rotate --generated is interrupted, run the same command again: before
+the swap it reuses the pending value (generated/KEY.next), after the swap
+it finishes the restart without generating another value. Until then
+deploy, rollback and a plain rotate refuse while generated/KEY.next
+exists; after the swap a plain ` + "`yoho secrets rotate`" + ` also finishes the
+restart. A killed run leaves the Destination lock behind: remove the lock
+directory named in the error, then re-run.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			a, err := g.load(cmd)
 			if err != nil {
@@ -162,6 +170,23 @@ func (a *app) rotateSecrets(ctx context.Context, services, generated []string, d
 	}
 
 	runtime := a.runtime()
+	switch {
+	case dryRun:
+		pending, perr := deploy.PendingRotations(ctx, hosts[0].Host, a.cfg.App, a.destName)
+		if perr != nil {
+			err = perr
+			u.Error(err, "check that the Server is reachable")
+			return &silentError{err}
+		}
+		if len(pending) > 0 {
+			u.Warn("%s", deploy.PendingRotationWarning(pending))
+		}
+	case len(generated) == 0:
+		// A plain rotate reads generated/<KEY> like a deploy does.
+		if err = a.refusePendingRotations(ctx, hosts, nil); err != nil {
+			return err
+		}
+	}
 	if len(generated) > 0 && !dryRun {
 		// Lock before reading the current Release, so no deploy can land
 		// between that read and the database change.
@@ -176,7 +201,11 @@ func (a *app) rotateSecrets(ctx context.Context, services, generated []string, d
 				err = uerr
 			}
 		}()
-		runtime = deploy.Compose{LockHeld: true}
+		runtime = deploy.Compose{LockHeld: true, Rotating: generated}
+		// A pending rotation of another key would roll out its old value.
+		if err = a.refusePendingRotations(ctx, hosts, generated); err != nil {
+			return err
+		}
 	}
 
 	step = u.Step(hosts[0].Name, "Read current Release")
@@ -231,6 +260,18 @@ func (a *app) rotateSecrets(ctx context.Context, services, generated []string, d
 	if len(gens) > 0 && !dryRun {
 		h := hosts[0].Host
 		res := rotateGeneratedKeys(u, hosts[0].Name, gens, func(g *deploy.GeneratedRotation, logf, warnf func(string, ...any)) error {
+			// An earlier run swapped the new value in but stopped before
+			// the rollout: finish that one instead of rotating again.
+			swapped, serr := deploy.RotationSwapped(ctx, h, a.cfg.App, a.destName, cur, g.Key)
+			if serr != nil {
+				return serr
+			}
+			if swapped {
+				u.Event("generated_rotation_resumed",
+					fmt.Sprintf("  an interrupted rotation already put the new %s in place; finishing its rollout (no new value)", g.Key),
+					map[string]any{"key": g.Key, "server": hosts[0].Name})
+				return nil
+			}
 			return deploy.RotateGeneratedSecret(ctx, h, a.cfg.App, a.destName, performer(), g, logf, warnf)
 		})
 		if res.err != nil {
@@ -288,7 +329,15 @@ func (a *app) rotateSecrets(ctx context.Context, services, generated []string, d
 		u.Finished(nil, "Dry run; nothing was changed")
 		return nil
 	}
+	// The rotated keys' values are rolled out (or nothing used them): drop
+	// their swap markers. Best effort; a leftover one is found stale later.
+	clearSwapped := func() {
+		if cerr := deploy.ClearRotationSwapped(ctx, hosts[0].Host, a.cfg.App, a.destName, generatedKeys(gens)); cerr != nil {
+			u.Info("  could not remove the rotation markers of %s: %v", strings.Join(generatedKeys(gens), ", "), cerr)
+		}
+	}
 	if len(changed) == 0 {
+		clearSwapped()
 		if partial != nil {
 			err = partial
 			u.Error(err, partialHint)
@@ -314,6 +363,7 @@ func (a *app) rotateSecrets(ctx context.Context, services, generated []string, d
 		}
 		return err
 	}
+	clearSwapped()
 	// Scoped deploys read the generation the operator last pushed.
 	if err := hosts[0].Host.Run(ctx, remote.Cmd{Script: "test -f " + remote.Quote(release.AccessSecretsFile(a.cfg.App, a.destName))}); err == nil {
 		u.Warn("Members' scoped deploys still use the secrets last pushed; run `yoho access secrets push`")
@@ -535,4 +585,18 @@ func rotatePlan(d *plan.Deploy, names []string, server string) []plan.Change {
 		out = append(out, ch)
 	}
 	return out
+}
+
+// refusePendingRotations stops a command that reads generated/<KEY> while
+// an interrupted `secrets rotate --generated` left generated/<KEY>.next
+// (keys in allow are the caller's own). Nothing is printed when none is.
+func (a *app) refusePendingRotations(ctx context.Context, hosts []plan.NamedHost, allow []string) error {
+	if len(hosts) == 0 || hosts[0].Host == nil {
+		return nil
+	}
+	if err := deploy.CheckPendingRotations(ctx, hosts[0].Host, a.cfg.App, a.destName, allow); err != nil {
+		a.ui.Error(err, hintFor(err, "check that the Server is reachable"))
+		return &silentError{err}
+	}
+	return nil
 }

@@ -218,7 +218,9 @@ func PlanGeneratedRotation(d *plan.Deploy, key string) (*GeneratedRotation, erro
 // a failed login check is passed to warnf and the swap still happens, so
 // the database and generated/<Key> agree. If the swap itself fails the
 // error is a *PendingSwapError: the database already uses the value in
-// generated/<Key>.next. Values travel over stdin or the env file of
+// generated/<Key>.next. After the swap, generated/<Key>.swapped holds the
+// new value's fingerprint until the rollout finishes (RotationSwapped,
+// ClearRotationSwapped). Values travel over stdin or the env file of
 // remote.Cmd, never in a script or argv, and errors are scrubbed.
 func RotateGeneratedSecret(ctx context.Context, h remote.Host, app, dest, performer string, g *GeneratedRotation, logf, warnf func(string, ...any)) (err error) {
 	if logf == nil {
@@ -268,16 +270,17 @@ func RotateGeneratedSecret(ctx context.Context, h remote.Host, app, dest, perfor
 			warnf("%s", warn)
 		}
 	}
-	if err := h.Run(ctx, remote.Cmd{Script: swapScript(p)}); err != nil {
-		return &PendingSwapError{Key: g.Key, Applied: g.Strategy != RotateNone, Err: err}
-	}
 	key, err := ensureHMACKey(ctx, h, dir)
 	if err != nil {
-		return err
+		return &PendingSwapError{Key: g.Key, Applied: g.Strategy != RotateNone, Err: err}
+	}
+	fp := secrets.Fingerprint(key, string(next))
+	if err := h.Run(ctx, remote.Cmd{Script: swapScript(p), Stdin: strings.NewReader(fp + "\n")}); err != nil {
+		return &PendingSwapError{Key: g.Key, Applied: g.Strategy != RotateNone, Err: err}
 	}
 	rec, err := json.Marshal(RotationRecord{
 		Time: now().UTC(), Performer: performer, Key: g.Key, Service: g.Service, Strategy: g.Strategy,
-		Consumers: g.Consumers, Fingerprint: secrets.Fingerprint(key, string(next)),
+		Consumers: g.Consumers, Fingerprint: fp,
 	})
 	if err != nil {
 		return err
@@ -303,9 +306,16 @@ func (e *PendingSwapError) Error() string {
 
 func (e *PendingSwapError) Unwrap() error { return e.Err }
 
+// swapScript renames generated/<Key>.next over generated/<Key>. It first
+// writes the swap marker (the new value's fingerprint, from stdin), so a
+// run interrupted after the rename knows the rollout is still pending
+// (RotationSwapped). A marker left without the rename is ignored: .next
+// still exists, and the database step resumes.
 func swapScript(p string) string {
 	n := remote.Quote(p + ".next")
-	return "set -eu\ntest -s " + n + "\nchmod 600 " + n + "\nmv -f " + n + " " + remote.Quote(p)
+	m := remote.Quote(swappedMarker(p))
+	t := remote.Quote(swappedMarker(p) + ".tmp")
+	return "set -eu\numask 077\ntest -s " + n + "\ncat > " + t + "\nmv -f " + t + " " + m + "\nchmod 600 " + n + "\nmv -f " + n + " " + remote.Quote(p)
 }
 
 // runningContainer returns the ID of a running container of svc.

@@ -185,6 +185,9 @@ func (Runtime) Deploy(ctx context.Context, d *plan.Deploy) (_ *release.Release, 
 			err = uerr
 		}
 	}()
+	if err := deploy.CheckPendingRotations(ctx, h, d.App, d.Destination, nil); err != nil {
+		return nil, err
+	}
 	if err := deploy.CheckRestartBase(ctx, h, d); err != nil {
 		return nil, err
 	}
@@ -1206,6 +1209,9 @@ func (Runtime) Rollback(ctx context.Context, d *plan.Deploy, version string) (_ 
 			err = uerr
 		}
 	}()
+	if err := deploy.CheckPendingRotations(ctx, h, d.App, d.Destination, nil); err != nil {
+		return nil, err
+	}
 	if _, err := checkSwarm(ctx, d); err != nil {
 		return nil, err
 	}

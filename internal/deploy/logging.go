@@ -17,6 +17,38 @@ const (
 	LogMaxFile = "3"
 )
 
+// DefaultLoggingNote annotates a plan's "config changed: logging" when the
+// new value is Yoho's default rotation, which v0.6.0 added to Services
+// without `logging`: the first plan after upgrading shows it everywhere.
+const DefaultLoggingNote = "logging (Yoho's default log rotation since v0.6.0; set `logging` on the Service to keep your own)"
+
+// IsDefaultLogging reports whether v (a compiled Service's `logging`, as
+// decoded from YAML) is Yoho's default log rotation.
+func IsDefaultLogging(v any) bool {
+	m, ok := v.(map[string]any)
+	if !ok || len(m) != 2 || fmt.Sprint(m["driver"]) != LogDriver {
+		return false
+	}
+	o, ok := m["options"].(map[string]any)
+	return ok && len(o) == 2 && fmt.Sprint(o["max-size"]) == LogMaxSize && fmt.Sprint(o["max-file"]) == LogMaxFile
+}
+
+// AnnotateLoggingKeys replaces "logging" in changed config keys with
+// DefaultLoggingNote when the new value is the default.
+func AnnotateLoggingKeys(keys []string, newLogging any) []string {
+	if !IsDefaultLogging(newLogging) {
+		return keys
+	}
+	out := make([]string, len(keys))
+	for i, k := range keys {
+		if k == "logging" {
+			k = DefaultLoggingNote
+		}
+		out[i] = k
+	}
+	return out
+}
+
 // DaemonLogging is what the Server's Docker daemon does with container logs
 // by default: its logging driver and whether daemon.json sets log-opts.
 type DaemonLogging struct {

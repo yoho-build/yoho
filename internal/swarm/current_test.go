@@ -168,7 +168,8 @@ type probePreflightHost struct {
 }
 
 func (h *probePreflightHost) Output(ctx context.Context, c remote.Cmd) (string, error) {
-	if !strings.Contains(c.Script, "echo acquired") && !strings.Contains(c.Script, "docker info -f") && !strings.Contains(c.Script, "readlink") {
+	// The pending-rotation check (deploy.PendingRotations) only lists files.
+	if !strings.Contains(c.Script, "echo acquired") && !strings.Contains(c.Script, "docker info -f") && !strings.Contains(c.Script, "readlink") && !strings.Contains(c.Script, `"$d"/*.next`) {
 		h.mutations = append(h.mutations, c.Script)
 	}
 	return h.fakeHost.Output(ctx, c)

@@ -398,6 +398,7 @@ func diffReasons(cur, des map[string]any) ([]string, error) {
 		reasons = append(reasons, "secrets changed")
 	}
 	if len(cfg) > 0 {
+		cfg = deploy.AnnotateLoggingKeys(cfg, b["logging"])
 		reasons = append(reasons, "config changed: "+strings.Join(cfg, ", "))
 	}
 	return reasons, nil

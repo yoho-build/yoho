@@ -365,6 +365,7 @@ func (c Compose) Diff(ctx context.Context, d *plan.Deploy) ([]plan.Change, error
 		if cur != nil {
 			if old, ok := cur.services[sp.Name]; ok {
 				if keys := changedKeys(old, want[sp.Name]); len(keys) > 0 {
+					keys = AnnotateLoggingKeys(keys, want[sp.Name]["logging"])
 					reasons = append(reasons, "config changed: "+strings.Join(keys, ", "))
 				}
 			} else {

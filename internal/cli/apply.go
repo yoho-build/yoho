@@ -182,7 +182,15 @@ func (a *app) collectChanges(ctx context.Context, s *session) (changes []plan.Ch
 		return nil, false, &silentError{err}
 	}
 	changes = append(changes, cc...)
+	pending, err := deploy.PendingRotations(ctx, s.hosts[0].Host, a.cfg.App, a.destName)
+	if err != nil {
+		step.Fail(err, "check that the Server is reachable")
+		return nil, false, &silentError{err}
+	}
 	step.Done()
+	if len(pending) > 0 {
+		a.ui.Warn("%s", deploy.PendingRotationWarning(pending))
+	}
 	return changes, deployNeeded, nil
 }
 
@@ -338,6 +346,10 @@ func (a *app) apply(ctx context.Context, o applyOptions) (err error) {
 	// Converge app_dir (and finish an interrupted move) before building:
 	// Server builds write into the App directory.
 	if err = a.ensureAppDirs(ctx, s.hosts); err != nil {
+		return err
+	}
+	// Refuse before building: the runtime checks again under the lock.
+	if err = a.refusePendingRotations(ctx, s.hosts, nil); err != nil {
 		return err
 	}
 	// A migration cutover is decided (and its tokens resolved) before the

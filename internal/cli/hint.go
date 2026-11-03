@@ -30,6 +30,14 @@ func hintFor(err error, def string) string {
 	if errors.As(err, &ae) && ae.Hint != "" {
 		return ae.Hint
 	}
+	var lk *deploy.LockedError
+	if errors.As(err, &lk) {
+		return lockHint(lk)
+	}
+	var pr *deploy.PendingRotationError
+	if errors.As(err, &pr) {
+		return deploy.PendingRotationHint
+	}
 	var le *deploy.LogDriverError
 	if errors.As(err, &le) {
 		return deploy.LogDriverHint
@@ -48,6 +56,17 @@ func hintFor(err error, def string) string {
 		return ge.Hint
 	}
 	return def
+}
+
+// lockHint is the next step when the Destination lock (or gate) is held:
+// nothing was changed. Wait for the holder, or remove a stale lock left by
+// a killed run, as the error message says.
+func lockHint(le *deploy.LockedError) string {
+	h := "nothing was changed: another Yoho command holds the lock of this Destination; wait for it to finish and rerun. If none is running (a run was killed), the lock is stale: remove " + le.Dir + " on the Server, then rerun"
+	if le.Holder.Command == "secrets rotate" {
+		h += "; an interrupted `yoho secrets rotate --generated KEY` is finished by running it again"
+	}
+	return h
 }
 
 // poolHint explains Docker address pool exhaustion with the subnet found free

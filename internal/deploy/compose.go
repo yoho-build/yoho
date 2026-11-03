@@ -28,6 +28,10 @@ import (
 type Compose struct {
 	// LockHeld means the caller owns the Destination lock through failure recovery.
 	LockHeld bool
+	// Rotating are generated keys the caller is rotating itself (secrets
+	// rotate --generated); their pending generated/<KEY>.next does not
+	// refuse the deploy. Any other pending rotation does.
+	Rotating []string
 }
 
 var _ plan.Runtime = Compose{}
@@ -106,7 +110,7 @@ func (c Compose) Deploy(ctx context.Context, d *plan.Deploy) (_ *release.Release
 	r.phase = "prepare-release"
 	defer func() {
 		var failure *Failure
-		if err != nil && !errors.As(err, &failure) {
+		if err != nil && !errors.As(err, &failure) && !isRefusal(err) {
 			err = r.failure(ctx, err, "", nil)
 		}
 		err = AnnotatePoolExhausted(ctx, h, release.ProjectName(d.App, d.Destination), poolKnownNetworks(d), err)
@@ -126,6 +130,11 @@ func (c Compose) Deploy(ctx context.Context, d *plan.Deploy) (_ *release.Release
 				err = uerr
 			}
 		}()
+	}
+	// Under the lock: deploy reads generated/<KEY>, which an interrupted
+	// rotation left on the old value while the database may use the new.
+	if err := CheckPendingRotations(ctx, h, d.App, d.Destination, c.Rotating); err != nil {
+		return nil, err
 	}
 	if err := CheckRestartBase(ctx, h, d); err != nil {
 		return nil, err
@@ -399,7 +408,7 @@ func (c Compose) Rollback(ctx context.Context, d *plan.Deploy, version string) (
 	r.phase = "prepare-release"
 	defer func() {
 		var failure *Failure
-		if err != nil && !errors.As(err, &failure) {
+		if err != nil && !errors.As(err, &failure) && !isRefusal(err) {
 			err = r.failure(ctx, err, "", nil)
 		}
 	}()
@@ -413,6 +422,9 @@ func (c Compose) Rollback(ctx context.Context, d *plan.Deploy, version string) (
 			err = uerr
 		}
 	}()
+	if err := CheckPendingRotations(ctx, h, d.App, d.Destination, nil); err != nil {
+		return nil, err
+	}
 
 	rel, err := readRelease(ctx, h, path.Join(relDir, "release.json"))
 	if err != nil {

@@ -66,7 +66,7 @@ func appDirHint(err error) string {
 	}
 	var le *deploy.LockedError
 	if errors.As(err, &le) {
-		return "another command holds the App directory; wait and rerun (a stale gate or lock is removed by hand, as the message says)"
+		return lockHint(le)
 	}
 	var me *deploy.MigrationPendingError
 	if errors.As(err, &me) {
