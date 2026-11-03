@@ -3,11 +3,13 @@ package deploy
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"io"
 	"os"
 	"path"
+	"regexp"
 	"strings"
 	"sync"
 	"testing"
@@ -25,7 +27,8 @@ type rotHost struct {
 	mu     sync.Mutex
 	calls  []rotCall
 	docker func(c rotCall, stderr io.Writer) error
-	swap   error // returned for the swap script, when set
+	out    func(c rotCall) string // stdout of a docker script, when set
+	swap   error                  // returned for the swap script, when set
 }
 
 type rotCall struct {
@@ -56,14 +59,21 @@ func (f *rotHost) Output(ctx context.Context, c remote.Cmd) (string, error) {
 	if strings.Contains(c.Script, "docker ps") {
 		return "c0ffee", nil
 	}
+	out := ""
+	if f.out != nil {
+		out = f.out(call)
+	}
 	if f.docker == nil {
-		return "", nil
+		return out, nil
 	}
 	stderr := c.Stderr
 	if stderr == nil {
 		stderr = io.Discard
 	}
-	return "", f.docker(call, stderr)
+	if err := f.docker(call, stderr); err != nil {
+		return "", err
+	}
+	return out, nil
 }
 func (f *rotHost) WriteFile(ctx context.Context, p string, data []byte, mode os.FileMode, sudo bool) error {
 	return f.local.WriteFile(ctx, p, data, mode, sudo)
@@ -253,8 +263,19 @@ func TestRotateGeneratedSecretPostgres(t *testing.T) {
 	if alter == nil || verify == nil {
 		t.Fatalf("calls: %+v", h.calls)
 	}
-	if !strings.Contains(alter.Stdin, "'"+next+"'") || alter.Env["PGPASSWORD"] != "OLDvalue0123456789" {
-		t.Fatalf("alter call %+v", alter)
+	if strings.Contains(alter.Stdin, next) || alter.Env["PGPASSWORD"] != "OLDvalue0123456789" {
+		t.Fatalf("alter call sends the plaintext: %+v", alter)
+	}
+	m := regexp.MustCompile(`WITH PASSWORD '(SCRAM-SHA-256\$4096:([^$]+)\$[^']+)';`).FindStringSubmatch(alter.Stdin)
+	if m == nil {
+		t.Fatalf("alter call has no SCRAM verifier: %s", alter.Stdin)
+	}
+	salt, err := base64.StdEncoding.DecodeString(m[2])
+	if err != nil || len(salt) != 16 {
+		t.Fatalf("salt %q %v", m[2], err)
+	}
+	if want, _ := scramVerifierWithSalt(next, salt, 4096); m[1] != want {
+		t.Fatalf("verifier %s is not the new value's (%s)", m[1], want)
 	}
 	if verify.Env["PGPASSWORD"] != next {
 		t.Fatal("verify did not use the new value")

@@ -3,6 +3,13 @@ package deploy
 import (
 	"bytes"
 	"context"
+	"crypto/hmac"
+	"crypto/pbkdf2"
+	"crypto/rand"
+	"crypto/sha1"
+	"crypto/sha256"
+	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -344,7 +351,11 @@ func applyRotation(ctx context.Context, h remote.Host, cid string, g *GeneratedR
 	run := func(c remote.Cmd) error { return runScrubbed(ctx, h, c, string(old), string(next)) }
 	switch g.Strategy {
 	case RotatePostgres:
-		sql := postgresSQL(g.User, string(next))
+		verifier, err := scramSHA256Verifier(string(next))
+		if err != nil {
+			return "", fmt.Errorf("ALTER ROLE %s: %w", g.User, err)
+		}
+		sql := postgresSQL(g.User, verifier)
 		if err := withEither(old, next, func(auth []byte) error {
 			return run(remote.Cmd{Script: postgresAlterScript(cid, g.User), Stdin: strings.NewReader(sql), Env: map[string]string{"PGPASSWORD": string(auth)}})
 		}); err != nil {
@@ -355,8 +366,15 @@ func applyRotation(ctx context.Context, h remote.Host, cid string, g *GeneratedR
 		}
 		return "", nil
 	case RotateMySQL:
-		sql := mysqlSQL(g.User, string(next), g.MariaDB)
 		if err := withEither(old, next, func(auth []byte) error {
+			p, err := probeMySQL(ctx, h, cid, g, string(auth), string(old), string(next))
+			if err != nil {
+				return err
+			}
+			sql, err := mysqlRotationSQL(g.User, string(next), p)
+			if err != nil {
+				return err
+			}
 			in, err := mysqlStdin(g.User, string(auth), sql)
 			if err != nil {
 				return err
@@ -400,7 +418,18 @@ func withEither(old, next []byte, f func([]byte) error) error {
 func runScrubbed(ctx context.Context, h remote.Host, c remote.Cmd, vals ...string) error {
 	var stderr bytes.Buffer
 	c.Stderr = &stderr
-	err := h.Run(ctx, c)
+	return scrubError(h, h.Run(ctx, c), &stderr, vals)
+}
+
+// outputScrubbed is runScrubbed returning stdout.
+func outputScrubbed(ctx context.Context, h remote.Host, c remote.Cmd, vals ...string) (string, error) {
+	var stderr bytes.Buffer
+	c.Stderr = &stderr
+	out, err := h.Output(ctx, c)
+	return out, scrubError(h, err, &stderr, vals)
+}
+
+func scrubError(h remote.Host, err error, stderr *bytes.Buffer, vals []string) error {
 	if err == nil {
 		return nil
 	}
@@ -430,12 +459,61 @@ func sqlLiteral(s string) string { return "'" + strings.ReplaceAll(s, "'", "''")
 // pgIdent quotes s as a Postgres identifier.
 func pgIdent(s string) string { return `"` + strings.ReplaceAll(s, `"`, `""`) + `"` }
 
-// postgresSQL is fed to psql on stdin. Statement logging is turned off for
-// the session (superuser only; ignored otherwise) so the server log does
-// not record the password.
-func postgresSQL(user, password string) string {
+// postgresSQL is fed to psql on stdin. verifier is a SCRAM-SHA-256
+// verifier (scramSHA256Verifier), never the password: Postgres stores a
+// verifier as given, so the plaintext never reaches the server, whose
+// statement log (log_statement=ddl or all) would otherwise record it.
+// Statement logging is also turned off for the session (superuser only;
+// ignored otherwise) so not even the verifier is logged when allowed.
+func postgresSQL(user, verifier string) string {
 	return "\\set VERBOSITY terse\n\\set ON_ERROR_STOP 0\nSET log_statement = 'none';\nSET log_min_error_statement = 'panic';\nSET log_min_duration_statement = -1;\n\\set ON_ERROR_STOP 1\n" +
-		"ALTER ROLE " + pgIdent(user) + " WITH PASSWORD " + sqlLiteral(password) + ";\n"
+		"ALTER ROLE " + pgIdent(user) + " WITH PASSWORD " + sqlLiteral(verifier) + ";\n"
+}
+
+const scramIterations = 4096 // the Postgres default (scram_iterations)
+
+// scramSHA256Verifier computes the Postgres SCRAM-SHA-256 verifier of
+// password (RFC 5802 / RFC 7677) with a random 16-byte salt:
+// SCRAM-SHA-256$<iterations>:<salt>$<StoredKey>:<ServerKey>, base64.
+func scramSHA256Verifier(password string) (string, error) {
+	salt := make([]byte, 16)
+	if _, err := rand.Read(salt); err != nil {
+		return "", err
+	}
+	return scramVerifierWithSalt(password, salt, scramIterations)
+}
+
+func scramVerifierWithSalt(password string, salt []byte, iter int) (string, error) {
+	// SASLprep is the identity on printable ASCII, which is all generated
+	// values use (letters, digits, hex, base64); anything else is refused
+	// rather than hashed differently than the server would.
+	if !printableASCII(password) {
+		return "", errors.New("generated value is not printable ASCII; cannot compute its SCRAM verifier")
+	}
+	salted, err := pbkdf2.Key(sha256.New, password, salt, iter, sha256.Size)
+	if err != nil {
+		return "", err
+	}
+	mac := func(key []byte, msg string) []byte {
+		m := hmac.New(sha256.New, key)
+		m.Write([]byte(msg))
+		return m.Sum(nil)
+	}
+	stored := sha256.Sum256(mac(salted, "Client Key"))
+	b64 := base64.StdEncoding.EncodeToString
+	return fmt.Sprintf("SCRAM-SHA-256$%d:%s$%s:%s", iter, b64(salt), b64(stored[:]), b64(mac(salted, "Server Key"))), nil
+}
+
+func printableASCII(s string) bool {
+	if s == "" {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		if s[i] < 0x20 || s[i] > 0x7e {
+			return false
+		}
+	}
+	return true
 }
 
 // postgresAlterScript reads SQL from stdin over the container's local
@@ -476,6 +554,102 @@ func mysqlSQL(user, password string, mariadb bool) string {
 	return "ALTER USER CURRENT_USER() IDENTIFIED BY " + pw + ";\n"
 }
 
+// mysqlProbe is what a rotation learns about a MySQL or MariaDB server and
+// account before it sends a new password, so the plaintext never lands in
+// the general log (which `yoho app logs` may show).
+type mysqlProbe struct {
+	MariaDB    bool
+	GeneralLog bool // general_log is ON
+	SlowLog    bool // slow_query_log is ON
+	LogRaw     bool // MySQL log_raw is ON: passwords are not rewritten in logs
+	LogOff     bool // this account may SET SESSION sql_log_off=1
+	Native     bool // MariaDB account authenticates with mysql_native_password
+}
+
+const mysqlProbeSQL = "SHOW GLOBAL VARIABLES WHERE Variable_name IN ('version','general_log','slow_query_log','log_raw');\n"
+
+var mariadbOtherPluginRe = regexp.MustCompile(`(?i)\bVIA\s+(ed25519|parsec|pam|gssapi|named_pipe|caching_sha2_password|sha256_password)\b`)
+
+// probeMySQL reads the logging variables, tries sql_log_off, and on MariaDB
+// reads the account's authentication plugin, each as user with auth.
+// Failure of the first query (authentication) is an error; the others only
+// leave their fields false.
+func probeMySQL(ctx context.Context, h remote.Host, cid string, g *GeneratedRotation, auth string, vals ...string) (mysqlProbe, error) {
+	query := func(sql string) (string, error) {
+		in, err := mysqlStdin(g.User, auth, sql)
+		if err != nil {
+			return "", err
+		}
+		return outputScrubbed(ctx, h, remote.Cmd{Script: mysqlQueryScript(cid), Stdin: bytes.NewReader(in)}, vals...)
+	}
+	p := mysqlProbe{MariaDB: g.MariaDB}
+	out, err := query(mysqlProbeSQL)
+	if err != nil {
+		return p, err
+	}
+	for _, l := range lines(out) {
+		name, val, _ := strings.Cut(l, "\t")
+		on := strings.EqualFold(strings.TrimSpace(val), "ON") || strings.TrimSpace(val) == "1"
+		switch strings.ToLower(strings.TrimSpace(name)) {
+		case "version":
+			p.MariaDB = strings.Contains(strings.ToLower(val), "mariadb")
+		case "general_log":
+			p.GeneralLog = on
+		case "slow_query_log":
+			p.SlowLog = on
+		case "log_raw":
+			p.LogRaw = on
+		}
+	}
+	if _, err := query("SET SESSION sql_log_off=1;\n"); err == nil {
+		p.LogOff = true
+	}
+	if p.MariaDB {
+		if out, err := query("SHOW CREATE USER CURRENT_USER();\n"); err == nil {
+			p.Native = (strings.Contains(out, "IDENTIFIED BY PASSWORD '*") || strings.Contains(strings.ToLower(out), "via mysql_native_password")) &&
+				!mariadbOtherPluginRe.MatchString(out)
+		}
+	}
+	return p, nil
+}
+
+// mysqlNativeHash is the mysql_native_password hash of password:
+// '*' + uppercase hex SHA1(SHA1(password)).
+func mysqlNativeHash(password string) string {
+	a := sha1.Sum([]byte(password))
+	b := sha1.Sum(a[:])
+	return "*" + strings.ToUpper(hex.EncodeToString(b[:]))
+}
+
+// mysqlRotationSQL is the session that changes user's password without
+// the plaintext reaching a log. sql_log_off is set first when allowed. A
+// MariaDB mysql_native_password account gets a client-computed hash, as
+// MariaDB writes statements to its general log verbatim. MySQL rewrites the
+// password in ALTER USER in its logs unless log_raw is on. Otherwise, if the
+// general (or, on MariaDB, slow) log would record the plaintext, the
+// rotation is refused.
+func mysqlRotationSQL(user, password string, p mysqlProbe) (string, error) {
+	pre := ""
+	if p.LogOff {
+		pre = "SET SESSION sql_log_off=1;\n"
+	}
+	if p.MariaDB && p.Native {
+		h := sqlLiteral(mysqlNativeHash(password))
+		if user == "root" {
+			return pre + "ALTER USER IF EXISTS 'root'@'localhost' IDENTIFIED BY PASSWORD " + h + ", 'root'@'%' IDENTIFIED BY PASSWORD " + h + ";\n", nil
+		}
+		return pre + "SET PASSWORD = " + h + ";\n", nil
+	}
+	generalLeaks := p.GeneralLog && !p.LogOff
+	switch {
+	case p.MariaDB && (generalLeaks || p.SlowLog):
+		return "", fmt.Errorf("MariaDB would write the new password of %s to its general or slow query log: the account does not use mysql_native_password (so Yoho cannot send a hash) and cannot SET sql_log_off; turn general_log and slow_query_log off, grant it SUPER, or set the password by hand", user)
+	case !p.MariaDB && generalLeaks && p.LogRaw:
+		return "", fmt.Errorf("MySQL runs with log_raw, so its general log would record the new password of %s, and the account cannot SET sql_log_off; turn log_raw or general_log off, or set the password by hand", user)
+	}
+	return pre + mysqlSQL(user, password, p.MariaDB), nil
+}
+
 const mysqlSQLMarker = "#yoho-sql"
 
 // mysqlStdin is an option file (the credentials), a marker line, then SQL.
@@ -490,7 +664,13 @@ func mysqlStdin(user, password, sql string) ([]byte, error) {
 
 // mysqlScript runs inside the container: copy stdin up to the marker into
 // a 0600 option file, then run the client on the rest of stdin.
-func mysqlScript(cid string) string {
+func mysqlScript(cid string) string { return mysqlClientScript(cid, " >/dev/null") }
+
+// mysqlQueryScript is mysqlScript with the client's tab-separated output on
+// stdout (the probe queries; never values).
+func mysqlQueryScript(cid string) string { return mysqlClientScript(cid, "") }
+
+func mysqlClientScript(cid, redirect string) string {
 	inner := `set -eu
 umask 077
 f=$(mktemp)
@@ -501,7 +681,7 @@ while IFS= read -r l; do
 done
 c=mysql
 if command -v mariadb >/dev/null 2>&1; then c=mariadb; fi
-"$c" --defaults-extra-file="$f" -N -B >/dev/null`
+"$c" --defaults-extra-file="$f" -N -B` + redirect
 	return "set -eu\ndocker exec -i " + remote.Quote(cid) + " sh -c " + remote.Quote(inner)
 }
 

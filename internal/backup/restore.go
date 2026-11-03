@@ -74,6 +74,31 @@ func List(ctx context.Context, o ListOptions) (entries []Entry, err error) {
 	if err := t.prepareRclone(ctx, o.Host, o.RcloneConfig, time.Now()); err != nil {
 		return nil, err
 	}
+	if t.crossRclone() {
+		// The source's rclone config lives in a private staging directory
+		// for this listing only (a killed CLI leaves a check-* leftover).
+		base := release.BackupDir(o.App, o.Destination)
+		name, token, serr := newStagingName(StagingCheck)
+		if serr != nil {
+			return nil, serr
+		}
+		dir := path.Join(base, name)
+		if serr := createPrivateStaging(ctx, o.Host, base, dir, token); serr != nil {
+			return nil, fmt.Errorf("create staging dir: %w", serr)
+		}
+		defer func() {
+			cctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), cleanupTimeout)
+			defer cancel()
+			if cerr := removePrivateStaging(cctx, o.Host, dir, token); cerr != nil {
+				err = errors.Join(err, fmt.Errorf("remove private staging %s: %w", dir, cerr))
+			}
+		}()
+		cleanup, serr := t.useTempRclone(ctx, o.Host, dir)
+		if serr != nil {
+			return nil, serr
+		}
+		defer cleanup()
+	}
 	return t.list(ctx, o.Host, release.BackupDir(o.App, o.Destination))
 }
 
@@ -287,6 +312,13 @@ func Restore(ctx context.Context, o RestoreOptions) (res *RestoreResult, err err
 	if err := createPrivateStaging(ctx, o.Host, base, dir, token); err != nil {
 		return nil, fmt.Errorf("create staging dir: %w", err)
 	}
+	// restore --from: the source's rclone config is used from this staging
+	// directory and removed even when the staging is kept.
+	rcloneCleanup, err := t.useTempRclone(ctx, o.Host, dir)
+	if err != nil {
+		return nil, err
+	}
+	defer rcloneCleanup()
 
 	logf("fetching Backup %s", o.ID)
 	data, err := t.fetch(ctx, o.Host, base, dir, o.ID)
