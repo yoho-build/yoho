@@ -922,9 +922,9 @@ func proxyCmd(g *globals) *cobra.Command {
 	return c
 }
 
-// appCmds adds ps / logs / stats / exec.
+// appCmds adds ps / logs / stats / exec / run.
 func appCmds(g *globals) *cobra.Command {
-	c := &cobra.Command{Use: "app", Short: "Inspect the running App (ps, logs, stats, exec)"}
+	c := &cobra.Command{Use: "app", Short: "Inspect the running App (ps, logs, stats, exec, run)"}
 	c.AddCommand(&cobra.Command{
 		Use: "ps", Short: "List the App's containers",
 		RunE: func(cmd *cobra.Command, _ []string) error {
@@ -942,20 +942,26 @@ func appCmds(g *globals) *cobra.Command {
 		},
 	})
 	c.AddCommand(logsCmd(g), statsCmd(g))
-	c.AddCommand(&cobra.Command{
-		Use: "exec SERVICE -- COMMAND...", Short: "Run a command in a running Service container",
+	var execTerm termOptions
+	execCmd := &cobra.Command{
+		Use: "exec SERVICE [-i] [-t] -- COMMAND...", Short: "Run a command in a running Service container (-it for a console)",
 		Args: cobra.MinimumNArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			a, err := g.load(cmd)
 			if err != nil {
 				return err
 			}
-			if a.dest.Runtime == "swarm" {
-				return a.swarmExec(cmd, args[0], args[1:])
+			if err := execTerm.check(cmd); err != nil {
+				return a.fail(err)
 			}
-			return a.remoteRun(cmd, "docker compose -p "+remote.Quote(a.project())+" exec -T "+remote.QuoteArgs(args...))
+			if a.dest.Runtime == "swarm" {
+				return a.swarmExec(cmd, args[0], args[1:], execTerm)
+			}
+			return a.runTerminal(cmd, composeExecScript(a.project(), execTerm, args), execTerm)
 		},
-	})
+	}
+	addTermFlags(execCmd, &execTerm)
+	c.AddCommand(execCmd, appRunCmd(g))
 	return c
 }
 
@@ -973,7 +979,7 @@ func swarmTaskContainer(ctx context.Context, h remote.Host, project, svc string)
 // swarmExec runs command in a running task container of Service. Swarm tasks
 // can run on any node, so the Destination's Servers are tried in order and
 // the command runs on the first node that has one.
-func (a *app) swarmExec(cmd *cobra.Command, svc string, command []string) error {
+func (a *app) swarmExec(cmd *cobra.Command, svc string, command []string, term termOptions) error {
 	ctx := cmd.Context()
 	var tried []string
 	for _, name := range a.dest.Servers {
@@ -985,7 +991,11 @@ func (a *app) swarmExec(cmd *cobra.Command, svc string, command []string) error 
 		id, err := swarmTaskContainer(ctx, h, a.project(), svc)
 		if err == nil && id != "" {
 			defer h.Close()
-			return h.Run(ctx, remote.Cmd{Script: "docker exec " + remote.Quote(id) + " " + remote.QuoteArgs(command...), Stdout: cmd.OutOrStdout(), Stderr: cmd.ErrOrStderr()})
+			script := "docker exec " + swarmExecFlags(term) + remote.Quote(id) + " " + remote.QuoteArgs(command...)
+			if term.attached() {
+				return commandExit(h.RunTerminal(ctx, script, term.tty, cmd.InOrStdin(), cmd.OutOrStdout(), cmd.ErrOrStderr()))
+			}
+			return h.Run(ctx, remote.Cmd{Script: script, Stdout: cmd.OutOrStdout(), Stderr: cmd.ErrOrStderr()})
 		}
 		h.Close()
 		tried = append(tried, name)
