@@ -14,7 +14,7 @@ Railway-specific commands below are from Railway's docs, retrieved 2026-10-23. A
 | Variable names | `x-yoho.secrets` plus a reference in `.yoho/secrets`, or `x-yoho.generate` for a new Postgres password |
 | `RAILWAY_*` variables | Dropped. They name Railway's own network |
 | Volume mount | A named volume. The bytes do not come with the name |
-| Postgres | `stateful: true`, a volume, and `x-yoho.backup.dump` |
+| Postgres | `stateful: true`, a volume, and `x-yoho.backup.dump`. No `ports`: Services reach it as `db:5432`; a Railway public TCP proxy has no equivalent, and `"5432:5432"` would bypass the firewall (`yoho config check` warns) |
 | `healthcheckPath` | A wget `healthcheck` and, when it is not `/up`, `x-yoho.proxy.health_path` |
 | `preDeployCommand` | `x-yoho.release_command`. A string becomes `sh -c`, because the Railway schema stores one string, not an argv |
 | `startCommand` | `command: ["sh", "-c", "..."]`, or an argv `command` in the inventory |

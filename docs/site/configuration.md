@@ -189,6 +189,8 @@ The Cloudflare API token needs Account > Cloudflare Tunnel > Edit. It is resolve
 
 Stateful rule: a Service with volumes deployed to several Servers without `stateful: true` is an error.
 
+Databases are private by default: other Services reach a Stateful Service by its Service name on the compose network (`postgres://db:5432/app`), so it needs no `ports`. Ports Docker publishes bypass the Server firewall (ufw), so `ports: ["5432:5432"]` puts the database on the internet. `yoho config check`, `yoho plan` and `yoho deploy` warn when a `stateful: true` Service publishes a port on all interfaces (no host IP, `0.0.0.0` or `::`). To reach it from the Server itself or an SSH tunnel, bind to loopback: `ports: ["127.0.0.1:5432:5432"]`.
+
 `yoho config check` also warns when a Service's `environment` (including `env_file` values) uses another Service's name, `container_name` or network alias as a host, such as `postgres://u@analytics-db:5432/x`, without a `depends_on` path to it. Compose may then start the Service first, and the deploy fails as "did not become healthy". Add `depends_on: {analytics-db: {condition: service_healthy}}` (`service_started` when the target has no healthcheck); under Swarm, where `depends_on` is ignored, make the app retry.
 
 A proxied Service needs a compose `healthcheck` (an error under swarm, a warning under compose). This example executes `wget`, so the image must include it. For a curl-only image, change the healthcheck test to execute `curl` instead:

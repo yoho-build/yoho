@@ -171,6 +171,12 @@ func Check(r *Result, runtime string, secretKeys []string) []Finding {
 			}
 		}
 
+		if ext.Stateful {
+			if pub := publicPorts(svc); len(pub) > 0 {
+				svcAdd(LevelWarning, "stateful service publishes port(s) %s on all interfaces; Docker-published ports bypass the Server firewall (ufw), so it is reachable from the internet; bind to loopback (e.g. \"127.0.0.1:5432:5432\") or drop ports and reach it on the compose network by Service name", strings.Join(pub, ", "))
+			}
+		}
+
 		if (ext.Stateful || ext.Proxy != nil) && slowFirstProbe(svc.HealthCheck) {
 			svcAdd(LevelWarning, "healthcheck sets interval %s without test, so it inherits the image check and Yoho adds no fast-start probes: the deploy waits that long for the first probe; set test, or set start_period and start_interval together (start_interval needs Docker 25+), or shorten interval", time.Duration(*svc.HealthCheck.Interval))
 		}
@@ -312,6 +318,26 @@ func stateDescription(svc types.ServiceConfig, appDir string) string {
 		return fmt.Sprintf("uses writable bind mount(s) %s", strings.Join(binds, ", "))
 	}
 	return ""
+}
+
+// publicPorts lists the ports svc publishes on every host interface (no
+// host_ip, 0.0.0.0 or ::) as published:target, or target when the host port
+// is ephemeral. Loopback and other specific binds are not listed.
+func publicPorts(svc types.ServiceConfig) []string {
+	var out []string
+	for _, p := range svc.Ports {
+		switch strings.Trim(p.HostIP, "[]") {
+		case "", "0.0.0.0", "::":
+		default:
+			continue
+		}
+		desc := fmt.Sprint(p.Target)
+		if p.Published != "" {
+			desc = p.Published + ":" + desc
+		}
+		out = append(out, desc)
+	}
+	return out
 }
 
 func sortedMapKeys(m map[string]string) []string {
