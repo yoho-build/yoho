@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"strings"
@@ -9,6 +10,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/yoho-build/yoho/internal/backup"
+	"github.com/yoho-build/yoho/internal/deploy"
 )
 
 func backupDrillCmd(g *globals) *cobra.Command {
@@ -24,11 +26,14 @@ starts the backed-up Services from the deployed Release, loads restore_dump,
 waits for their healthchecks, runs x-yoho.backup.verify, reports per-phase
 timings (download, restore, healthy) as a recovery time estimate, then removes
 the drill's containers, volumes and network. The running App is not stopped or
-changed.
+changed. Before restoring, the drill runs the real restore's read-only
+isolation preflight against the App and fails wherever ` + "`yoho backup restore`" + `
+would refuse.
 
 --keep leaves the drill running for inspection; remove it later with
---cleanup, which removes every drill of this App/Destination and never touches
-objects without the drill labels.`,
+--cleanup, which takes the Destination lock (so it never removes a drill that
+is still running), removes every drill of this App/Destination and never
+touches objects without the drill labels.`,
 		Args: cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) (err error) {
 			if cleanup && (keep || cmd.Flags().Changed("id")) {
@@ -57,7 +62,28 @@ objects without the drill labels.`,
 				}
 				defer closeHosts()
 				h := hosts[0]
-				step := u.Step(h.Name, "Find drills of %s (%s)", a.cfg.App, a.destName)
+				// A running drill holds the Destination lock; take it so
+				// cleanup never removes a drill another operator is running.
+				step := u.Step(h.Name, "Lock %s (%s)", a.cfg.App, a.destName)
+				unlock, err := a.backupLock(h.Host, "backup drill --cleanup")(ctx)
+				if err != nil {
+					step.Fail(err, drillCleanupLockHint(err))
+					return &silentError{err}
+				}
+				step.Done()
+				unlocked := false
+				release := func() error {
+					unlocked = true
+					uctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+					defer cancel()
+					return unlock(uctx)
+				}
+				defer func() {
+					if !unlocked {
+						_ = release() // a failed cleanup already reports its error
+					}
+				}()
+				step = u.Step(h.Name, "Find drills of %s (%s)", a.cfg.App, a.destName)
 				projects, err := backup.ListDrills(ctx, h.Host, a.cfg.App, a.destName)
 				if err != nil {
 					step.Fail(err, "rerun with -v to see the remote output")
@@ -72,6 +98,9 @@ objects without the drill labels.`,
 					}
 					step.Done()
 					u.Event("drill_removed", "", map[string]any{"project": p})
+				}
+				if err := release(); err != nil {
+					return fmt.Errorf("unlock: %w", err)
 				}
 				u.Finished(nil, fmt.Sprintf("Removed %d drills of %s (%s)", len(projects), a.cfg.App, a.destName))
 				return nil
@@ -167,9 +196,19 @@ objects without the drill labels.`,
 	return c
 }
 
+func drillCleanupLockHint(err error) string {
+	var le *deploy.LockedError
+	if errors.As(err, &le) {
+		return "a drill, deploy or Backup of this Destination is running; wait for it to finish, then rerun `yoho backup drill --cleanup`"
+	}
+	return backupHint(err)
+}
+
 func drillHint(err error) string {
 	s := err.Error()
 	switch {
+	case strings.HasPrefix(s, backup.RestoreRefusedPrefix):
+		return "the drill isolates what it restores, but `yoho backup restore` onto the running App refuses this; fix the refusal (e.g. remove published ports or host networking from Services with restore_dump or post_restore, or deploy the App first), deploy, and rerun the drill"
 	case strings.Contains(s, "deploy first"):
 		return "deploy the App first; the drill runs the deployed Release's Services"
 	case strings.Contains(s, "did not become healthy"), strings.Contains(s, "not ready"):

@@ -549,6 +549,16 @@ func Drill(ctx context.Context, o DrillOptions) (res *DrillResult, err error) {
 	if err != nil {
 		return nil, fmt.Errorf("drill: read deployed compose file: %w", err)
 	}
+	// The drill strips ports, networks and routes, so it would pass where a
+	// real restore of this Backup onto the running App refuses. Run the same
+	// read-only isolation preflight against the App first.
+	volKeys := make([]string, 0, len(vols))
+	for _, v := range vols {
+		volKeys = append(volKeys, v.key)
+	}
+	if err := restoreWouldRefuse(ctx, o, appProject, rt, services, dumps, volKeys); err != nil {
+		return nil, err
+	}
 	drillYAML, err := DrillCompose(compiled, o.App, o.Destination, project, services)
 	if err != nil {
 		return nil, err
@@ -665,6 +675,38 @@ func Drill(ctx context.Context, o DrillOptions) (res *DrillResult, err error) {
 	}
 	phase("cleanup", project)
 	return res, nil
+}
+
+// RestoreRefusedPrefix starts a drill error for a Backup that a real
+// restore onto the running App would refuse.
+const RestoreRefusedPrefix = "a real restore would refuse: "
+
+// restoreWouldRefuse runs the real restore's ownership and isolation
+// preflight against the deployed App, report-only: nothing is stopped,
+// started or written.
+func restoreWouldRefuse(ctx context.Context, o DrillOptions, project, rt string, services, dumps, volKeys []string) error {
+	refused := func(err error) error { return fmt.Errorf("%s%w", RestoreRefusedPrefix, err) }
+	var hookRoots []string
+	for _, svc := range services {
+		if len(o.Services[svc].PostRestore) > 0 {
+			hookRoots = append(hookRoots, svc)
+		}
+	}
+	volumes := make([]string, 0, len(volKeys))
+	for _, key := range volKeys {
+		dn, err := volumeName(ctx, o.Host, project, key, rt)
+		if err != nil {
+			return refused(fmt.Errorf("%w (deploy the App before restoring)", err))
+		}
+		volumes = append(volumes, dn)
+	}
+	if err := checkProjectOwnership(ctx, o.Host, project, o.App, o.Destination, rt); err != nil {
+		return refused(err)
+	}
+	if _, err := restorePreflight(ctx, o.Host, project, o.App, o.Destination, rt, services, dumps, hookRoots, volumes); err != nil {
+		return refused(err)
+	}
+	return nil
 }
 
 func composeDeclaresVolume(doc []byte, key string) bool {

@@ -754,3 +754,26 @@ func TestRestoreIsolationCleanupFailureReported(t *testing.T) {
 		t.Fatal("failed cleanup reopened consumers")
 	}
 }
+
+func TestDrillFailsWhereRestoreRefuses(t *testing.T) {
+	r := newRestoreRig(t, "compose", false)
+	o := DrillOptions{App: "shop", Destination: "production", Host: r.h, Services: r.o.Services}
+	run := func() error {
+		return restoreWouldRefuse(context.Background(), o, "yoho-shop-production", "compose", []string{"db"}, []string{"db"}, []string{"pgdata"})
+	}
+	if err := run(); err != nil {
+		t.Fatalf("safe App refused: %v", err)
+	}
+	var db restoreObject
+	_ = json.Unmarshal([]byte(r.objects["db"]), &db)
+	db.Ports = map[string]json.RawMessage{"5432/tcp": json.RawMessage(`[{"HostIp":"127.0.0.1","HostPort":"5432"}]`)}
+	b, _ := json.Marshal(db)
+	r.objects["db"] = string(b)
+	err := run()
+	if err == nil || !strings.HasPrefix(err.Error(), RestoreRefusedPrefix) || !strings.Contains(err.Error(), "published ports") {
+		t.Fatalf("drill must fail where restore refuses: %v", err)
+	}
+	if r.h.index("docker stop") >= 0 || r.h.index("docker start") >= 0 {
+		t.Fatalf("report-only preflight changed the App:\n%s", r.h.scripts())
+	}
+}

@@ -378,52 +378,16 @@ func Restore(ctx context.Context, o RestoreOptions) (res *RestoreResult, err err
 		}
 	}
 
-	dumpTargets, requireHealth, err := restorePrerequisites(ctx, o.Host, o.App, o.Destination, rt, dumps)
-	if err != nil {
-		return nil, err
-	}
-	hookTargets, hookHealth, err := restorePrerequisites(ctx, o.Host, o.App, o.Destination, rt, hookRoots)
-	if err != nil {
-		return nil, err
-	}
-	for name := range hookHealth {
-		if requireHealth == nil {
-			requireHealth = map[string]bool{}
-		}
-		requireHealth[name] = true
-	}
-	// Starting a hook-only target runs its normal process too. Never let a
-	// worker start while another Service's dump is still loading, even when
-	// that worker is declared as a dump prerequisite.
-	dumpSet, dumpRootSet := map[string]bool{}, map[string]bool{}
-	for _, svc := range dumps {
-		dumpRootSet[svc] = true
-	}
-	for _, svc := range dumpTargets {
-		dumpSet[svc] = true
-	}
-	for _, svc := range hookRoots {
-		if dumpSet[svc] && !dumpRootSet[svc] {
-			return nil, fmt.Errorf("restore isolation: hook-only target %s is a dump prerequisite; its normal process cannot safely run while dumps load", svc)
-		}
-	}
-	temporary := append([]string(nil), dumpTargets...)
-	var afterDumps []string
-	for _, svc := range hookTargets {
-		if !dumpSet[svc] {
-			temporary = append(temporary, svc)
-			afterDumps = append(afterDumps, svc)
-		}
-	}
-	state, err = snapshotRestoreState(ctx, o.Host, project, o.App, o.Destination, rt, services, temporary, requireHealth)
-	if err != nil {
-		return nil, err
-	}
+	volNames := make([]string, 0, len(vols))
 	for _, v := range vols {
-		if err := checkRestoreVolumeUsers(ctx, o.Host, v.docker, project, o.App, o.Destination, rt); err != nil {
-			return nil, err
-		}
+		volNames = append(volNames, v.docker)
 	}
+	iso, err := restorePreflight(ctx, o.Host, project, o.App, o.Destination, rt, services, dumps, hookRoots, volNames)
+	if err != nil {
+		return nil, err
+	}
+	state = iso.state
+	dumpTargets, dumpRootSet, afterDumps := iso.dumpTargets, iso.dumpRootSet, iso.afterDumps
 	// Keep a names/status-only recovery record beside the staged Backup. It
 	// survives errors and an interrupted process; no secret values are saved.
 	stateFile := path.Join(dir, "prior-state.json")
