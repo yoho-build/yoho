@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -17,6 +18,7 @@ import (
 	"github.com/yoho-build/yoho/internal/plan"
 	"github.com/yoho-build/yoho/internal/release"
 	"github.com/yoho-build/yoho/internal/remote"
+	"github.com/yoho-build/yoho/internal/ui"
 	"github.com/yoho-build/yoho/internal/version"
 )
 
@@ -47,7 +49,10 @@ what would restart and changes nothing. Secret values are never printed.
 is applied to the database first (Postgres: ALTER ROLE; MySQL/MariaDB:
 ALTER USER; or the x-yoho.rotate command), then swapped in, and every
 Service that uses it restarts. If the database step fails, the old value
-stays in use and a re-run applies the same pending value.`,
+stays in use and a re-run applies the same pending value. Keys rotate in
+order; if one fails, later keys are not attempted, the Services that use
+the keys already rotated still restart, and rotate reports which keys
+rotated and which still use the old value.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			a, err := g.load(cmd)
 			if err != nil {
@@ -156,6 +161,24 @@ func (a *app) rotateSecrets(ctx context.Context, services, generated []string, d
 		}
 	}
 
+	runtime := a.runtime()
+	if len(generated) > 0 && !dryRun {
+		// Lock before reading the current Release, so no deploy can land
+		// between that read and the database change.
+		unlock, lerr := deploy.AcquireLock(ctx, hosts[0].Host, a.cfg.App, a.destName, deploy.LockInfo{Performer: performer(), Command: "secrets rotate"})
+		if lerr != nil {
+			err = lerr
+			u.Error(err, appDirHint(err))
+			return &silentError{err}
+		}
+		defer func() {
+			if uerr := unlock(context.WithoutCancel(ctx)); uerr != nil && err == nil {
+				err = uerr
+			}
+		}()
+		runtime = deploy.Compose{LockHeld: true}
+	}
+
 	step = u.Step(hosts[0].Name, "Read current Release")
 	cur, err := a.currentDeployedRelease(ctx, hosts)
 	if err != nil {
@@ -179,7 +202,6 @@ func (a *app) rotateSecrets(ctx context.Context, services, generated []string, d
 		return err
 	}
 	var gens []*deploy.GeneratedRotation
-	runtime := a.runtime()
 	if len(generated) > 0 {
 		step = u.Step("", "Plan generated secrets")
 		var details []string
@@ -203,31 +225,23 @@ func (a *app) rotateSecrets(ctx context.Context, services, generated []string, d
 		}
 		step.Done(strings.Join(details, "; "))
 	}
+	// partial is set when some generated keys rotated and a later one did
+	// not: the rotated keys' consumers still restart, then rotate fails.
+	var partial error
 	if len(gens) > 0 && !dryRun {
 		h := hosts[0].Host
-		unlock, lerr := deploy.AcquireLock(ctx, h, a.cfg.App, a.destName, deploy.LockInfo{Performer: performer(), Version: cur.Version, Command: "secrets rotate"})
-		if lerr != nil {
-			err = lerr
-			u.Error(err, appDirHint(err))
-			return &silentError{err}
-		}
-		defer func() {
-			if uerr := unlock(context.WithoutCancel(ctx)); uerr != nil && err == nil {
-				err = uerr
-			}
-		}()
-		runtime = deploy.Compose{LockHeld: true}
-		for _, g := range gens {
-			step = u.Step(hosts[0].Name, "Rotate generated %s (%s via %s)", g.Key, g.Strategy, g.Service)
-			if rerr := deploy.RotateGeneratedSecret(ctx, h, a.cfg.App, a.destName, performer(), g, func(f string, args ...any) {
-				fmt.Fprintf(step.Output(), f+"\n", args...)
-			}); rerr != nil {
-				err = rerr
-				step.Fail(err, fmt.Sprintf("the old %s is still in use; fix the cause and re-run `yoho secrets rotate --generated %s` (it reuses the pending value)", g.Key, g.Key))
+		res := rotateGeneratedKeys(u, hosts[0].Name, gens, func(g *deploy.GeneratedRotation, logf, warnf func(string, ...any)) error {
+			return deploy.RotateGeneratedSecret(ctx, h, a.cfg.App, a.destName, performer(), g, logf, warnf)
+		})
+		if res.err != nil {
+			if len(res.rotated) == 0 {
+				err = res.err
 				return &silentError{err}
 			}
-			step.Done("new value in place")
+			partial = res.summary()
+			u.Warn("%s; restarting the Services that use the rotated keys", partial)
 		}
+		gens = res.rotated
 	}
 	step = u.Step("", "Compare secrets")
 	changed, err := deploy.DetectChangedServices(ctx, d, cur)
@@ -275,6 +289,11 @@ func (a *app) rotateSecrets(ctx context.Context, services, generated []string, d
 		return nil
 	}
 	if len(changed) == 0 {
+		if partial != nil {
+			err = partial
+			u.Error(err, partialHint)
+			return &silentError{err}
+		}
 		u.Finished(nil, "Secrets unchanged; nothing to restart")
 		return nil
 	}
@@ -288,7 +307,10 @@ func (a *app) rotateSecrets(ctx context.Context, services, generated []string, d
 	rel, err := a.rollout(ctx, s, d, runtime)
 	if err != nil {
 		if len(gens) > 0 {
-			u.Warn("The new generated values are in place and the database uses them; run `yoho secrets rotate` to restart the remaining Services")
+			u.Warn("The new values of %s are in place and the database uses them; run `yoho secrets rotate` to restart the remaining Services", strings.Join(generatedKeys(gens), ", "))
+		}
+		if partial != nil {
+			u.Warn("%s", partial)
 		}
 		return err
 	}
@@ -296,9 +318,98 @@ func (a *app) rotateSecrets(ctx context.Context, services, generated []string, d
 	if err := hosts[0].Host.Run(ctx, remote.Cmd{Script: "test -f " + remote.Quote(release.AccessSecretsFile(a.cfg.App, a.destName))}); err == nil {
 		u.Warn("Members' scoped deploys still use the secrets last pushed; run `yoho access secrets push`")
 	}
+	if partial != nil {
+		err = fmt.Errorf("%w; restarted %s", partial, strings.Join(changed, ", "))
+		u.Error(err, partialHint)
+		return &silentError{err}
+	}
 	u.Finished(nil, fmt.Sprintf("Rotated secrets for %s@%s on %s in %s; restarted %s",
 		a.cfg.App, shortVersion(rel.Version), a.destName, time.Since(start).Round(100*time.Millisecond), strings.Join(changed, ", ")))
 	return nil
+}
+
+const partialHint = "fix the cause, then re-run `yoho secrets rotate --generated KEY` for each key that did not rotate"
+
+// generatedResult is the outcome of rotating several generated keys in
+// order: the ones rotated, the one that failed (with err), and the ones
+// not attempted after it.
+type generatedResult struct {
+	rotated []*deploy.GeneratedRotation
+	failed  string
+	skipped []string
+	err     error
+}
+
+// summary names the keys that rotated and the ones still on the old value.
+func (r generatedResult) summary() error {
+	if r.err == nil {
+		return nil
+	}
+	var parts, old []string
+	if len(r.rotated) > 0 {
+		parts = append(parts, "rotated "+strings.Join(generatedKeys(r.rotated), ", "))
+	}
+	if pe := (*deploy.PendingSwapError)(nil); errors.As(r.err, &pe) && pe.Applied {
+		parts = append(parts, fmt.Sprintf("%s failed (%v); the database already uses the pending value in generated/%s.next, do not run `yoho deploy` until a re-run finishes it", r.failed, r.err, r.failed))
+	} else {
+		parts = append(parts, fmt.Sprintf("%s failed (%v)", r.failed, r.err))
+		old = append(old, r.failed)
+	}
+	if len(r.skipped) > 0 {
+		parts = append(parts, "not attempted: "+strings.Join(r.skipped, ", "))
+		old = append(old, r.skipped...)
+	}
+	switch len(old) {
+	case 0:
+	case 1:
+		parts = append(parts, old[0]+" still uses the old value")
+	default:
+		parts = append(parts, strings.Join(old, ", ")+" still use the old value")
+	}
+	return errors.New(strings.Join(parts, "; "))
+}
+
+type rotateGeneratedFunc func(g *deploy.GeneratedRotation, logf, warnf func(string, ...any)) error
+
+// rotateGeneratedKeys rotates gens in order and stops at the first
+// failure, so the caller can still roll out the keys already swapped.
+func rotateGeneratedKeys(u *ui.UI, server string, gens []*deploy.GeneratedRotation, rotate rotateGeneratedFunc) generatedResult {
+	var res generatedResult
+	for i, g := range gens {
+		step := u.Step(server, "Rotate generated %s (%s via %s)", g.Key, g.Strategy, g.Service)
+		err := rotate(g, func(f string, args ...any) {
+			fmt.Fprintf(step.Output(), f+"\n", args...)
+		}, func(f string, args ...any) {
+			u.Warn("%s: %s", g.Key, fmt.Sprintf(f, args...))
+		})
+		if err != nil {
+			res.failed, res.err = g.Key, err
+			for _, rest := range gens[i+1:] {
+				res.skipped = append(res.skipped, rest.Key)
+			}
+			step.Fail(err, generatedFailHint(g.Key, err))
+			return res
+		}
+		res.rotated = append(res.rotated, g)
+		step.Done("new value in place")
+	}
+	return res
+}
+
+func generatedFailHint(key string, err error) string {
+	var pe *deploy.PendingSwapError
+	if errors.As(err, &pe) && pe.Applied {
+		return fmt.Sprintf("the database already uses the pending value in generated/%s.next, but generated/%s still holds the old one; re-run `yoho secrets rotate --generated %s` to finish (it reuses the pending value), and do not run `yoho deploy` until then", key, key, key)
+	}
+	return fmt.Sprintf("the old %s is still in use; fix the cause and re-run `yoho secrets rotate --generated %s` (it reuses the pending value)", key, key)
+}
+
+func generatedKeys(gens []*deploy.GeneratedRotation) []string {
+	out := make([]string, 0, len(gens))
+	for _, g := range gens {
+		out = append(out, g.Key)
+	}
+	return out
 }
 
 func generatedDetail(g *deploy.GeneratedRotation) string {

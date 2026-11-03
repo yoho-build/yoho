@@ -2,6 +2,7 @@ package backup
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -79,12 +80,29 @@ func TestBackupTrustThroughAppDirLink(t *testing.T) {
 	os.MkdirAll(filepath.Join(data, generatedPrefix), 0o700)
 	os.WriteFile(filepath.Join(data, generatedPrefix, "PG"), []byte("restored"), 0o600)
 	os.WriteFile(filepath.Join(data, generatedPrefix, "NEW"), []byte("new"), 0o600)
-	wrote, changed, err := restoreGenerated(ctx, h, "shop", "production", data, []string{"NEW", "PG"}, func(string, ...any) {})
-	if err != nil || strings.Join(wrote, ",") != "NEW,PG" || strings.Join(changed, ",") != "PG" {
-		t.Fatalf("restore: %v %v %v", wrote, changed, err)
+	// KEEP belongs to a dump-only database: its current value stays.
+	// KEEPNEW is absent on the Server, so the Backup value is still written.
+	os.WriteFile(filepath.Join(data, generatedPrefix, "KEEP"), []byte("backup-keep"), 0o600)
+	os.WriteFile(filepath.Join(data, generatedPrefix, "KEEPNEW"), []byte("backup-new"), 0o600)
+	os.MkdirAll(filepath.Join(target, "generated"), 0o700)
+	os.WriteFile(filepath.Join(target, "generated", "KEEP"), []byte("current-keep"), 0o600)
+	var notes []string
+	keep := map[string]string{"KEEP": "db", "KEEPNEW": "db"}
+	wrote, changed, kept, err := restoreGenerated(ctx, h, "shop", "production", data, []string{"KEEP", "KEEPNEW", "NEW", "PG"}, keep, func(f string, a ...any) { notes = append(notes, fmt.Sprintf(f, a...)) })
+	if err != nil || strings.Join(wrote, ",") != "KEEPNEW,NEW,PG" || strings.Join(changed, ",") != "PG" || strings.Join(kept, ",") != "KEEP" {
+		t.Fatalf("restore: %v %v %v %v", wrote, changed, kept, err)
 	}
 	if b, _ := os.ReadFile(filepath.Join(target, "generated", "PG")); string(b) != "restored" {
 		t.Fatalf("restored %q", b)
+	}
+	if b, _ := os.ReadFile(filepath.Join(target, "generated", "KEEP")); string(b) != "current-keep" {
+		t.Fatalf("kept value replaced: %q", b)
+	}
+	if b, _ := os.ReadFile(filepath.Join(target, "generated", "KEEPNEW")); string(b) != "backup-new" {
+		t.Fatalf("absent value not written: %q", b)
+	}
+	if n := strings.Join(notes, "\n"); !strings.Contains(n, "keeping the current generated secret KEEP: Service db is restored from a dump") || strings.Contains(n, "current-keep") || strings.Contains(n, "backup-keep") {
+		t.Fatalf("notes %q", notes)
 	}
 	// Without the exception the same link is still refused. Root-owned
 	// ancestor links pass as admin aliases (macOS /var), so as root hand the

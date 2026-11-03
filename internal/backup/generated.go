@@ -132,51 +132,88 @@ func stageGenerated(ctx context.Context, h remote.Host, app, dest, staging strin
 	return nil
 }
 
+// dumpOnlyGenerated maps each generated secret in names to the Service that
+// keeps its current value: a Service declaring it in x-yoho.generate
+// (owners) that the Backup holds as a dump only. A dump (pg_dump, say) has
+// no database roles, so the restored database keeps the password it has
+// now; writing back the Backup's value would lock its consumers out. Keys
+// with an owner whose volumes are in the Backup, or with no known owner in
+// the Backup, are absent and restored as before.
+func dumpOnlyGenerated(m Manifest, names []string, owners map[string][]string) map[string]string {
+	out := map[string]string{}
+	for _, name := range names {
+		dumpOnly, withVolumes := "", false
+		for _, svc := range owners[name] {
+			ms, ok := m.Services[svc]
+			if !ok {
+				continue
+			}
+			if len(ms.Volumes) > 0 {
+				withVolumes = true
+			} else if ms.Dump != "" && dumpOnly == "" {
+				dumpOnly = svc
+			}
+		}
+		if dumpOnly != "" && !withVolumes {
+			out[name] = dumpOnly
+		}
+	}
+	return out
+}
+
 // restoreGenerated writes Backup copies of generated secrets back to the
 // Server. wrote is every name written. changed is the subset whose previous
-// value differed (not names that were absent). A warning names the secret
-// and not the value. The next deploy keeps the file (ensureFileOnce).
-// Running Services keep the previous release's secrets/<generation> copy
-// until that deploy.
-func restoreGenerated(ctx context.Context, h remote.Host, app, dest, data string, names []string, logf func(string, ...any)) (wrote, changed []string, err error) {
+// value differed (not names that were absent). keep names secrets whose
+// current value stays (see dumpOnlyGenerated): kept lists those whose
+// Backup value differed and was not written; an absent one is still
+// written. A note names the secret and not the value. The next deploy
+// keeps the file (ensureFileOnce). Running Services keep the previous
+// release's secrets/<generation> copy until that deploy.
+func restoreGenerated(ctx context.Context, h remote.Host, app, dest, data string, names []string, keep map[string]string, logf func(string, ...any)) (wrote, changed, kept []string, err error) {
 	if len(names) == 0 {
-		return nil, nil, nil
+		return nil, nil, nil, nil
 	}
 	dir := generatedDir(app, dest)
 	script := appLink(app, dest) + safeDir(dir, true, true)
 	if err := h.Run(ctx, remote.Cmd{Script: script}); err != nil {
-		return nil, nil, fmt.Errorf("create generated dir: %w", err)
+		return nil, nil, nil, fmt.Errorf("create generated dir: %w", err)
 	}
 	for _, name := range names {
 		if !generatedNameRe.MatchString(name) {
-			return nil, nil, fmt.Errorf("manifest: invalid generated secret name %q", name)
+			return nil, nil, nil, fmt.Errorf("manifest: invalid generated secret name %q", name)
 		}
 		if err := h.Run(ctx, remote.Cmd{Script: safeFile(path.Join(data, generatedPrefix, name), true)}); err != nil {
-			return nil, nil, fmt.Errorf("unsafe Backup generated secret %s: %w", name, err)
+			return nil, nil, nil, fmt.Errorf("unsafe Backup generated secret %s: %w", name, err)
 		}
 		b, err := h.ReadFile(ctx, path.Join(data, generatedPrefix, name), false)
 		if err != nil {
-			return nil, nil, fmt.Errorf("generated secret %s missing from Backup: %w", name, err)
+			return nil, nil, nil, fmt.Errorf("generated secret %s missing from Backup: %w", name, err)
 		}
 		dst := path.Join(dir, name)
 		if err := h.Run(ctx, remote.Cmd{Script: appLink(app, dest) + pathSafety + "yoho_private " + remote.Quote(dir) + "\nif [ -e " + remote.Quote(dst) + " ] || [ -L " + remote.Quote(dst) + " ]; then yoho_secret " + remote.Quote(dst) + "; fi\n"}); err != nil {
-			return nil, nil, fmt.Errorf("unsafe generated secret destination %s: %w", name, err)
+			return nil, nil, nil, fmt.Errorf("unsafe generated secret destination %s: %w", name, err)
 		}
 		existing, err := h.ReadFile(ctx, dst, false)
 		switch {
 		case err == nil:
-			if !bytes.Equal(existing, b) {
-				logf("generated secret %s differs on the Server; restoring the Backup value", name)
-				changed = append(changed, name)
+			if bytes.Equal(existing, b) {
+				break
 			}
+			if svc, ok := keep[name]; ok {
+				logf("keeping the current generated secret %s: Service %s is restored from a dump, which has no database roles, so its database still uses the current value", name, svc)
+				kept = append(kept, name)
+				continue
+			}
+			logf("generated secret %s differs on the Server; restoring the Backup value", name)
+			changed = append(changed, name)
 		case errors.Is(err, os.ErrNotExist):
 		default:
-			return nil, nil, fmt.Errorf("read generated secret %s: %w", name, err)
+			return nil, nil, nil, fmt.Errorf("read generated secret %s: %w", name, err)
 		}
 		if err := h.WriteFile(ctx, dst, b, 0o600, false); err != nil {
-			return nil, nil, fmt.Errorf("write generated secret %s: %w", name, err)
+			return nil, nil, nil, fmt.Errorf("write generated secret %s: %w", name, err)
 		}
 		wrote = append(wrote, name)
 	}
-	return wrote, changed, nil
+	return wrote, changed, kept, nil
 }

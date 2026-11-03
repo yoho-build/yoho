@@ -110,6 +110,11 @@ type RestoreOptions struct {
 	// GeneratedSkipped. Ignored for same-Destination restores, which always
 	// restore them.
 	CopyGenerated bool
+	// GeneratedOwners maps each generated secret to the Services that
+	// declare it in x-yoho.generate. A secret whose owner the Backup holds
+	// as a dump only (no volumes) keeps its current value: the dump has no
+	// database roles. Nil: every generated secret is restored.
+	GeneratedOwners map[string][]string
 	// AfterRestore runs after Service post_restore commands, while consumers
 	// remain stopped. Failure keeps the App isolated. Intended for the CLI's
 	// post-restore Hook; it must not start consumers or change exposure.
@@ -136,6 +141,10 @@ type RestoreResult struct {
 	// and was replaced. Services keep reading secrets/<generation> until
 	// the next deploy.
 	GeneratedChanged []string
+	// GeneratedKept are generated secrets of a dump-only Service whose
+	// Backup value differed and was not written: the restored database
+	// still uses the current value (names only).
+	GeneratedKept []string
 	// GeneratedSkipped are generated secrets in a --from Backup that were
 	// not written because CopyGenerated was false (names only).
 	GeneratedSkipped []string
@@ -467,12 +476,15 @@ func Restore(ctx context.Context, o RestoreOptions) (res *RestoreResult, err err
 	// Generated secrets go back after volumes and before Services start,
 	// so the data and the passwords it was created with land together.
 	// The next deploy keeps these files (ensureFileOnce never overwrites).
-	restored, changed, err := restoreGenerated(ctx, o.Host, o.App, o.Destination, data, generated, logf)
+	// Secrets of a dump-only database keep their current value: the dump
+	// has no roles, so the database keeps its current password.
+	restored, changed, kept, err := restoreGenerated(ctx, o.Host, o.App, o.Destination, data, generated, dumpOnlyGenerated(m, generated, o.GeneratedOwners), logf)
 	if err != nil {
 		return nil, fmt.Errorf("restore generated secrets: %w", err)
 	}
 	res.Generated = restored
 	res.GeneratedChanged = changed
+	res.GeneratedKept = kept
 	// Start prerequisites in dependency order and load each target's dump before
 	// starting downstream processes that could otherwise consume partial data.
 	for _, svc := range dumpTargets {

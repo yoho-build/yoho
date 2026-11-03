@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path"
@@ -24,6 +25,7 @@ type rotHost struct {
 	mu     sync.Mutex
 	calls  []rotCall
 	docker func(c rotCall, stderr io.Writer) error
+	swap   error // returned for the swap script, when set
 }
 
 type rotCall struct {
@@ -37,6 +39,9 @@ func (f *rotHost) Run(ctx context.Context, c remote.Cmd) error {
 	return err
 }
 func (f *rotHost) Output(ctx context.Context, c remote.Cmd) (string, error) {
+	if f.swap != nil && strings.Contains(c.Script, "mv -f ") {
+		return "", f.swap
+	}
 	if !strings.Contains(c.Script, "docker ") {
 		return f.local.Output(ctx, c)
 	}
@@ -221,7 +226,7 @@ func TestRotateGeneratedSecretPostgres(t *testing.T) {
 		t.Fatal(err)
 	}
 	g := &GeneratedRotation{Key: "POSTGRES_PASSWORD", Kind: "password32", Service: "db", Strategy: RotatePostgres, User: "shop", Consumers: []string{"db", "web"}}
-	if err := RotateGeneratedSecret(ctx, h, "shop", "production", "alice", g, t.Logf); err != nil {
+	if err := RotateGeneratedSecret(ctx, h, "shop", "production", "alice", g, t.Logf, nil); err != nil {
 		t.Fatal(err)
 	}
 	b, err := os.ReadFile(p)
@@ -275,7 +280,7 @@ func TestRotateGeneratedSecretKeepsOldOnFailureAndResumes(t *testing.T) {
 		return &remote.ExitError{Host: "s1", Code: 1}
 	}
 	g := &GeneratedRotation{Key: "MYSQL_PASSWORD", Kind: "password32", Service: "db", Strategy: RotateMySQL, User: "app"}
-	err := RotateGeneratedSecret(ctx, h, "shop", "production", "alice", g, nil)
+	err := RotateGeneratedSecret(ctx, h, "shop", "production", "alice", g, nil, nil)
 	if err == nil {
 		t.Fatal("expected failure")
 	}
@@ -298,7 +303,7 @@ func TestRotateGeneratedSecretKeepsOldOnFailureAndResumes(t *testing.T) {
 		}
 		return nil
 	}
-	if err := RotateGeneratedSecret(ctx, h, "shop", "production", "alice", g, nil); err != nil {
+	if err := RotateGeneratedSecret(ctx, h, "shop", "production", "alice", g, nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	if b, _ := os.ReadFile(p); !bytes.Equal(b, pending) {
@@ -328,7 +333,7 @@ func TestRotateGeneratedSecretCommandAndNone(t *testing.T) {
 		}
 		return nil
 	}
-	if err := RotateGeneratedSecret(ctx, h, "shop", "production", "alice", &GeneratedRotation{Key: "A", Kind: "hex32", Service: "svc", Strategy: RotateCommand, Command: []string{"rekey", "--stdin"}}, nil); err != nil {
+	if err := RotateGeneratedSecret(ctx, h, "shop", "production", "alice", &GeneratedRotation{Key: "A", Kind: "hex32", Service: "svc", Strategy: RotateCommand, Command: []string{"rekey", "--stdin"}}, nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	a, _ := os.ReadFile(path.Join(dir, "generated", "A"))
@@ -336,7 +341,7 @@ func TestRotateGeneratedSecretCommandAndNone(t *testing.T) {
 		t.Fatalf("command stdin %q", got)
 	}
 	h.calls = nil
-	if err := RotateGeneratedSecret(ctx, h, "shop", "production", "alice", &GeneratedRotation{Key: "B", Kind: "hex32", Service: "svc", Strategy: RotateNone}, nil); err != nil {
+	if err := RotateGeneratedSecret(ctx, h, "shop", "production", "alice", &GeneratedRotation{Key: "B", Kind: "hex32", Service: "svc", Strategy: RotateNone}, nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	if len(h.calls) != 0 {
@@ -346,8 +351,66 @@ func TestRotateGeneratedSecretCommandAndNone(t *testing.T) {
 		t.Fatalf("B = %q", b)
 	}
 	// Not generated yet: nothing to rotate.
-	err := RotateGeneratedSecret(ctx, h, "shop", "production", "alice", &GeneratedRotation{Key: "C", Kind: "hex32", Strategy: RotateNone}, nil)
+	err := RotateGeneratedSecret(ctx, h, "shop", "production", "alice", &GeneratedRotation{Key: "C", Kind: "hex32", Strategy: RotateNone}, nil, nil)
 	if err == nil || !strings.Contains(err.Error(), "yoho deploy") {
 		t.Fatalf("missing: %v", err)
+	}
+}
+
+func TestRotateGeneratedSecretFailedLoginCheckStillSwaps(t *testing.T) {
+	withRoot(t)
+	ctx := context.Background()
+	h := &rotHost{}
+	p := path.Join(release.AppDir("shop", "production"), "generated", "POSTGRES_PASSWORD")
+	if _, err := ensureFileOnce(ctx, h, p, []byte("OLDvalue0123456789")); err != nil {
+		t.Fatal(err)
+	}
+	h.docker = func(c rotCall, stderr io.Writer) error {
+		if strings.Contains(c.Script, "SELECT 1") {
+			io.WriteString(stderr, "connection refused")
+			return &remote.ExitError{Host: "s1", Code: 2}
+		}
+		return nil
+	}
+	var warns []string
+	g := &GeneratedRotation{Key: "POSTGRES_PASSWORD", Kind: "password32", Service: "db", Strategy: RotatePostgres, User: "shop"}
+	if err := RotateGeneratedSecret(ctx, h, "shop", "production", "alice", g, nil, func(f string, a ...any) {
+		warns = append(warns, fmt.Sprintf(f, a...))
+	}); err != nil {
+		t.Fatalf("a failed login check after ALTER must not fail the rotation: %v", err)
+	}
+	if len(warns) != 1 || !strings.Contains(warns[0], "the database took the new password") || !strings.Contains(warns[0], "connection refused") {
+		t.Fatalf("warnings %q", warns)
+	}
+	if b, _ := os.ReadFile(p); string(b) == "OLDvalue0123456789" || len(b) != 32 {
+		t.Fatalf("not swapped: %q", b)
+	}
+}
+
+func TestRotateGeneratedSecretSwapFailureIsPending(t *testing.T) {
+	withRoot(t)
+	ctx := context.Background()
+	h := &rotHost{swap: errors.New("disk full")}
+	p := path.Join(release.AppDir("shop", "production"), "generated", "POSTGRES_PASSWORD")
+	if _, err := ensureFileOnce(ctx, h, p, []byte("OLDvalue0123456789")); err != nil {
+		t.Fatal(err)
+	}
+	g := &GeneratedRotation{Key: "POSTGRES_PASSWORD", Kind: "password32", Service: "db", Strategy: RotatePostgres, User: "shop"}
+	err := RotateGeneratedSecret(ctx, h, "shop", "production", "alice", g, nil, nil)
+	var pe *PendingSwapError
+	if !errors.As(err, &pe) || pe.Key != "POSTGRES_PASSWORD" || !pe.Applied {
+		t.Fatalf("want PendingSwapError, got %v", err)
+	}
+	if b, _ := os.ReadFile(p + ".next"); len(b) != 32 {
+		t.Fatalf("pending value gone: %q", b)
+	}
+	// A re-run resumes with the pending value and finishes the swap.
+	pending, _ := os.ReadFile(p + ".next")
+	h.swap = nil
+	if err := RotateGeneratedSecret(ctx, h, "shop", "production", "alice", g, nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	if b, _ := os.ReadFile(p); !bytes.Equal(b, pending) {
+		t.Fatal("re-run used another value")
 	}
 }

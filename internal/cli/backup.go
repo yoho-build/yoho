@@ -38,6 +38,9 @@ type backupJob struct {
 	env        map[string]string
 	rcloneConf string         // resolved rclone_config_secret; never stored on the Server as a secret file
 	store      *secrets.Store // nil when the target needs no secrets
+	// generatedOwners maps x-yoho.generate keys to the Services declaring
+	// them (set by resolveServices).
+	generatedOwners map[string][]string
 }
 
 func (j *backupJob) label() string {
@@ -132,9 +135,14 @@ func (a *app) resolveServices(ctx context.Context, j *backupJob) error {
 		return err
 	}
 	all := map[string]config.ServiceBackup{}
-	for svc, ext := range r.Ext {
+	j.generatedOwners = map[string][]string{}
+	for _, svc := range sortedKeys(r.Ext) {
+		ext := r.Ext[svc]
 		if ext.Backup != nil {
 			all[svc] = *ext.Backup
+		}
+		for key := range ext.Generate {
+			j.generatedOwners[key] = append(j.generatedOwners[key], svc)
 		}
 	}
 	j.services = map[string]config.ServiceBackup{}
@@ -631,7 +639,7 @@ this Destination's Server. The source's generated secrets are not copied unless
 				App: a.cfg.App, Destination: a.destName, Project: a.project(), From: source, CopyGenerated: copyGenerated,
 				Services: j.services, Target: j.target, Password: j.password, TargetEnv: j.env, RcloneConfig: j.rcloneConf,
 				Host: h.Host, Out: out, Lock: a.backupLock(h.Host, "restore"), ID: found.ID, Confirm: true,
-				Runtime: a.dest.Runtime,
+				Runtime: a.dest.Runtime, GeneratedOwners: j.generatedOwners,
 				AfterRestore: func(ctx context.Context) error {
 					return hook(ctx, "post-restore", hookEnv)
 				},
@@ -659,6 +667,7 @@ this Destination's Server. The source's generated secrets are not copied unless
 				u.Warn("generated secrets %s of %s were not copied; %s keeps its own. If the restored volume data needs the source's values, rerun with --copy-generated-secrets", strings.Join(res.GeneratedSkipped, ", "), source, a.destName)
 			}
 			warnIfGeneratedChanged(u, res.GeneratedChanged)
+			noteGeneratedKept(u, res.GeneratedKept)
 			what := found.ID
 			if cross {
 				what = found.ID + " of " + source
@@ -759,6 +768,15 @@ func warnIfGeneratedChanged(u *ui.UI, changed []string) {
 		return
 	}
 	u.Warn("generated secrets %s changed; run `yoho deploy` so Services use the restored values", strings.Join(changed, ", "))
+}
+
+// noteGeneratedKept names generated secrets left at their current value
+// because their database was restored from a dump (no roles in it).
+func noteGeneratedKept(u *ui.UI, kept []string) {
+	if len(kept) == 0 {
+		return
+	}
+	u.Info("kept the current value of generated secrets %s: their Services were restored from a dump, which has no database roles, so the database still uses the current password", strings.Join(kept, ", "))
 }
 
 func humanBytes(n int64) string {

@@ -189,7 +189,7 @@ func TestGeneratedSecretsRejectLinkedSourceAndDestination(t *testing.T) {
 	data := filepath.Join(release.Root, "data")
 	os.MkdirAll(filepath.Join(data, generatedPrefix), 0700)
 	os.WriteFile(filepath.Join(data, generatedPrefix, "PG"), []byte("restored"), 0600)
-	if _, _, err := restoreGenerated(ctx, h, "shop", "production", data, []string{"PG"}, func(string, ...any) {}); err == nil {
+	if _, _, _, err := restoreGenerated(ctx, h, "shop", "production", data, []string{"PG"}, nil, func(string, ...any) {}); err == nil {
 		t.Fatal("linked destination accepted")
 	}
 	b, _ := os.ReadFile(outside)
@@ -198,7 +198,7 @@ func TestGeneratedSecretsRejectLinkedSourceAndDestination(t *testing.T) {
 	}
 	os.Remove(src)
 	os.WriteFile(src, []byte("old"), 0644)
-	if _, _, err := restoreGenerated(ctx, h, "shop", "production", data, []string{"PG"}, func(string, ...any) {}); err == nil {
+	if _, _, _, err := restoreGenerated(ctx, h, "shop", "production", data, []string{"PG"}, nil, func(string, ...any) {}); err == nil {
 		t.Fatal("public generated secret accepted")
 	}
 }

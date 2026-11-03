@@ -9,7 +9,9 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/yoho-build/yoho/internal/deploy"
 	"github.com/yoho-build/yoho/internal/release"
+	"github.com/yoho-build/yoho/internal/ui"
 )
 
 func TestCheckGeneratedFlags(t *testing.T) {
@@ -105,5 +107,59 @@ func TestMigrateDraftRotationChecklist(t *testing.T) {
 	}
 	if svcs, _ := first["services"].([]any); len(svcs) != 2 {
 		t.Fatalf("services %v", first["services"])
+	}
+}
+
+func TestRotateGeneratedKeysStopsAtFailureAndKeepsRotated(t *testing.T) {
+	gens := []*deploy.GeneratedRotation{
+		{Key: "A_PASSWORD", Service: "db", Strategy: deploy.RotatePostgres},
+		{Key: "B_PASSWORD", Service: "db2", Strategy: deploy.RotatePostgres},
+		{Key: "C_PASSWORD", Service: "db3", Strategy: deploy.RotatePostgres},
+	}
+	var out bytes.Buffer
+	var tried []string
+	res := rotateGeneratedKeys(ui.New(&out, ui.Human, false), "s1", gens, func(g *deploy.GeneratedRotation, logf, warnf func(string, ...any)) error {
+		tried = append(tried, g.Key)
+		if g.Key == "B_PASSWORD" {
+			return errors.New("ALTER ROLE app: connection refused")
+		}
+		return nil
+	})
+	if strings.Join(tried, ",") != "A_PASSWORD,B_PASSWORD" {
+		t.Fatalf("tried %v", tried)
+	}
+	if len(res.rotated) != 1 || res.rotated[0].Key != "A_PASSWORD" || res.failed != "B_PASSWORD" || strings.Join(res.skipped, ",") != "C_PASSWORD" {
+		t.Fatalf("result %+v", res)
+	}
+	msg := res.summary().Error()
+	for _, want := range []string{"rotated A_PASSWORD", "B_PASSWORD failed (ALTER ROLE app: connection refused)", "not attempted: C_PASSWORD", "B_PASSWORD, C_PASSWORD still use the old value"} {
+		if !strings.Contains(msg, want) {
+			t.Fatalf("summary %q lacks %q", msg, want)
+		}
+	}
+	if !strings.Contains(out.String(), "the old B_PASSWORD is still in use") {
+		t.Fatalf("hint: %s", out.String())
+	}
+}
+
+func TestRotateGeneratedKeysPendingSwapHint(t *testing.T) {
+	gens := []*deploy.GeneratedRotation{{Key: "A"}, {Key: "B"}}
+	var out bytes.Buffer
+	res := rotateGeneratedKeys(ui.New(&out, ui.Human, false), "s1", gens, func(g *deploy.GeneratedRotation, logf, warnf func(string, ...any)) error {
+		if g.Key == "A" {
+			warnf("the database took the new password; could not confirm a network login: %s", "timeout")
+			return nil
+		}
+		return &deploy.PendingSwapError{Key: "B", Applied: true, Err: errors.New("mv failed")}
+	})
+	msg := res.summary().Error()
+	if !strings.Contains(msg, "generated/B.next") || strings.Contains(msg, "B still") || !strings.Contains(msg, "yoho deploy") {
+		t.Fatalf("summary %q", msg)
+	}
+	s := out.String()
+	for _, want := range []string{"A: the database took the new password", "already uses the pending value in generated/B.next", "do not run `yoho deploy`"} {
+		if !strings.Contains(s, want) {
+			t.Fatalf("output lacks %q:\n%s", want, s)
+		}
 	}
 }

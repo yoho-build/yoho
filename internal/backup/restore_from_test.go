@@ -157,3 +157,26 @@ func TestListFromUsesSourceIdentityAndLocalFiles(t *testing.T) {
 		t.Fatalf("list must use the local Destination's spool:\n%s", s)
 	}
 }
+
+func TestDumpOnlyGenerated(t *testing.T) {
+	m := Manifest{Services: map[string]ManifestService{
+		"pg":    {Dump: "pg.dump"},
+		"mysql": {Dump: "mysql.dump", Volumes: map[string]string{"data": "mysql-data.tar"}},
+		"vol":   {Volumes: map[string]string{"data": "vol-data.tar"}},
+	}}
+	owners := map[string][]string{
+		"POSTGRES_PASSWORD": {"pg", "web"}, // web is not backed up: pg decides
+		"MYSQL_PASSWORD":    {"mysql"},     // its volumes restore the roles
+		"VOL_KEY":           {"vol"},
+		"APP_KEY":           {"web"},       // owner not in the Backup
+		"SHARED":            {"pg", "vol"}, // one owner restores volumes
+	}
+	names := []string{"APP_KEY", "MYSQL_PASSWORD", "POSTGRES_PASSWORD", "SHARED", "UNKNOWN", "VOL_KEY"}
+	got := dumpOnlyGenerated(m, names, owners)
+	if len(got) != 1 || got["POSTGRES_PASSWORD"] != "pg" {
+		t.Fatalf("got %v", got)
+	}
+	if got := dumpOnlyGenerated(m, names, nil); len(got) != 0 {
+		t.Fatalf("no owners: %v", got)
+	}
+}

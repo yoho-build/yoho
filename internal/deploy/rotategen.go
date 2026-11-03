@@ -214,11 +214,18 @@ func PlanGeneratedRotation(d *plan.Deploy, key string) (*GeneratedRotation, erro
 //
 // If the database step fails, generated/<Key> keeps the old value and the
 // pending one stays, so a re-run applies the same value again (the strategy
-// authenticates with either value). Values travel over stdin or the env
-// file of remote.Cmd, never in a script or argv, and errors are scrubbed.
-func RotateGeneratedSecret(ctx context.Context, h remote.Host, app, dest, performer string, g *GeneratedRotation, logf func(string, ...any)) (err error) {
+// authenticates with either value). Once the database took the new value,
+// a failed login check is passed to warnf and the swap still happens, so
+// the database and generated/<Key> agree. If the swap itself fails the
+// error is a *PendingSwapError: the database already uses the value in
+// generated/<Key>.next. Values travel over stdin or the env file of
+// remote.Cmd, never in a script or argv, and errors are scrubbed.
+func RotateGeneratedSecret(ctx context.Context, h remote.Host, app, dest, performer string, g *GeneratedRotation, logf, warnf func(string, ...any)) (err error) {
 	if logf == nil {
 		logf = func(string, ...any) {}
+	}
+	if warnf == nil {
+		warnf = logf
 	}
 	dir := release.AppDir(app, dest)
 	p := path.Join(dir, "generated", g.Key)
@@ -253,12 +260,16 @@ func RotateGeneratedSecret(ctx context.Context, h remote.Host, app, dest, perfor
 			return err
 		}
 		logf("applying the new %s through %s (%s)", g.Key, g.Service, g.Strategy)
-		if err := applyRotation(ctx, h, cid, g, old, next); err != nil {
+		warn, err := applyRotation(ctx, h, cid, g, old, next)
+		if err != nil {
 			return err
+		}
+		if warn != "" {
+			warnf("%s", warn)
 		}
 	}
 	if err := h.Run(ctx, remote.Cmd{Script: swapScript(p)}); err != nil {
-		return fmt.Errorf("swap generated secret %s: %w", g.Key, err)
+		return &PendingSwapError{Key: g.Key, Applied: g.Strategy != RotateNone, Err: err}
 	}
 	key, err := ensureHMACKey(ctx, h, dir)
 	if err != nil {
@@ -276,6 +287,21 @@ func RotateGeneratedSecret(ctx context.Context, h remote.Host, app, dest, perfor
 	}
 	return nil
 }
+
+// PendingSwapError means the new value was applied to the database (when
+// Applied) but could not replace generated/<Key>: the database uses the
+// value in generated/<Key>.next. A re-run of the rotation finishes it.
+type PendingSwapError struct {
+	Key     string
+	Applied bool
+	Err     error
+}
+
+func (e *PendingSwapError) Error() string {
+	return fmt.Sprintf("swap generated secret %s: %v", e.Key, e.Err)
+}
+
+func (e *PendingSwapError) Unwrap() error { return e.Err }
 
 func swapScript(p string) string {
 	n := remote.Quote(p + ".next")
@@ -300,8 +326,11 @@ func runningContainer(ctx context.Context, h remote.Host, project, svc string) (
 // applyRotation runs the strategy. It first authenticates with the old
 // value; if the database already took the new one (an earlier run stopped
 // after the database step), it retries with the new value. Remote stderr is
-// captured and scrubbed of both values before it becomes an error.
-func applyRotation(ctx context.Context, h remote.Host, cid string, g *GeneratedRotation, old, next []byte) error {
+// captured and scrubbed of both values before it becomes an error. An error
+// means the database step failed; once it succeeded, a failed login check
+// with the new value is returned as a warning instead, because the database
+// already uses the new value.
+func applyRotation(ctx context.Context, h remote.Host, cid string, g *GeneratedRotation, old, next []byte) (warning string, err error) {
 	run := func(c remote.Cmd) error { return runScrubbed(ctx, h, c, string(old), string(next)) }
 	switch g.Strategy {
 	case RotatePostgres:
@@ -309,12 +338,12 @@ func applyRotation(ctx context.Context, h remote.Host, cid string, g *GeneratedR
 		if err := withEither(old, next, func(auth []byte) error {
 			return run(remote.Cmd{Script: postgresAlterScript(cid, g.User), Stdin: strings.NewReader(sql), Env: map[string]string{"PGPASSWORD": string(auth)}})
 		}); err != nil {
-			return fmt.Errorf("ALTER ROLE %s: %w", g.User, err)
+			return "", fmt.Errorf("ALTER ROLE %s: %w", g.User, err)
 		}
 		if err := run(remote.Cmd{Script: postgresVerifyScript(cid, g.User), Env: map[string]string{"PGPASSWORD": string(next)}}); err != nil {
-			return fmt.Errorf("postgres did not accept the new password for %s over the network: %w", g.User, err)
+			return fmt.Sprintf("the database took the new password for %s; could not confirm a network login: %v", g.User, err), nil
 		}
-		return nil
+		return "", nil
 	case RotateMySQL:
 		sql := mysqlSQL(g.User, string(next), g.MariaDB)
 		if err := withEither(old, next, func(auth []byte) error {
@@ -324,23 +353,23 @@ func applyRotation(ctx context.Context, h remote.Host, cid string, g *GeneratedR
 			}
 			return run(remote.Cmd{Script: mysqlScript(cid), Stdin: bytes.NewReader(in)})
 		}); err != nil {
-			return fmt.Errorf("change the password of %s: %w", g.User, err)
+			return "", fmt.Errorf("change the password of %s: %w", g.User, err)
 		}
 		in, err := mysqlStdin(g.User, string(next), "SELECT 1;\n")
+		if err == nil {
+			err = run(remote.Cmd{Script: mysqlScript(cid), Stdin: bytes.NewReader(in)})
+		}
 		if err != nil {
-			return err
+			return fmt.Sprintf("the database took the new password for %s; could not confirm a login with it: %v", g.User, err), nil
 		}
-		if err := run(remote.Cmd{Script: mysqlScript(cid), Stdin: bytes.NewReader(in)}); err != nil {
-			return fmt.Errorf("the database did not accept the new password for %s: %w", g.User, err)
-		}
-		return nil
+		return "", nil
 	case RotateCommand:
 		if err := run(remote.Cmd{Script: commandScript(cid, g.Command), Stdin: strings.NewReader(commandStdin(string(old), string(next)))}); err != nil {
-			return fmt.Errorf("x-yoho.rotate.%s.command: %w", g.Key, err)
+			return "", fmt.Errorf("x-yoho.rotate.%s.command: %w", g.Key, err)
 		}
-		return nil
+		return "", nil
 	}
-	return fmt.Errorf("unknown strategy %q", g.Strategy)
+	return "", fmt.Errorf("unknown strategy %q", g.Strategy)
 }
 
 // withEither calls f with the old value, then with the new one. When both
