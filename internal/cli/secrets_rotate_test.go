@@ -124,3 +124,15 @@ func TestRotateVersionPattern(t *testing.T) {
 		}
 	}
 }
+
+func TestGeneratedPlanHint(t *testing.T) {
+	d := &plan.Deploy{SecretRefs: map[string]string{"APP_TOKEN": "op://v/i/f"}, ServiceSecrets: map[string]map[string]string{"web": {"API_KEY": "x"}}}
+	for _, key := range []string{"APP_TOKEN", "API_KEY"} {
+		if h := generatedPlanHint(&deploy.NotGeneratedError{Key: key}, d); h != key+" comes from .yoho/secrets (or your provider); change it there and run `yoho secrets rotate`" {
+			t.Errorf("%s: %q", key, h)
+		}
+	}
+	if h := generatedPlanHint(&deploy.NotGeneratedError{Key: "NOPE"}, d); !strings.Contains(h, "https://yohobuild.com/secrets#rotating-generated-secrets") {
+		t.Errorf("unknown: %q", h)
+	}
+}

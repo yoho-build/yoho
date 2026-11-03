@@ -200,7 +200,7 @@ func TestDiffAnnotatesDefaultLogging(t *testing.T) {
 		t.Fatal(err)
 	}
 	c := byKey(cs)["service db"]
-	want := "config changed: logging (Yoho's default log rotation since v0.6.0; set `logging` on the Service to keep your own)"
+	want := "config changed: " + DefaultLoggingNote
 	if c.Action != plan.ActionReplace || len(c.Reasons) != 1 || c.Reasons[0] != want {
 		t.Fatalf("db %+v", c)
 	}

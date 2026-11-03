@@ -25,7 +25,7 @@ func TestSwarmRuntimeError(t *testing.T) {
 	if err := swarmRuntimeError("production", config.Destination{Runtime: "swarm"}); err != nil {
 		t.Fatal(err)
 	}
-	want := "destination production uses runtime compose; set destinations.production.runtime: swarm first (switching needs downtime, see docs/site/swarm.md)"
+	want := "destination production uses runtime compose; set destinations.production.runtime: swarm first (switching needs downtime, see https://yohobuild.com/swarm)"
 	if err := swarmRuntimeError("production", config.Destination{}); err == nil || err.Error() != want {
 		t.Fatalf("empty runtime: %v", err)
 	}

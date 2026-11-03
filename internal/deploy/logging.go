@@ -20,7 +20,7 @@ const (
 // DefaultLoggingNote annotates a plan's "config changed: logging" when the
 // new value is Yoho's default rotation, which v0.6.0 added to Services
 // without `logging`: the first plan after upgrading shows it everywhere.
-const DefaultLoggingNote = "logging (Yoho's default log rotation since v0.6.0; set `logging` on the Service to keep your own)"
+const DefaultLoggingNote = "logging (Yoho's default log rotation since v0.6.0; set logging on the Service (e.g. {driver: json-file}) to keep Docker's unrotated default and skip this recreation)"
 
 // IsDefaultLogging reports whether v (a compiled Service's `logging`, as
 // decoded from YAML) is Yoho's default log rotation.

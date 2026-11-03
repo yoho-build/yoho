@@ -78,6 +78,23 @@ directory named in the error, then re-run.`,
 	return c
 }
 
+// generatedPlanHint is the hint for a --generated key Yoho cannot plan.
+// A key the Services get from .yoho/secrets is not Server-generated.
+func generatedPlanHint(err error, d *plan.Deploy) string {
+	var ng *deploy.NotGeneratedError
+	if errors.As(err, &ng) {
+		_, ok := d.SecretRefs[ng.Key]
+		for _, m := range d.ServiceSecrets {
+			_, in := m[ng.Key]
+			ok = ok || in
+		}
+		if ok {
+			return ng.Key + " comes from .yoho/secrets (or your provider); change it there and run `yoho secrets rotate`"
+		}
+	}
+	return "check x-yoho.generate and x-yoho.rotate; see https://yohobuild.com/secrets#rotating-generated-secrets"
+}
+
 // checkGeneratedFlags validates --generated keys and returns them sorted
 // and unique.
 func checkGeneratedFlags(keys, services []string, runtime string) ([]string, error) {
@@ -88,7 +105,7 @@ func checkGeneratedFlags(keys, services []string, runtime string) ([]string, err
 		return nil, &hintError{"--generated cannot be combined with Service names", "rotate restarts every Service that uses the key; drop the Service names"}
 	}
 	if runtime == "swarm" {
-		return nil, &hintError{"--generated supports the compose runtime only", "rotate the value by hand on Swarm; see docs/site/secrets.md"}
+		return nil, &hintError{"--generated supports the compose runtime only", "rotate the value by hand on Swarm; see https://yohobuild.com/secrets#rotating-generated-secrets"}
 	}
 	var out []string
 	for _, k := range keys {
@@ -140,7 +157,7 @@ func (a *app) rotateSecrets(ctx context.Context, services, generated []string, d
 		step.Fail(err, "use a Service name from the compose files")
 		return &silentError{err}
 	}
-	step.Done(fmt.Sprintf("%d services", len(r.Project.Services)))
+	step.Done(ui.Count(len(r.Project.Services), "service", ""))
 
 	step = u.Step("", "Resolve secrets")
 	store, err := a.loadSecrets(ctx, step)
@@ -148,7 +165,7 @@ func (a *app) rotateSecrets(ctx context.Context, services, generated []string, d
 		step.Fail(err, secretsHint(err, "check .yoho/secrets and that op / bw / bws are signed in"))
 		return &silentError{err}
 	}
-	step.Done(fmt.Sprintf("%d keys", len(store.Keys())))
+	step.Done(ui.Count(len(store.Keys()), "key", ""))
 	s := &session{a: a, r: r, store: store, red: store.Redactor(os.Stdout)}
 	defer s.close()
 
@@ -238,7 +255,7 @@ func (a *app) rotateSecrets(ctx context.Context, services, generated []string, d
 			g, gerr := deploy.PlanGeneratedRotation(d, key)
 			if gerr != nil {
 				err = gerr
-				step.Fail(err, "check x-yoho.generate and x-yoho.rotate; see docs/site/secrets.md#rotating-generated-secrets")
+				step.Fail(err, generatedPlanHint(gerr, d))
 				return &silentError{err}
 			}
 			gens = append(gens, g)

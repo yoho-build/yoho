@@ -36,6 +36,7 @@ import (
 	"github.com/yoho-build/yoho/internal/release"
 	"github.com/yoho-build/yoho/internal/remote"
 	"github.com/yoho-build/yoho/internal/secrets"
+	"github.com/yoho-build/yoho/internal/ui"
 )
 
 // Runtime implements plan.Runtime with Docker Swarm.
@@ -810,7 +811,7 @@ func (r *runner) routes(ctx context.Context, d *plan.Deploy, p stackPlan, prev *
 		}
 		target += ":" + strconv.Itoa(sp.Proxy.Port)
 		route := deploy.RouteName(d.App, d.Destination, sp.Name)
-		r.logf("proxy route %s -> %s on %d servers", route, target, len(d.Servers))
+		r.logf("proxy route %s -> %s on %s", route, target, ui.Count(len(d.Servers), "Server", ""))
 		opts, err := proxy.ServiceDeployOptions(*sp.Proxy)
 		if err != nil {
 			return fmt.Errorf("service %s: %w", sp.Name, err)

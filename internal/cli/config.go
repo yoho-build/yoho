@@ -542,7 +542,7 @@ func runConfigCheck(cmd *cobra.Command, g *globals, offline bool) error {
 			return fail(exitFindings, err, secretsHint(err, "check the declared source keys in .yoho/secrets and secrets.values"))
 		}
 	}
-	step.Done(fmt.Sprintf("%d services, %d secret keys, runtime %s", services, keyCount, a.dest.Runtime))
+	step.Done(fmt.Sprintf("%s, %s, runtime %s", ui.Count(services, "service", ""), ui.Count(keyCount, "secret key", ""), a.dest.Runtime))
 	a.ui.Check(true, 0, offline, services, keyCount)
 	return nil
 }

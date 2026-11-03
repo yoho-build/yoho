@@ -111,6 +111,21 @@ type LogsOptions struct {
 	Timestamps bool
 }
 
+// ErrFollowUntil refuses Follow with Until: docker compose logs -f
+// --until keeps following, so the read would never end.
+var ErrFollowUntil = errors.New("--until cannot be combined with -f")
+
+// FollowUntilHint is the hint for ErrFollowUntil.
+const FollowUntilHint = "`--until` ends the output at a point in the past; drop -f, or use --since with -f"
+
+// CheckFollow refuses an Until bound on a Follow read (ErrFollowUntil).
+func CheckFollow(f LogFilter, follow bool) error {
+	if follow && f.Until != "" {
+		return ErrFollowUntil
+	}
+	return nil
+}
+
 // ExitBadPattern is the exit status of a logs script whose --grep -E
 // pattern the Server's grep refuses.
 const ExitBadPattern = 2

@@ -71,7 +71,7 @@ func swarmRuntimeError(dest string, d config.Destination) error {
 	if d.Runtime == "swarm" {
 		return nil
 	}
-	return fmt.Errorf("destination %s uses runtime %s; set destinations.%s.runtime: swarm first (switching needs downtime, see docs/site/swarm.md)", dest, runtimeName(d), dest)
+	return fmt.Errorf("destination %s uses runtime %s; set destinations.%s.runtime: swarm first (switching needs downtime, see https://yohobuild.com/swarm)", dest, runtimeName(d), dest)
 }
 
 func (g *globals) swarmHosts(cmd *cobra.Command, strict bool) (*app, []plan.NamedHost, func(), error) {

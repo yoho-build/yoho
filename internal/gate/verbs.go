@@ -194,6 +194,9 @@ func logs(ctx context.Context, c *call) (any, error) {
 	if err := a.LogFilter.Check(); err != nil {
 		return nil, invalid(err.Error())
 	}
+	if err := dash.CheckFollow(a.LogFilter, a.Follow); err != nil {
+		return nil, invalid(err.Error())
+	}
 	if err := checkMemberPattern(a.LogFilter); err != nil {
 		return nil, err
 	}
@@ -822,6 +825,9 @@ func rollbackVerb(ctx context.Context, c *call) (any, error) {
 		Servers: []plan.NamedHost{c.namedHost(s)}, Registry: s.Registry, Proxy: s.Proxy,
 		RetainReleases: s.RetainReleases, Out: c.fw,
 		Scoped: c.scoped(func(compose []byte, rel *release.Release) error { return c.vetRollback(ctx, s, version, compose, rel) }),
+	}
+	for _, w := range deploy.RollbackWarnings(ctx, d.Servers[0].Host, d.App, d.Destination, version) {
+		fmt.Fprintf(c.fw, "warning: %s\n", w)
 	}
 	rel, err := composeRollback(ctx, d, version)
 	if err != nil {

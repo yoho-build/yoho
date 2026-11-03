@@ -112,6 +112,9 @@ func logsOptions(o dash.LogsOptions, linesSet, swarm bool) (dash.LogsOptions, er
 	if err := o.Check(); err != nil {
 		return o, &hintError{err.Error(), "e.g. `yoho app logs web --grep ERROR -i`"}
 	}
+	if err := dash.CheckFollow(o.LogFilter, o.Follow); err != nil {
+		return o, &hintError{err.Error(), dash.FollowUntilHint}
+	}
 	if swarm && o.Until != "" {
 		return o, &hintError{"swarm: --until is not supported, `docker service logs` has no --until", "use --since, or compose"}
 	}
@@ -133,6 +136,8 @@ func logsCmd(g *globals) *cobra.Command {
 
 --since and --until take what docker takes: a duration back from now (30s,
 10m, 2h) or a timestamp (2026-11-03T15:04:05Z, 2026-11-03, Unix seconds).
+--until ends the output at a point in the past, so it cannot be combined
+with -f; use --since with -f.
 --grep keeps lines containing a fixed string, filtered on the Server with
 grep; -i ignores case and -E makes it an extended regular expression. With
 --grep (and not -f), -n counts matching lines. grep runs under nice, and
@@ -178,37 +183,77 @@ the output, e.g. --since 10m -n 200.`,
 				}
 				return err
 			}
+			// With --grep the container's output goes through grep to stdout,
+			// so the script's stderr holds only its own messages: capture
+			// them, and print each once, with its hint.
+			stderr := cmd.ErrOrStderr()
+			if opts.Grep != "" {
+				stderr = nil
+			}
 			if follow && opts.Grep != "" {
-				err = a.followGrep(cmd, appFollowGrepScript(a.project(), svcs, swarm, opts))
+				err = a.followGrep(cmd, stderr, appFollowGrepScript(a.project(), svcs, swarm, opts))
 			} else {
-				err = a.remoteRun(cmd, appLogsScript(a.project(), svcs, swarm, opts))
+				err = a.logsRun(cmd, stderr, appLogsScript(a.project(), svcs, swarm, opts))
 			}
 			if follow && cmd.Context().Err() != nil {
 				return nil // Ctrl-C ends a follow
 			}
-			var ee *remote.ExitError
-			if opts.Regex && errors.As(err, &ee) && ee.Code == dash.ExitBadPattern && strings.Contains(ee.Stderr, "invalid --grep pattern") {
-				// grep's own message is already on stderr.
-				return a.fail(&hintError{"invalid --grep pattern", badPatternHint})
-			}
-			if opts.Grep != "" && errors.As(err, &ee) && ee.Code == dash.ExitGrepTimeout && strings.Contains(ee.Stderr, "--grep search took longer") {
-				// The Server stopped grep at dash.GrepLimit.
-				return a.fail(&hintError{fmt.Sprintf("--grep search took longer than %ds", dash.GrepLimit), grepTimeoutHint})
-			}
-			return err
+			return a.logsError(err, opts)
 		},
 	}
 	f := c.Flags()
 	f.BoolVarP(&o.Follow, "follow", "f", false, "Follow")
-	f.IntVarP(&o.Lines, "lines", "n", 100, "Lines from the end (0: none, -1: all); with --grep, matching lines")
+	f.IntVarP(&o.Lines, "lines", "n", 100, "Lines from the end (0: none, -1: all); with --grep, matching lines; unbounded with --since/--grep")
 	f.BoolVar(&all, "all", false, "Every Service, interleaved (compose only)")
 	f.StringVar(&o.Since, "since", "", "Only logs since a duration back (10m, 2h) or a timestamp (2026-11-03T15:04:05Z)")
-	f.StringVar(&o.Until, "until", "", "Only logs before a duration back or a timestamp (compose only)")
+	f.StringVar(&o.Until, "until", "", "Only logs before a duration back or a timestamp (compose only, not with -f)")
 	f.BoolVarP(&o.Timestamps, "timestamps", "t", false, "Show timestamps")
 	f.StringVar(&o.Grep, "grep", "", "Only lines containing this text, filtered on the Server")
 	f.BoolVarP(&o.IgnoreCase, "ignore-case", "i", false, "Match --grep ignoring case")
 	f.BoolVarP(&o.Regex, "regex", "E", false, "Treat --grep as an extended regular expression")
 	return c
+}
+
+// logsError reports a failed `app logs` read: a --grep -E pattern the
+// Server's grep refuses or a search that ran into dash.GrepLimit as one
+// error with its hint, anything else as is.
+func (a *app) logsError(err error, opts dash.LogsOptions) error {
+	var ee *remote.ExitError
+	if opts.Grep == "" || !errors.As(err, &ee) {
+		return err
+	}
+	if opts.Regex && ee.Code == dash.ExitBadPattern {
+		if msg := stderrLine(ee.Stderr, "invalid --grep pattern"); msg != "" {
+			return a.fail(&hintError{msg, badPatternHint})
+		}
+	}
+	if ee.Code == dash.ExitGrepTimeout && strings.Contains(ee.Stderr, "--grep search took longer") {
+		// The Server stopped grep at dash.GrepLimit.
+		return a.fail(&hintError{fmt.Sprintf("--grep search took longer than %ds", dash.GrepLimit), grepTimeoutHint})
+	}
+	return err
+}
+
+// stderrLine is the first line of stderr starting with prefix, or "".
+func stderrLine(stderr, prefix string) string {
+	for _, l := range strings.Split(stderr, "\n") {
+		if l = strings.TrimSpace(l); strings.HasPrefix(l, prefix) {
+			return l
+		}
+	}
+	return ""
+}
+
+// logsRun runs a logs script on the Destination's first Server; a nil
+// stderr is captured into the returned error instead of printed.
+func (a *app) logsRun(cmd *cobra.Command, stderr io.Writer, script string) error {
+	srv := a.cfg.Servers[a.dest.Servers[0]]
+	h, err := remote.NewSSH(a.dest.Servers[0], srv.SSH, srv.Sudo, a.sshOptions())
+	if err != nil {
+		return err
+	}
+	defer h.Close()
+	return h.Run(cmd.Context(), remote.Cmd{Script: script, Stdout: cmd.OutOrStdout(), Stderr: stderr})
 }
 
 // badPatternHint is the hint for a --grep -E pattern the Server's grep
@@ -246,7 +291,7 @@ func appFollowGrepScript(project string, svcs []string, swarm bool, o dash.LogsO
 // followGrep runs a dash.FollowGrepScript: the script travels as an
 // argument and ssh's stdin stays open until this command ends, so the
 // Server stops docker and grep when we exit or the connection drops.
-func (a *app) followGrep(cmd *cobra.Command, script string) error {
+func (a *app) followGrep(cmd *cobra.Command, stderr io.Writer, script string) error {
 	ctx := cmd.Context()
 	srv := a.cfg.Servers[a.dest.Servers[0]]
 	h, err := remote.NewSSH(a.dest.Servers[0], srv.SSH, srv.Sudo, remote.SSHOptions{})
@@ -265,7 +310,7 @@ func (a *app) followGrep(cmd *cobra.Command, script string) error {
 	stop := context.AfterFunc(ctx, func() { hold.Close() })
 	defer stop()
 	defer hold.Close()
-	return h.RunTerminal(ctx, script, false, stdin, cmd.OutOrStdout(), cmd.ErrOrStderr())
+	return h.RunTerminal(ctx, script, false, stdin, cmd.OutOrStdout(), stderr)
 }
 
 // exitNoContainers is the exit code of statsScript when the App has no

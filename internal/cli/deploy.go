@@ -28,6 +28,7 @@ import (
 	"github.com/yoho-build/yoho/internal/remote"
 	"github.com/yoho-build/yoho/internal/secrets"
 	"github.com/yoho-build/yoho/internal/transport"
+	"github.com/yoho-build/yoho/internal/ui"
 	"github.com/yoho-build/yoho/internal/version"
 )
 
@@ -194,7 +195,7 @@ func (a *app) openSession(ctx context.Context, ver string, readOnly bool) (_ *se
 		step.Fail(err, "fix the errors above, then `yoho config check`")
 		return nil, &silentError{err}
 	}
-	step.Done(fmt.Sprintf("%d services", len(r.Project.Services)))
+	step.Done(ui.Count(len(r.Project.Services), "service", ""))
 
 	step = u.Step("", "Resolve secrets")
 	store, err := a.loadSecrets(ctx, step)
@@ -202,7 +203,7 @@ func (a *app) openSession(ctx context.Context, ver string, readOnly bool) (_ *se
 		step.Fail(err, secretsHint(err, "check .yoho/secrets and that op / bw / bws are signed in"))
 		return nil, &silentError{err}
 	}
-	step.Done(fmt.Sprintf("%d keys", len(store.Keys())))
+	step.Done(ui.Count(len(store.Keys()), "key", ""))
 	s := &session{a: a, ver: ver, r: r, store: store, red: store.Redactor(os.Stdout)}
 
 	if !readOnly {
@@ -768,6 +769,9 @@ ingress changed since the cutover, unless --force.`,
 			}
 			a.ui.Title("Rolling back %s on %s to %s", a.cfg.App, a.destName, shortVersion(target))
 			a.ui.Warn("volumes and database migrations are not reverted")
+			for _, w := range deploy.RollbackWarnings(ctx, hosts[0].Host, a.cfg.App, a.destName, target) {
+				a.ui.Warn("%s", w)
+			}
 			step := a.ui.Step(hosts[0].Name, "Redeploy %s", shortVersion(target))
 			rel, err := a.runtime().Rollback(ctx, d, target)
 			if err != nil {

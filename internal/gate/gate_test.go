@@ -245,6 +245,11 @@ func TestPSAndLogs(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "invalid Service name") {
 		t.Fatalf("injection: %v", err)
 	}
+	// -f --until would follow forever (docker keeps following).
+	err = g.Call(context.Background(), VerbLogs, LogsArgs{ServicesArgs: ServicesArgs{Services: []string{"web"}}, Follow: true, LogFilter: dash.LogFilter{Until: "1h"}}, nil, io.Discard, nil)
+	if err == nil || !strings.Contains(err.Error(), "--until cannot be combined with -f") {
+		t.Fatalf("follow until: %v", err)
+	}
 	// Filters run on the Server; the Gate checks them and quotes the pattern.
 	filtered := LogsArgs{ServicesArgs: ServicesArgs{Services: []string{"web"}}, LogFilter: dash.LogFilter{Since: "1h", Grep: "a'; id"}}
 	if err := g.Call(context.Background(), VerbLogs, filtered, nil, io.Discard, nil); err != nil {

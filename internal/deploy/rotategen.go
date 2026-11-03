@@ -97,6 +97,14 @@ func imageFamily(image string) string {
 	return ""
 }
 
+// NotGeneratedError is a --generated key no Service declares in
+// x-yoho.generate.
+type NotGeneratedError struct{ Key string }
+
+func (e *NotGeneratedError) Error() string {
+	return e.Key + " is not a generated secret (no Service declares it in x-yoho.generate)"
+}
+
 // PlanGeneratedRotation decides how key is rotated: which Service applies
 // it, with which strategy and database user, and which Services restart.
 func PlanGeneratedRotation(d *plan.Deploy, key string) (*GeneratedRotation, error) {
@@ -106,7 +114,7 @@ func PlanGeneratedRotation(d *plan.Deploy, key string) (*GeneratedRotation, erro
 	}
 	kind, ok := kinds[key]
 	if !ok {
-		return nil, fmt.Errorf("%s is not a generated secret (no Service declares it in x-yoho.generate)", key)
+		return nil, &NotGeneratedError{Key: key}
 	}
 	var owners, explicit, databases []string
 	for _, svc := range sortedKeys(d.Ext) {

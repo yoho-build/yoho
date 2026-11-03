@@ -19,6 +19,7 @@ import (
 	"github.com/yoho-build/yoho/internal/dash"
 	"github.com/yoho-build/yoho/internal/gate"
 	"github.com/yoho-build/yoho/internal/remote"
+	"github.com/yoho-build/yoho/internal/ui"
 )
 
 func TestLogsOptions(t *testing.T) {
@@ -40,12 +41,34 @@ func TestLogsOptions(t *testing.T) {
 		{dash.LogsOptions{LogFilter: dash.LogFilter{IgnoreCase: true}}, false, "--grep ERROR -i"},
 		{dash.LogsOptions{LogFilter: dash.LogFilter{Until: "1h"}}, true, "use --since"},
 		{dash.LogsOptions{Lines: -2}, false, "-n -1"},
+		// docker compose logs -f --until keeps following: refused.
+		{dash.LogsOptions{Follow: true, LogFilter: dash.LogFilter{Until: "1h"}}, false, "use --since with -f"},
 	} {
 		_, err := logsOptions(c.o, true, c.swarm)
 		var he *hintError
 		if !errors.As(err, &he) || !strings.Contains(he.hint, c.want) {
 			t.Errorf("%+v: %v", c.o, err)
 		}
+	}
+}
+
+// TestLogsErrorOnce: a bad -E pattern is reported once, with grep's
+// message and the hint, from the captured stderr.
+func TestLogsErrorOnce(t *testing.T) {
+	var out bytes.Buffer
+	a := &app{g: &globals{}, ui: ui.New(&out, ui.Human, false)}
+	ee := &remote.ExitError{Code: dash.ExitBadPattern, Stderr: "invalid --grep pattern: grep: Unmatched ( or \\("}
+	err := a.logsError(ee, dash.LogsOptions{LogFilter: dash.LogFilter{Grep: "(", Regex: true}})
+	var se *silentError
+	if !errors.As(err, &se) {
+		t.Fatalf("err %v", err)
+	}
+	if got := out.String(); strings.Count(got, "invalid --grep pattern") != 1 || !strings.Contains(got, "Unmatched") || !strings.Contains(got, "drop -E") {
+		t.Fatalf("output %q", got)
+	}
+	other := &remote.ExitError{Code: 1, Stderr: "docker logs exited 1"}
+	if err := a.logsError(other, dash.LogsOptions{LogFilter: dash.LogFilter{Grep: "x"}}); err != other {
+		t.Fatalf("other: %v", err)
 	}
 }
 

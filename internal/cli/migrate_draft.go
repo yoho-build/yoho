@@ -128,7 +128,7 @@ func printRotationChecklist(w io.Writer, items []railway.RotationItem) {
 	for _, it := range items {
 		fmt.Fprintf(w, "  [ ] %s (used by %s): %s\n", it.Key, strings.Join(it.Services, ", "), it.Action)
 	}
-	fmt.Fprintln(w, "Rotate before pointing traffic at Yoho; after an incident see the runbook in docs/site/secrets.md.")
+	fmt.Fprintln(w, "Rotate before pointing traffic at Yoho; after an incident see the runbook at https://yohobuild.com/secrets#rotate-everything-after-an-incident.")
 }
 
 // writeDraftFiles creates compose.yaml and yoho.yml. It refuses when either
