@@ -52,7 +52,7 @@ Scoped access (sharing one App Destination with teammates or CI, see https://yoh
 | `secrets_as_env` | Deliver as env (`env_file`) instead of files. |
 | `generate` | `{NAME: kind}`; kinds `password32`, `password64`, `hex32`, `hex64`, `base64_32`, `base64_64`. Created once on the Server. |
 | `release_command` | One-off container from the new image before cutover (migrations); failure aborts. |
-| `backup` | `volumes`, `dump` (stdout is the dump), `pre_backup`, `post_restore`, `restore_dump` (dump on stdin). Without `pre_backup`, the container is paused while volumes are copied. |
+| `backup` | `volumes`, `dump` (stdout is the dump), `pre_backup`, `post_restore`, `restore_dump` (dump on stdin), `verify` (run by `backup drill`). Without `pre_backup`, the container is paused while volumes are copied. |
 | `strict_drain` | Swarm only: proxy targets tasks. |
 | `endpoint` | Reserved for Roles. |
 

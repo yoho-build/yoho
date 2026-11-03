@@ -185,6 +185,7 @@ The Cloudflare API token needs Account > Cloudflare Tunnel > Edit. It is resolve
 | `backup.pre_backup` | Run before copying volumes. Without it, the container is paused during the copy. |
 | `backup.post_restore` | Run after a restore. |
 | `backup.restore_dump` | Command receiving the dump on stdin. Empty: dumps stay on the Server. |
+| `backup.verify` | Command run in the restored copy by `yoho backup drill` after it is healthy; nonzero exit fails the drill. |
 | `strict_drain` | Swarm only: Proxy routes to tasks instead of the service VIP. |
 | `endpoint` | Reserved for Roles. |
 

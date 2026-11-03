@@ -18,6 +18,7 @@ const guide = [
   ['Scheduled jobs', 'scheduled-jobs'],
   ['Server setup', 'setup'],
   ['Swarm', 'swarm'],
+  ['High availability & recovery', 'high-availability'],
   ['Dashboards (tui / ui)', 'dashboards'],
   ['Sharing one App with a team', 'team-access'],
   ['Hooks & env vars', 'hooks'],

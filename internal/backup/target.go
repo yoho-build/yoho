@@ -26,7 +26,12 @@ const (
 
 // target stores, lists and fetches Backups for one Backup Target.
 type target struct {
+	// app, dest and project identify the Backups (restic tags, archive file
+	// names, manifest ownership). local is the Destination whose Server
+	// files (Backup spool, persistent rclone config) the operation uses; it
+	// differs from dest only when restoring with --from.
 	app, dest, project string
+	local              string
 	cfg                config.BackupTarget
 	typ, format        string
 	env                map[string]string
@@ -51,7 +56,7 @@ func newTarget(app, dest, project string, cfg config.BackupTarget, password stri
 		}
 		cfg.Repository = path.Clean(cfg.Repository)
 	}
-	t := &target{app: app, dest: dest, project: project, cfg: cfg, typ: cfg.Type, format: cfg.Format, env: map[string]string{}}
+	t := &target{app: app, dest: dest, project: project, local: dest, cfg: cfg, typ: cfg.Type, format: cfg.Format, env: map[string]string{}}
 	if t.typ == "" {
 		t.typ = "restic"
 	}
@@ -113,6 +118,21 @@ func newTarget(app, dest, project string, cfg config.BackupTarget, password stri
 		return nil, fmt.Errorf("backup target: unknown type %q", t.typ)
 	}
 	return t, nil
+}
+
+// fromSource makes t select the Backups of another Destination (src, with
+// compose project srcProject) of the same App, while Server files stay those
+// of the local Destination. The App never changes: cross-App Backups are
+// never listed or fetched.
+func (t *target) fromSource(src, srcProject string) error {
+	if src == "" {
+		return nil
+	}
+	if !nameRe.MatchString(src) || !nameRe.MatchString(srcProject) {
+		return errors.New("backup target: invalid source Destination or project name")
+	}
+	t.dest, t.project = src, srcProject
+	return nil
 }
 
 func (t *target) method() string {

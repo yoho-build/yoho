@@ -109,6 +109,8 @@ yoho access key add MEMBER KEY.pub | key rm MEMBER   # restricted Gate keys (for
 yoho backup run [JOB] | list [JOB] | restore ID [--job JOB] [-y]   # ID may be "latest"
 yoho backup pull [JOB] [--to DIR] [--limit N]   # mirror archive-target files to a local dir; never deletes, verifies SHA-256, no rsync
 yoho backup check [JOB] [--id ID | --read-data]   # integrity only, not restore proof
+yoho backup restore ID --from production -d staging [--copy-generated-secrets]   # another Destination's Backup; same App only
+yoho backup drill [JOB] [--id ID] [--keep] | --cleanup   # restore into a throwaway yoho-<app>-<dest>-drill-<id> project, health + verify, RTO timings; App untouched
 yoho schedule install [JOB...] [--binary PATH] | status [--max-age 48h] | remove [JOB...]
 yoho swarm init [-y] | join [-y] | status
 yoho skill install [--dir DIR] [--agent claude|codex|all] [--only A,B | --exclude A,B] [--no-migrate-refs] [--project [--force]] | list | print [SKILL]

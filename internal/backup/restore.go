@@ -20,9 +20,13 @@ import (
 // ListOptions selects the Backups of one App/Destination in a Backup Target.
 type ListOptions struct {
 	App, Destination, Project string
-	Target                    config.BackupTarget
-	Password                  string
-	TargetEnv                 map[string]string
+	// From lists the Backups taken by another Destination of the same App
+	// (restore --from). Empty: Destination. Server files (spool, rclone
+	// config, lock) remain Destination's.
+	From      string
+	Target    config.BackupTarget
+	Password  string
+	TargetEnv map[string]string
 	// Resolved Target.RcloneConfigSecret; see RunOptions.RcloneConfig.
 	RcloneConfig string
 	Host         remote.Host
@@ -44,6 +48,11 @@ func List(ctx context.Context, o ListOptions) (entries []Entry, err error) {
 	t, err := newTarget(o.App, o.Destination, project, o.Target, o.Password, o.TargetEnv)
 	if err != nil {
 		return nil, err
+	}
+	if o.From != "" && o.From != o.Destination {
+		if err := t.fromSource(o.From, release.ProjectName(o.App, o.From)); err != nil {
+			return nil, err
+		}
 	}
 	if o.Target.RcloneConfigSecret != "" || o.Lock != nil {
 		lock := o.Lock
@@ -90,6 +99,17 @@ type RestoreOptions struct {
 	Now     func() time.Time
 	// Runtime is "compose" (default) or "swarm".
 	Runtime string
+	// From restores a Backup taken by another Destination of the same App
+	// (e.g. production into staging). Empty or Destination: this
+	// Destination's own Backups. The manifest must name App and From;
+	// another App's Backup is always refused.
+	From string
+	// CopyGenerated writes the source Destination's generated secrets from
+	// the Backup over this Destination's when From is another Destination.
+	// Default false: they are left unchanged and reported in
+	// GeneratedSkipped. Ignored for same-Destination restores, which always
+	// restore them.
+	CopyGenerated bool
 	// AfterRestore runs after Service post_restore commands, while consumers
 	// remain stopped. Failure keeps the App isolated. Intended for the CLI's
 	// post-restore Hook; it must not start consumers or change exposure.
@@ -116,6 +136,27 @@ type RestoreResult struct {
 	// and was replaced. Services keep reading secrets/<generation> until
 	// the next deploy.
 	GeneratedChanged []string
+	// GeneratedSkipped are generated secrets in a --from Backup that were
+	// not written because CopyGenerated was false (names only).
+	GeneratedSkipped []string
+}
+
+// crossDestination reports whether from names another Destination.
+func crossDestination(from, dest string) bool { return from != "" && from != dest }
+
+// checkManifestOwner accepts a Backup only of app, taken by Destination
+// source. A Backup of another App is always refused, with or without --from.
+func checkManifestOwner(m Manifest, app, dest, source string) error {
+	if m.App != app {
+		return fmt.Errorf("Backup belongs to App %s, not %s; restoring another App's Backup is not supported", m.App, app)
+	}
+	if m.Destination != source {
+		if source == dest {
+			return fmt.Errorf("Backup belongs to %s/%s, not %s/%s (pass --from %s to restore another Destination's Backup)", m.App, m.Destination, app, dest, m.Destination)
+		}
+		return fmt.Errorf("Backup belongs to %s/%s, not %s/%s", m.App, m.Destination, app, source)
+	}
+	return nil
 }
 
 // Restore fetches and verifies a Backup, then stops this App's deployed
@@ -157,6 +198,13 @@ func Restore(ctx context.Context, o RestoreOptions) (res *RestoreResult, err err
 	t, err := newTarget(o.App, o.Destination, project, o.Target, o.Password, o.TargetEnv)
 	if err != nil {
 		return nil, err
+	}
+	source := o.Destination
+	if crossDestination(o.From, o.Destination) {
+		source = o.From
+		if err := t.fromSource(source, release.ProjectName(o.App, source)); err != nil {
+			return nil, err
+		}
 	}
 	now := time.Now
 	if o.Now != nil {
@@ -227,8 +275,21 @@ func Restore(ctx context.Context, o RestoreOptions) (res *RestoreResult, err err
 		return nil, fmt.Errorf("parse manifest: %w", err)
 	}
 	m := res.Manifest
-	if m.App != o.App || m.Destination != o.Destination {
-		return nil, fmt.Errorf("Backup belongs to %s/%s, not %s/%s", m.App, m.Destination, o.App, o.Destination)
+	if err := checkManifestOwner(m, o.App, o.Destination, source); err != nil {
+		return nil, err
+	}
+	for _, name := range m.GeneratedSecrets {
+		if !generatedNameRe.MatchString(name) {
+			return nil, fmt.Errorf("manifest: invalid generated secret name %q", name)
+		}
+	}
+	generated := m.GeneratedSecrets
+	if source != o.Destination && !o.CopyGenerated && len(generated) > 0 {
+		// Another Destination's generated secrets (database passwords, keys)
+		// never replace this Destination's unless asked for.
+		res.GeneratedSkipped = append([]string(nil), generated...)
+		logf("leaving this Destination's generated secrets unchanged (%s from %s not copied)", strings.Join(generated, ", "), source)
+		generated = nil
 	}
 
 	var services []string
@@ -284,7 +345,7 @@ func Restore(ctx context.Context, o RestoreOptions) (res *RestoreResult, err err
 		}
 	}
 
-	for _, name := range m.GeneratedSecrets {
+	for _, name := range generated {
 		if !generatedNameRe.MatchString(name) {
 			return nil, fmt.Errorf("manifest: invalid generated secret name %q", name)
 		}
@@ -292,11 +353,11 @@ func Restore(ctx context.Context, o RestoreOptions) (res *RestoreResult, err err
 			return nil, fmt.Errorf("unsafe Backup generated secret %s: %w", name, err)
 		}
 	}
-	if len(m.GeneratedSecrets) > 0 {
+	if len(generated) > 0 {
 		// Preflight existing destinations without creating or changing App files.
 		d := generatedDir(o.App, o.Destination)
 		pre := appLink(o.App, o.Destination) + safeDir(d, false, false) + "if [ -d " + remote.Quote(d) + " ]; then yoho_private " + remote.Quote(d) + "; fi\n"
-		for _, name := range m.GeneratedSecrets {
+		for _, name := range generated {
 			f := path.Join(d, name)
 			pre += "if [ -e " + remote.Quote(f) + " ] || [ -L " + remote.Quote(f) + " ]; then yoho_secret " + remote.Quote(f) + "; fi\n"
 		}
@@ -406,7 +467,7 @@ func Restore(ctx context.Context, o RestoreOptions) (res *RestoreResult, err err
 	// Generated secrets go back after volumes and before Services start,
 	// so the data and the passwords it was created with land together.
 	// The next deploy keeps these files (ensureFileOnce never overwrites).
-	restored, changed, err := restoreGenerated(ctx, o.Host, o.App, o.Destination, data, m.GeneratedSecrets, logf)
+	restored, changed, err := restoreGenerated(ctx, o.Host, o.App, o.Destination, data, generated, logf)
 	if err != nil {
 		return nil, fmt.Errorf("restore generated secrets: %w", err)
 	}
