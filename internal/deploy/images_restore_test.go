@@ -109,7 +109,8 @@ func TestRotateRetagsFromRecordedID(t *testing.T) {
 	d.ServiceSecrets["web"]["SECRET_KEY_BASE"] = "rotated-secret-value-ABC"
 	d.Restart, d.RestartFrom = []string{"web"}, first
 	h.scripts = nil
-	if _, err := (Compose{}).Deploy(ctx, d); err != nil {
+	second, err := (Compose{}).Deploy(ctx, d)
+	if err != nil {
 		t.Fatal(err)
 	}
 	if retag, up := indexOf(t, h.scripts, "docker tag 'sha256:aaaa1111' '"+restoreRef+"'"), indexOf(t, h.scripts, "'--scale' 'web=2'"); retag > up {
@@ -118,7 +119,9 @@ func TestRotateRetagsFromRecordedID(t *testing.T) {
 
 	tag = "sha256:bbbb2222"
 	gone := tagHostGone(&tag)
-	d.RestartFrom = first
+	// Restart from the Release now current (generations are named to the
+	// second, so first's may differ and trip CheckRestartBase).
+	d.RestartFrom = second
 	d.Servers[0].Host = gone
 	_, err = (Compose{}).Deploy(ctx, d)
 	if err == nil || !strings.Contains(err.Error(), "cannot restore image "+restoreRef) || !strings.Contains(err.Error(), "no longer exists") {
