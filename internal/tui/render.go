@@ -298,7 +298,14 @@ func (m *Model) logLines(height int) []line {
 	if lv.Err != nil {
 		ls = append(ls, line{{"error: " + lv.Err.Error(), red}})
 	}
-	text := strings.Split(strings.TrimRight(lv.Text, "\n"), "\n")
+	if lv.Typing || lv.Filter != "" {
+		f := line{{" /", bold}, {lv.Filter, ""}}
+		if lv.Typing {
+			f = append(f, seg{"▏", bold}, seg{"  enter keep · esc clear", dim})
+		}
+		ls[1] = f
+	}
+	text := lv.lines()
 	room := max(1, height-len(ls)-1)
 	if lv.Offset > max(0, len(text)-room) {
 		lv.Offset = max(0, len(text)-room)
@@ -315,7 +322,7 @@ func (m *Model) logLines(height int) []line {
 	if lv.Offset > 0 {
 		pos = fmt.Sprintf("%d lines up", lv.Offset)
 	}
-	return append(ls[:height-1], line{{" esc", bold}, {" back  ", dim}, {"↑↓ pgup pgdn", bold}, {" scroll  ", dim}, {"g/G", bold}, {" top/bottom  ", dim}, {"r", bold}, {" reload", dim}, {"   " + pos, dim}})
+	return append(ls[:height-1], line{{" esc", bold}, {" back  ", dim}, {"↑↓ pgup pgdn", bold}, {" scroll  ", dim}, {"g/G", bold}, {" top/bottom  ", dim}, {"r", bold}, {" reload  ", dim}, {"/", bold}, {" filter", dim}, {"   " + pos, dim}})
 }
 
 func stateText(c dash.Container) (string, string) {

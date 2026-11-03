@@ -14,7 +14,53 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/yoho-build/yoho/internal/dash"
 )
+
+func TestLogsOptions(t *testing.T) {
+	o, err := logsOptions(dash.LogsOptions{Lines: 100, LogFilter: dash.LogFilter{Since: "30s"}}, false, false)
+	if err != nil || o.Lines != 0 {
+		t.Errorf("--since without -n shows every line: %+v %v", o, err)
+	}
+	o, err = logsOptions(dash.LogsOptions{Lines: 20, LogFilter: dash.LogFilter{Grep: "x"}}, true, false)
+	if err != nil || o.Lines != 20 {
+		t.Errorf("-n is kept: %+v %v", o, err)
+	}
+	for _, c := range []struct {
+		o     dash.LogsOptions
+		swarm bool
+		want  string
+	}{
+		{dash.LogsOptions{LogFilter: dash.LogFilter{Since: "banana"}}, false, "duration like 30s"},
+		{dash.LogsOptions{LogFilter: dash.LogFilter{Until: "1h;id"}}, false, "duration like 30s"},
+		{dash.LogsOptions{LogFilter: dash.LogFilter{IgnoreCase: true}}, false, "--grep ERROR -i"},
+		{dash.LogsOptions{LogFilter: dash.LogFilter{Until: "1h"}}, true, "use --since"},
+		{dash.LogsOptions{Lines: -1}, false, "-n 0"},
+	} {
+		_, err := logsOptions(c.o, true, c.swarm)
+		var he *hintError
+		if !errors.As(err, &he) || !strings.Contains(he.hint, c.want) {
+			t.Errorf("%+v: %v", c.o, err)
+		}
+	}
+}
+
+func TestAppLogsScript(t *testing.T) {
+	o := dash.LogsOptions{Lines: 50, Follow: true, Timestamps: true, LogFilter: dash.LogFilter{Since: "10m", Grep: `"; $(id)`, IgnoreCase: true}}
+	got := appLogsScript("yoho-shop-production", []string{"web", "worker"}, false, o)
+	if !strings.Contains(got, `docker compose -p 'yoho-shop-production' logs --since '10m' --timestamps -f --tail 50 'web' 'worker' 2>&1 | grep $lb -i -F -e '"; $(id)' || [`) {
+		t.Errorf("compose: %s", got)
+	}
+	got = appLogsScript("yoho-shop-production", []string{"web"}, true, dash.LogsOptions{Lines: 100})
+	if got != "docker service logs --tail 100 'yoho-shop-production_web' 2>&1" {
+		t.Errorf("swarm: %s", got)
+	}
+	got = appLogsScript("yoho-shop-production", nil, false, dash.LogsOptions{LogFilter: dash.LogFilter{Grep: "ERROR"}})
+	if got != "set -eu\ndocker compose -p 'yoho-shop-production' logs 2>&1 | grep -F -e 'ERROR' || [ \"$?\" -eq 1 ]\n" {
+		t.Errorf("--all --grep: %q", got)
+	}
+}
 
 func TestLogsServices(t *testing.T) {
 	three := []string{"db", "web", "worker"}

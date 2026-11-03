@@ -40,7 +40,7 @@ type Reader interface {
 	// Server returns the Server's facts, containers and Releases.
 	Server(ctx context.Context) (Server, error)
 	// Logs returns the last lines of one of the App's containers.
-	Logs(ctx context.Context, container string, lines int) (string, error)
+	Logs(ctx context.Context, container string, lines int, f LogFilter) (string, error)
 }
 
 // Source identifies what to collect.
@@ -455,13 +455,14 @@ func container(l psLine) Container {
 	return c
 }
 
-// LogsScript prints the last lines of a container's logs with timestamps.
-// The caller must check that name is a container of the Snapshot.
-func LogsScript(name string, lines int) string {
+// ContainerLogsScript prints the last lines of a container's logs with
+// timestamps, filtered by f. The caller must check that name is a
+// container of the Snapshot and f.
+func ContainerLogsScript(name string, lines int, f LogFilter) string {
 	if lines <= 0 || lines > 5000 {
 		lines = 200
 	}
-	return "docker logs --timestamps --tail " + strconv.Itoa(lines) + " " + remote.Quote(name) + " 2>&1"
+	return LogsScript("docker logs", remote.Quote(name), LogsOptions{LogFilter: f, Lines: lines, Timestamps: true})
 }
 
 // HasContainer reports whether name is a container (or the Proxy) of the
@@ -487,16 +488,19 @@ func HasContainer(snap *Snapshot, server, name string) bool {
 }
 
 // Logs reads the last lines of a Yoho-owned container on server.
-func Logs(ctx context.Context, src *Source, snap *Snapshot, server, name string, lines int) (string, error) {
+func Logs(ctx context.Context, src *Source, snap *Snapshot, server, name string, lines int, f LogFilter) (string, error) {
+	if err := f.Check(); err != nil {
+		return "", err
+	}
 	if !HasContainer(snap, server, name) {
 		return "", fmt.Errorf("unknown container %q on %q", name, server)
 	}
 	for _, t := range src.Targets {
 		if t.Name == server {
 			if t.Reader != nil {
-				return t.Reader.Logs(ctx, name, lines)
+				return t.Reader.Logs(ctx, name, lines, f)
 			}
-			return t.Host.Output(ctx, remote.Cmd{Script: LogsScript(name, lines)})
+			return t.Host.Output(ctx, remote.Cmd{Script: ContainerLogsScript(name, lines, f)})
 		}
 	}
 	return "", fmt.Errorf("unknown Server %q", server)
@@ -537,7 +541,7 @@ func (l *Live) Snapshot(ctx context.Context, fresh bool) (*Snapshot, error) {
 }
 
 // Logs reads the last lines of a container listed by the latest Snapshot.
-func (l *Live) Logs(ctx context.Context, server, name string, lines int) (string, error) {
+func (l *Live) Logs(ctx context.Context, server, name string, lines int, f LogFilter) (string, error) {
 	snap, err := l.Snapshot(ctx, false)
 	if err != nil {
 		return "", err
@@ -548,5 +552,5 @@ func (l *Live) Logs(ctx context.Context, server, name string, lines int) (string
 			return "", err
 		}
 	}
-	return Logs(ctx, l.Src, snap, server, name, lines)
+	return Logs(ctx, l.Src, snap, server, name, lines, f)
 }

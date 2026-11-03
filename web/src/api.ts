@@ -63,9 +63,15 @@ export const api = {
   meta: (signal?: AbortSignal) => get<Meta>("/api/meta", signal),
   snapshot: (fresh: boolean, signal?: AbortSignal) => get<Snapshot>(`/api/snapshot${fresh ? "?fresh=1" : ""}`, signal),
   disk: (fresh: boolean, signal?: AbortSignal) => get<DiskUsage>(`/api/disk${fresh ? "?fresh=1" : ""}`, signal),
-  logs: (server: string, container: string, lines: number, signal?: AbortSignal) =>
-    get<{ logs: string }>(
-      `/api/logs?${new URLSearchParams({ server, container, lines: String(lines) })}`,
-      signal,
-    ),
+  // since: a docker duration ("15m") or ""; grep: text matched on the
+  // Server, ignoring case, or "". With grep, lines counts matching lines.
+  logs: (server: string, container: string, lines: number, filter: { since: string; grep: string }, signal?: AbortSignal) => {
+    const q = new URLSearchParams({ server, container, lines: String(lines) })
+    if (filter.since) q.set("since", filter.since)
+    if (filter.grep) {
+      q.set("grep", filter.grep)
+      q.set("icase", "1")
+    }
+    return get<{ logs: string }>(`/api/logs?${q}`, signal)
+  },
 }

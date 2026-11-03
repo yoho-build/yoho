@@ -506,9 +506,9 @@ func (r gateReader) Server(ctx context.Context) (dash.Server, error) {
 	return s, err
 }
 
-func (r gateReader) Logs(ctx context.Context, container string, lines int) (string, error) {
+func (r gateReader) Logs(ctx context.Context, container string, lines int, f dash.LogFilter) (string, error) {
 	var b strings.Builder
-	err := r.g.Call(ctx, gate.VerbLogs, gate.LogsArgs{Container: container, Lines: lines, Timestamps: true}, nil, &b, nil)
+	err := r.g.Call(ctx, gate.VerbLogs, gate.LogsArgs{Container: container, Lines: lines, Timestamps: true, LogFilter: f}, nil, &b, nil)
 	return b.String(), err
 }
 

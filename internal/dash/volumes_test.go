@@ -190,7 +190,7 @@ func TestCollectDiskKeepsPartialOutput(t *testing.T) {
 type gateless struct{}
 
 func (gateless) Server(context.Context) (Server, error) { return Server{}, nil }
-func (gateless) Logs(context.Context, string, int) (string, error) {
+func (gateless) Logs(context.Context, string, int, LogFilter) (string, error) {
 	return "", nil
 }
 

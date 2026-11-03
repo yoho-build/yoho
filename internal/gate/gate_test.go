@@ -12,6 +12,7 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/yoho-build/yoho/internal/dash"
 	"github.com/yoho-build/yoho/internal/deploy"
 	"github.com/yoho-build/yoho/internal/release"
 	"github.com/yoho-build/yoho/internal/remote"
@@ -243,6 +244,20 @@ func TestPSAndLogs(t *testing.T) {
 	err := g.Call(context.Background(), VerbLogs, LogsArgs{ServicesArgs: ServicesArgs{Services: []string{"web; id"}}}, nil, io.Discard, nil)
 	if err == nil || !strings.Contains(err.Error(), "invalid Service name") {
 		t.Fatalf("injection: %v", err)
+	}
+	// Filters run on the Server; the Gate checks them and quotes the pattern.
+	filtered := LogsArgs{ServicesArgs: ServicesArgs{Services: []string{"web"}}, LogFilter: dash.LogFilter{Since: "1h", Grep: "a'; id"}}
+	if err := g.Call(context.Background(), VerbLogs, filtered, nil, io.Discard, nil); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(h.all(), "logs --since '1h' 'web' 2>&1 | grep -F -e 'a'\\''; id' | tail -n 10000") {
+		t.Fatalf("scripts: %s", h.all())
+	}
+	for _, bad := range []dash.LogFilter{{Since: "1h; id"}, {Until: "banana"}, {Grep: "a\nb"}} {
+		err := g.Call(context.Background(), VerbLogs, LogsArgs{LogFilter: bad}, nil, io.Discard, nil)
+		if err == nil || !strings.Contains(err.Error(), "invalid") && !strings.Contains(err.Error(), "single line") {
+			t.Fatalf("%+v: %v", bad, err)
+		}
 	}
 	// A project shared with another App Destination: read verbs refuse.
 	foreign = true

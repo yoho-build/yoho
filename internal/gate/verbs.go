@@ -11,7 +11,6 @@ import (
 	"path/filepath"
 	"regexp"
 	"slices"
-	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -151,13 +150,16 @@ func stats(ctx context.Context, c *call) (any, error) {
 }
 
 // LogsArgs are the logs arguments. Container names one container of the
-// App (the dashboards); otherwise Services (none: every Service).
+// App (the dashboards); otherwise Services (none: every Service). Unset
+// filter fields are omitted, so a Gate of an older Yoho serves plain reads
+// and refuses filtered ones as unknown arguments.
 type LogsArgs struct {
 	ServicesArgs
 	Container  string `json:"container,omitempty"`
 	Lines      int    `json:"lines,omitempty"`
 	Follow     bool   `json:"follow,omitempty"`
 	Timestamps bool   `json:"timestamps,omitempty"`
+	dash.LogFilter
 }
 
 func logs(ctx context.Context, c *call) (any, error) {
@@ -168,23 +170,25 @@ func logs(ctx context.Context, c *call) (any, error) {
 	if err := checkServices(a.Services); err != nil {
 		return nil, err
 	}
-	if a.Lines <= 0 {
-		a.Lines = 100
+	if err := a.LogFilter.Check(); err != nil {
+		return nil, invalid(err.Error())
 	}
-	if a.Lines > maxLogLines {
+	switch {
+	case a.Lines <= 0 && (a.Since != "" || a.Grep != ""):
+		a.Lines = maxLogLines
+	case a.Lines <= 0:
+		a.Lines = 100
+	case a.Lines > maxLogLines:
 		a.Lines = maxLogLines
 	}
 	c.audit["services"], c.audit["lines"], c.audit["follow"] = a.Services, a.Lines, a.Follow
+	if a.Since != "" || a.Until != "" || a.Grep != "" {
+		c.audit["since"], c.audit["until"], c.audit["grep"] = a.Since, a.Until, a.Grep != ""
+	}
 	if a.Follow {
 		c.watchStdin()
 	}
-	flags := " --tail " + strconv.Itoa(a.Lines)
-	if a.Follow {
-		flags += " -f"
-	}
-	if a.Timestamps {
-		flags += " --timestamps"
-	}
+	opts := dash.LogsOptions{LogFilter: a.LogFilter, Lines: a.Lines, Follow: a.Follow, Timestamps: a.Timestamps}
 	var script string
 	if a.Container != "" {
 		c.audit["container"] = a.Container
@@ -203,16 +207,12 @@ func logs(ctx context.Context, c *call) (any, error) {
 		if id == "" || owner != c.project()+"|"+c.req.App+"|"+c.req.Destination {
 			return nil, denied("container "+a.Container+" is not part of "+c.req.App+"/"+c.req.Destination, "")
 		}
-		script = "docker logs" + flags + " " + remote.Quote(id) + " 2>&1"
+		script = dash.LogsScript("docker logs", remote.Quote(id), opts)
 	} else {
 		if _, err := c.ownContainers(ctx); err != nil {
 			return nil, err
 		}
-		script = "docker compose -p " + remote.Quote(c.project()) + " logs" + flags
-		if len(a.Services) > 0 {
-			script += " " + remote.QuoteArgs(a.Services...)
-		}
-		script += " 2>&1"
+		script = dash.LogsScript("docker compose -p "+remote.Quote(c.project())+" logs", remote.QuoteArgs(a.Services...), opts)
 	}
 	err := c.host.Run(ctx, remote.Cmd{Script: script, Stdout: c.fw})
 	if a.Follow && ctx.Err() != nil {

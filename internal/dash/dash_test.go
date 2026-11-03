@@ -165,11 +165,11 @@ func TestCollect(t *testing.T) {
 	if HasContainer(snap, "web-1", "postgres-unrelated") || HasContainer(snap, "web-2", "yoho-proxy") {
 		t.Error("only containers of the Snapshot's Server may be read")
 	}
-	if _, err := Logs(context.Background(), src, snap, "web-1", "other", 10); err == nil {
+	if _, err := Logs(context.Background(), src, snap, "web-1", "other", 10, LogFilter{}); err == nil {
 		t.Error("Logs must refuse containers outside the Snapshot")
 	}
 	ok.out = "line"
-	got, err := Logs(context.Background(), src, snap, "web-1", "yoho-proxy", 50)
+	got, err := Logs(context.Background(), src, snap, "web-1", "yoho-proxy", 50, LogFilter{})
 	if err != nil || got != "line" {
 		t.Fatalf("logs: %q %v", got, err)
 	}
@@ -179,7 +179,7 @@ func TestCollect(t *testing.T) {
 }
 
 func TestLogsScriptClampsLines(t *testing.T) {
-	if s := LogsScript("x", 999999); !strings.Contains(s, "--tail 200 ") {
+	if s := ContainerLogsScript("x", 999999, LogFilter{}); !strings.Contains(s, "--tail 200 ") {
 		t.Error(s)
 	}
 }
@@ -193,7 +193,7 @@ func TestLiveCachesAndRefreshesForNewContainers(t *testing.T) {
 	if a != b || len(h.scripts) != 1 {
 		t.Fatalf("cached Snapshot expected, %d collections", len(h.scripts))
 	}
-	if _, err := l.Logs(ctx, "web-1", "yoho-new-1", 10); err == nil {
+	if _, err := l.Logs(ctx, "web-1", "yoho-new-1", 10, LogFilter{}); err == nil {
 		t.Error("unknown container must fail after a refresh")
 	}
 	if len(h.scripts) != 2 {

@@ -6,7 +6,7 @@
 - the App's containers with state, health, CPU, memory, network I/O, image and ports;
 - the Proxy (`yoho-proxy`);
 - Release history, with the current Release marked;
-- the last lines of any listed container's logs;
+- the last lines of any listed container's logs, with a time range and a search run on the Server (`yoho ui`) or a filter as you type (`yoho tui`);
 - on demand, the size of the App directory and each of the App's volumes.
 
 ```sh
@@ -55,7 +55,19 @@ To reach it from another machine, forward the port over SSH (`ssh -L 7300:127.0.
 
 ## Logs
 
+The `yoho ui` logs dialog shows the last 100, 200 or 1000 lines, optionally of the last 15 minutes, hour, 6 hours or 24 hours only. The search box filters on the Server (`grep`, fixed string, ignoring case), so the line count is of matching lines and older matches are found too. In `yoho tui` logs, `/` filters the loaded lines as you type (ignoring case); `enter` keeps the filter, `esc` clears it. For more, use `yoho app logs` with `--since`, `--until`, `--grep` and `-f` (see the [CLI reference](cli.md)).
+
 Container output is shown as Docker returns it. Yoho does not resolve your secrets for these views, so it cannot redact a value an application prints; keep secrets out of application logs.
+
+## Metrics history and alerts
+
+`yoho ui` and `yoho tui` show the present: nothing is recorded while they are closed, and nothing alerts you. Yoho runs no daemon on your Servers ([ADR 0003](https://github.com/yoho-build/yoho/blob/main/docs/adr/0003-no-resident-daemon-by-default.md)). For history or alerts, add a tool for it. Both recipes are **optional and outside Yoho**: you run and maintain them; Yoho neither installs nor checks them.
+
+**Metrics history with Grafana Cloud (or any Prometheus).** Run [Grafana Alloy](https://grafana.com/docs/alloy/latest/) on each Server with its built-in node (`prometheus.exporter.unix`) and cAdvisor (`prometheus.exporter.cadvisor`) exporters, sending to your Grafana Cloud stack with `prometheus.remote_write`, and set alert rules in Grafana. Deploy it as its own Yoho App (the `grafana/alloy` image with `/proc`, `/sys`, `/` and `/var/run/docker.sock` mounted read-only, and the Grafana Cloud token as a Yoho secret) or with your usual tooling. Self-hosted Prometheus with `node_exporter` and cAdvisor works the same way.
+
+**Uptime alerts with an external monitor and a heartbeat.** Point a monitor on another machine ([Uptime Kuma](https://github.com/louislam/uptime-kuma), [Better Stack](https://betterstack.com/uptime), Healthchecks.io) at your App's public URL for availability alerts. For the Server itself, a root crontab line such as `*/5 * * * * curl -fsS -m 10 https://uptime.betterstack.com/api/v1/heartbeat/<id> >/dev/null` (or an Uptime Kuma push monitor URL) pings a heartbeat; the monitor alerts when the pings stop.
+
+An opt-in per-Server API for unattended metrics and alerting is on the [backlog](https://github.com/yoho-build/yoho/blob/main/docs/backlog.md) ("Remote API + dashboard").
 
 ## Developing the web app
 
