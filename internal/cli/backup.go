@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"path"
+	"slices"
 	"strings"
 	"time"
 
@@ -376,19 +377,23 @@ func backupRunCmd(g *globals) *cobra.Command {
 			}
 			step := u.Step(h.Name, "Back up %s", strings.Join(sortedKeys(j.services), ", "))
 			out, flush := j.redact(step.Output())
+			var left backup.Leftovers
 			res, err := backup.Run(ctx, backup.RunOptions{
 				App: a.cfg.App, Destination: a.destName, Project: a.project(),
 				Services: j.services, Target: j.target, Password: j.password, TargetEnv: j.env, RcloneConfig: j.rcloneConf,
 				TargetName: j.targetName,
 				Host:       h.Host, Out: out, Lock: a.backupLock(h.Host, "backup"), YohoVersion: Version,
-				Runtime: a.dest.Runtime,
+				Runtime:   a.dest.Runtime,
+				Leftovers: func(l backup.Leftovers) { left = l },
 			})
 			flush()
 			if err != nil {
 				step.Fail(err, backupHint(err))
+				warnLeftovers(u, a.destName, left)
 				return &silentError{err}
 			}
 			step.Done(fmt.Sprintf("%s · %s · %s", res.ID, humanBytes(res.Size), res.Method))
+			warnLeftovers(u, a.destName, left)
 			hookEnv["YOHO_BACKUP_ID"] = res.ID
 			if err = hook(ctx, "post-backup", hookEnv); err != nil {
 				return err
@@ -586,7 +591,7 @@ remotes are not files on the Server and are refused.
 
 func backupRestoreCmd(g *globals) *cobra.Command {
 	var jobName, from string
-	var yes, copyGenerated bool
+	var yes, copyGenerated, cleanup bool
 	c := &cobra.Command{
 		Use:   "restore ID",
 		Short: "Restore a Backup, replacing the Services' volume data",
@@ -604,9 +609,28 @@ YOHO_DESTINATION=staging). The Backup job and Backup Target are the source
 Destination's, and so are the Target's secrets (password_secret, env_secrets,
 rclone_config_secret are read from .yoho/secrets.<source>); the Target must be
 reachable from this Destination's Server. The source's generated secrets are not copied unless
---copy-generated-secrets is given. Another App's Backup is always refused.`,
-		Args: cobra.ExactArgs(1),
+--copy-generated-secrets is given. Another App's Backup is always refused.
+
+A restore keeps prior-state.json (the Services that ran before it) in a
+restore-* staging directory under the Destination's Backup directory until it
+succeeds. Rerunning an interrupted or failed restore resumes the Services that
+ran before the first attempt once it succeeds, then removes the old staging.
+--cleanup (without ID) takes the Destination lock, so it refuses while a
+restore, drill, deploy or Backup runs, and removes the restore staging
+directories that Yoho can prove it created, including their prior-state.json.`,
+		Args: func(cmd *cobra.Command, args []string) error {
+			if cleanup {
+				return cobra.NoArgs(cmd, args)
+			}
+			return cobra.ExactArgs(1)(cmd, args)
+		},
 		RunE: func(cmd *cobra.Command, args []string) (err error) {
+			if cleanup {
+				if from != "" || copyGenerated || yes {
+					return errors.New("--cleanup cannot be combined with --from, --copy-generated-secrets or --yes")
+				}
+				return restoreCleanup(cmd, g, jobName)
+			}
 			// The Destination to restore into must be named explicitly (-d
 			// or $YOHO_DESTINATION), never a default: restore replaces data.
 			if from != "" && g.destination == "" && os.Getenv("YOHO_DESTINATION") == "" {
@@ -690,6 +714,7 @@ reachable from this Destination's Server. The source's generated secrets are not
 			}
 			step = u.Step(h.Name, "Restore %s", found.ID)
 			out, flush := j.redact(step.Output())
+			var left backup.Leftovers
 			res, err := backup.Restore(ctx, backup.RestoreOptions{
 				App: a.cfg.App, Destination: a.destName, Project: a.project(), From: source, CopyGenerated: copyGenerated,
 				Services: j.services, Target: j.target, Password: j.password, TargetEnv: j.env, RcloneConfig: j.rcloneConf,
@@ -698,10 +723,12 @@ reachable from this Destination's Server. The source's generated secrets are not
 				AfterRestore: func(ctx context.Context) error {
 					return hook(ctx, "post-restore", hookEnv)
 				},
+				Leftovers: func(l backup.Leftovers) { left = l },
 			})
 			flush()
 			if err != nil {
 				step.Fail(err, restoreHint(err))
+				warnLeftovers(u, a.destName, left)
 				return &silentError{err}
 			}
 			var detail []string
@@ -712,6 +739,19 @@ reachable from this Destination's Server. The source's generated secrets are not
 				detail = append(detail, "dumps "+strings.Join(res.Dumps, ", "))
 			}
 			step.Done(strings.Join(detail, " · "))
+			// Restore staging this restore applied and removed is not a leftover.
+			left.Staging = slices.DeleteFunc(left.Staging, func(d backup.StagingDir) bool { return slices.Contains(res.RemovedStaging, d.Path) })
+			warnLeftovers(u, a.destName, left)
+			if len(res.Revived) > 0 {
+				u.Info("resumed %s, stopped by an interrupted restore (they ran before its first attempt)", strings.Join(res.Revived, ", "))
+			}
+			if len(res.StillStopped) > 0 {
+				u.Warn("%d Services (%s) were stopped by an interrupted restore and remain stopped; start them with `yoho deploy -d %s`", len(res.StillStopped), strings.Join(res.StillStopped, ", "), a.destName)
+			}
+			u.Event("restore", "", map[string]any{
+				"backup_id": found.ID, "from": source, "volumes": res.Volumes, "dumps": res.Dumps,
+				"revived": res.Revived, "still_stopped": res.StillStopped, "removed_staging": res.RemovedStaging,
+			})
 			for _, s := range res.Skipped {
 				u.Warn("Service %s is not in this Backup; left unchanged", s)
 			}
@@ -735,6 +775,7 @@ reachable from this Destination's Server. The source's generated secrets are not
 	c.Flags().BoolVarP(&yes, "yes", "y", false, "Skip the confirmation prompt")
 	c.Flags().StringVar(&from, "from", "", "restore a Backup taken by another Destination of this App (e.g. --from production -d staging)")
 	c.Flags().BoolVar(&copyGenerated, "copy-generated-secrets", false, "with --from: also replace this Destination's generated secrets with the source's copies from the Backup")
+	c.Flags().BoolVar(&cleanup, "cleanup", false, "remove leftover restore staging (and its prior-state.json) of this Destination and exit")
 	return c
 }
 
@@ -746,7 +787,7 @@ func restoreHint(err error) string {
 	case strings.Contains(err.Error(), "isolation cleanup failed"):
 		return "verify and manually stop this App's Services immediately; repair or rerun the restore before resuming (data was not rolled back)"
 	case strings.Contains(err.Error(), "Services left stopped"):
-		return "fix the cause and rerun the restore, or inspect and repair the data before manually resuming from prior-state.json; deploy does not roll back volume data"
+		return "Services stay stopped: fix the cause and rerun the restore, which resumes the Services that ran before the first attempt once it succeeds; or inspect and repair the data and start them by hand from prior-state.json (`yoho deploy` starts every Service and does not roll back volume data)"
 	case strings.Contains(err.Error(), "restore isolation"):
 		return "check deployed ownership and isolate the restore target's published ports, Proxy/Tunnel access and shared networks before retrying; no routes were removed"
 	case strings.Contains(err.Error(), "deploy the App"):

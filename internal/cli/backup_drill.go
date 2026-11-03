@@ -33,7 +33,11 @@ would refuse.
 --keep leaves the drill running for inspection; remove it later with
 --cleanup, which takes the Destination lock (so it never removes a drill that
 is still running), removes every drill of this App/Destination and never
-touches objects without the drill labels.`,
+touches objects without the drill labels. It also removes the drill staging
+directories a killed drill leaves in the Destination's Backup directory (they
+hold the decrypted Backup), only when their name and private ownership marker
+prove Yoho created them. A drill, Backup or restore warns when it finds such
+leftovers.`,
 		Args: cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) (err error) {
 			if cleanup && (keep || cmd.Flags().Changed("id")) {
@@ -99,10 +103,17 @@ touches objects without the drill labels.`,
 					step.Done()
 					u.Event("drill_removed", "", map[string]any{"project": p})
 				}
+				// A killed drill also leaves its staging directory, which
+				// holds the decrypted Backup (dumps, volume archives,
+				// generated secrets).
+				dirs, err := removeStaging(ctx, u, h.Name, h.Host, a.cfg.App, a.destName, backup.StagingDrill)
+				if err != nil {
+					return err
+				}
 				if err := release(); err != nil {
 					return fmt.Errorf("unlock: %w", err)
 				}
-				u.Finished(nil, fmt.Sprintf("Removed %d drills of %s (%s)", len(projects), a.cfg.App, a.destName))
+				u.Finished(nil, fmt.Sprintf("Removed %d drills and %d drill staging directories of %s (%s)", len(projects), dirs, a.cfg.App, a.destName))
 				return nil
 			}
 			if id == "" {
@@ -149,8 +160,10 @@ touches objects without the drill labels.`,
 
 			step = u.Step(h.Name, "Drill %s", found.ID)
 			out, flush := j.redact(step.Output())
+			var left backup.Leftovers
 			res, err := backup.Drill(ctx, backup.DrillOptions{
-				App: a.cfg.App, Destination: a.destName,
+				Leftovers: func(l backup.Leftovers) { left = l },
+				App:       a.cfg.App, Destination: a.destName,
 				Services: j.services, Target: j.target, Password: j.password, TargetEnv: j.env, RcloneConfig: j.rcloneConf,
 				Host: h.Host, Out: out, Lock: a.backupLock(h.Host, "backup drill"), ID: found.ID, Keep: keep,
 				Runtime: a.dest.Runtime,
@@ -161,9 +174,11 @@ touches objects without the drill labels.`,
 			flush()
 			if err != nil {
 				step.Fail(err, drillHint(err))
+				warnLeftovers(u, a.destName, left)
 				return &silentError{err}
 			}
 			step.Done(res.Project)
+			warnLeftovers(u, a.destName, left)
 			rows := make([][]string, 0, len(res.Phases)+1)
 			for _, p := range res.Phases {
 				rows = append(rows, []string{p.Name, p.Duration.Round(100 * time.Millisecond).String(), p.Detail})

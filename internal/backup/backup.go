@@ -81,6 +81,10 @@ type RunOptions struct {
 	// volumes named <project>_<volume>. Stateful Services are pinned to the
 	// first Server, which is the host the CLI connects for Backups.
 	Runtime string
+	// Leftovers, when set, is called (with the lock held) with the drill
+	// projects and drill/restore staging that killed or interrupted runs
+	// left on the Server.
+	Leftovers func(Leftovers)
 }
 
 // Result describes a stored Backup.
@@ -171,6 +175,7 @@ func Run(ctx context.Context, o RunOptions) (res *Result, err error) {
 		return nil, err
 	}
 
+	reportLeftovers(ctx, o.Host, o.App, o.Destination, "", o.Leftovers, o.logf)
 	ts := start.UTC().Format(tsLayout)
 	spool := release.BackupDir(o.App, o.Destination)
 	name, token, err := newStagingName("run")
