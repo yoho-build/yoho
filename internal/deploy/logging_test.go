@@ -1,11 +1,15 @@
 package deploy
 
 import (
+	"context"
+	"errors"
 	"reflect"
 	"strings"
 	"testing"
 
 	"go.yaml.in/yaml/v3"
+
+	"github.com/yoho-build/yoho/internal/remote"
 )
 
 func compiledLogging(t *testing.T, logDriver string) map[string]any {
@@ -69,5 +73,24 @@ func TestCompileDefaultLoggingStable(t *testing.T) {
 	}
 	if string(a) != string(b) {
 		t.Error("compiled compose differs between identical compiles")
+	}
+}
+
+// failHost fails every command, like a Server whose docker info errors.
+type failHost struct{ remote.Local }
+
+func (*failHost) Output(context.Context, remote.Cmd) (string, error) {
+	return "", errors.New("docker info: permission denied")
+}
+
+func TestDockerLogDriverNeverFailsADeploy(t *testing.T) {
+	got, err := DockerLogDriver(context.Background(), &failHost{})
+	if err != nil || got != "" || !UseDefaultLogging(got) {
+		t.Fatalf("unreadable driver must mean unknown (json-file default): %q %v", got, err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := DockerLogDriver(ctx, &failHost{}); err == nil {
+		t.Fatal("a cancelled context must still stop the deploy")
 	}
 }

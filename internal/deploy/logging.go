@@ -18,14 +18,20 @@ const (
 )
 
 // DockerLogDriver is the daemon's default logging driver from `docker info`.
-// A nil Host reports "" (unknown).
+// A nil Host, or a daemon that cannot report it, is "" (unknown, so the
+// json-file default applies): the log default must never fail a deploy or
+// plan; a Docker that is really unreachable fails the steps that need it.
+// Only a cancelled ctx is an error.
 func DockerLogDriver(ctx context.Context, h remote.Host) (string, error) {
 	if h == nil {
 		return "", nil
 	}
 	out, err := h.Output(ctx, remote.Cmd{Script: "set -eu\ndocker info --format '{{.LoggingDriver}}'"})
 	if err != nil {
-		return "", fmt.Errorf("inspect Docker logging driver: %w", err)
+		if ctx.Err() != nil {
+			return "", fmt.Errorf("inspect Docker logging driver: %w", ctx.Err())
+		}
+		return "", nil
 	}
 	return strings.TrimSpace(out), nil
 }
