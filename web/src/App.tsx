@@ -23,6 +23,7 @@ import {
 import { api, ApiError } from "@/api"
 import { ago, bytes, duration, shortVersion } from "@/format"
 import { parseLogs, shortTime, spanClass } from "@/logs"
+import { TrafficCard } from "@/traffic"
 import type { Container, Disk, DiskUsage, Meta, Release, Server, ServerDisk, Snapshot } from "@/types"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
@@ -302,6 +303,8 @@ function ServerView({ server, now, disk, onLogs }: { server: Server; now: number
         </Card>
         <ProxyCard proxy={server.proxy} onLogs={onLogs} />
       </div>
+
+      <TrafficCard traffic={server.traffic} />
 
       <VolumesCard server={server} disk={disk} now={now} />
 

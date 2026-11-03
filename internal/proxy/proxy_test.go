@@ -67,6 +67,19 @@ func TestRunArgsPorts(t *testing.T) {
 	}
 }
 
+func TestRunArgsMetrics(t *testing.T) {
+	off := runArgs(config.ProxyConfig{})
+	on := runArgs(config.ProxyConfig{Metrics: true, Bind: "0.0.0.0"})
+	got := strings.Join(on, " ")
+	// Loopback only whatever Bind says; the flag goes to kamal-proxy run.
+	if !strings.Contains(got, "--publish 127.0.0.1:9188:9188") || !strings.HasSuffix(got, DefaultImage+" kamal-proxy run --metrics-port 9188") {
+		t.Errorf("metrics args: %s", got)
+	}
+	if strings.Contains(strings.Join(off, " "), "metrics") || configHash(off) == configHash(on) {
+		t.Errorf("metrics off must keep the old fingerprint and differ from on: %s", off)
+	}
+}
+
 func TestBootCreatesWhenMissing(t *testing.T) {
 	h := &fakeHost{}
 	var out bytes.Buffer

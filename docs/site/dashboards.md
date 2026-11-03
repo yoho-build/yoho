@@ -4,7 +4,7 @@
 
 - every Server: OS, kernel, uptime, load, memory, disk of the Yoho and Docker roots, Docker version;
 - the App's containers with state, health, CPU, memory, network I/O, image and ports;
-- the Proxy (`yoho-proxy`);
+- the Proxy (`yoho-proxy`), and with `proxy.metrics: true` the traffic of each proxied Service;
 - Release history, with the current Release marked;
 - the last lines of any listed container's logs, with a time range and a search run on the Server (`yoho ui`) or a filter as you type (`yoho tui`);
 - on demand, the size of the App directory and each of the App's volumes.
@@ -31,6 +31,18 @@ per-second rates. Stopped containers and unavailable stats show `—`.
 Use `↑↓` or `pgup`/`pgdn` to scroll, `g`/`G` for the top/bottom, and `esc` or `q`
 to return. `Enter` opens logs from either the overview or Details; leaving logs
 returns to the page you opened them from.
+
+## Traffic
+
+With `proxy.metrics: true` in the Yoho file (then `yoho proxy boot` or a deploy, see [Proxy metrics](zero-downtime.md#proxy-metrics)), `yoho tui` shows a TRAFFIC line per proxied Service and `yoho ui` a Traffic card:
+
+- requests per minute and the share of 5xx responses since the previous refresh;
+- p50 and p95 latency over that interval, estimated from kamal-proxy's latency histogram (bucket bounds 5 ms, 10 ms, 25 ms, … 10 s, so values are interpolated within a bucket);
+- a sparkline of requests/min over the last 30 refreshes, and the totals since the Proxy started.
+
+Each refresh, the collector script also fetches `http://127.0.0.1:9188/metrics` on the Server with `curl` or `wget` and keeps only the `kamal_proxy_http_*` lines of this App's routes; other Apps' routes never leave the Server. Rates come from the difference between two refreshes, so the first refresh shows only totals. The history lives in the memory of the running `yoho tui` / `yoho ui` and is gone when it stops; nothing is stored. A Proxy restart resets kamal-proxy's counters; Yoho counts from zero again. Without `proxy.metrics`, the dashboards show a one-line hint how to enable it. Traffic isn't available through scoped access yet.
+
+Unique visitors are not shown: kamal-proxy's metrics carry no client identity, and counting visitors would mean reading and keeping request logs, which these views don't do.
 
 ## Volume disk usage
 

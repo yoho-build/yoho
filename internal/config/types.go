@@ -268,6 +268,9 @@ type ProxyConfig struct {
 	HTTPSPort *int `json:"https_port,omitempty"`
 	// Bind address for published ports, e.g. 127.0.0.1. Default all.
 	Bind string `json:"bind,omitempty"`
+	// Publish kamal-proxy Prometheus metrics on 127.0.0.1 of the Server
+	// only, for the traffic panels of `yoho tui` and `yoho ui`. Opt-in.
+	Metrics bool `json:"metrics,omitempty" jsonschema:"description=Publish kamal-proxy Prometheus metrics on 127.0.0.1:9188 of the Server only (never public) so yoho tui and yoho ui show per-Service traffic: requests/min, 5xx rate, p50/p95 latency. Proxy settings are Server-wide: set the same value in every App on a Server. Changing it recreates yoho-proxy (brief proxy downtime)"`
 	// Cloudflare Tunnel in front of the Proxy, managed by Yoho as the
 	// yoho-tunnel container. Without token_secret a Quick Tunnel
 	// (random *.trycloudflare.com URL, no account) is started.

@@ -44,6 +44,15 @@ func (a *app) dashSource(cmd *cobra.Command, interval time.Duration) (*dash.Live
 	if src.Runtime == "" {
 		src.Runtime = "compose"
 	}
+	// Traffic needs the proxied Services; a compose error only hides it.
+	if r, err := a.compose(cmd.Context()); err == nil {
+		src.Metrics = a.proxyConfig().Metrics
+		for _, name := range sortedKeys(r.Ext) {
+			if p := r.Ext[name].Proxy; p != nil {
+				src.Routes = append(src.Routes, dash.ProxyRoute{Service: name, Route: deploy.RouteName(a.cfg.App, a.destName, name), Hosts: p.Hosts})
+			}
+		}
+	}
 	for _, h := range hosts {
 		src.Targets = append(src.Targets, dash.Target{Name: h.Name, SSH: h.Server.SSH, Host: h.Host})
 	}

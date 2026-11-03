@@ -249,6 +249,7 @@ func (m *Model) mainLines(width, height int) []line {
 		})
 	}
 	ls = append(ls, line{})
+	ls = append(ls, trafficLines(s.Traffic)...)
 
 	// Releases, as many as fit above the footer.
 	ls = append(ls, line{{"  RELEASES", bold}})

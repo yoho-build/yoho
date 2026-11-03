@@ -34,6 +34,9 @@ const (
 
 	stateDir    = "/home/kamal-proxy/.config/kamal-proxy"
 	configLabel = "yoho.proxy.config"
+	// MetricsPort serves kamal-proxy Prometheus metrics when
+	// proxy.metrics is set, published on the Server's 127.0.0.1 only.
+	MetricsPort = 9188
 	// LabelAttach marks a Docker network the Proxy joins besides Network: a
 	// scoped App's own network (ADR 0011). A recreated Proxy rejoins them.
 	LabelAttach = "yoho.proxy.attach"
@@ -80,7 +83,13 @@ func runArgsForDriver(cfg config.ProxyConfig, driver string) []string {
 	}
 	publish(cfg.HTTPPort, 80, 80)
 	publish(cfg.HTTPSPort, 443, 443)
-	return append(args, image, "kamal-proxy", "run")
+	if !cfg.Metrics {
+		return append(args, image, "kamal-proxy", "run")
+	}
+	// Loopback of the Server only, whatever Bind says: metrics are never public.
+	m := strconv.Itoa(MetricsPort)
+	args = append(args, "--publish", "127.0.0.1:"+m+":"+m)
+	return append(args, image, "kamal-proxy", "run", "--metrics-port", m)
 }
 
 // configHash identifies the Proxy configuration; stored as a label so Boot
@@ -160,7 +169,10 @@ func BootWith(ctx context.Context, host remote.Host, cfg config.ProxyConfig, out
 		return err
 	}
 	want := configHash(args)
-	image := args[len(args)-3]
+	image := cfg.Image
+	if image == "" {
+		image = DefaultImage
+	}
 	if exists && label == want {
 		if !running {
 			fmt.Fprintf(out, "[%s] starting proxy %s\n", host.Name(), ContainerName)
@@ -277,7 +289,11 @@ func NeedsBoot(ctx context.Context, host remote.Host, cfg config.ProxyConfig) (b
 	case !exists:
 		return true, "proxy container " + ContainerName + " is missing", nil
 	case label != configHash(args):
-		return true, "proxy configuration changed (recreated, brief proxy downtime)", nil
+		why := "proxy configuration changed (recreated, brief proxy downtime)"
+		if cfg.Metrics {
+			why += "; metrics on 127.0.0.1:" + strconv.Itoa(MetricsPort)
+		}
+		return true, why, nil
 	case !running:
 		return true, "proxy container is stopped", nil
 	}
