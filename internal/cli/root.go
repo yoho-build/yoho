@@ -63,6 +63,7 @@ kamal-proxy, keeps secrets in your password manager, and backs up volumes.`,
 	for _, add := range extraCommands {
 		root.AddCommand(add(g))
 	}
+	auditWrap(g, root)
 
 	ctx, cancel := signalContext()
 	defer cancel()

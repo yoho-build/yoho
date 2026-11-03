@@ -22,6 +22,7 @@ Global flags (every command): `-c, --config FILE`, `-d, --destination NAME` (def
 | `lock acquire -m MESSAGE` | Hold the Destination lock by hand (maintenance): deploys, rollbacks, rotates, Backups and Scheduled Backups refuse with the message until `lock release`. See [Locks](zero-downtime.md#locks). |
 | `lock status` | Who holds the Destination lock: performer, command, Version, message, since (`--json`: a `lock` event). |
 | `lock release [--force]` | Release a lock taken with `lock acquire`; `--force` also removes one a running or killed command holds (after a killed run). |
+| `audit [-n 50] [--since D] [--json]` | The Destination's audit log: who ran which mutating command, with which Version, how it ended and how long it took (TIME, BY, COMMAND, VERSION, RESULT, DURATION; a killed command shows `unfinished`). `--since` takes `36h`, `7d` or a date. `--json` prints the log's records, one per line. See [Audit log](#audit-log). Members of the Gate: `access audit`. |
 | `migrate plan [--cutover-allow-empty]` | Run the migration cutover preflight alone (read-only): old containers to stop, claimed-data conflicts, ingress rules to repoint. `--cutover-allow-empty` accepts a `migrate.stop` that matches no running container. |
 | `migrate status` | Print the cutover journal (`<app dir>/cutover.json`). |
 | `migrate draft --from FILE [--out DIR] [--service NAME] [--project NAME]` | Print `compose.yaml` and `yoho.yml` from a names-only inventory JSON, or from one service's `railway.json` / `railway.toml`. `--out` writes those two files only when neither exists. Does not write `.yoho/secrets`, contact Railway, or contact a Server. See [Migrating from Railway](migrating-from-railway.md). |
@@ -71,6 +72,18 @@ Global flags (every command): `-c, --config FILE`, `-d, --destination NAME` (def
 Run `yoho <command> --help` for the full flag list.
 
 `app logs`, `app stats` and `app exec` read the Service names from the compose files without the full checks of a deploy (no `env_file`, `label_file` or `x-yoho` checks), so they work while a deploy would fail. Services disabled by a compose profile are never deployed and are not listed.
+
+## Audit log
+
+Every command that changes a Server or runs code on it appends to `<root>/apps/<app>/<destination>/audit.log` on the Destination's first Server: `deploy`, `apply`, `rollback`, `remove`, `app exec`, `app run`, `backup run|restore|drill`, `secrets rotate`, `lock acquire|release` and `proxy boot|upgrade`. Read-only commands, `plan` and `--dry-run` are not logged. `yoho audit` prints it.
+
+The file is JSON lines, mode 0600 inside the 0700 App directory, append-only (one write per line, the line travels on stdin). Each command writes a `started` record before it changes anything and a `finished` record after it, paired by `run`, so a killed command is visible as `unfinished`. A record has `time` (UTC), `run`, `phase`, `performer` (`user@host`, as on the Release), `command`, `app`, `destination`, `version`, `args`, `exit`, `error`, `seconds`, `yoho` (CLI version) and `via` (`cli`). The file rotates to `audit.log.1` and `.2` at 5 MiB; older records are dropped.
+
+Recorded: the flags you set and the positional arguments (Service, Version, Backup id), and for `app exec` / `app run` the command argv, as Kamal does. Never recorded: secret values. The argv and error text pass the secrets redactor first (the Destination's resolved secret values) and then a pattern pass that masks `NAME=value` for names like password, token, secret or key, `--password VALUE` style flags, `Authorization: Bearer ...` and `user:password@` in URLs. `secrets rotate --generated` records key names only. Environment output of the command itself is never captured. Do not rely on redaction for secrets typed into an argv: prefer `app exec web -- sh -c 'cmd "$VAR"'`.
+
+Logging is best effort: a failed write warns and the command goes on. A first deploy has no App directory yet, so it has no `started` record. `yoho remove` deletes the App directory, and the log with it.
+
+Members who act through the [Gate](team-access.md) are recorded in `access/audit.log` in a different format (`member`, `verb`, `exit`, `seconds`; see `access audit`). The two share `time`, `app`, `destination`, `args`, `exit`, `error` and `seconds`.
 
 ## Plan and apply
 
