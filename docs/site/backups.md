@@ -31,12 +31,43 @@ backups:
       password_secret: BACKUP_PASSWORD
       env_secrets: [AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY]
       keep_last: 14
+      keep_within: 30d                   # and every Backup of the 30 days before the newest
   jobs:
     nightly: { destination: production, target: offsite, schedule: "*-*-* 03:00:00" }
 ```
 
 - `restic` (default): encrypted, deduplicated.
-- `archive`: files at a path or rclone remote in `tar.gz` (default `format`), AES-256 `zip`, or `7z` (never ZipCrypto); set `format` to choose; `keep_last` trims old files.
+- `archive`: files at a path or rclone remote in `tar.gz` (default `format`), AES-256 `zip`, or `7z` (never ZipCrypto); set `format` to choose; `keep_last` and `keep_within` trim old files.
+
+### Retention
+
+After each Backup Yoho applies the Target's retention to this App Destination's Backups only (restic: `forget --tag yoho,app=<app>,destination=<destination> --group-by tags ... --prune`):
+
+- `keep_last: N` keeps the newest N Backups (restic `--keep-last`).
+- `keep_within: 30d` keeps every Backup taken within that duration of the newest Backup, not of now, so a stopped schedule never empties the Target (restic `--keep-within`). Units `y`, `m` (months), `d`, `h`, in that order: `12h`, `30d`, `1y6m`. Archive Targets prune by the timestamp in the archive name.
+- With both, a Backup either rule keeps stays. Without either, nothing is deleted.
+
+### Stateful Services without a Backup
+
+`yoho config check`, `plan` and `deploy` warn once when a Stateful Service (`x-yoho.stateful: true`) has no Backup job of the Destination covering it: a job that lists it in `services`, or a job without `services` when the Service has `x-yoho.backup`. The hint says what to add. `yoho init --template postgres` (and the other Stateful templates) writes a commented-out example into a new `yoho.yml`, or prints it when `yoho.yml` exists:
+
+```yaml
+# backups:
+#   targets:
+#     local:
+#       type: archive                  # tar.gz files on the Server; `yoho backup pull` mirrors them
+#       repository: /var/backups/yoho  # generated secrets are left out unless zip/7z + password_secret
+#       keep_last: 7
+#       keep_within: 30d
+#     # offsite: { type: restic, repository: "s3:...", password_secret: BACKUP_PASSWORD, keep_within: 30d }
+#   jobs:
+#     nightly:
+#       destination: production
+#       target: local
+#       schedule: "*-*-* 03:00:00"
+```
+
+Uncomment it, then `yoho schedule install`. `yoho remove` keeps Backups (and, without `--volumes`, volumes).
 
 Generated secrets (`x-yoho.generate`, on the Server as `generated/<NAME>`) are included as `yoho-generated/<NAME>` only when the target encrypts at rest: restic, or zip/7z with `password_secret`. Any other target leaves them out and warns once. Restore writes them back after volumes and before Services start. A different value already on the Server is replaced by the Backup (the warning names the secret, not the value), except for keys of a Service backed up with `dump` only: a dump has no database roles, so the database keeps its current password and the current value stays (a note names the key). The next deploy keeps that file. A restore with `--from` another Destination leaves the target's generated secrets alone unless you pass `--copy-generated-secrets` (see [Restore from another Destination](#restore-from-another-destination)).
 

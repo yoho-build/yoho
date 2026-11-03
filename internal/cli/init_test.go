@@ -76,9 +76,38 @@ func TestInitTemplatesPassConfigCheck(t *testing.T) {
 			if err != nil {
 				t.Fatalf("config check: %v\n%s", err, check)
 			}
+			// The only warning: no Backup job covers the Stateful Services.
 			ev := checkEvent(t, check)
-			if ev["ok"] != true || ev["warnings"].(float64) != 0 || int(ev["services"].(float64)) != len(set) {
+			if ev["ok"] != true || ev["warnings"].(float64) != 1 || int(ev["services"].(float64)) != len(set) ||
+				!strings.Contains(check, "no Backup job on Destination production") {
 				t.Fatalf("check event %#v\n%s", ev, check)
+			}
+			// Uncommenting the backups example in yoho.yml covers them.
+			yp := filepath.Join(dir, "yoho.yml")
+			y, _ := os.ReadFile(yp)
+			if !strings.Contains(string(y), "\n# backups:\n") || !strings.Contains(string(y), "keep_within: 30d") {
+				t.Fatalf("no backups example in yoho.yml:\n%s", y)
+			}
+			var lines []string
+			on := false
+			for _, l := range strings.Split(string(y), "\n") {
+				if l == "# backups:" {
+					on = true
+				}
+				if on {
+					l = strings.TrimPrefix(l, "# ")
+				}
+				lines = append(lines, l)
+			}
+			if err := os.WriteFile(yp, []byte(strings.Join(lines, "\n")), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			check, err = runCheck(t, yp, "--offline")
+			if err != nil {
+				t.Fatalf("config check with backups: %v\n%s", err, check)
+			}
+			if ev := checkEvent(t, check); ev["ok"] != true || ev["warnings"].(float64) != 0 {
+				t.Fatalf("check event with backups %#v\n%s", ev, check)
 			}
 		})
 	}
@@ -105,6 +134,9 @@ func TestInitTemplateMergesAndRefusesConflicts(t *testing.T) {
 	out, err := initIn(t, dir, "postgres")
 	if err != nil || !strings.Contains(out, "yoho.yml exists, left unchanged") {
 		t.Fatalf("%v\n%s", err, out)
+	}
+	if !strings.Contains(out, `"event":"backups_example"`) || !strings.Contains(out, `keep_within: 30d`) {
+		t.Fatalf("no backups example printed for an existing yoho.yml:\n%s", out)
 	}
 	if again, _ := os.ReadFile(filepath.Join(dir, "yoho.yml")); string(again) != string(yoho) {
 		t.Fatal("yoho.yml changed")

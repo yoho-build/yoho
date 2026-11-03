@@ -382,3 +382,35 @@ func sortedKeys(m map[string]any) []string {
 	sort.Strings(out)
 	return out
 }
+
+// BackupsExample is a commented-out yoho.yml `backups:` block for the
+// template Services of destination: a local archive Target, a restic
+// offsite Target, and a nightly job covering every Service with
+// x-yoho.backup. Every line starts with "#"; removing one leading "# "
+// gives a block that passes `yoho config check` (the restic Target stays
+// commented).
+func BackupsExample(destination string) string {
+	if destination == "" {
+		destination = "production"
+	}
+	return "# Backups for the template Services (uncomment, then `yoho schedule install`).\n" +
+		"# Without a Backup job their data exists only on the Server.\n" +
+		"# backups:\n" +
+		"#   targets:\n" +
+		"#     local:\n" +
+		"#       type: archive                  # tar.gz files on the Server; `yoho backup pull` mirrors them\n" +
+		"#       repository: /var/backups/yoho  # generated secrets are left out unless zip/7z + password_secret\n" +
+		"#       keep_last: 7                   # keep the newest 7 ...\n" +
+		"#       keep_within: 30d               # ... and every Backup of the 30 days before the newest\n" +
+		"#     # offsite:\n" +
+		"#     #   type: restic                 # encrypted, deduplicated (s3:, b2:, sftp:, rclone: or a path)\n" +
+		"#     #   repository: \"s3:s3.amazonaws.com/my-backups\"\n" +
+		"#     #   password_secret: BACKUP_PASSWORD\n" +
+		"#     #   env_secrets: [AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY]\n" +
+		"#     #   keep_within: 30d\n" +
+		"#   jobs:\n" +
+		"#     nightly:\n" +
+		"#       destination: " + destination + "\n" +
+		"#       target: local                  # or offsite\n" +
+		"#       schedule: \"*-*-* 03:00:00\"     # systemd OnCalendar\n"
+}
