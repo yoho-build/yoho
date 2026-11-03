@@ -615,6 +615,14 @@ func (w *stepWriter) Write(p []byte) (int, error) {
 // and two-byte ESC sequences), so output cannot recolor, move the cursor,
 // retitle or rewrite the terminal. Colors the UI adds are painted after.
 func sanitize(l string) string {
+	// A carriage return redraws the line (progress bars): show what a
+	// terminal would end with, the text after the last one.
+	if strings.IndexByte(l, '\r') >= 0 {
+		l = strings.TrimRight(l, "\r")
+		if i := strings.LastIndexByte(l, '\r'); i >= 0 {
+			l = l[i+1:]
+		}
+	}
 	clean := true
 	for i := 0; i < len(l); i++ {
 		if c := l[i]; (c < 0x20 && c != '\t') || c == 0x7f || c == 0xc2 || (c >= 0x80 && c <= 0x9f) {

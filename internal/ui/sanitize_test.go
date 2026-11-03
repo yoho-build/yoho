@@ -23,7 +23,7 @@ func TestSanitize(t *testing.T) {
 		"\x1b]52;c;Y2xpcGJvYXJk":                    "", // unterminated OSC 52 (clipboard)
 		"\x1b(Bcharset \x1b7save\x1b8":              "charset save",
 		"\x1bc reset":                               " reset",
-		"a\rb\x08c\x00d\x07e\x7ff":                  "abcdef",
+		"ab\x08c\x00d\x07e\x7ff":                    "abcdef",
 		"c1 \u009b31mcsi\u009d0;t\u009cend\u0085nl": "c1 csiendnl",
 		"raw \x9b31m8bit":                           "raw 31m8bit",
 		"trailing esc \x1b":                         "trailing esc ",
@@ -86,5 +86,17 @@ func TestProgressStripsTerminalControl(t *testing.T) {
 	}
 	if !strings.Contains(out, cyan+"[srv]"+reset+" hook said hi") {
 		t.Errorf("progress lost host prefix or colors:\n%q", out)
+	}
+}
+
+func TestSanitizeCarriageReturnKeepsLastRedraw(t *testing.T) {
+	for in, want := range map[string]string{
+		"10%\r50%\r100% done": "100% done",
+		"done\r":              "done",
+		"\x1b[2K\rpulled":     "pulled",
+	} {
+		if got := sanitize(in); got != want {
+			t.Errorf("%q: %q, want %q", in, got, want)
+		}
 	}
 }
