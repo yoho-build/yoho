@@ -12,6 +12,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"golang.org/x/term"
 )
@@ -608,7 +609,103 @@ func (w *stepWriter) Write(p []byte) (int, error) {
 	return len(p), nil
 }
 
+// sanitize removes terminal control from one line of command output (Hook
+// output, a drill's verify output from restored data): C0 controls except
+// tab, DEL, C1 controls and escape sequences (CSI, OSC, DCS, SOS, PM, APC
+// and two-byte ESC sequences), so output cannot recolor, move the cursor,
+// retitle or rewrite the terminal. Colors the UI adds are painted after.
+func sanitize(l string) string {
+	clean := true
+	for i := 0; i < len(l); i++ {
+		if c := l[i]; (c < 0x20 && c != '\t') || c == 0x7f || c == 0xc2 || (c >= 0x80 && c <= 0x9f) {
+			clean = false
+			break
+		}
+	}
+	if clean {
+		return l
+	}
+	var b strings.Builder
+	b.Grow(len(l))
+	// skipString skips a control string body (OSC, DCS, SOS, PM, APC) up to
+	// and including its terminator: BEL (OSC), ESC \ or C1 ST.
+	skipString := func(i int) int {
+		for i < len(l) {
+			r, n := utf8.DecodeRuneInString(l[i:])
+			switch {
+			case r == 0x07 || r == 0x9c:
+				return i + n
+			case r == 0x1b && i+1 < len(l) && l[i+1] == '\\':
+				return i + 2
+			case r == 0x1b:
+				return i // an unterminated string ends at the next ESC
+			}
+			i += n
+		}
+		return i
+	}
+	// skipCSI skips parameter and intermediate bytes and the final byte.
+	skipCSI := func(i int) int {
+		for i < len(l) {
+			c := l[i]
+			i++
+			if c >= 0x40 && c <= 0x7e {
+				return i
+			}
+			if c < 0x20 || c >= 0x7f {
+				return i - 1 // malformed: drop the introducer only
+			}
+		}
+		return i
+	}
+	for i := 0; i < len(l); {
+		r, n := utf8.DecodeRuneInString(l[i:])
+		if r == utf8.RuneError && n == 1 {
+			if c := l[i]; c >= 0x80 && c <= 0x9f {
+				i++ // raw 8-bit C1 byte
+				continue
+			}
+			b.WriteByte(l[i])
+			i++
+			continue
+		}
+		switch {
+		case r == 0x1b:
+			i += n
+			if i >= len(l) {
+				continue
+			}
+			switch c := l[i]; {
+			case c == '[':
+				i = skipCSI(i + 1)
+			case c == ']' || c == 'P' || c == 'X' || c == '^' || c == '_':
+				i = skipString(i + 1)
+			case c >= 0x20 && c <= 0x2f: // nF: intermediates, then a final byte
+				for i < len(l) && l[i] >= 0x20 && l[i] <= 0x2f {
+					i++
+				}
+				if i < len(l) && l[i] >= 0x30 && l[i] <= 0x7e {
+					i++
+				}
+			case c >= 0x30 && c <= 0x7e:
+				i++
+			}
+		case r == 0x9b:
+			i = skipCSI(i + n)
+		case r == 0x9d || r == 0x90 || r == 0x98 || r == 0x9e || r == 0x9f:
+			i = skipString(i + n)
+		case (r < 0x20 && r != '\t') || (r >= 0x7f && r <= 0x9f):
+			i += n
+		default:
+			b.WriteString(l[i : i+n])
+			i += n
+		}
+	}
+	return b.String()
+}
+
 func (w *stepWriter) line(l string) {
+	l = sanitize(l)
 	s := w.s
 	s.tail.add(l)
 	u := s.u
@@ -677,6 +774,7 @@ func (p *progressWriter) Write(b []byte) (int, error) {
 }
 
 func (p *progressWriter) line(l string) {
+	l = sanitize(l)
 	if strings.TrimSpace(l) == "" {
 		return
 	}
