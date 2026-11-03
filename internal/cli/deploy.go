@@ -649,6 +649,9 @@ func (a *app) proxyConfig() config.ProxyConfig {
 		if o.Bind != "" {
 			p.Bind = o.Bind
 		}
+		if o.Metrics {
+			p.Metrics = true
+		}
 		if o.Tunnel != nil {
 			p.Tunnel = o.Tunnel
 		}

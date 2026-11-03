@@ -52,6 +52,19 @@ type Source struct {
 	Targets     []Target
 	// Releases lists Releases on a Server. Nil skips Release history.
 	Releases func(ctx context.Context, h remote.Host) ([]release.Release, error)
+	// Routes are the App's Proxy routes. With Metrics (proxy.metrics) the
+	// collector reads their traffic from the Proxy's metrics endpoint;
+	// without it each Server reports Traffic disabled. Empty: no Traffic.
+	Routes  []ProxyRoute
+	Metrics bool
+}
+
+func (s *Source) routeNames() []string {
+	names := make([]string, len(s.Routes))
+	for i, r := range s.Routes {
+		names[i] = r.Route
+	}
+	return names
 }
 
 // Project is the compose project or swarm stack name of the App.
@@ -76,7 +89,9 @@ type Server struct {
 	Proxy      *Container  `json:"proxy,omitempty"`
 	Containers []Container `json:"containers"`
 	Releases   []Release   `json:"releases"`
-	Elapsed    float64     `json:"elapsed_seconds"`
+	// Traffic is nil when the App has no proxied Service.
+	Traffic *Traffic `json:"traffic,omitempty"`
+	Elapsed float64  `json:"elapsed_seconds"`
 }
 
 // Host holds facts about the Server machine.
@@ -181,13 +196,24 @@ func collectServer(ctx context.Context, src *Source, t Target, releases bool) (s
 		}
 		return got
 	}
-	out, err := t.Host.Output(ctx, remote.Cmd{Script: Script(src.Project(), src.Root)})
+	metrics := ""
+	if src.Metrics {
+		metrics = MetricsScript(src.routeNames())
+	}
+	out, err := t.Host.Output(ctx, remote.Cmd{Script: script(src.Project(), src.Root, metrics)})
 	if err != nil {
 		s.Error = err.Error()
 		return s
 	}
 	parsed := Parse(out)
 	s.Host, s.Proxy, s.Containers = parsed.Host, parsed.Proxy, parsed.Containers
+	switch {
+	case len(src.Routes) == 0:
+	case src.Metrics:
+		s.Traffic = parseTraffic(parsed.Metrics, src.Routes)
+	default:
+		s.Traffic = &Traffic{Routes: []RouteTraffic{}}
+	}
 	if releases {
 		rels, err := src.Releases(ctx, t.Host)
 		if err != nil {
@@ -223,12 +249,17 @@ const (
 // Script is the read-only shell script that prints host facts, the App's
 // containers (compose project or swarm stack) and yoho-proxy as JSON lines,
 // and their resource usage.
-func Script(project, root string) string {
+func Script(project, root string) string { return script(project, root, "") }
+
+// script is Script with the MetricsScript fragment, which runs first so
+// consecutive Snapshots read the counters at a steady offset from
+// CollectedAt (docker stats takes a variable second or two).
+func script(project, root, metrics string) string {
 	q := remote.Quote
 	ps := "docker ps -a --format '{{json .}}'"
 	return `set -eu
 LC_ALL=C; export LC_ALL
-echo ` + markHost + `
+` + metrics + `echo ` + markHost + `
 printf 'hostname=%s\n' "$(hostname 2>/dev/null || uname -n)"
 printf 'os=%s\n' "$( (. /etc/os-release && printf '%s' "${PRETTY_NAME:-${NAME:-}}") 2>/dev/null || uname -s)"
 printf 'kernel=%s\n' "$(uname -r)"
@@ -272,6 +303,8 @@ type Parsed struct {
 	Host       Host
 	Proxy      *Container
 	Containers []Container
+	// Metrics are the lines of the MetricsScript section.
+	Metrics []string
 }
 
 type psLine struct {
@@ -317,6 +350,8 @@ func Parse(out string) Parsed {
 			if s := strings.TrimSpace(line); s != "" {
 				docker = append(docker, s)
 			}
+		case markMetrics:
+			p.Metrics = append(p.Metrics, line)
 		}
 	}
 	if len(docker) > 0 {
@@ -536,6 +571,7 @@ func (l *Live) Snapshot(ctx context.Context, fresh bool) (*Snapshot, error) {
 	if err != nil {
 		return nil, err
 	}
+	applyRates(snap, l.last)
 	l.last = snap
 	return snap, nil
 }

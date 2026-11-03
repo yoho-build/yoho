@@ -17,7 +17,36 @@ export interface Server {
   proxy?: Container
   containers: Container[]
   releases: Release[]
+  traffic?: Traffic
   elapsed_seconds: number
+}
+
+// Mirrors dash.Traffic: Proxy request metrics of the App's routes.
+export interface Traffic {
+  enabled: boolean
+  error?: string
+  routes: RouteTraffic[]
+}
+
+export interface RouteTraffic {
+  service: string
+  route: string
+  hosts: string[]
+  requests_total: number
+  errors_5xx_total: number
+  in_flight: number
+  buckets: Bucket[]
+  interval_seconds?: number
+  requests_per_min?: number
+  error_percent?: number
+  p50_seconds?: number
+  p95_seconds?: number
+  history: number[]
+}
+
+export interface Bucket {
+  le: number
+  count: number
 }
 
 export interface Host {
