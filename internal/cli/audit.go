@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -48,6 +49,9 @@ func auditWrap(g *globals, root *cobra.Command) {
 					inner := c.RunE
 					c.RunE = func(cmd *cobra.Command, args []string) error {
 						s := g.auditStart(cmd, args)
+						if s != nil {
+							cmd.SetContext(context.WithValue(cmd.Context(), auditRunKey{}, s))
+						}
 						err := inner(cmd, args)
 						s.finish(err)
 						return err
@@ -61,6 +65,17 @@ func auditWrap(g *globals, root *cobra.Command) {
 		}
 	}
 	walk(root)
+}
+
+type auditRunKey struct{}
+
+// auditNoteVersion records the deployed Release's Version on the running
+// audited command's finished record when the started record had none. It
+// reuses a Version the command already read; it never reads anything.
+func auditNoteVersion(ctx context.Context, v string) {
+	if r, _ := ctx.Value(auditRunKey{}).(*auditRun); r != nil && v != "" && r.rec.Version == "" {
+		r.rec.Version = v
+	}
 }
 
 // auditRun is one audited command: the open Server connection and the
@@ -299,7 +314,7 @@ are in 'yoho access audit'.
 				}
 				rows = append(rows, []string{
 					first.Time.Local().Format("2006-01-02 15:04:05"), first.Performer, auditCommandText(first),
-					shortVersion(first.Version), audit.Truncate(r.Result(), 70), dur,
+					shortVersion(runVersion(r)), audit.Truncate(r.Result(), 70), dur,
 				})
 			}
 			a.ui.Table([]string{"TIME", "BY", "COMMAND", "VERSION", "RESULT", "DURATION"}, rows)
@@ -311,9 +326,68 @@ are in 'yoho access audit'.
 	return c
 }
 
-// auditCommandText is the command with the Service and argv of an exec/run.
+// runVersion is the started record's Version, or the finished one's when
+// the Version was only known after the command began.
+func runVersion(r audit.Run) string {
+	if v := r.First().Version; v != "" {
+		return v
+	}
+	if r.Finished != nil {
+		return r.Finished.Version
+	}
+	return ""
+}
+
+// auditFlagSummary is a compact summary of the recorded flags and
+// arguments for the table: `--generated POSTGRES_PASSWORD`, `-d staging`,
+// `--lock-wait`. Values come from the already redacted record; flags that
+// are false are left out. At most 60 bytes.
+func auditFlagSummary(e audit.Entry) string {
+	keys := make([]string, 0, len(e.Args))
+	for k := range e.Args {
+		switch k {
+		case "service", "argv", "args", "truncated":
+			continue
+		}
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	var parts []string
+	for _, k := range keys {
+		switch v := e.Args[k].(type) {
+		case bool:
+			if v {
+				parts = append(parts, "--"+k)
+			}
+		case []any:
+			for _, x := range v {
+				parts = append(parts, "--"+k+" "+fmt.Sprint(x))
+			}
+		case float64:
+			parts = append(parts, "--"+k+" "+strconv.Itoa(int(v)))
+		default:
+			if str := fmt.Sprint(v); str != "" {
+				parts = append(parts, "--"+k+" "+str)
+			}
+		}
+	}
+	if a, ok := e.Args["args"].([]any); ok {
+		for _, x := range a {
+			parts = append(parts, fmt.Sprint(x))
+		}
+	}
+	return audit.Truncate(strings.Join(parts, " "), 60)
+}
+
+// auditCommandText is the command with its flags, or the Service and argv
+// of an exec/run.
 func auditCommandText(e audit.Entry) string {
 	s := e.Command
+	if _, ok := e.Args["service"]; !ok {
+		if f := auditFlagSummary(e); f != "" {
+			s += " " + f
+		}
+	}
 	if svc, ok := e.Args["service"].(string); ok {
 		s += " " + svc
 		if argv, ok := e.Args["argv"].([]any); ok {

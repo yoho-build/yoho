@@ -246,6 +246,7 @@ func (a *app) rotateSecrets(ctx context.Context, services, generated []string, d
 	}
 	step.Done(shortVersion(cur.Version))
 	s.ver = cur.Version
+	auditNoteVersion(ctx, cur.Version)
 
 	d, err := a.newDeploy(s, cur.Images, true)
 	if err != nil {

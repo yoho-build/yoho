@@ -294,6 +294,12 @@ func (a *app) apply(ctx context.Context, o applyOptions) (err error) {
 	start := time.Now()
 	defer func() {
 		if err != nil {
+			var je *jobsFailedError
+			if errors.As(err, &je) {
+				u.Event("jobs_failed", je.summary(), je.fields())
+				u.Finished(err, je.summary())
+				return
+			}
 			u.Finished(err, "")
 		}
 	}()
@@ -463,7 +469,7 @@ func (a *app) apply(ctx context.Context, o applyOptions) (err error) {
 	}
 	if err = a.applySchedules(ctx, s.hosts, s.store); err != nil {
 		u.Step("", "Scheduled Jobs").Fail(err, hintFor(err, "run `yoho schedule status`"))
-		return &silentError{err}
+		return &silentError{&jobsFailedError{err: err, app: a.cfg.App, dest: a.destName, version: version}}
 	}
 	u.Finished(nil, fmt.Sprintf("Deployed %s@%s to %s in %s%s", a.cfg.App, shortVersion(version), a.destName, time.Since(start).Round(100*time.Millisecond), urls))
 	return nil
@@ -504,4 +510,29 @@ func (a *app) confirmPrecheck(o applyOptions) error {
 func addCutoverFlags(c *cobra.Command, o *applyOptions) {
 	c.Flags().BoolVar(&o.CutoverResume, "cutover-resume", false, "Continue an unfinished migration cutover from its journal")
 	c.Flags().BoolVar(&o.CutoverAllowEmpty, "cutover-allow-empty", false, "Cut over even when migrate.stop matches no running container")
+}
+
+// jobsFailedError is returned when the rollout succeeded (the Release is
+// live and recorded) but the requested Scheduled Jobs could not be
+// installed or removed. The exit code stays non-zero; the final output and
+// the jobs_failed event say the rollout itself was fine.
+type jobsFailedError struct {
+	err                error
+	app, dest, version string
+}
+
+func (e *jobsFailedError) Error() string { return "Scheduled Jobs not installed: " + e.reason() }
+func (e *jobsFailedError) Unwrap() error { return e.err }
+
+func (e *jobsFailedError) reason() string { return firstLine(e.err.Error()) }
+
+func (e *jobsFailedError) summary() string {
+	return fmt.Sprintf("Deployed %s@%s to %s; Scheduled Jobs not installed: %s", e.app, shortVersion(e.version), e.dest, e.reason())
+}
+
+func (e *jobsFailedError) fields() map[string]any {
+	return map[string]any{
+		"rollout": "ok", "jobs": "failed", "app": e.app, "destination": e.dest,
+		"version": e.version, "error": e.reason(),
+	}
 }

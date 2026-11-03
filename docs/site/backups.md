@@ -52,19 +52,26 @@ After each Backup Yoho applies the Target's retention to this App Destination's 
 `yoho config check`, `plan` and `deploy` warn once when a Stateful Service (`x-yoho.stateful: true`) has no Backup job of the Destination covering it: a job that lists it in `services`, or a job without `services` when the Service has `x-yoho.backup`. The hint says what to add. `yoho init --template postgres` (and the other Stateful templates) writes a commented-out example into a new `yoho.yml`, or prints it when `yoho.yml` exists:
 
 ```yaml
+# Backups for the template Services (uncomment, then `yoho schedule install`).
+# Without a Backup job their data exists only on the Server.
 # backups:
 #   targets:
 #     local:
 #       type: archive                  # tar.gz files on the Server; `yoho backup pull` mirrors them
 #       repository: /var/backups/yoho  # generated secrets are left out unless zip/7z + password_secret
-#       keep_last: 7
-#       keep_within: 30d
-#     # offsite: { type: restic, repository: "s3:...", password_secret: BACKUP_PASSWORD, keep_within: 30d }
+#       keep_last: 7                   # keep the newest 7 ...
+#       keep_within: 30d               # ... and every Backup of the 30 days before the newest
+#     # offsite:
+#     #   type: restic                 # encrypted, deduplicated (s3:, b2:, sftp:, rclone: or a path)
+#     #   repository: "s3:s3.amazonaws.com/my-backups"
+#     #   password_secret: BACKUP_PASSWORD
+#     #   env_secrets: [AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY]
+#     #   keep_within: 30d
 #   jobs:
 #     nightly:
-#       destination: production
-#       target: local
-#       schedule: "*-*-* 03:00:00"
+#       destination: production        # your Destination's name
+#       target: local                  # or offsite
+#       schedule: "*-*-* 03:00:00"     # systemd OnCalendar
 ```
 
 Uncomment it, then `yoho schedule install`. `yoho remove` keeps Backups (and, without `--volumes`, volumes).

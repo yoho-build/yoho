@@ -319,6 +319,7 @@ func (a *app) serverVersion(ctx context.Context, h remote.Host) string {
 	if json.Unmarshal(b, &r) != nil {
 		return ""
 	}
+	auditNoteVersion(ctx, r.Version)
 	return r.Version
 }
 
