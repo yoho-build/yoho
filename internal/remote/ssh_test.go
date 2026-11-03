@@ -441,3 +441,36 @@ func TestHopCloudflare(t *testing.T) {
 		t.Error("cloudflare Servers have no hop")
 	}
 }
+
+// TestOsExecCancelWithHeldPipes: a cancelled ssh must not keep us waiting
+// while another process (the ControlMaster ssh forked, which runs ssh's
+// first session) still holds its stdout and stderr.
+func TestOsExecCancelWithHeldPipes(t *testing.T) {
+	if _, err := exec.LookPath("sh"); err != nil {
+		t.Skip("no sh")
+	}
+	old := execWaitDelay
+	execWaitDelay = 200 * time.Millisecond
+	defer func() { execWaitDelay = old }()
+	for name, run := range map[string]ExecFunc{"osExec": osExec, "osExecInterrupt": osExecInterrupt} {
+		ctx, cancel := context.WithCancel(context.Background())
+		var out, errOut bytes.Buffer
+		done := make(chan error, 1)
+		go func() {
+			// The background sleep stands in for the master: it outlives
+			// the killed sh and keeps both pipes open.
+			done <- run(ctx, []string{"sh", "-c", "sleep 30 & echo started; wait"}, nil, &out, &errOut)
+		}()
+		time.Sleep(300 * time.Millisecond)
+		start := time.Now()
+		cancel()
+		select {
+		case <-done:
+			if d := time.Since(start); d > 3*time.Second {
+				t.Errorf("%s: returned %s after cancel", name, d)
+			}
+		case <-time.After(10 * time.Second):
+			t.Fatalf("%s: still waiting for held pipes after cancel", name)
+		}
+	}
+}

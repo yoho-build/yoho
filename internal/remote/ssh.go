@@ -593,8 +593,17 @@ func (s *SSH) Forward(ctx context.Context, localPort int, remoteAddr string) (st
 	}, nil
 }
 
+// execWaitDelay bounds how long a cancelled ssh may hold us after ctx
+// ends. A ControlMaster that ssh forked (ControlPersist) runs ssh's first
+// session itself, with ssh's stdin, stdout and stderr: killing ssh leaves
+// the master writing to our pipes until the remote command ends, which for
+// `logs -f` is never. WaitDelay stops waiting for them.
+var execWaitDelay = 5 * time.Second
+
+// osExec runs argv, killing it when ctx ends.
 func osExec(ctx context.Context, argv []string, stdin io.Reader, stdout, stderr io.Writer) error {
 	c := exec.CommandContext(ctx, argv[0], argv[1:]...)
+	c.WaitDelay = execWaitDelay
 	c.Stdin, c.Stdout, c.Stderr = stdin, stdout, stderr
 	return c.Run()
 }
@@ -605,7 +614,7 @@ func osExec(ctx context.Context, argv []string, stdin io.Reader, stdout, stderr 
 func osExecInterrupt(ctx context.Context, argv []string, stdin io.Reader, stdout, stderr io.Writer) error {
 	c := exec.CommandContext(ctx, argv[0], argv[1:]...)
 	c.Cancel = func() error { return c.Process.Signal(os.Interrupt) }
-	c.WaitDelay = 5 * time.Second
+	c.WaitDelay = execWaitDelay
 	c.Stdin, c.Stdout, c.Stderr = stdin, stdout, stderr
 	return c.Run()
 }

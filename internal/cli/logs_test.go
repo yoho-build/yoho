@@ -143,6 +143,88 @@ func TestAppLogsScript(t *testing.T) {
 	}
 }
 
+// TestAppFollowScriptStopsWhenStdinCloses: a plain `app logs -f` must stop
+// docker on the Server when the client leaves (ssh's stdin ends), even for
+// a Service that never logs, and keep docker's own exit status otherwise.
+func TestAppFollowScriptStopsWhenStdinCloses(t *testing.T) {
+	if _, err := exec.LookPath("sh"); err != nil {
+		t.Skip("no sh")
+	}
+	o := dash.LogsOptions{Lines: 5, Follow: true, Timestamps: true, LogFilter: dash.LogFilter{Since: "10m"}}
+	script := appFollowScript("yoho-shop-production", []string{"web"}, false, o)
+	if !strings.Contains(script, "docker compose -p 'yoho-shop-production' logs --since '10m' --timestamps -f --tail 5 'web' 2>&1 </dev/null & dp=$!") {
+		t.Fatalf("script: %s", script)
+	}
+	dir := t.TempDir()
+	pidFile := filepath.Join(dir, "docker.pid")
+	// A quiet Service: docker prints one line, then nothing. A program, not
+	// a shell function, so the script's pid is docker's, as on a Server.
+	fake := "#!/bin/sh\necho $$ >" + remote.Quote(pidFile) + "\necho hello\nexec sleep 300\n"
+	if err := os.WriteFile(filepath.Join(dir, "docker"), []byte(fake), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command("sh", "-c", script)
+	cmd.Env = append(os.Environ(), "PATH="+dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	stdin, err := cmd.StdinPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	cmd.Stdout = &out
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for !strings.Contains(fileText(pidFile), "\n") && time.Now().Before(deadline) {
+		time.Sleep(50 * time.Millisecond)
+	}
+	pid, err := strconv.Atoi(strings.TrimSpace(fileText(pidFile)))
+	if err != nil {
+		cmd.Process.Kill()
+		t.Fatalf("fake docker did not start: %v", err)
+	}
+	stdin.Close() // the ssh client went away
+	done := make(chan error, 1)
+	go func() { done <- cmd.Wait() }()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		cmd.Process.Kill()
+		t.Fatal("script kept running after stdin closed")
+	}
+	if out.String() != "hello\n" {
+		t.Errorf("output: %q", out.String())
+	}
+	deadline = time.Now().Add(3 * time.Second)
+	for exec.Command("kill", "-0", strconv.Itoa(pid)).Run() == nil {
+		if time.Now().After(deadline) {
+			exec.Command("kill", "-KILL", strconv.Itoa(pid)).Run()
+			t.Fatal("docker kept running after the client left")
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+
+	// docker ending on its own (the Service was removed) ends the follow
+	// with docker's status, while stdin stays open.
+	cmd = exec.Command("sh", "-c", "docker() { echo gone >&2; return 3; }\n"+script)
+	hold, err := cmd.StdinPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer hold.Close()
+	start := time.Now()
+	err = cmd.Run()
+	var ee *exec.ExitError
+	if !errors.As(err, &ee) || ee.ExitCode() != 3 || time.Since(start) > 5*time.Second {
+		t.Errorf("docker failing: %v after %s", err, time.Since(start))
+	}
+}
+
+func fileText(p string) string {
+	b, _ := os.ReadFile(p)
+	return string(b)
+}
+
 func TestLogsServices(t *testing.T) {
 	three := []string{"db", "web", "worker"}
 	cases := []struct {
