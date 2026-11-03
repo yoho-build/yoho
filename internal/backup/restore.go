@@ -119,6 +119,10 @@ type RestoreOptions struct {
 	// remain stopped. Failure keeps the App isolated. Intended for the CLI's
 	// post-restore Hook; it must not start consumers or change exposure.
 	AfterRestore func(context.Context) error
+	// Leftovers, when set, is called (with the lock held) with the drill
+	// projects and drill/restore staging that killed or interrupted runs
+	// left on the Server.
+	Leftovers func(Leftovers)
 }
 
 // RestoreResult reports what was restored.
@@ -148,6 +152,15 @@ type RestoreResult struct {
 	// GeneratedSkipped are generated secrets in a --from Backup that were
 	// not written because CopyGenerated was false (names only).
 	GeneratedSkipped []string
+	// Revived are Services an earlier interrupted restore had stopped; this
+	// restore resumed them because they ran before that first attempt.
+	Revived []string
+	// StillStopped are Services an earlier interrupted restore stopped whose
+	// containers changed since (e.g. a deploy); they were not started.
+	StillStopped []string
+	// RemovedStaging are earlier restore staging directories whose
+	// prior-state.json this restore applied and then removed.
+	RemovedStaging []string
 }
 
 // crossDestination reports whether from names another Destination.
@@ -236,6 +249,7 @@ func Restore(ctx context.Context, o RestoreOptions) (res *RestoreResult, err err
 	if err := t.prepareRclone(ctx, o.Host, o.RcloneConfig, now()); err != nil {
 		return nil, err
 	}
+	reportLeftovers(ctx, o.Host, o.App, o.Destination, "", o.Leftovers, logf)
 	base := release.BackupDir(o.App, o.Destination)
 	name, token, err := newStagingName("restore-" + now().UTC().Format(tsLayout))
 	if err != nil {
@@ -243,6 +257,10 @@ func Restore(ctx context.Context, o RestoreOptions) (res *RestoreResult, err err
 	}
 	dir := path.Join(base, name)
 	keep := false
+	// Payload files kept in staging if the restore fails after isolation
+	// (a dump the operator may load by hand). Everything else decrypted is
+	// removed; prior-state.json stays for recovery.
+	var keepOnFail []string
 	var state *restoreState
 	isolated := false
 	defer func() {
@@ -397,6 +415,24 @@ func Restore(ctx context.Context, o RestoreOptions) (res *RestoreResult, err err
 	}
 	state = iso.state
 	dumpTargets, dumpRootSet, afterDumps := iso.dumpTargets, iso.dumpRootSet, iso.afterDumps
+	// A rerun after an interrupted restore sees the Services that attempt
+	// stopped. Resume what ran before the FIRST attempt instead.
+	priorDirs, priorStates, err := interruptedRestores(ctx, o.Host, o.App, o.Destination, name, logf)
+	if err != nil {
+		return nil, err
+	}
+	if len(priorDirs) > 0 {
+		res.Revived, res.StillStopped = state.mergePrior(priorStates)
+		for _, d := range priorDirs {
+			logf("found the recovery state of an interrupted restore from %s (%s)", d.Created.Local().Format("2006-01-02 15:04:05"), d.Path)
+		}
+		if len(res.Revived) > 0 {
+			logf("Services %s were stopped by an interrupted restore; they resume after this restore succeeds", strings.Join(res.Revived, ", "))
+		}
+		if len(res.StillStopped) > 0 {
+			logf("Services %s were stopped by an interrupted restore and changed since; they stay stopped", strings.Join(res.StillStopped, ", "))
+		}
+	}
 	// Keep a names/status-only recovery record beside the staged Backup. It
 	// survives errors and an interrupted process; no secret values are saved.
 	stateFile := path.Join(dir, "prior-state.json")
@@ -418,10 +454,18 @@ func Restore(ctx context.Context, o RestoreOptions) (res *RestoreResult, err err
 		rctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), cleanupTimeout)
 		defer cancel()
 		stopErr := state.stopBounded(rctx, o.Host)
+		// A rerun fetches the Backup again: do not leave decrypted generated
+		// secrets, volume archives or dumps behind.
+		kept := "decrypted Backup removed"
+		if serr := scrubStaging(rctx, o.Host, dir, token, data, keepOnFail, true); serr != nil {
+			kept = fmt.Sprintf("decrypted Backup NOT removed from %s: %v; remove it with `yoho backup restore --cleanup`", dir, serr)
+		} else if len(keepOnFail) > 0 {
+			kept = "dump kept at " + strings.Join(keepOnFail, " ")
+		}
 		if stopErr != nil {
-			err = fmt.Errorf("%w; isolation cleanup failed: %v; verify and manually stop this App's Services immediately (Backup kept at %s, prior state at %s)", err, stopErr, data, stateFile)
+			err = fmt.Errorf("%w; isolation cleanup failed: %v; verify and manually stop this App's Services immediately (%s; prior state at %s)", err, stopErr, kept, stateFile)
 		} else {
-			err = fmt.Errorf("%w (Services left stopped; no data rollback; Backup kept at %s, prior state at %s)", err, data, stateFile)
+			err = fmt.Errorf("%w (Services left stopped; no data rollback; %s; prior state at %s; rerunning the restore resumes the Services that ran before it)", err, kept, stateFile)
 		}
 	}()
 	logf("isolating App Services during restore (availability interrupted)")
@@ -449,6 +493,17 @@ func Restore(ctx context.Context, o RestoreOptions) (res *RestoreResult, err err
 	res.Generated = restored
 	res.GeneratedChanged = changed
 	res.GeneratedKept = kept
+	// Volume archives and generated secrets are no longer needed: remove
+	// them now, keeping only dumps (still to load) and prior-state.json.
+	var dumpPaths []string
+	for _, svc := range services {
+		if f := m.Services[svc].Dump; f != "" {
+			dumpPaths = append(dumpPaths, path.Join(data, f))
+		}
+	}
+	if err := scrubStaging(ctx, o.Host, dir, token, data, dumpPaths, true); err != nil {
+		return nil, fmt.Errorf("remove restored payload from staging %s: %w", dir, err)
+	}
 	// Start prerequisites in dependency order and load each target's dump before
 	// starting downstream processes that could otherwise consume partial data.
 	for _, svc := range dumpTargets {
@@ -470,8 +525,8 @@ func Restore(ctx context.Context, o RestoreOptions) (res *RestoreResult, err err
 		file := path.Join(data, m.Services[svc].Dump)
 		script := "set -eu; docker exec -i " + remote.Quote(cid) + " " + remote.QuoteArgs(o.Services[svc].RestoreDump...) + " < " + remote.Quote(file)
 		if err := o.Host.Run(ctx, remote.Cmd{Script: script}); err != nil {
-			keep = true
-			return nil, fmt.Errorf("restore dump of %s (Backup kept at %s): %w", svc, data, err)
+			keepOnFail = []string{file}
+			return nil, fmt.Errorf("restore dump of %s: %w", svc, err)
 		}
 		res.Dumps = append(res.Dumps, svc)
 	}
@@ -510,7 +565,22 @@ func Restore(ctx context.Context, o RestoreOptions) (res *RestoreResult, err err
 	if err := state.resume(ctx, o.Host); err != nil {
 		return nil, fmt.Errorf("resume Services: %w", err)
 	}
+	// The interrupted restores' recovery records are applied: remove them so
+	// a later restore does not resume Services from a stale record.
+	for _, d := range priorDirs {
+		if err := RemoveStaging(ctx, o.Host, o.App, o.Destination, d); err != nil {
+			logf("could not remove the applied interrupted restore staging %s: %v; remove it with `yoho backup restore --cleanup`", d.Path, err)
+			continue
+		}
+		res.RemovedStaging = append(res.RemovedStaging, d.Path)
+		logf("removed the applied interrupted restore staging %s", d.Path)
+	}
 	if len(res.DumpFiles) > 0 {
+		// Keep only the unloaded dumps; the restore succeeded, so its
+		// recovery record is not left for a later restore to apply.
+		if err := scrubStaging(ctx, o.Host, dir, token, data, res.DumpFiles, false); err != nil {
+			return nil, fmt.Errorf("remove restored payload from staging %s: %w", dir, err)
+		}
 		keep = true
 		res.StagingDir = dir
 		logf("dumps without restore_dump are not loaded; restore them from: %s", strings.Join(res.DumpFiles, " "))

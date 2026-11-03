@@ -359,6 +359,9 @@ type DrillOptions struct {
 	Now   func() time.Time
 	// ReadyTimeout bounds each container's wait for health (default 5m).
 	ReadyTimeout time.Duration
+	// Leftovers, when set, is called (with the lock held) with the drill
+	// projects and drill/restore staging that killed runs left behind.
+	Leftovers func(Leftovers)
 }
 
 // DrillPhase is one timed drill step: download, restore, healthy, verify,
@@ -467,6 +470,7 @@ func Drill(ctx context.Context, o DrillOptions) (res *DrillResult, err error) {
 	if err := t.prepareRclone(ctx, o.Host, o.RcloneConfig, now()); err != nil {
 		return nil, err
 	}
+	reportLeftovers(ctx, o.Host, o.App, o.Destination, "", o.Leftovers, logf)
 	base := release.BackupDir(o.App, o.Destination)
 	name, token, err := newStagingName("drill-" + now().UTC().Format(tsLayout))
 	if err != nil {
