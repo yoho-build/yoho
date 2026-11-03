@@ -114,6 +114,15 @@ func (c Compose) Deploy(ctx context.Context, d *plan.Deploy) (_ *release.Release
 	composeFile := path.Join(relDir, "compose.yaml")
 	r := newRunner(d, composeFile)
 	r.phase = "prepare-release"
+	committed := false
+	// Deferred first, so it runs last: a failed deploy must leave the
+	// Version's image tags on the images the existing record names, because
+	// Build and Ship already re-pointed them at the new build.
+	defer func() {
+		if err != nil && !committed {
+			RestoreVersionImages(ctx, h, r.out, r.server, d.App, d.Destination, d.Version)
+		}
+	}()
 	defer func() {
 		var failure *Failure
 		if err != nil && !errors.As(err, &failure) && !isRefusal(err) {
@@ -237,7 +246,6 @@ func (c Compose) Deploy(ctx context.Context, d *plan.Deploy) (_ *release.Release
 	// the Release directory. Keep the deployed record to restore if this
 	// attempt fails, so rollback and plan still see the working config.
 	prevFiles := snapshotRelease(ctx, h, relDir)
-	committed := false
 	if err := writeReleaseFiles(ctx, h, relDir, composeYAML, plans); err != nil {
 		restoreRelease(ctx, h, relDir, prevFiles, r.logf)
 		return nil, err

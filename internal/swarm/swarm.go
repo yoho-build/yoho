@@ -259,6 +259,13 @@ func (rt Runtime) Deploy(ctx context.Context, d *plan.Deploy) (_ *release.Releas
 		liveDir = release.Dir(d.App, d.Destination, liveVersion)
 	}
 	committed, stackTouched := false, false
+	// Runs after the cleanup below: put the Version's image tags back on the
+	// images the existing record names (Build and Ship moved them).
+	defer func() {
+		if err != nil && !committed {
+			deploy.RestoreVersionImages(ctx, h, r.out, r.server, d.App, d.Destination, d.Version)
+		}
+	}()
 	if err := h.WriteFile(ctx, stackFile, c.YAML, 0o600, false); err != nil {
 		deploy.RestoreRelease(ctx, h, relDir, prevFiles, r.logf)
 		return nil, fmt.Errorf("write stack file: %w", err)
@@ -331,6 +338,7 @@ func (rt Runtime) Deploy(ctx context.Context, d *plan.Deploy) (_ *release.Releas
 	}
 
 	rel.Status = "deployed"
+	rel.ImageIDs = deploy.TagImageIDs(ctx, r.h, rel.Images)
 	if err := r.finish(ctx, d, rel); err != nil {
 		return nil, err
 	}

@@ -3,12 +3,43 @@ package deploy
 import (
 	"context"
 	"fmt"
+	"io"
+	"path"
 	"slices"
 	"strings"
 
 	"github.com/yoho-build/yoho/internal/build"
+	"github.com/yoho-build/yoho/internal/release"
 	"github.com/yoho-build/yoho/internal/remote"
 )
+
+// TagImageIDs returns Service -> local image ID for the given Service -> ref
+// map. Runtimes without compose containers (Swarm) use it to record
+// Release.ImageIDs.
+func TagImageIDs(ctx context.Context, h remote.Host, images map[string]string) map[string]string {
+	return imageIDs(ctx, h, "", images)
+}
+
+// RestoreVersionImages undoes what a failed deploy did to the Version's image
+// tags. Build and Ship name images yoho/<app>-<destination>-<service>:<version>
+// before the Release is recorded, so a failed attempt of a Version that
+// already has a deployed record leaves those tags on the new build while the
+// record (and the containers it started) still name the old image ID. This
+// re-points each Yoho-built tag at the ID in that record. It is a no-op
+// without a deployed record or when the tags already match, runs without
+// ctx's cancellation (Ctrl-C), and only warns on failure: the original
+// failure is what the caller reports.
+func RestoreVersionImages(ctx context.Context, h remote.Host, out io.Writer, server, app, dest, version string) {
+	ctx = context.WithoutCancel(ctx)
+	r := &runner{h: h, out: out, server: server, app: app, dest: dest}
+	prev, err := readRelease(ctx, h, path.Join(release.Dir(app, dest, version), "release.json"))
+	if err != nil || prev == nil || prev.Status != "deployed" || len(prev.ImageIDs) == 0 {
+		return
+	}
+	if err := r.pinImages(ctx, prev.Images, prev.ImageIDs, prev.Built, version); err != nil {
+		r.logf("warning: could not restore the image tags of Release %s after the failed deploy: %v", version, err)
+	}
+}
 
 // imageIDs returns Service -> local image ID for images, as the deployed
 // containers run them. Builds happen before the Destination lock, so a
@@ -102,7 +133,7 @@ func (r *runner) pinImages(ctx context.Context, images, ids map[string]string, b
 		script := "set -e\ndocker image inspect " + remote.Quote(id) + " >/dev/null 2>&1 || { echo " + remote.Quote("image "+id+" is gone") + " >&2; exit 1; }\n" +
 			"docker tag " + remote.QuoteArgs(id, ref)
 		if err := r.h.Run(ctx, remote.Cmd{Script: script}); err != nil {
-			return fmt.Errorf("release %s: cannot restore image %s for %s: the tag now names another build (the same Version deployed to another Destination, or a rebuild) and the original is gone; deploy that commit again instead: %w", version, ref, svc, err)
+			return fmt.Errorf("release %s: cannot restore image %s for %s: the tag names another build (the same Version deployed to another Destination, or a rebuild) and the recorded image %s no longer exists on the Server; deploy that commit again instead: %w", version, ref, svc, shortID(id), err)
 		}
 	}
 	return nil
