@@ -165,13 +165,23 @@ func TestTokenAPIRedirectStripsAuthorization(t *testing.T) {
 		t.Fatal(err)
 	}
 	ln, err := net.Listen("tcp", "[::1]:0")
+	cdnHost := ""
 	if err != nil {
-		t.Fatal(err)
+		// No IPv6 loopback (some containers): "localhost" is still another
+		// host name than the API's 127.0.0.1 for the redirect rules.
+		if ln, err = net.Listen("tcp", "127.0.0.1:0"); err != nil {
+			t.Fatal(err)
+		}
+		cdnHost = "localhost"
 	}
 	cdn.Listener = ln
 	cdn.Start()
 	t.Cleanup(cdn.Close)
 	cdnURL := cdn.URL
+	if cdnHost != "" {
+		_, port, _ := net.SplitHostPort(ln.Addr().String())
+		cdnURL = "http://" + net.JoinHostPort(cdnHost, port)
+	}
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/repos/"+Repo+"/releases/tags/"+version, func(w http.ResponseWriter, r *http.Request) {

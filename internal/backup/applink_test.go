@@ -86,7 +86,14 @@ func TestBackupTrustThroughAppDirLink(t *testing.T) {
 	if b, _ := os.ReadFile(filepath.Join(target, "generated", "PG")); string(b) != "restored" {
 		t.Fatalf("restored %q", b)
 	}
-	// Without the exception the same link is still refused.
+	// Without the exception the same link is still refused. Root-owned
+	// ancestor links pass as admin aliases (macOS /var), so as root hand the
+	// link to another user, as when the deploy user created it.
+	if os.Geteuid() == 0 {
+		if err := os.Lchown(release.AppDir("shop", "production"), 65534, 65534); err != nil {
+			t.Fatal(err)
+		}
+	}
 	if err := localScript(safeDir(filepath.Join(release.AppDir("shop", "production"), "generated"), true, false)); err == nil {
 		t.Fatal("App link accepted without yoho_applink")
 	}
