@@ -372,7 +372,7 @@ type ServiceExt struct {
 	// {NAME: {strategy, user, command}}. Default: postgres for
 	// POSTGRES_PASSWORD, mysql for MYSQL_/MARIADB_ (ROOT_)PASSWORD, none for
 	// other keys of non-database, non-stateful Services.
-	Rotate map[string]GeneratedRotate `json:"rotate,omitempty"`
+	Rotate map[string]GeneratedRotate `json:"rotate,omitempty" jsonschema:"description=How yoho secrets rotate --generated NAME applies a new value of a secret this Service generates before its consumers restart; keyed by generated secret NAME. Default: postgres for POSTGRES_PASSWORD; mysql for MYSQL_/MARIADB_ (ROOT_)PASSWORD; none for other keys of non-database non-stateful Services"`
 	// Command run in a one-off container from the new image before cutover
 	// (e.g. migrations). Failure aborts the deploy.
 	ReleaseCommand []string       `json:"release_command,omitempty"`
@@ -390,13 +390,13 @@ type GeneratedRotate struct {
 	// mysql: ALTER USER through mysql/mariadb in this Service's container.
 	// command: run Command in this Service's container with the current and
 	// new value on stdin (two lines). none: only swap the value and restart.
-	Strategy string `json:"strategy" jsonschema:"required,enum=postgres,enum=mysql,enum=command,enum=none"`
+	Strategy string `json:"strategy" jsonschema:"required,enum=postgres,enum=mysql,enum=command,enum=none,description=postgres: ALTER ROLE through psql in this Service's container; mysql: ALTER USER through mysql/mariadb; command: run command with the current and new value on stdin (two lines); none: only swap the value and restart (the Service re-reads it on start)"`
 	// Database role (postgres, mysql). Default: POSTGRES_USER or postgres;
 	// root for *_ROOT_PASSWORD, else MYSQL_USER / MARIADB_USER.
-	User string `json:"user,omitempty"`
+	User string `json:"user,omitempty" jsonschema:"description=Database role for strategy postgres or mysql. Default: POSTGRES_USER or postgres; root for *_ROOT_PASSWORD; else MYSQL_USER / MARIADB_USER"`
 	// Command for strategy command, run with docker exec -i. It must be
 	// idempotent: Yoho may run it again with the same values.
-	Command []string `json:"command,omitempty"`
+	Command []string `json:"command,omitempty" jsonschema:"description=Command for strategy command; run with docker exec -i in this Service's container. Must be idempotent: Yoho may run it again with the same values"`
 }
 
 // ServiceProxy configures how the Proxy routes to a Service.
@@ -454,7 +454,7 @@ type ServiceBackup struct {
 	// Command run inside the Service's container by `yoho backup drill`
 	// after the restored copy is healthy, e.g. ["psql", "-U", "app", "-c",
 	// "select count(*) from orders"]. A nonzero exit fails the drill.
-	Verify []string `json:"verify,omitempty"`
+	Verify []string `json:"verify,omitempty" jsonschema:"description=Command run inside the Service's container by yoho backup drill after the restored copy is healthy (e.g. psql -c 'select count(*) from orders'); a nonzero exit fails the drill"`
 }
 
 // SecretRef maps a name seen by the container to a secret key.

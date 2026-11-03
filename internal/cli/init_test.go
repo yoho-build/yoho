@@ -149,6 +149,9 @@ func TestInitListTemplatesJSON(t *testing.T) {
 		}
 		if e["event"] == "template" {
 			names = append(names, e["name"].(string))
+			if _, ok := e["secrets"].([]any); !ok {
+				t.Fatalf("secrets is not a list: %s", line)
+			}
 		}
 	}
 	if strings.Join(names, ",") != "postgres,redis,clickhouse,rustfs" {

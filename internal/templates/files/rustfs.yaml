@@ -23,6 +23,11 @@ services:
       generate:
         RUSTFS_ACCESS_KEY: password32 # delivered as RUSTFS_ACCESS_KEY_FILE
         RUSTFS_SECRET_KEY: password32 # delivered as RUSTFS_SECRET_KEY_FILE
+      rotate:
+        # RustFS reads the root credentials from the files on every start,
+        # so `yoho secrets rotate --generated` only swaps and restarts.
+        RUSTFS_ACCESS_KEY: {strategy: none}
+        RUSTFS_SECRET_KEY: {strategy: none}
       backup:
         # The container is paused while the volume is copied.
         volumes: [rustfsdata]

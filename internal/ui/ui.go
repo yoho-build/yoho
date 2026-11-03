@@ -533,6 +533,17 @@ func (u *UI) Finished(err error, summary string) {
 	u.stamp()
 }
 
+// tableKey is the JSON key of a Table column. The event envelope owns
+// "event" and "time", so a column with one of those names is emitted as
+// "row_event" / "row_time" instead of silently overwriting the envelope.
+func tableKey(h string) string {
+	k := strings.ToLower(strings.ReplaceAll(h, " ", "_"))
+	if k == "event" || k == "time" {
+		return "row_" + k
+	}
+	return k
+}
+
 // Table prints aligned rows (human) or one event per row (JSON).
 func (u *UI) Table(header []string, rows [][]string) {
 	u.mu.Lock()
@@ -542,7 +553,7 @@ func (u *UI) Table(header []string, rows [][]string) {
 			f := map[string]any{}
 			for i, h := range header {
 				if i < len(r) {
-					f[strings.ToLower(strings.ReplaceAll(h, " ", "_"))] = r[i]
+					f[tableKey(h)] = r[i]
 				}
 			}
 			u.event("row", f)

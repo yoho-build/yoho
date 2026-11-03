@@ -87,12 +87,12 @@ yoho init --list-templates
 yoho init --template postgres,redis      # also works in a project that already has yoho.yml
 ```
 
-| Template | Image | Backup | Generated secrets |
-|---|---|---|---|
-| `postgres` | `postgres:17-alpine` | `pg_dump --clean --if-exists`, restored with `psql` | `POSTGRES_PASSWORD` (`POSTGRES_PASSWORD_FILE`) |
-| `redis` | `valkey/valkey:9.0-alpine` (Redis-compatible, append-only file) | volume `redisdata` | none: reachable only on the App's network |
-| `clickhouse` | `clickhouse/clickhouse-server:26.8-alpine` (LTS) | volume `clickhousedata`, container paused during the copy | `CLICKHOUSE_PASSWORD` (`CLICKHOUSE_PASSWORD_FILE`) |
-| `rustfs` | `rustfs/rustfs:1.0.4` (S3-compatible) | volume `rustfsdata` | `RUSTFS_ACCESS_KEY`, `RUSTFS_SECRET_KEY` (`*_FILE`); see [Object storage](object-storage.md) |
+| Template | Image | Backup | Generated secrets | `secrets rotate --generated` |
+|---|---|---|---|---|
+| `postgres` | `postgres:17-alpine` | `pg_dump --clean --if-exists`, restored with `psql` | `POSTGRES_PASSWORD` (`POSTGRES_PASSWORD_FILE`) | `ALTER ROLE`, then restart (detected) |
+| `redis` | `valkey/valkey:9.0-alpine` (Redis-compatible, append-only file) | volume `redisdata` | none: reachable only on the App's network | n/a |
+| `clickhouse` | `clickhouse/clickhouse-server:26.8-alpine` (LTS) | volume `clickhousedata`, container paused during the copy | `CLICKHOUSE_PASSWORD` (`CLICKHOUSE_PASSWORD_FILE`) | swap and restart (`rotate: {strategy: none}`): the image rewrites user `default`'s password from the file on every start; users made with `CREATE USER` keep theirs |
+| `rustfs` | `rustfs/rustfs:1.0.4` (S3-compatible) | volume `rustfsdata` | `RUSTFS_ACCESS_KEY`, `RUSTFS_SECRET_KEY` (`*_FILE`); see [Object storage](object-storage.md) | swap and restart (`rotate: {strategy: none}`): RustFS reads the root keys from the files on every start; objects stay readable with the new keys |
 
 Each Service is `stateful: true`, has `restart: unless-stopped`, a healthcheck over TCP on 127.0.0.1, a named volume, and no published ports; other Services reach it by name (`postgres:5432`, `redis:6379`, `clickhouse:8123`, `rustfs:9000`). Generated secrets are created on the Server at the first deploy; list them in `x-yoho.secrets` of each Service that connects. A ClickHouse volume Backup copies the whole data directory; for very large tables use ClickHouse's own `BACKUP` to an S3 bucket instead.
 

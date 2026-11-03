@@ -198,3 +198,35 @@ func TestRestoreFromAcceptsDestinationEnv(t *testing.T) {
 		t.Fatalf("$YOHO_DESTINATION must name the target: %v", err)
 	}
 }
+
+func TestRestoreCleanupRefusesBackupID(t *testing.T) {
+	g := &globals{configPath: filepath.Join(t.TempDir(), "missing.yml")}
+	c := backupRestoreCmd(g)
+	c.SetArgs([]string{"--cleanup", "latest"})
+	c.SetOut(io.Discard)
+	c.SetErr(io.Discard)
+	if err := c.Execute(); err == nil || !strings.Contains(err.Error(), "--cleanup takes no Backup ID") {
+		t.Fatalf("--cleanup latest: %v", err)
+	}
+}
+
+func TestRestoreFromRefusesSameDestination(t *testing.T) {
+	dir := t.TempDir()
+	for name, body := range map[string]string{
+		"yoho.yml": "app: shop\nservers:\n  primary:\n    ssh: yoho@203.0.113.10\ndestinations:\n  production:\n    servers: [primary]\n" +
+			"backups:\n  targets:\n    local: {repository: /tmp/yoho-test-backups}\n  jobs:\n    nightly: {destination: production, target: local}\n",
+		"compose.yaml": "services:\n  db: {image: postgres, x-yoho: {stateful: true, backup: {volumes: [data]}}, volumes: [data:/d]}\nvolumes:\n  data: {}\n",
+	} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	g := &globals{configPath: filepath.Join(dir, "yoho.yml"), destination: "production"}
+	c := backupRestoreCmd(g)
+	c.SetArgs([]string{"latest", "--from", "production"})
+	c.SetOut(io.Discard)
+	c.SetErr(io.Discard)
+	if err := c.Execute(); err == nil || err.Error() != "--from names the restore Destination itself; drop --from" {
+		t.Fatalf("--from same Destination: %v", err)
+	}
+}
