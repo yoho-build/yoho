@@ -16,6 +16,7 @@ const guide = [
   ['Builds & image transport', 'builds'],
   ['Backups & restore', 'backups'],
   ['Scheduled jobs', 'scheduled-jobs'],
+  ['Object storage', 'object-storage'],
   ['Server setup', 'setup'],
   ['Swarm', 'swarm'],
   ['Dashboards (tui / ui)', 'dashboards'],

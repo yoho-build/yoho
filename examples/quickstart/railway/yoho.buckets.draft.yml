@@ -1,0 +1,71 @@
+# yoho.yml — drafted by `yoho migrate draft` from inventory inventory-buckets.json.
+# Switch configuration. On the first deploy, delete the migrate block so
+# ingress stays on Railway while you restore Postgres. A finished cutover
+# does not run again. from: compose is a label; Railway is not a migrate.from value.
+# stop names nothing on this Server, so the switch is:
+#   yoho migrate plan --cutover-allow-empty
+#   yoho deploy --skip-build --cutover-allow-empty
+# No claim: Railway volumes are not on this Server.
+# HTTP healthchecks use wget. The image must include wget; change the test to curl if it does not.
+# POSTGRES_PASSWORD, RUSTFS_ACCESS_KEY, RUSTFS_SECRET_KEY are generated on the Server. Do not copy Railway's values.
+# Bucket shop-uploads goes to the rustfs Service (S3 endpoint http://rustfs:9000, path-style).
+#   A Service that uses it lists RUSTFS_ACCESS_KEY and RUSTFS_SECRET_KEY in x-yoho.secrets (generated on the Server).
+# Bucket shop-media goes to an external S3-compatible store (R2, B2, S3).
+#   A Service that uses it sets environment S3_ENDPOINT (https://ACCOUNT_ID.r2.cloudflarestorage.com)
+#   and lists S3_ACCESS_KEY_ID and S3_SECRET_ACCESS_KEY in x-yoho.secrets.
+# yaml-language-server: $schema=https://yohobuild.com/schema/yoho.schema.json
+app: shop
+
+servers:
+  primary:
+    ssh: root@203.0.113.10 # replace with root@YOUR_SERVER
+
+destinations:
+  production:
+    servers: [primary]
+    migrate:
+      from: compose
+      stop:
+        containers: [railway-shop-web]
+
+builder:
+  location: local
+
+proxy:
+  http_port: 0
+  https_port: 0
+
+setup:
+  user: yoho
+
+# Copy into .yoho/secrets. These are references, not values.
+# Bitwarden alternative: KEY=$(bw get password item)
+# APP_GREETING=$(op read op://Production/shop/APP_GREETING)
+# S3_ACCESS_KEY_ID=$(op read op://Production/shop/S3_ACCESS_KEY_ID)
+# S3_SECRET_ACCESS_KEY=$(op read op://Production/shop/S3_SECRET_ACCESS_KEY)
+
+# Buckets: copy and verify with rclone after the first deploy.
+# Copy each bucket with rclone. Credentials come from the environment, never argv.
+# Railway side: the bucket's S3 endpoint and keys, stored in your password manager.
+#   export RCLONE_CONFIG_RAILWAY_TYPE=s3 RCLONE_CONFIG_RAILWAY_PROVIDER=Other
+#   export RCLONE_CONFIG_RAILWAY_ENDPOINT="$(op read op://Production/shop/RAILWAY_BUCKET_ENDPOINT)"
+#   export RCLONE_CONFIG_RAILWAY_ACCESS_KEY_ID="$(op read op://Production/shop/RAILWAY_BUCKET_ACCESS_KEY_ID)"
+#   export RCLONE_CONFIG_RAILWAY_SECRET_ACCESS_KEY="$(op read op://Production/shop/RAILWAY_BUCKET_SECRET_ACCESS_KEY)"
+# RustFS on the Server, after the first `yoho deploy`: tunnel its S3 port to 127.0.0.1:19000.
+#   ssh root@YOUR_SERVER "docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}} {{end}}' yoho-shop-production-rustfs-1"
+#   ssh -N -L 19000:RUSTFS_IP:9000 root@YOUR_SERVER &
+#   export RCLONE_CONFIG_YOHO_TYPE=s3 RCLONE_CONFIG_YOHO_PROVIDER=Other RCLONE_CONFIG_YOHO_ENDPOINT=http://127.0.0.1:19000
+#   export RCLONE_CONFIG_YOHO_ACCESS_KEY_ID="$(ssh root@YOUR_SERVER cat /var/lib/yoho/apps/shop/production/generated/RUSTFS_ACCESS_KEY)"
+#   export RCLONE_CONFIG_YOHO_SECRET_ACCESS_KEY="$(ssh root@YOUR_SERVER cat /var/lib/yoho/apps/shop/production/generated/RUSTFS_SECRET_KEY)"
+# shop-uploads (12GB) -> rustfs
+#   rclone mkdir yoho:shop-uploads
+#   rclone sync railway:shop-uploads yoho:shop-uploads --checksum --progress
+#   rclone check railway:shop-uploads yoho:shop-uploads
+# External store (R2 shown; PROVIDER=AWS for S3, Other for B2). Create the buckets there first.
+#   export RCLONE_CONFIG_TARGET_TYPE=s3 RCLONE_CONFIG_TARGET_PROVIDER=Cloudflare RCLONE_CONFIG_TARGET_ENDPOINT=https://ACCOUNT_ID.r2.cloudflarestorage.com
+#   export RCLONE_CONFIG_TARGET_ACCESS_KEY_ID="$(op read op://Production/shop/S3_ACCESS_KEY_ID)"
+#   export RCLONE_CONFIG_TARGET_SECRET_ACCESS_KEY="$(op read op://Production/shop/S3_SECRET_ACCESS_KEY)"
+# shop-media (2TB) -> external
+#   rclone sync railway:shop-media target:shop-media --checksum --progress
+#   rclone check railway:shop-media target:shop-media
+# rclone check must report 0 differences. Objects without an MD5 (multipart uploads) are compared by size; add --download for a byte-for-byte check.

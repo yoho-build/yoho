@@ -16,6 +16,11 @@ func render(inv inventory, source string, extra []string) (*Result, error) {
 		return nil, err
 	}
 	d := &Result{Warnings: append([]string{}, extra...)}
+	buckets, err := prepareBuckets(&inv)
+	if err != nil {
+		return nil, err
+	}
+	d.Buckets = buckets
 	seenVol := map[string]string{}
 	var wget bool
 	for i := range inv.Services {
@@ -68,6 +73,9 @@ func render(inv inventory, source string, extra []string) (*Result, error) {
 		d.Warnings = append([]string{"HTTP healthchecks use wget. The image must include wget; change the test to curl if it does not."}, d.Warnings...)
 	}
 	d.Compose = renderCompose(source, inv, d.Warnings)
+	if err := renderBuckets(d, inv); err != nil {
+		return nil, err
+	}
 	d.Yoho, d.SecretLines, d.SecretKeys = renderYoho(source, inv, d)
 	return d, nil
 }
@@ -390,8 +398,15 @@ func renderYoho(source string, inv inventory, d *Result) (string, []string, []st
 	for _, w := range d.Warnings {
 		b.WriteString("# " + w + "\n")
 	}
-	if len(d.Generated) > 0 {
-		b.WriteString("# " + strings.Join(d.Generated, ", ") + " is generated on the Server. Do not copy Railway's value.\n")
+	switch len(d.Generated) {
+	case 0:
+	case 1:
+		b.WriteString("# " + d.Generated[0] + " is generated on the Server. Do not copy Railway's value.\n")
+	default:
+		b.WriteString("# " + strings.Join(d.Generated, ", ") + " are generated on the Server. Do not copy Railway's values.\n")
+	}
+	for _, n := range bucketNotes(d) {
+		b.WriteString("# " + n + "\n")
 	}
 	b.WriteString("# yaml-language-server: $schema=https://yohobuild.com/schema/yoho.schema.json\n")
 	b.WriteString("app: " + inv.Project + "\n\n")
@@ -436,6 +451,17 @@ func renderYoho(source string, inv inventory, d *Result) (string, []string, []st
 			lines = append(lines, k+"=$(op read op://Production/"+inv.Project+"/"+k+")")
 		}
 	}
+	for _, bk := range d.Buckets {
+		if bk.Target != TargetExternal {
+			continue
+		}
+		for _, k := range externalKeys {
+			if !seen[k] {
+				seen[k] = true
+				lines = append(lines, k+"=$(op read op://Production/"+inv.Project+"/"+k+")")
+			}
+		}
+	}
 	if len(inv.Hostnames) > 0 {
 		for _, k := range []string{"CF_API_TOKEN", "CF_TUNNEL_TOKEN"} {
 			if !seen[k] {
@@ -455,6 +481,15 @@ func renderYoho(source string, inv inventory, d *Result) (string, []string, []st
 		b.WriteString("# Bitwarden alternative: KEY=$(bw get password item)\n")
 		for _, line := range lines {
 			b.WriteString("# " + line + "\n")
+		}
+	}
+	if len(d.Checklist) > 0 {
+		b.WriteString("\n# Buckets: copy and verify with rclone after the first deploy.\n")
+		for _, line := range d.Checklist {
+			if !strings.HasPrefix(line, "#") {
+				line = "#   " + line
+			}
+			b.WriteString(line + "\n")
 		}
 	}
 	return b.String(), lines, keys

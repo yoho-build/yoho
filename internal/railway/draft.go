@@ -45,6 +45,10 @@ type Result struct {
 	Warnings    []string
 	Services    []string
 	Volumes     []string
+	// Buckets are the inventory's buckets with their targets. Checklist is
+	// the rclone copy and verify steps for them (shell lines and comments).
+	Buckets   []BucketPlan
+	Checklist []string
 }
 
 const maxBytes = 1 << 20
@@ -104,6 +108,7 @@ type inventory struct {
 	Project   string    `json:"project"`
 	Hostnames []string  `json:"hostnames,omitempty"`
 	Services  []service `json:"services"`
+	Buckets   []bucket  `json:"buckets,omitempty"`
 }
 
 type service struct {
