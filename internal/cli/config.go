@@ -105,7 +105,7 @@ func secretsCmd(g *globals) *cobra.Command {
 				step.Fail(err, secretsHint(err, "check .yoho/secrets and that op / bw / bws are signed in"))
 				return &silentError{err}
 			}
-			step.Done(fmt.Sprintf("%d keys", len(s.Keys())))
+			step.Done(plural(len(s.Keys()), "key", "keys"))
 			var rows [][]string
 			for _, e := range secrets.Describe(s, nil) {
 				rows = append(rows, []string{e.Key, e.Ref, fmt.Sprintf("%d", e.Length)})
@@ -219,7 +219,7 @@ func listTemplates(g *globals, u *ui.UI) {
 	var rows [][]string
 	for _, t := range templates.List() {
 		if g.json {
-			u.Event("template", "", map[string]any{"name": t.Name, "image": t.Image, "description": t.Description, "connect": t.Connect, "secrets": t.Secrets})
+			u.Event("template", "", map[string]any{"name": t.Name, "image": t.Image, "description": t.Description, "connect": t.Connect, "secrets": jsonList(t.Secrets)})
 			continue
 		}
 		rows = append(rows, []string{t.Name, t.Image, t.Description})

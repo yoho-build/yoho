@@ -180,20 +180,20 @@ func Check(r *Result, runtime string, secretKeys []string) []Finding {
 			// Restore isolation (internal/backup) refuses any published port
 			// or host/shared network namespace on a Service it loads a dump
 			// into or runs post_restore in, loopback binds included.
-			const restoreNote = "; `yoho backup restore` also refuses to load restore_dump or run post_restore in a Service that publishes ports (even on loopback) or uses host networking"
+			const portsNote = " (backup restore and drill refuse any published port, loopback too)"
 			switch {
 			case swarm:
 				// swarm/compile.go drops host_ip: the ingress routing mesh
 				// publishes every port on every node, loopback binds included.
 				if all := publishedPorts(svc, false); len(all) > 0 {
-					svcAdd(LevelWarning, "stateful service publishes port(s) %s; on runtime swarm Yoho drops host_ip and the ingress routing mesh publishes them on every node and interface, bypassing the Server firewall (ufw), so it is reachable from the internet; drop ports and reach it on the stack network by Service name"+restoreNote, strings.Join(all, ", "))
+					svcAdd(LevelWarning, "Stateful Service publishes port(s) %s; on runtime swarm Yoho drops host_ip and the ingress routing mesh publishes them on every node and interface, bypassing the Server firewall (ufw), so it is reachable from the internet; drop ports and reach it on the stack network by Service name"+portsNote, strings.Join(all, ", "))
 				}
 			default:
 				if pub := publicPorts(svc); len(pub) > 0 {
-					svcAdd(LevelWarning, "stateful service publishes port(s) %s on all interfaces; Docker-published ports bypass the Server firewall (ufw), so it is reachable from the internet; bind to loopback (e.g. \"127.0.0.1:5432:5432\") or drop ports and reach it on the compose network by Service name"+restoreNote, strings.Join(pub, ", "))
+					svcAdd(LevelWarning, "Stateful Service publishes port(s) %s on all interfaces; Docker-published ports bypass the Server firewall (ufw), so it is reachable from the internet; drop ports and reach it on the compose network by Service name"+portsNote+"; bind to loopback (\"127.0.0.1:5432:5432\") only if you must reach it from the Server", strings.Join(pub, ", "))
 				}
 				if svc.NetworkMode == "host" {
-					svcAdd(LevelWarning, "stateful service uses network_mode: host; it listens on the Server's own interfaces, bypassing Docker networks, so anything it binds to 0.0.0.0 is reachable unless the Server firewall blocks it; drop network_mode and reach it on the compose network by Service name"+restoreNote)
+					svcAdd(LevelWarning, "Stateful Service uses network_mode: host; it listens on the Server's own interfaces, bypassing Docker networks, so anything it binds to 0.0.0.0 is reachable unless the Server firewall blocks it; drop network_mode and reach it on the compose network by Service name (backup restore and drill refuse host networking too)")
 				}
 			}
 		}

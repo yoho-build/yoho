@@ -20,6 +20,7 @@ It writes (or appends to `compose.yaml`) a `rustfs` Service:
 - `x-yoho.stateful: true` and a named volume `rustfsdata` at `/data`,
 - `x-yoho.generate` for `RUSTFS_ACCESS_KEY` and `RUSTFS_SECRET_KEY` (`password32`, created once on the Server). Yoho mounts them as files and sets `RUSTFS_ACCESS_KEY_FILE` / `RUSTFS_SECRET_KEY_FILE`, which RustFS reads, so the keys are not in `docker inspect`,
 - a healthcheck on `http://127.0.0.1:9000/health`,
+- `x-yoho.rotate` with `strategy: none` for both keys: `yoho secrets rotate --generated RUSTFS_ACCESS_KEY --generated RUSTFS_SECRET_KEY` swaps the values and restarts RustFS and every Service that lists them (RustFS reads the files on every start; stored objects stay readable). Copies outside Yoho (an `s3.env`, a laptop profile) keep the old keys and stop working,
 - `x-yoho.backup.volumes: [rustfsdata]`,
 - no published ports.
 

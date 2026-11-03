@@ -71,8 +71,16 @@ func restoreCleanup(cmd *cobra.Command, g *globals, jobName string) (err error) 
 	if err := release(); err != nil {
 		return fmt.Errorf("unlock: %w", err)
 	}
-	u.Finished(nil, fmt.Sprintf("Removed %d restore, Backup and check staging directories of %s (%s)", n, a.cfg.App, a.destName))
+	u.Finished(nil, fmt.Sprintf("Removed %s of %s (%s)", plural(n, "restore, Backup or check staging directory", "restore, Backup and check staging directories"), a.cfg.App, a.destName))
 	return nil
+}
+
+// plural renders "1 drill" / "2 drills"; many is the plural form.
+func plural(n int, one, many string) string {
+	if n == 1 {
+		return "1 " + one
+	}
+	return fmt.Sprintf("%d %s", n, many)
 }
 
 // stagingAge renders how long ago a staging directory was created.
@@ -85,7 +93,7 @@ func stagingAge(d time.Duration) string {
 	case d < 48*time.Hour:
 		return d.Round(time.Minute).String() + " ago"
 	}
-	return fmt.Sprintf("%d days ago", int(d.Hours()/24))
+	return plural(int(d.Hours()/24), "day", "days") + " ago"
 }
 
 // warnLeftovers reports what killed or interrupted drills and restores of

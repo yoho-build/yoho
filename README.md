@@ -70,9 +70,10 @@ Then `yoho app logs web -f`, `yoho app stats`, `yoho releases`, `yoho rollback <
 - Compose-native: `docker compose up` still works locally; Yoho reads `x-yoho` and ignores nothing else.
 - Zero downtime: health-gated, drained cutover via kamal-proxy, also behind Cloudflare Tunnel.
 - Registry-less: local build (Apple `container` on Apple silicon, Docker elsewhere), amd64 cross-builds, layer push over SSH.
-- File-based secrets by default: resolved locally from 1Password, Bitwarden, or any command; delivered as files; generated secrets on the Server. Values stay out of the repo, image, and `docker inspect` in this mode. Opt-in `secrets_as_env: true` delivers environment variables, which `docker inspect` can expose.
+- File-based secrets by default: resolved locally from 1Password, Bitwarden, or any command; delivered as files; generated secrets on the Server, rotatable with `yoho secrets rotate --generated` (Postgres, MySQL/MariaDB or your own command). Values stay out of the repo, image, and `docker inspect` in this mode. Opt-in `secrets_as_env: true` delivers environment variables, which `docker inspect` can expose.
 - Stateful Services are pinned and never `down -v`.
-- Backups (restic, S3, B2, SFTP, rclone, or encrypted archives) and restore; opt-in scheduled jobs via systemd timers.
+- Backups (restic, S3, B2, SFTP, rclone, or encrypted archives) and restore; `yoho backup drill` restores into a throwaway project and reports a recovery time estimate; opt-in scheduled jobs via systemd timers.
+- Service templates: `yoho init --template postgres,redis,clickhouse,rustfs` adds ready-to-deploy Stateful Services with generated secrets and Backups.
 - Cloudflare Tunnel, including account-less Quick Tunnels.
 - Compose (default) or Swarm runtime.
 - Kamal-compatible hooks and secrets-file style.
@@ -146,8 +147,8 @@ See `examples/quickstart` for a runnable web + worker + Postgres App, and `examp
 | `app ps\|logs\|stats\|exec` | inspect the running App |
 | `tui`, `ui` | read-only dashboards of Servers, Services, Releases and logs, in the terminal or a local browser |
 | `proxy boot\|status\|logs`, `tunnel up\|status\|down` | Proxy and Cloudflare Tunnel |
-| `secrets list\|print\|rotate` | inspect or rotate secrets |
-| `backup run\|list\|restore`, `schedule install\|status\|remove` | Backups and Scheduled Jobs |
+| `secrets list\|print\|rotate [--generated KEY]` | inspect or rotate secrets, including Server-generated ones |
+| `backup run\|list\|restore\|check\|pull\|drill`, `schedule install\|status\|remove` | Backups (integrity check, local mirror of archives, restore drill) and Scheduled Jobs |
 | `swarm init\|join\|status` | Swarm runtime |
 | `builder status\|setup` | local Builder |
 | `skill install\|print [SKILL]` | agent skills |

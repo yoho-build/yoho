@@ -732,6 +732,11 @@ func Drill(ctx context.Context, o DrillOptions) (res *DrillResult, err error) {
 			fmt.Fprintln(o.Out, out)
 		}
 		if err != nil {
+			// The command's stderr is merged into out (shown above), so an
+			// ExitError has no stderr tail worth repeating.
+			if ee, ok := errors.AsType[*remote.ExitError](err); ok && strings.TrimSpace(ee.Stderr) == "" {
+				return nil, fmt.Errorf("verify %s failed on %s (exit %d)", svc, ee.Host, ee.Code)
+			}
 			return nil, fmt.Errorf("verify %s failed: %w", svc, err)
 		}
 		res.Verified = append(res.Verified, svc)

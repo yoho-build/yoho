@@ -20,7 +20,7 @@ func backupDrillCmd(g *globals) *cobra.Command {
 		Use:   "drill [JOB]",
 		Short: "Prove a Backup restores: restore it into a throwaway project and check health",
 		Long: `Restore a Backup (--id, default latest) into a throwaway compose project
-yoho-<app>-<destination>-drill-<id> on the Destination's Server: fresh drill
+yoho-<app>-<destination>-drill-<8 random hex> on the Destination's Server: fresh drill
 volumes, one internal network, no published ports and no Proxy route. Yoho
 starts the backed-up Services from the deployed Release, loads restore_dump,
 waits for their healthchecks, runs x-yoho.backup.verify, reports per-phase
@@ -113,7 +113,7 @@ leftovers.`,
 				if err := release(); err != nil {
 					return fmt.Errorf("unlock: %w", err)
 				}
-				u.Finished(nil, fmt.Sprintf("Removed %d drills and %d drill staging directories of %s (%s)", len(projects), dirs, a.cfg.App, a.destName))
+				u.Finished(nil, fmt.Sprintf("Removed %s and %s of %s (%s)", plural(len(projects), "drill", "drills"), plural(dirs, "drill staging directory", "drill staging directories"), a.cfg.App, a.destName))
 				return nil
 			}
 			if id == "" {
@@ -184,7 +184,7 @@ leftovers.`,
 				rows = append(rows, []string{p.Name, p.Duration.Round(100 * time.Millisecond).String(), p.Detail})
 			}
 			rows = append(rows, []string{"RTO estimate", res.RTO.Round(100 * time.Millisecond).String(), "download + restore + healthy"})
-			u.Table([]string{"PHASE", "TIME", "DETAIL"}, rows)
+			u.Table([]string{"PHASE", "DURATION", "DETAIL"}, rows)
 			for _, s := range res.Unloaded {
 				u.Warn("dump of %s was not loaded (no x-yoho.backup.restore_dump)", s)
 			}
@@ -192,8 +192,8 @@ leftovers.`,
 				u.Info("no x-yoho.backup.verify command: the drill proved restore and health, not your data; add one to check it")
 			}
 			u.Event("drill", "", map[string]any{
-				"project": res.Project, "backup_id": found.ID, "services": res.Services, "volumes": res.Volumes, "dumps": res.Dumps,
-				"verified": res.Verified, "rto_ms": res.RTO.Milliseconds(), "kept": res.Kept,
+				"project": res.Project, "backup_id": found.ID, "services": jsonList(res.Services), "volumes": jsonList(res.Volumes), "dumps": jsonList(res.Dumps),
+				"verified": jsonList(res.Verified), "rto_ms": res.RTO.Milliseconds(), "kept": res.Kept,
 			})
 			if res.Kept {
 				u.Info("drill %s is still running on %s (internal network, no published ports)", res.Project, h.Name)
@@ -234,4 +234,12 @@ func drillHint(err error) string {
 		return "remove the leftover drill with `yoho backup drill --cleanup`"
 	}
 	return backupHint(err)
+}
+
+// jsonList is l, or [] rather than null in JSON events.
+func jsonList(l []string) []string {
+	if l == nil {
+		return []string{}
+	}
+	return l
 }

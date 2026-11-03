@@ -69,7 +69,7 @@ func TestStatefulPublicPortsWarning(t *testing.T) {
 			t.Errorf("%s: want public port warning", name)
 			continue
 		}
-		if !strings.Contains(msg, "127.0.0.1:5432:5432") || !strings.Contains(msg, "compose network") || !strings.Contains(msg, "yoho backup restore") {
+		if !strings.Contains(msg, "127.0.0.1:5432:5432") || !strings.Contains(msg, "compose network") || !strings.Contains(msg, "backup restore and drill refuse any published port") || !strings.Contains(msg, "only if you must") {
 			t.Errorf("%s: message lacks hint: %s", name, msg)
 		}
 	}
@@ -108,7 +108,7 @@ func TestStatefulSwarmPortsWarning(t *testing.T) {
 			t.Errorf("%s: want swarm port warning", name)
 			continue
 		}
-		if !strings.Contains(msg, "every node") || !strings.Contains(msg, "stack network") || strings.Contains(msg, "bind to loopback") {
+		if !strings.Contains(msg, "every node") || !strings.Contains(msg, "stack network") || !strings.Contains(msg, "loopback too") || strings.Contains(msg, "bind to loopback") {
 			t.Errorf("%s: wrong advice for swarm: %s", name, msg)
 		}
 	}
@@ -133,7 +133,7 @@ func TestStatefulHostNetworkWarning(t *testing.T) {
   hostweb: {image: nginx, restart: always, network_mode: host}
 `
 	got := statefulFindings(t, svcs, "compose", "network_mode: host")
-	if msg, ok := got["hostdb"]; !ok || !strings.Contains(msg, "yoho backup restore") {
+	if msg, ok := got["hostdb"]; !ok || !strings.Contains(msg, "backup restore and drill refuse host networking") {
 		t.Errorf("hostdb: want host network warning, got %q", msg)
 	}
 	for _, name := range []string{"bridgedb", "hostweb"} {

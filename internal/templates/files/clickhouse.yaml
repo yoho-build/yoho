@@ -20,6 +20,10 @@ services:
       stateful: true
       generate:
         CLICKHOUSE_PASSWORD: password32 # delivered as CLICKHOUSE_PASSWORD_FILE
+      rotate:
+        # The image rewrites user default's password from the file on every
+        # start, so `yoho secrets rotate --generated` only swaps and restarts.
+        CLICKHOUSE_PASSWORD: {strategy: none}
       backup:
         # The container is paused while the volume is copied, so the copy is
         # consistent. Restore puts the whole data directory back.

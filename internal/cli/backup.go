@@ -176,7 +176,7 @@ func (a *app) resolveServices(ctx context.Context, j *backupJob) error {
 
 // resolveTargetSecrets loads the Backup Target's password and env secrets
 // from the secrets of the job's Destination: for `restore --from SRC` that is
-// SRC's (.yoho/secrets.SRC), whose Backups the Target holds, not the
+// SRC's (.yoho/secrets, .yoho/secrets.SRC, SRC's secrets.values), whose Backups the Target holds, not the
 // Destination being restored into.
 func (a *app) resolveTargetSecrets(ctx context.Context, j *backupJob) error {
 	j.env = map[string]string{}
@@ -456,13 +456,13 @@ func backupListCmd(g *globals) *cobra.Command {
 				step.Fail(err, backupHint(err))
 				return &silentError{err}
 			}
-			step.Done(fmt.Sprintf("%d Backups", len(entries)))
+			step.Done(plural(len(entries), "Backup", "Backups"))
 			rows := make([][]string, 0, len(entries))
 			for _, e := range entries {
 				rows = append(rows, []string{e.ID, e.Time.Local().Format("2006-01-02 15:04:05"), humanBytes(e.Size)})
 			}
 			if len(rows) == 0 {
-				a.ui.Info("no Backups yet; take one with `yoho backup run %s`", name)
+				a.ui.Info("no Backups yet; take one with `%s`", strings.TrimSpace("yoho backup run "+name))
 				return nil
 			}
 			a.ui.Table([]string{"ID", "CREATED", "SIZE"}, rows)
@@ -578,7 +578,7 @@ remotes are not files on the Server and are refused.
 					errs = append(errs, perr)
 					continue
 				}
-				step.Done(fmt.Sprintf("%d archives", len(res)))
+				step.Done(plural(len(res), "archive", "archives"))
 			}
 			copied, skipped, conflicts, failed, n := reportPull(u, all)
 			u.Event("summary", fmt.Sprintf("copied %d (%s), skipped %d, conflicts %d, failed %d", copied, humanBytes(n), skipped, conflicts, failed),
@@ -586,7 +586,7 @@ remotes are not files on the Server and are refused.
 			if len(errs) > 0 {
 				return &silentError{errors.Join(errs...)}
 			}
-			u.Finished(nil, fmt.Sprintf("Pulled %d new archives of %s (%s) to %s", copied, a.cfg.App, a.destName, root))
+			u.Finished(nil, fmt.Sprintf("Pulled %s of %s (%s) to %s", plural(copied, "new archive", "new archives"), a.cfg.App, a.destName, root))
 			return nil
 		},
 	}
@@ -612,8 +612,9 @@ Use "latest" as ID for the newest Backup.
 --from DESTINATION restores a Backup taken by another Destination of the same
 App (for example production into staging, with -d staging or
 YOHO_DESTINATION=staging). The Backup job and Backup Target are the source
-Destination's, and so are the Target's secrets (password_secret, env_secrets,
-rclone_config_secret are read from .yoho/secrets.<source>); the Target must be
+Destination's, and so are the Target's secrets: password_secret, env_secrets
+and rclone_config_secret are resolved as for the source Destination
+(.yoho/secrets, .yoho/secrets.<source>, secrets.values). The Target must be
 reachable from this Destination's Server. The source's generated secrets are not copied unless
 --copy-generated-secrets is given. Another App's Backup is always refused.
 
@@ -623,10 +624,15 @@ succeeds. Rerunning an interrupted or failed restore resumes the Services that
 ran before the first attempt once it succeeds, then removes the old staging.
 --cleanup (without ID) takes the Destination lock, so it refuses while a
 restore, drill, deploy or Backup runs, and removes the restore staging
-directories that Yoho can prove it created, including their prior-state.json.`,
+directories that Yoho can prove it created, including their prior-state.json,
+plus stale run-* and check-* staging of an interrupted backup run or check.
+Services that an interrupted restore stopped are not resumed afterwards.`,
 		Args: func(cmd *cobra.Command, args []string) error {
 			if cleanup {
-				return cobra.NoArgs(cmd, args)
+				if len(args) > 0 {
+					return errors.New("--cleanup takes no Backup ID; run `yoho backup restore --cleanup` alone")
+				}
+				return nil
 			}
 			return cobra.ExactArgs(1)(cmd, args)
 		},
@@ -653,6 +659,9 @@ directories that Yoho can prove it created, including their prior-state.json.`,
 			if from != "" {
 				if _, ok := a.cfg.Destinations[from]; !ok {
 					return fmt.Errorf("--from: unknown Destination %q (have: %s)", from, strings.Join(sortedKeys(a.cfg.Destinations), ", "))
+				}
+				if from == a.destName {
+					return errors.New("--from names the restore Destination itself; drop --from")
 				}
 				source = from
 			}
@@ -752,7 +761,7 @@ directories that Yoho can prove it created, including their prior-state.json.`,
 				u.Info("resumed %s, stopped by an interrupted restore (they ran before its first attempt)", strings.Join(res.Revived, ", "))
 			}
 			if len(res.StillStopped) > 0 {
-				u.Warn("%d Services (%s) were stopped by an interrupted restore and remain stopped; start them with `yoho deploy -d %s`", len(res.StillStopped), strings.Join(res.StillStopped, ", "), a.destName)
+				u.Warn("stopped by an interrupted restore and still stopped: %s (%s); start them with `yoho deploy -d %s`", plural(len(res.StillStopped), "Service", "Services"), strings.Join(res.StillStopped, ", "), a.destName)
 			}
 			u.Event("restore", "", map[string]any{
 				"backup_id": found.ID, "from": source, "volumes": res.Volumes, "dumps": res.Dumps,
@@ -781,7 +790,7 @@ directories that Yoho can prove it created, including their prior-state.json.`,
 	c.Flags().BoolVarP(&yes, "yes", "y", false, "Skip the confirmation prompt")
 	c.Flags().StringVar(&from, "from", "", "restore a Backup taken by another Destination of this App (e.g. --from production -d staging)")
 	c.Flags().BoolVar(&copyGenerated, "copy-generated-secrets", false, "with --from: also replace this Destination's generated secrets with the source's copies from the Backup")
-	c.Flags().BoolVar(&cleanup, "cleanup", false, "remove leftover restore staging (and its prior-state.json) of this Destination and exit")
+	c.Flags().BoolVar(&cleanup, "cleanup", false, "remove leftover restore, backup run and check staging (and restore prior-state.json) of this Destination and exit")
 	return c
 }
 
