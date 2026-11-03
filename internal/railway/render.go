@@ -369,7 +369,7 @@ func writeHealth(b *strings.Builder, s service) {
 		b.WriteString("      test: " + flow([]string{"CMD", "wget", "-qO-", fmt.Sprintf("http://127.0.0.1:%d%s", s.Port, s.HealthcheckPath)}) + "\n")
 	case isPostgres(s.Image):
 		b.WriteString("    healthcheck:\n")
-		b.WriteString("      test: " + flow([]string{"CMD-SHELL", "pg_isready -U " + s.Env["POSTGRES_USER"]}) + "\n")
+		b.WriteString("      test: " + flow([]string{"CMD-SHELL", "pg_isready -h 127.0.0.1 -U " + s.Env["POSTGRES_USER"]}) + "\n")
 	default:
 		return
 	}

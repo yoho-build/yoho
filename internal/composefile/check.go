@@ -186,6 +186,10 @@ func Check(r *Result, runtime string, secretKeys []string) []Finding {
 			svcAdd(LevelWarning, "healthcheck sets interval %s without test, so it inherits the image check and Yoho adds no fast-start probes: the deploy waits that long for the first probe; set test, or set start_period and start_interval together (start_interval needs Docker 25+), or shorten interval", time.Duration(*svc.HealthCheck.Interval))
 		}
 
+		if ext.Stateful && socketOnlyPgIsready(svc.HealthCheck) {
+			svcAdd(LevelWarning, "healthcheck runs pg_isready without -h: during first initialization the postgres image runs a temporary socket-only server, so the Service can look healthy before the real server starts and a deploy or Backup restore then fails; use pg_isready -h 127.0.0.1")
+		}
+
 		// Stateful guard (ADR 0005): data must not silently diverge across Servers.
 		if !ext.Stateful {
 			if desc := stateDescription(svc, r.Project.WorkingDir); desc != "" {
@@ -352,6 +356,27 @@ func sortedMapKeys[V any](m map[string]V) []string {
 	}
 	sort.Strings(k)
 	return k
+}
+
+// socketOnlyPgIsready reports a healthcheck that runs pg_isready without a
+// host, so it also passes against the image's first-boot socket-only server.
+func socketOnlyPgIsready(hc *types.HealthCheckConfig) bool {
+	if hc == nil || hc.Disable {
+		return false
+	}
+	cmd := strings.Join(hc.Test, " ")
+	if !strings.Contains(cmd, "pg_isready") {
+		return false
+	}
+	if strings.Contains(cmd, "host=") { // a connection string with a host
+		return false
+	}
+	for _, f := range strings.Fields(cmd) {
+		if strings.HasPrefix(f, "-h") || strings.HasPrefix(f, "--host") {
+			return false
+		}
+	}
+	return true
 }
 
 // slowFirstProbe reports a timing-only healthcheck (no test, so the image's

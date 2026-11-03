@@ -225,7 +225,7 @@ Cleanup removes an object only after proving it belongs to the drill: the projec
 
 The drill holds the Destination lock while it runs (a deploy waits), uses the Server's CPU, memory and disk for a second copy of the data, and reads the deployed Release's secrets. It does not start Web or workers, so it does not prove the App's code works with the data; `restore --from` into staging does. Swarm Destinations are refused for now.
 
-Tip: make the healthcheck mean "ready for connections over the network". PostgreSQL's image runs a temporary socket-only server during first initialization, so `pg_isready` without `-h 127.0.0.1` can report healthy before the real server starts, and a dump load then fails. The drill catches exactly this kind of problem.
+Tip: make the healthcheck mean "ready for connections over the network". PostgreSQL's image runs a temporary socket-only server during first initialization, so `pg_isready` without `-h 127.0.0.1` can report healthy before the real server starts, and a dump load then fails. The drill catches exactly this kind of problem, and `yoho config check` warns about a Stateful Service whose healthcheck runs `pg_isready` without a host.
 
 QA on a small PostgreSQL 17 App (dump-only Backup in a local restic repository, same Server), three consecutive runs: download 1.3 to 1.8 s, restore 2.3 to 3.1 s, healthy 0.3 s, verify 0.1 s, cleanup 0.6 to 0.7 s; RTO estimate 4.4 to 4.9 s, whole command under 7 s. Expect download and restore to grow with Backup size and Target bandwidth; measure your own.
 
