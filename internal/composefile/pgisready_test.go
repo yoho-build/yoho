@@ -8,13 +8,19 @@ import (
 
 func TestSocketOnlyPgIsready(t *testing.T) {
 	for cmd, want := range map[string]bool{
-		"pg_isready -U postgres":                  true,
-		"pg_isready -d postgres -U postgres":      true,
-		"pg_isready -h 127.0.0.1 -U postgres":     false,
-		"pg_isready -h127.0.0.1":                  false,
-		"pg_isready --host=localhost":             false,
-		"pg_isready -d 'host=127.0.0.1 dbname=x'": false,
-		"wget -qO- http://127.0.0.1:8080/up":      false,
+		"pg_isready -U postgres":                    true,
+		"pg_isready -d postgres -U postgres":        true,
+		"pg_isready -h 127.0.0.1 -U postgres":       false,
+		"pg_isready -h127.0.0.1":                    false,
+		"pg_isready --host=localhost":               false,
+		"pg_isready -d 'host=127.0.0.1 dbname=x'":   false,
+		"wget -qO- http://127.0.0.1:8080/up":        false,
+		"pg_isready -d postgres://u@db/x":           false,
+		"pg_isready -d postgresql://127.0.0.1:5432": false,
+		"pg_isready --dbname=postgres://db/x":       false,
+		"pg_isready -d 'postgres://u:p@[::1]/x'":    false,
+		"pg_isready -d postgres:///x":               true,
+		"pg_isready -d postgresql://u@/x":           true,
 	} {
 		hc := &types.HealthCheckConfig{Test: types.HealthCheckTest{"CMD-SHELL", cmd}}
 		if got := socketOnlyPgIsready(hc); got != want {
