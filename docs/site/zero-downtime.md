@@ -53,7 +53,7 @@ Defaults are 80/443. If the Server already uses them: `proxy.http_port: 8080`, `
 
 ## Proxy logging
 
-New or recreated Proxy containers inherit the Server's Docker default logging driver. Yoho adds `max-size=10m` only for `json-file` and `local`; it does not pass unsupported rotation options to `fluentd`, `syslog`, `journald`, or other drivers. `plan` and `proxy boot` use the same effective arguments. An already matching Proxy is left unchanged: changing the daemon default does not alter existing containers. App Service logging remains controlled by Compose.
+New or recreated Proxy containers inherit the Server's Docker default logging driver. Yoho adds `max-size=10m` only for `json-file` and `local`; it does not pass unsupported rotation options to `fluentd`, `syslog`, `journald`, or other drivers. `plan` and `proxy boot` use the same effective arguments. An already matching Proxy is left unchanged: changing the daemon default does not alter existing containers. App Services get the same kind of rotation by default: a Service without its own `logging` is compiled with `json-file` and `max-size: 10m`, `max-file: 3` unless the daemon default is another driver; set `logging` on the Service to choose anything else. See [Configuration](configuration.md#x-yoho).
 
 ## Commands
 

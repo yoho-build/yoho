@@ -50,7 +50,8 @@ Scoped access (sharing one App Destination with teammates or CI, see https://yoh
 | `stateful` | Pinned to one Server, stop-first recreate, never scaled. |
 | `secrets` | List `["KEY", "NAME:KEY"]` or map `{NAME: KEY}`. Delivered as files in `/run/secrets/NAME`; use `*_FILE` env vars. |
 | `secrets_as_env` | Deliver as env (`env_file`) instead of files. |
-| `generate` | `{NAME: kind}`; kinds `password32`, `password64`, `hex32`, `hex64`, `base64_32`, `base64_64`. Created once on the Server. |
+| `generate` | `{NAME: kind}`; kinds `password32`, `password64`, `hex32`, `hex64`, `base64_32`, `base64_64`. Created once on the Server; replace with `yoho secrets rotate --generated NAME`. |
+| `rotate` | `{NAME: {strategy, user, command}}` for `secrets rotate --generated`, on the Service that generates NAME. `strategy`: `postgres` (ALTER ROLE `user`), `mysql` (ALTER USER), `command` (`docker exec -i` argv; stdin is the current value, then the new one; must be idempotent), `none` (nothing to apply). Detected for `POSTGRES_PASSWORD`, `MYSQL_*`/`MARIADB_*` passwords; required for other keys of a Stateful or database Service. |
 | `release_command` | One-off container from the new image before cutover (migrations); failure aborts. |
 | `backup` | `volumes`, `dump` (stdout is the dump), `pre_backup`, `post_restore`, `restore_dump` (dump on stdin), `verify` (run by `backup drill`). Without `pre_backup`, the container is paused while volumes are copied. |
 | `strict_drain` | Swarm only: proxy targets tasks. |
