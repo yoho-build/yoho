@@ -36,6 +36,9 @@ type target struct {
 	typ, format        string
 	env                map[string]string
 	diagnostics        []string
+	// restore --from with rclone_config_secret: the source's config value
+	// and the temporary directory holding it (useTempRclone).
+	rcloneValue, rcloneTemp string
 }
 
 func newTarget(app, dest, project string, cfg config.BackupTarget, password string, targetEnv map[string]string) (*target, error) {

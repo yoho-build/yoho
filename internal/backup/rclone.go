@@ -55,6 +55,15 @@ func (t *target) rcloneConfig() *rcloneRun {
 		return nil
 	}
 	dir := RcloneConfigDir(t.app, t.local, key)
+	if t.crossRclone() {
+		// Another Destination's config never touches this Destination's
+		// persistent file: only the temporary copy (useTempRclone) is used.
+		if t.rcloneTemp == "" {
+			fail := "echo 'rclone config: no temporary config for the --from Destination' >&2; exit 1\n"
+			return &rcloneRun{check: fail, native: "false ", docker: " --entrypoint false", dockerEnv: " --entrypoint false", mount: "/nonexistent:" + rcloneMountDir}
+		}
+		dir = t.rcloneTemp
+	}
 	conf := path.Join(dir, rcloneConfName)
 	env := " -e RCLONE_CONFIG=" + rcloneMountDir + "/" + rcloneConfName
 	return &rcloneRun{
@@ -76,6 +85,19 @@ func (t *target) prepareRclone(ctx context.Context, h remote.Host, value string,
 		return nil
 	}
 	t.diagnostics = secrets.RcloneConfigValues(value)
+	if t.crossRclone() {
+		// restore --from: the source's config is used from a temporary file
+		// (useTempRclone), never seeded into this Destination's persistent
+		// config, whose OAuth tokens belong to this Destination's remote.
+		if strings.TrimSpace(value) == "" {
+			return fmt.Errorf("rclone config: secret %s of Destination %s is empty", key, t.dest)
+		}
+		t.rcloneValue = value
+		for _, v := range t.env {
+			t.diagnostics = append(t.diagnostics, v)
+		}
+		return nil
+	}
 	if value != "" {
 		if _, err := seedRclone(ctx, h, t.app, t.local, key, value, now); err != nil {
 			return secrets.RedactError(err, t.diagnostics...)
@@ -90,6 +112,53 @@ func (t *target) prepareRclone(ctx context.Context, h remote.Host, value string,
 		t.diagnostics = append(t.diagnostics, v)
 	}
 	return nil
+}
+
+// crossRclone reports whether t reads another Destination's Backups (restore
+// --from) through a persistent rclone config secret.
+func (t *target) crossRclone() bool {
+	return t.cfg.RcloneConfigSecret != "" && t.local != t.dest
+}
+
+// useTempRclone writes the source Destination's rclone config (restore
+// --from) to a private 0600 file in stagingDir/.rclone and points t at it.
+// stagingDir must be a private staging directory this operation created.
+// The returned cleanup removes the copy: tokens rclone refreshed in it are
+// discarded, and neither Destination's persistent config changes. A no-op
+// unless crossRclone.
+func (t *target) useTempRclone(ctx context.Context, h remote.Host, stagingDir string) (cleanup func(), err error) {
+	cleanup = func() {}
+	if !t.crossRclone() {
+		return cleanup, nil
+	}
+	if t.rcloneValue == "" {
+		return cleanup, errors.New("rclone config: the --from Destination's config was not resolved")
+	}
+	defer func() { err = secrets.RedactError(err, t.diagnostics...) }()
+	dir := path.Join(stagingDir, ".rclone")
+	conf := path.Join(dir, rcloneConfName)
+	remove := func() {
+		cctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), cleanupTimeout)
+		defer cancel()
+		_ = h.Run(cctx, remote.Cmd{Script: pathSafety + "yoho_private " + remote.Quote(stagingDir) + "\nrm -rf " + remote.Quote(dir) + "\n"})
+	}
+	if err := h.Run(ctx, remote.Cmd{Script: safeDir(stagingDir, true, false) + safeDir(dir, true, true)}); err != nil {
+		return cleanup, fmt.Errorf("rclone config: create temporary directory: %w", err)
+	}
+	data := t.rcloneValue
+	if !strings.HasSuffix(data, "\n") {
+		data += "\n"
+	}
+	if err := h.WriteFile(ctx, conf, []byte(data), 0o600, false); err != nil {
+		remove()
+		return cleanup, fmt.Errorf("rclone config: write temporary config: %w", err)
+	}
+	if err := h.Run(ctx, remote.Cmd{Script: safeDir(dir, true, false) + "yoho_secret " + remote.Quote(conf) + "\n"}); err != nil {
+		remove()
+		return cleanup, fmt.Errorf("rclone config: temporary config: %w", err)
+	}
+	t.rcloneTemp = dir
+	return func() { t.rcloneTemp = ""; remove() }, nil
 }
 
 // SeedRcloneConfig writes the rclone_config_secret value of target to its
