@@ -1,0 +1,28 @@
+services:
+  # ClickHouse from `yoho init --template clickhouse`. Connect at
+  # http://clickhouse:8123 or clickhouse:9000 (native) as user default. List
+  # CLICKHOUSE_PASSWORD in the x-yoho.secrets of each Service that connects.
+  clickhouse:
+    image: clickhouse/clickhouse-server:26.8-alpine
+    restart: unless-stopped
+    stop_grace_period: 60s
+    environment:
+      CLICKHOUSE_USER: default
+      CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: "1" # allow CREATE USER / GRANT
+    volumes:
+      - clickhousedata:/var/lib/clickhouse
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://127.0.0.1:8123/ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+    x-yoho:
+      stateful: true
+      generate:
+        CLICKHOUSE_PASSWORD: password32 # delivered as CLICKHOUSE_PASSWORD_FILE
+      backup:
+        # The container is paused while the volume is copied, so the copy is
+        # consistent. Restore puts the whole data directory back.
+        volumes: [clickhousedata]
+volumes:
+  clickhousedata:

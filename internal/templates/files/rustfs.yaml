@@ -1,0 +1,30 @@
+services:
+  # RustFS (S3-compatible object storage) from `yoho init --template rustfs`.
+  # S3 endpoint http://rustfs:9000, path-style addressing, region us-east-1.
+  # List RUSTFS_ACCESS_KEY and RUSTFS_SECRET_KEY in the x-yoho.secrets of each
+  # Service that connects. The console (port 9001) is not published; open it
+  # with an SSH tunnel.
+  rustfs:
+    image: rustfs/rustfs:1.0.4
+    restart: unless-stopped
+    environment:
+      RUSTFS_VOLUMES: /data
+      RUSTFS_CONSOLE_ENABLE: "true"
+      RUSTFS_OBS_LOG_DIRECTORY: "" # log to stdout (yoho app logs)
+    volumes:
+      - rustfsdata:/data
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "-o", "/dev/null", "http://127.0.0.1:9000/health"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    x-yoho:
+      stateful: true
+      generate:
+        RUSTFS_ACCESS_KEY: password32 # delivered as RUSTFS_ACCESS_KEY_FILE
+        RUSTFS_SECRET_KEY: password32 # delivered as RUSTFS_SECRET_KEY_FILE
+      backup:
+        # The container is paused while the volume is copied.
+        volumes: [rustfsdata]
+volumes:
+  rustfsdata:

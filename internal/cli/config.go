@@ -14,6 +14,8 @@ import (
 	"github.com/yoho-build/yoho/internal/composefile"
 	"github.com/yoho-build/yoho/internal/config"
 	"github.com/yoho-build/yoho/internal/secrets"
+	"github.com/yoho-build/yoho/internal/templates"
+	"github.com/yoho-build/yoho/internal/ui"
 )
 
 func configCmd(g *globals) *cobra.Command {
@@ -169,55 +171,212 @@ const initSecrets = `# Yoho secrets for every Destination. Trusted shell: $(...)
 `
 
 func initCmd(g *globals) *cobra.Command {
-	return &cobra.Command{
+	var tmpl []string
+	var list bool
+	c := &cobra.Command{
 		Use:   "init",
-		Short: "Create yoho.yml, .yoho/secrets and sample hooks in the current directory",
+		Short: "Create yoho.yml, .yoho/secrets and sample hooks; --template adds ready-to-deploy Services",
+		Long: `Create yoho.yml, .yoho/secrets and sample hooks in the current directory.
+
+--template NAME[,NAME...] also writes compose Services (` + strings.Join(templates.Names(), ", ") + `)
+with stateful, generated secrets, Backups and healthchecks set, and no
+published ports. An existing compose file gets the Services appended; a
+Service or volume name that already exists is refused and nothing is
+written. With --template an existing Yoho file is left unchanged.
+--list-templates prints the templates.`,
+		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
+			u := g.ui(cmd)
+			if list {
+				listTemplates(g, u)
+				return nil
+			}
+			var names []string
+			if cmd.Flags().Changed("template") {
+				var err error
+				if names, err = templates.Parse(tmpl); err != nil {
+					var te *templates.Error
+					if errors.As(err, &te) {
+						u.Error(te, te.Hint)
+						return &silentError{te}
+					}
+					return err
+				}
+			}
 			wd, err := os.Getwd()
 			if err != nil {
 				return err
 			}
-			u := g.ui(cmd)
-			if p, err := config.Find(wd); err == nil {
-				return fmt.Errorf("%s already exists", filepath.Base(p))
-			}
-			name := strings.ToLower(filepath.Base(wd))
-			name = strings.Map(func(r rune) rune {
-				if r >= 'a' && r <= 'z' || r >= '0' && r <= '9' || r == '-' {
-					return r
-				}
-				return '-'
-			}, name)
-			files := map[string]string{
-				"yoho.yml":           fmt.Sprintf(initYoho, name),
-				".yoho/secrets":      initSecrets,
-				".yoho/hooks/README": "Executable scripts named after a hook run on your machine: pre-connect, pre-build, pre-deploy, post-deploy, pre-backup, post-backup, ...\nEnv: YOHO_APP, YOHO_DESTINATION, YOHO_VERSION, YOHO_HOSTS, YOHO_COMMAND, YOHO_PERFORMER.\n",
-			}
-			for _, rel := range []string{"yoho.yml", ".yoho/secrets", ".yoho/hooks/README"} {
-				p := filepath.Join(wd, rel)
-				if _, err := os.Stat(p); err == nil {
-					u.Warn("%s exists, left unchanged", rel)
-					continue
-				}
-				if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
-					return err
-				}
-				mode := os.FileMode(0o644)
-				if strings.HasPrefix(rel, ".yoho/secrets") {
-					mode = 0o600
-				}
-				if err := os.WriteFile(p, []byte(files[rel]), mode); err != nil {
-					return err
-				}
-				u.Info("created %s", rel)
-			}
-			if err := ensureGitignore(wd, ".yoho/secrets*"); err != nil {
-				return err
-			}
-			u.Info("Next: edit yoho.yml, add x-yoho to compose services, then `yoho config check`")
-			return nil
+			return runInit(u, wd, names)
 		},
 	}
+	c.Flags().StringSliceVar(&tmpl, "template", nil, "Add compose Services from templates: "+strings.Join(templates.Names(), ", "))
+	c.Flags().BoolVar(&list, "list-templates", false, "List the Service templates and exit")
+	return c
+}
+
+func listTemplates(g *globals, u *ui.UI) {
+	var rows [][]string
+	for _, t := range templates.List() {
+		if g.json {
+			u.Event("template", "", map[string]any{"name": t.Name, "image": t.Image, "description": t.Description, "connect": t.Connect, "secrets": t.Secrets})
+			continue
+		}
+		rows = append(rows, []string{t.Name, t.Image, t.Description})
+	}
+	if !g.json {
+		u.Table([]string{"TEMPLATE", "IMAGE", "DESCRIPTION"}, rows)
+	}
+}
+
+func runInit(u *ui.UI, wd string, names []string) error {
+	yohoPath, findErr := config.Find(wd)
+	haveYoho := findErr == nil
+	if haveYoho && len(names) == 0 {
+		return fmt.Errorf("%s already exists", filepath.Base(yohoPath))
+	}
+	// Merge first: a refused template leaves every file as it was.
+	var composeRel string
+	var merged *templates.Result
+	if len(names) > 0 {
+		var err error
+		composeRel, err = initComposeFile(wd, yohoPath, haveYoho)
+		if err != nil {
+			return err
+		}
+		existing, err := os.ReadFile(filepath.Join(wd, composeRel))
+		if err != nil && !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+		merged, err = templates.Merge(existing, names)
+		if err != nil {
+			var te *templates.Error
+			if errors.As(err, &te) {
+				err = fmt.Errorf("%s: %w", composeRel, te)
+				u.Error(err, te.Hint)
+				return &silentError{err}
+			}
+			return err
+		}
+	}
+	name := strings.ToLower(filepath.Base(wd))
+	name = strings.Map(func(r rune) rune {
+		if r >= 'a' && r <= 'z' || r >= '0' && r <= '9' || r == '-' {
+			return r
+		}
+		return '-'
+	}, name)
+	name = strings.TrimLeft(name, "-")
+	if name == "" {
+		name = "app"
+	}
+	if name[0] < 'a' || name[0] > 'z' {
+		name = `"` + name + `"` // a name like 001 must stay a YAML string
+	}
+	files := map[string]string{
+		"yoho.yml":           fmt.Sprintf(initYoho, name),
+		".yoho/secrets":      initSecrets,
+		".yoho/hooks/README": "Executable scripts named after a hook run on your machine: pre-connect, pre-build, pre-deploy, post-deploy, pre-backup, post-backup, ...\nEnv: YOHO_APP, YOHO_DESTINATION, YOHO_VERSION, YOHO_HOSTS, YOHO_COMMAND, YOHO_PERFORMER.\n",
+	}
+	for _, rel := range []string{"yoho.yml", ".yoho/secrets", ".yoho/hooks/README"} {
+		p := filepath.Join(wd, rel)
+		if rel == "yoho.yml" && haveYoho {
+			u.Warn("%s exists, left unchanged", filepath.Base(yohoPath))
+			continue
+		}
+		if _, err := os.Stat(p); err == nil {
+			u.Warn("%s exists, left unchanged", rel)
+			continue
+		}
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			return err
+		}
+		mode := os.FileMode(0o644)
+		if strings.HasPrefix(rel, ".yoho/secrets") {
+			mode = 0o600
+		}
+		if err := os.WriteFile(p, []byte(files[rel]), mode); err != nil {
+			return err
+		}
+		u.Info("created %s", rel)
+	}
+	if err := ensureGitignore(wd, ".yoho/secrets*"); err != nil {
+		return err
+	}
+	if merged == nil {
+		u.Info("Next: edit yoho.yml, add x-yoho to compose services, then `yoho config check`")
+		return nil
+	}
+	p := filepath.Join(wd, composeRel)
+	mode := os.FileMode(0o644)
+	verb := "created"
+	if st, err := os.Stat(p); err == nil {
+		mode = st.Mode().Perm()
+		verb = "updated"
+	}
+	if err := writeFileAtomic(p, merged.Compose, mode); err != nil {
+		return err
+	}
+	u.Info("%s %s", verb, composeRel)
+	var keys []string
+	for _, n := range names {
+		t, _ := templates.Lookup(n)
+		keys = append(keys, t.Secrets...)
+		u.Event("template_added", fmt.Sprintf("  %s (%s): %s", n, t.Image, t.Connect), map[string]any{
+			"template": n, "compose": composeRel, "image": t.Image, "connect": t.Connect, "secrets": t.Secrets,
+		})
+	}
+	if len(keys) > 0 {
+		u.Info("Generated on the Server at the first deploy: %s. List them in x-yoho.secrets of each Service that connects.", strings.Join(keys, ", "))
+	}
+	u.Info("Next: edit yoho.yml (servers, destinations), then `yoho config check`")
+	return nil
+}
+
+// initComposeFile picks the compose file templates go into: the Yoho file's
+// first compose entry, else the first default name that exists, else
+// compose.yaml.
+func initComposeFile(wd, yohoPath string, haveYoho bool) (string, error) {
+	if haveYoho {
+		cfg, err := config.Load(yohoPath)
+		if err != nil {
+			return "", err
+		}
+		if len(cfg.Compose) > 0 {
+			rel := cfg.Compose[0]
+			if filepath.IsAbs(rel) {
+				return filepath.Rel(wd, rel)
+			}
+			return rel, nil // Find looks only in wd, so relative to the Yoho file is relative to wd
+		}
+	}
+	for _, n := range composefile.DefaultFiles {
+		if _, err := os.Stat(filepath.Join(wd, n)); err == nil {
+			return n, nil
+		}
+	}
+	return "compose.yaml", nil
+}
+
+// writeFileAtomic replaces p through a temporary file in the same directory.
+func writeFileAtomic(p string, data []byte, mode os.FileMode) error {
+	t, err := os.CreateTemp(filepath.Dir(p), "."+filepath.Base(p)+".*")
+	if err != nil {
+		return err
+	}
+	defer os.Remove(t.Name())
+	if _, err := t.Write(data); err != nil {
+		t.Close()
+		return err
+	}
+	if err := t.Chmod(mode); err != nil {
+		t.Close()
+		return err
+	}
+	if err := t.Close(); err != nil {
+		return err
+	}
+	return os.Rename(t.Name(), p)
 }
 
 func ensureGitignore(dir, line string) error {

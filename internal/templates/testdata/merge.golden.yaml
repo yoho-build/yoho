@@ -1,0 +1,63 @@
+# my app
+name: shop
+
+services:
+    web:
+        image: nginx:1.27-alpine
+        restart: unless-stopped
+        # trailing comment inside web
+
+    # Postgres from `yoho init --template postgres`. Connect at postgres:5432 as
+    # postgres. List POSTGRES_PASSWORD in the x-yoho.secrets of each Service that
+    # connects; it is read from /run/secrets/POSTGRES_PASSWORD.
+    postgres:
+        image: postgres:17-alpine
+        restart: unless-stopped
+        stop_grace_period: 30s
+        environment:
+            POSTGRES_USER: postgres
+            POSTGRES_DB: postgres
+        volumes:
+            - pgdata:/var/lib/postgresql/data
+        healthcheck:
+            # Over TCP: the image's first-boot temporary server is socket-only.
+            test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U postgres -d postgres"]
+            interval: 5s
+            timeout: 3s
+            retries: 20
+        x-yoho:
+            stateful: true
+            generate:
+                POSTGRES_PASSWORD: password32 # delivered as POSTGRES_PASSWORD_FILE
+            backup:
+                # A logical dump with DROP statements, so a restore replaces tables.
+                dump: ["pg_dump", "-U", "postgres", "--clean", "--if-exists", "postgres"]
+                restore_dump: ["psql", "-U", "postgres", "-v", "ON_ERROR_STOP=1", "-q", "postgres"]
+
+    # Valkey (Redis-compatible) from `yoho init --template redis`. Connect at
+    # redis://redis:6379. No password: the port is reachable only on this App's
+    # compose network.
+    redis:
+        image: valkey/valkey:9.0-alpine
+        restart: unless-stopped
+        command: ["valkey-server", "--appendonly", "yes", "--appendfsync", "everysec"]
+        volumes:
+            - redisdata:/data
+        healthcheck:
+            test: ["CMD", "valkey-cli", "-h", "127.0.0.1", "-p", "6379", "ping"]
+            interval: 5s
+            timeout: 3s
+            retries: 20
+        x-yoho:
+            stateful: true
+            backup:
+                # The container is paused while the volume is copied.
+                volumes: [redisdata]
+
+# volumes used by web
+volumes:
+    assets: {}
+    pgdata:
+    redisdata:
+
+# end of file
