@@ -321,6 +321,71 @@ func snapshotRestoreState(ctx context.Context, h remote.Host, project, app, dest
 	return s, nil
 }
 
+// restoreIsolation is the outcome of restorePreflight.
+type restoreIsolation struct {
+	state *restoreState
+	// dumpTargets start in order, each dump root loading its dump;
+	// afterDumps are post_restore targets started once dumps are loaded.
+	dumpTargets, afterDumps []string
+	dumpRootSet             map[string]bool
+}
+
+// restorePreflight is the read-only isolation check a restore runs against
+// the deployed App before stopping anything: dump (restore_dump) and
+// post_restore prerequisites from the deployed Release, the owned objects
+// and their exposure, and the users of every volume to be replaced
+// (volumes are Docker volume names). A restore drill runs it too, so a drill
+// fails wherever the real restore would refuse. It changes nothing.
+func restorePreflight(ctx context.Context, h remote.Host, project, app, dest, rt string, services, dumps, hookRoots, volumes []string) (*restoreIsolation, error) {
+	dumpTargets, requireHealth, err := restorePrerequisites(ctx, h, app, dest, rt, dumps)
+	if err != nil {
+		return nil, err
+	}
+	hookTargets, hookHealth, err := restorePrerequisites(ctx, h, app, dest, rt, hookRoots)
+	if err != nil {
+		return nil, err
+	}
+	for name := range hookHealth {
+		if requireHealth == nil {
+			requireHealth = map[string]bool{}
+		}
+		requireHealth[name] = true
+	}
+	// Starting a hook-only target runs its normal process too. Never let a
+	// worker start while another Service's dump is still loading, even when
+	// that worker is declared as a dump prerequisite.
+	dumpSet, dumpRootSet := map[string]bool{}, map[string]bool{}
+	for _, svc := range dumps {
+		dumpRootSet[svc] = true
+	}
+	for _, svc := range dumpTargets {
+		dumpSet[svc] = true
+	}
+	for _, svc := range hookRoots {
+		if dumpSet[svc] && !dumpRootSet[svc] {
+			return nil, fmt.Errorf("restore isolation: hook-only target %s is a dump prerequisite; its normal process cannot safely run while dumps load", svc)
+		}
+	}
+	temporary := append([]string(nil), dumpTargets...)
+	var afterDumps []string
+	for _, svc := range hookTargets {
+		if !dumpSet[svc] {
+			temporary = append(temporary, svc)
+			afterDumps = append(afterDumps, svc)
+		}
+	}
+	state, err := snapshotRestoreState(ctx, h, project, app, dest, rt, services, temporary, requireHealth)
+	if err != nil {
+		return nil, err
+	}
+	for _, v := range volumes {
+		if err := checkRestoreVolumeUsers(ctx, h, v, project, app, dest, rt); err != nil {
+			return nil, err
+		}
+	}
+	return &restoreIsolation{state: state, dumpTargets: dumpTargets, afterDumps: afterDumps, dumpRootSet: dumpRootSet}, nil
+}
+
 // checkRestoreVolumeUsers refuses shared data belonging to unrelated Apps,
 // even when those containers are currently stopped. Never stop foreign users
 // just to make a destructive restore possible.

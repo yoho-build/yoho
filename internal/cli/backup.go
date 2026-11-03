@@ -170,13 +170,26 @@ func (a *app) resolveServices(ctx context.Context, j *backupJob) error {
 	return nil
 }
 
-// resolveTargetSecrets loads the Backup Target's password and env secrets.
+// resolveTargetSecrets loads the Backup Target's password and env secrets
+// from the secrets of the job's Destination: for `restore --from SRC` that is
+// SRC's (.yoho/secrets.SRC), whose Backups the Target holds, not the
+// Destination being restored into.
 func (a *app) resolveTargetSecrets(ctx context.Context, j *backupJob) error {
 	j.env = map[string]string{}
 	if !targetNeedsSecrets(j.target) {
 		return nil
 	}
-	store, err := a.loadSecrets(ctx, nil)
+	dest := j.cfg.Destination
+	if dest == "" {
+		dest = a.destName
+	}
+	var store *secrets.Store
+	var err error
+	if dest == a.destName {
+		store, err = a.loadSecrets(ctx, nil)
+	} else {
+		store, err = a.loadSourceSecrets(ctx, dest, j.target.SecretKeys())
+	}
 	if err != nil {
 		return err
 	}
@@ -184,7 +197,7 @@ func (a *app) resolveTargetSecrets(ctx context.Context, j *backupJob) error {
 	get := func(k string) (string, error) {
 		v, ok := store.Get(k)
 		if !ok {
-			return "", fmt.Errorf("secret %s for Backup Target %s is not defined in .yoho/secrets or secrets.values", k, j.targetName)
+			return "", fmt.Errorf("secret %s for Backup Target %s is not defined in .yoho/secrets, .yoho/secrets.%s or secrets.values of Destination %s", k, j.targetName, dest, dest)
 		}
 		return v, nil
 	}
@@ -204,6 +217,31 @@ func (a *app) resolveTargetSecrets(ctx context.Context, j *backupJob) error {
 		}
 	}
 	return nil
+}
+
+// loadSourceSecrets loads the secrets of another Destination of this App
+// (the --from source), with that Destination's own secrets configuration.
+// Only Backup Target keys (keys) are read from it, so the source's nonempty
+// contract applies to those keys only, not to its App secrets.
+func (a *app) loadSourceSecrets(ctx context.Context, dest string, keys []string) (*secrets.Store, error) {
+	cfg, _, _, err := config.LoadForDestination(a.path, dest)
+	if err != nil {
+		return nil, fmt.Errorf("load Destination %s for its Backup Target secrets: %w", dest, err)
+	}
+	sc := cfg.Secrets
+	sc.Nonempty = nil
+	for _, k := range cfg.Secrets.Nonempty {
+		if contains(keys, k) {
+			sc.Nonempty = append(sc.Nonempty, k)
+		}
+	}
+	return secrets.Load(ctx, a.dir, dest, sc, secrets.LoadOptions{
+		Warn:    func(msg string) { a.ui.Warn("%s", msg) },
+		Retries: resolveSecretsRetries(a.g.secretsRetries, os.Getenv("YOHO_SECRETS_RETRIES"), stdinIsTTY()),
+		OnWait: func(ev secrets.WaitEvent) {
+			a.ui.Waiting("waiting for secrets provider approval… ("+ev.Provider+")", map[string]any{"provider": ev.Provider, "key": ev.Key, "elapsed_ms": ev.Elapsed.Milliseconds()})
+		},
+	})
 }
 
 // targetNeedsSecrets reports whether the Backup Target references secrets.
@@ -548,14 +586,18 @@ and repair the data before manually resuming. Current volume data is lost.
 Use "latest" as ID for the newest Backup.
 
 --from DESTINATION restores a Backup taken by another Destination of the same
-App (for example production into staging, with -d staging). The Backup job and
-Backup Target are the source Destination's; the Target must be reachable from
-this Destination's Server. The source's generated secrets are not copied unless
+App (for example production into staging, with -d staging or
+YOHO_DESTINATION=staging). The Backup job and Backup Target are the source
+Destination's, and so are the Target's secrets (password_secret, env_secrets,
+rclone_config_secret are read from .yoho/secrets.<source>); the Target must be
+reachable from this Destination's Server. The source's generated secrets are not copied unless
 --copy-generated-secrets is given. Another App's Backup is always refused.`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) (err error) {
-			if from != "" && g.destination == "" {
-				return errors.New("--from needs -d to name the Destination to restore into")
+			// The Destination to restore into must be named explicitly (-d
+			// or $YOHO_DESTINATION), never a default: restore replaces data.
+			if from != "" && g.destination == "" && os.Getenv("YOHO_DESTINATION") == "" {
+				return errors.New("--from needs -d (or $YOHO_DESTINATION) to name the Destination to restore into")
 			}
 			if copyGenerated && from == "" {
 				return errors.New("--copy-generated-secrets only applies with --from")

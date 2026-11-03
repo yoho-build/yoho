@@ -31,6 +31,9 @@ services:
                 POSTGRES_PASSWORD: password32 # delivered as POSTGRES_PASSWORD_FILE
             backup:
                 # A logical dump with DROP statements, so a restore replaces tables.
+                # It holds only the postgres database: roles and other databases are
+                # not in it. Back up the pgdata volume instead (volumes: [pgdata]), or
+                # add a pg_dumpall --globals-only step, if you need them.
                 dump: ["pg_dump", "-U", "postgres", "--clean", "--if-exists", "postgres"]
                 restore_dump: ["psql", "-U", "postgres", "-v", "ON_ERROR_STOP=1", "-q", "postgres"]
 

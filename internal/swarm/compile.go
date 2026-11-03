@@ -116,9 +116,9 @@ type compileInput struct {
 	// DockerVersion is `docker version` Server.Version. Empty or below 25
 	// skips start_interval; older engines reject that field.
 	DockerVersion string
-	// LogDriver is the manager's default logging driver; see
-	// deploy.UseDefaultLogging.
-	LogDriver string
+	// LogDriver is the manager's default logging; see
+	// deploy.DaemonLogging.UseDefault.
+	LogDriver deploy.DaemonLogging
 }
 
 // compiled is the result of compile.
@@ -359,7 +359,7 @@ func compile(d *plan.Deploy, in compileInput) (*compiled, error) {
 
 		// Rotate logs unless the Service chose its own logging (issue #47).
 		// The manager's daemon driver stands in for every node's.
-		if _, ok := s["logging"]; !ok && deploy.UseDefaultLogging(in.LogDriver) {
+		if _, ok := s["logging"]; !ok && in.LogDriver.UseDefault() {
 			s["logging"] = map[string]any{"driver": deploy.LogDriver, "options": map[string]any{"max-size": deploy.LogMaxSize, "max-file": deploy.LogMaxFile}}
 		}
 

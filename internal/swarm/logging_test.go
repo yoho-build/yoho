@@ -6,11 +6,13 @@ import (
 	"testing"
 
 	"go.yaml.in/yaml/v3"
+
+	"github.com/yoho-build/yoho/internal/deploy"
 )
 
 func TestCompileDefaultLogging(t *testing.T) {
 	want := map[string]any{"driver": "json-file", "options": map[string]any{"max-size": "10m", "max-file": "3"}}
-	_, doc := compileTest(t, func(in *compileInput) { in.LogDriver = "json-file" })
+	_, doc := compileTest(t, func(in *compileInput) { in.LogDriver = deploy.DaemonLogging{Driver: "json-file"} })
 	for _, name := range []string{"web", "worker", "db", "cloudflared"} {
 		if got := get(t, doc, "services", name, "logging"); !reflect.DeepEqual(got, want) {
 			t.Errorf("%s logging = %v, want %v", name, got, want)
@@ -35,7 +37,7 @@ func TestCompileDefaultLogging(t *testing.T) {
 		t.Errorf("unknown daemon driver: web logging = %v, want default", got)
 	}
 
-	_, doc3 := compileTest(t, func(in *compileInput) { in.LogDriver = "syslog" })
+	_, doc3 := compileTest(t, func(in *compileInput) { in.LogDriver = deploy.DaemonLogging{Driver: "syslog"} })
 	if _, ok := get(t, doc3, "services", "web").(map[string]any)["logging"]; ok {
 		t.Error("daemon syslog: web got default logging")
 	}

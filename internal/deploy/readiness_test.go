@@ -167,7 +167,7 @@ func TestPlainReadinessFailureBlocksProxy(t *testing.T) {
 		return "", nil
 	}}
 	d := testDeploy(t, h, &bytes.Buffer{})
-	_, plans, err := compile(d, "primary", "/secrets", nil, []byte("key"), "", "")
+	_, plans, err := compile(d, "primary", "/secrets", nil, []byte("key"), "", DaemonLogging{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -202,7 +202,7 @@ func TestReadinessPlanCompileAndLegacyRollback(t *testing.T) {
 	d := testDeploy(t, &remote.Local{}, &bytes.Buffer{})
 	d.Project = loadProject(t, src)
 	d.Ext = nil
-	raw, plans, err := compile(d, "primary", "/secrets", nil, []byte("key"), "", "")
+	raw, plans, err := compile(d, "primary", "/secrets", nil, []byte("key"), "", DaemonLogging{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -548,7 +548,7 @@ func TestInactiveConsumersDoNotIdentifyJobs(t *testing.T) {
 	d := testDeploy(t, &remote.Local{}, &bytes.Buffer{})
 	d.Project = loadProject(t, src)
 	d.Ext = nil
-	raw, plans, err := compile(d, "primary", "/secrets", nil, []byte("key"), "", "")
+	raw, plans, err := compile(d, "primary", "/secrets", nil, []byte("key"), "", DaemonLogging{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -586,7 +586,7 @@ func TestScaledZeroCompletionDependencyPreflight(t *testing.T) {
 	d := testDeploy(t, h, &bytes.Buffer{})
 	d.Project = loadProject(t, src)
 	d.Ext = nil
-	if _, _, err := compile(d, "primary", "/secrets", nil, []byte("key"), "", ""); err == nil || !strings.Contains(err.Error(), "scaled-zero") {
+	if _, _, err := compile(d, "primary", "/secrets", nil, []byte("key"), "", DaemonLogging{}); err == nil || !strings.Contains(err.Error(), "scaled-zero") {
 		t.Fatalf("compile preflight error: %v", err)
 	}
 	if _, err := (Compose{}).Deploy(context.Background(), d); err == nil || !strings.Contains(err.Error(), "scaled-zero") {
@@ -657,7 +657,7 @@ func TestOptionalProfileDependencyPlansAndLegacyRollback(t *testing.T) {
 	d := testDeploy(t, &remote.Local{}, &bytes.Buffer{})
 	d.Project = loaded.Project
 	d.Ext = loaded.Ext
-	compiled, plans, err := compile(d, "primary", "/secrets", nil, []byte("key"), "", "")
+	compiled, plans, err := compile(d, "primary", "/secrets", nil, []byte("key"), "", DaemonLogging{})
 	if err != nil {
 		t.Fatal(err)
 	}

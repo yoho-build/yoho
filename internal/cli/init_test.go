@@ -94,6 +94,44 @@ func TestInitTemplateMergesAndRefusesConflicts(t *testing.T) {
 	}
 }
 
+// A name declared in a Destination overlay or another compose entry would
+// merge into the template's Service: refused before anything is written.
+func TestInitTemplateRefusesNamesInOtherComposeFiles(t *testing.T) {
+	write := func(dir, rel, body string) {
+		t.Helper()
+		if err := os.WriteFile(filepath.Join(dir, rel), []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, tc := range []struct {
+		name, file, body, yoho, want string
+	}{
+		{"destination overlay", "compose.production.yaml", "services:\n  postgres:\n    environment: {X: y}\n", "", `Service \"postgres\" is already declared in compose.production.yaml`},
+		{"second compose entry", "db.yaml", "services:\n  postgres:\n    image: postgres:16\n", "compose: [compose.yaml, db.yaml]\n", `Service \"postgres\" is already declared in db.yaml`},
+		{"volume in another entry", "db.yaml", "services:\n  other:\n    image: busybox\nvolumes:\n  pgdata: {}\n", "compose: [compose.yaml, db.yaml]\n", `volume \"pgdata\" is already declared in db.yaml`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			if out, err := initIn(t, dir, "redis"); err != nil {
+				t.Fatalf("%v\n%s", err, out)
+			}
+			if tc.yoho != "" {
+				y, _ := os.ReadFile(filepath.Join(dir, "yoho.yml"))
+				write(dir, "yoho.yml", tc.yoho+string(y))
+			}
+			write(dir, tc.file, tc.body)
+			before, _ := os.ReadFile(filepath.Join(dir, "compose.yaml"))
+			out, err := initIn(t, dir, "postgres")
+			if err == nil || !strings.Contains(out, tc.want) || !strings.Contains(out, `"hint"`) {
+				t.Fatalf("collision not refused: %v\n%s", err, out)
+			}
+			if after, _ := os.ReadFile(filepath.Join(dir, "compose.yaml")); string(after) != string(before) {
+				t.Fatal("refused template changed compose.yaml")
+			}
+		})
+	}
+}
+
 func TestInitListTemplatesJSON(t *testing.T) {
 	c := initCmd(&globals{json: true})
 	var buf bytes.Buffer

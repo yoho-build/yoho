@@ -177,8 +177,24 @@ func Check(r *Result, runtime string, secretKeys []string) []Finding {
 		}
 
 		if ext.Stateful {
-			if pub := publicPorts(svc); len(pub) > 0 {
-				svcAdd(LevelWarning, "stateful service publishes port(s) %s on all interfaces; Docker-published ports bypass the Server firewall (ufw), so it is reachable from the internet; bind to loopback (e.g. \"127.0.0.1:5432:5432\") or drop ports and reach it on the compose network by Service name", strings.Join(pub, ", "))
+			// Restore isolation (internal/backup) refuses any published port
+			// or host/shared network namespace on a Service it loads a dump
+			// into or runs post_restore in, loopback binds included.
+			const restoreNote = "; `yoho backup restore` also refuses to load restore_dump or run post_restore in a Service that publishes ports (even on loopback) or uses host networking"
+			switch {
+			case swarm:
+				// swarm/compile.go drops host_ip: the ingress routing mesh
+				// publishes every port on every node, loopback binds included.
+				if all := publishedPorts(svc, false); len(all) > 0 {
+					svcAdd(LevelWarning, "stateful service publishes port(s) %s; on runtime swarm Yoho drops host_ip and the ingress routing mesh publishes them on every node and interface, bypassing the Server firewall (ufw), so it is reachable from the internet; drop ports and reach it on the stack network by Service name"+restoreNote, strings.Join(all, ", "))
+				}
+			default:
+				if pub := publicPorts(svc); len(pub) > 0 {
+					svcAdd(LevelWarning, "stateful service publishes port(s) %s on all interfaces; Docker-published ports bypass the Server firewall (ufw), so it is reachable from the internet; bind to loopback (e.g. \"127.0.0.1:5432:5432\") or drop ports and reach it on the compose network by Service name"+restoreNote, strings.Join(pub, ", "))
+				}
+				if svc.NetworkMode == "host" {
+					svcAdd(LevelWarning, "stateful service uses network_mode: host; it listens on the Server's own interfaces, bypassing Docker networks, so anything it binds to 0.0.0.0 is reachable unless the Server firewall blocks it; drop network_mode and reach it on the compose network by Service name"+restoreNote)
+				}
 			}
 		}
 
@@ -333,12 +349,20 @@ func stateDescription(svc types.ServiceConfig, appDir string) string {
 // host_ip, 0.0.0.0 or ::) as published:target, or target when the host port
 // is ephemeral. Loopback and other specific binds are not listed.
 func publicPorts(svc types.ServiceConfig) []string {
+	return publishedPorts(svc, true)
+}
+
+// publishedPorts lists svc's published ports like publicPorts; with
+// onlyPublic false it lists specific (e.g. loopback) binds too.
+func publishedPorts(svc types.ServiceConfig, onlyPublic bool) []string {
 	var out []string
 	for _, p := range svc.Ports {
 		switch strings.Trim(p.HostIP, "[]") {
 		case "", "0.0.0.0", "::":
 		default:
-			continue
+			if onlyPublic {
+				continue
+			}
 		}
 		desc := fmt.Sprint(p.Target)
 		if p.Published != "" {
@@ -372,11 +396,37 @@ func socketOnlyPgIsready(hc *types.HealthCheckConfig) bool {
 		return false
 	}
 	for _, f := range strings.Fields(cmd) {
-		if strings.HasPrefix(f, "-h") || strings.HasPrefix(f, "--host") {
+		if strings.HasPrefix(f, "-h") || strings.HasPrefix(f, "--host") || uriWithHost(f) {
 			return false
 		}
 	}
 	return true
+}
+
+// uriWithHost reports a postgres:// or postgresql:// connection URI (as
+// -d or --dbname=) that names a host, e.g. postgres://u@db/x.
+func uriWithHost(f string) bool {
+	f = strings.Trim(f, `'"`)
+	if _, v, ok := strings.Cut(f, "="); ok && strings.HasPrefix(f, "--") {
+		f = strings.Trim(v, `'"`)
+	}
+	f = strings.TrimPrefix(f, "-d")
+	rest, ok := strings.CutPrefix(f, "postgresql://")
+	if !ok {
+		if rest, ok = strings.CutPrefix(f, "postgres://"); !ok {
+			return false
+		}
+	}
+	authority, _, _ := strings.Cut(rest, "/")
+	authority, _, _ = strings.Cut(authority, "?")
+	if i := strings.LastIndex(authority, "@"); i >= 0 {
+		authority = authority[i+1:]
+	}
+	host := authority
+	if !strings.HasPrefix(host, "[") {
+		host, _, _ = strings.Cut(host, ":")
+	}
+	return host != ""
 }
 
 // slowFirstProbe reports a timing-only healthcheck (no test, so the image's

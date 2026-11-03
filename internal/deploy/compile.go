@@ -167,8 +167,8 @@ func versioned(image, version string) bool {
 // file references secrets by path only; it never contains secret values.
 // dockerVersion is the server engine version from `docker version`; empty
 // or below 25 skips fast-start healthcheck fields. logDriver is the daemon's
-// default logging driver (see UseDefaultLogging).
-func compile(d *plan.Deploy, server, generationDir string, svcSecrets map[string]map[string]string, hmacKey []byte, dockerVersion, logDriver string) ([]byte, []servicePlan, error) {
+// default logging (see DaemonLogging.UseDefault).
+func compile(d *plan.Deploy, server, generationDir string, svcSecrets map[string]map[string]string, hmacKey []byte, dockerVersion string, logDriver DaemonLogging) ([]byte, []servicePlan, error) {
 	if _, err := proxy.ProjectRoutes(d.App, d.Destination, d.Project, d.Ext, "compose"); err != nil {
 		return nil, nil, err
 	}
@@ -228,7 +228,7 @@ func compile(d *plan.Deploy, server, generationDir string, svcSecrets map[string
 		}
 
 		// Rotate logs unless the Service chose its own logging (issue #47).
-		if s.Logging == nil && UseDefaultLogging(logDriver) {
+		if s.Logging == nil && logDriver.UseDefault() {
 			s.Logging = &types.LoggingConfig{Driver: LogDriver, Options: types.Options{"max-size": LogMaxSize, "max-file": LogMaxFile}}
 		}
 
