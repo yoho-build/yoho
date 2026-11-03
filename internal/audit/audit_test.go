@@ -102,7 +102,7 @@ func TestScriptHoldsNoRecordValues(t *testing.T) {
 	release.Root = "/srv/yo'ho"
 	defer func() { release.Root = old }()
 	s := AppendScript("shop", "production")
-	if !strings.Contains(s, remote.Quote("/srv/yo'ho/apps/shop/production")) {
+	if !strings.Contains(s, remote.Quote("/srv/yo'ho/audit/shop/production.log")) {
 		t.Fatal("path not quoted")
 	}
 	if !strings.Contains(s, "yoho_line=$(cat)") {
@@ -123,7 +123,7 @@ func TestScriptHoldsNoRecordValues(t *testing.T) {
 }
 
 func TestStartedFinishedPairing(t *testing.T) {
-	h, dir := setup(t, true)
+	h, _ := setup(t, true)
 	ctx := context.Background()
 	t0 := time.Now().Add(-time.Minute)
 	zero, one := 0, 1
@@ -137,7 +137,7 @@ func TestStartedFinishedPairing(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	fi, err := os.Stat(filepath.Join(dir, "audit.log"))
+	fi, err := os.Stat(Path("shop", "production"))
 	if err != nil || fi.Mode().Perm() != 0o600 {
 		t.Fatalf("%v %v", fi, err)
 	}
@@ -169,7 +169,7 @@ func TestStartedFinishedPairing(t *testing.T) {
 	}
 }
 
-func TestMissingAppDirIsSkipped(t *testing.T) {
+func TestFirstWriteWithoutAppDir(t *testing.T) {
 	h, dir := setup(t, false)
 	if err := Append(context.Background(), h, rec("a", Started, time.Now())); err != nil {
 		t.Fatal(err)
@@ -177,13 +177,77 @@ func TestMissingAppDirIsSkipped(t *testing.T) {
 	if _, err := os.Stat(dir); !os.IsNotExist(err) {
 		t.Fatalf("App dir was created: %v", err)
 	}
-	if es, err := Read(context.Background(), h, "shop", "production", 10); err != nil || len(es) != 0 {
+	for _, d := range []string{filepath.Join(release.Root, "audit"), filepath.Dir(Path("shop", "production"))} {
+		if fi, err := os.Stat(d); err != nil || fi.Mode().Perm() != 0o700 {
+			t.Fatalf("%s: %v %v", d, fi, err)
+		}
+	}
+	if Path("shop", "production") != filepath.Join(release.Root, "audit", "shop", "production.log") {
+		t.Fatal(Path("shop", "production"))
+	}
+	es, err := Read(context.Background(), h, "shop", "production", 10)
+	if err != nil || len(es) != 1 || es[0].Phase != Started {
 		t.Fatalf("%v %v", es, err)
 	}
 }
 
-func TestRotation(t *testing.T) {
+func TestSurvivesAppDirRemoval(t *testing.T) {
 	h, dir := setup(t, true)
+	ctx := context.Background()
+	if err := Append(ctx, h, rec("a", Started, time.Now())); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.RemoveAll(dir); err != nil {
+		t.Fatal(err)
+	}
+	if err := Append(ctx, h, rec("a", Finished, time.Now())); err != nil {
+		t.Fatal(err)
+	}
+	es, err := Read(ctx, h, "shop", "production", 10)
+	if err != nil || len(es) != 2 {
+		t.Fatalf("%v %v", es, err)
+	}
+}
+
+func TestMigratesLegacyLog(t *testing.T) {
+	h, dir := setup(t, true)
+	ctx := context.Background()
+	t0 := time.Now().Add(-time.Hour)
+	line := func(run string, at time.Time) string {
+		b, _ := rec(run, Started, at).Line()
+		return string(b) + "\n"
+	}
+	must := func(err error) {
+		t.Helper()
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	must(os.WriteFile(filepath.Join(dir, "audit.log.1"), []byte(line("old1", t0)), 0o600))
+	must(os.WriteFile(filepath.Join(dir, "audit.log"), []byte(line("old2", t0.Add(time.Second))), 0o600))
+	es, err := Read(ctx, h, "shop", "production", 10)
+	if err != nil || len(es) != 2 || es[0].Run != "old1" {
+		t.Fatalf("%v %v", es, err)
+	}
+	must(Append(ctx, h, rec("new", Started, time.Now())))
+	for _, n := range []string{"audit.log", "audit.log.1"} {
+		if _, err := os.Stat(filepath.Join(dir, n)); !os.IsNotExist(err) {
+			t.Errorf("legacy %s still there: %v", n, err)
+		}
+	}
+	es, err = Read(ctx, h, "shop", "production", 10)
+	if err != nil || len(es) != 3 || es[0].Run != "old1" || es[1].Run != "old2" || es[2].Run != "new" {
+		t.Fatalf("%+v %v", es, err)
+	}
+	must(Append(ctx, h, rec("new2", Started, time.Now())))
+	if es, _ = Read(ctx, h, "shop", "production", 10); len(es) != 4 {
+		t.Fatalf("%d entries", len(es))
+	}
+}
+
+func TestRotation(t *testing.T) {
+	h, _ := setup(t, true)
+	dir := filepath.Dir(Path("shop", "production"))
 	old := MaxBytes
 	MaxBytes = 600
 	defer func() { MaxBytes = old }()
@@ -193,7 +257,7 @@ func TestRotation(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	for _, name := range []string{"audit.log", "audit.log.1", "audit.log.2"} {
+	for _, name := range []string{"production.log", "production.log.1", "production.log.2"} {
 		fi, err := os.Stat(filepath.Join(dir, name))
 		if err != nil {
 			t.Fatalf("%s: %v", name, err)
@@ -202,7 +266,7 @@ func TestRotation(t *testing.T) {
 			t.Errorf("%s is %d bytes", name, fi.Size())
 		}
 	}
-	if _, err := os.Stat(filepath.Join(dir, "audit.log.3")); err == nil {
+	if _, err := os.Stat(filepath.Join(dir, "production.log.3")); err == nil {
 		t.Error("kept more than 2 rotated files")
 	}
 	entries, err := Read(ctx, h, "shop", "production", 1000)
@@ -225,12 +289,15 @@ func TestParseSkipsGarbage(t *testing.T) {
 }
 
 func TestRefusesSymlinkedLog(t *testing.T) {
-	h, dir := setup(t, true)
+	h, _ := setup(t, true)
 	target := filepath.Join(t.TempDir(), "elsewhere")
 	if err := os.WriteFile(target, nil, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Symlink(target, filepath.Join(dir, "audit.log")); err != nil {
+	if err := os.MkdirAll(filepath.Dir(Path("shop", "production")), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, Path("shop", "production")); err != nil {
 		t.Fatal(err)
 	}
 	if err := Append(context.Background(), h, rec("a", Started, time.Now())); err == nil {
@@ -238,5 +305,22 @@ func TestRefusesSymlinkedLog(t *testing.T) {
 	}
 	if b, _ := os.ReadFile(target); len(b) != 0 {
 		t.Fatalf("symlink target written: %q", b)
+	}
+}
+
+func TestRefusesSymlinkedAuditDir(t *testing.T) {
+	h, _ := setup(t, true)
+	other := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(release.Root, "audit"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(other, filepath.Join(release.Root, "audit", "shop")); err != nil {
+		t.Fatal(err)
+	}
+	if err := Append(context.Background(), h, rec("a", Started, time.Now())); err == nil {
+		t.Fatal("wrote through a symlinked audit dir")
+	}
+	if es, _ := os.ReadDir(other); len(es) != 0 {
+		t.Fatalf("symlink target written: %v", es)
 	}
 }

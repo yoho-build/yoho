@@ -10,6 +10,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/yoho-build/yoho/internal/audit"
 	"github.com/yoho-build/yoho/internal/deploy"
 	"github.com/yoho-build/yoho/internal/plan"
 	"github.com/yoho-build/yoho/internal/release"
@@ -180,6 +181,7 @@ func (a *app) remove(cmd *cobra.Command, f removeFlags) (err error) {
 	}
 	u.Info("  - Scheduled Jobs of %s", a.destName)
 	u.Info("  = Backups in %s and in every Backup Target (kept)", release.BackupDir(a.cfg.App, a.destName))
+	u.Info("  = Audit log %s (kept; delete it by hand if wanted, also with --volumes)", audit.Path(a.cfg.App, a.destName))
 	if !f.volumes && volumes > 0 {
 		u.Info("Volumes are kept; a later deploy uses them again. Pass --volumes to delete them.")
 	}

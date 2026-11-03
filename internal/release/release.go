@@ -23,6 +23,7 @@
 //	  migrate.json                  app_dir migration journal {"kind","from","to"} (0600)
 //	  link.tmp                      temporary symlink published over the canonical path
 //	<root>/backups/<app>/<destination>/   local Backup spool (0700)
+//	<root>/audit/<app>/<destination>.log  operator audit log (0600 in 0700 dirs; outside the App directory so `remove` keeps it; rotates to .log.1, .log.2)
 //	<root>/jobs/<app>-<destination>-<job>.json   Scheduled Job specs
 //
 // <root> is Root, /var/lib/yoho by default.

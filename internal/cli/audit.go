@@ -235,7 +235,7 @@ func auditCmd(g *globals) *cobra.Command {
 		Long: `Show the Destination's audit log, newest last: who ran which mutating
 command, with which Version, how it ended and how long it took.
 
-The log is <root>/apps/<app>/<destination>/audit.log on the (first) Server,
+The log is <root>/audit/<app>/<destination>.log on the (first) Server,
 one JSON line per record: a "started" record before the command changes
 anything and a "finished" record after it. A command that was killed shows
 as "unfinished". For app exec and app run the command is recorded after the
