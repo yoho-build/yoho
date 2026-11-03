@@ -1,6 +1,10 @@
 package cli
 
 import (
+	"context"
+	"io"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -134,5 +138,63 @@ func TestBackupPullFlags(t *testing.T) {
 	}
 	if c.Flags().Lookup("delete") != nil {
 		t.Error("pull must have no delete flag")
+	}
+}
+
+// restore --from SRC reads the Backup Target's secrets from SRC's store.
+func TestRestoreFromResolvesSourceTargetSecrets(t *testing.T) {
+	dir := t.TempDir()
+	yoho := "app: shop\nservers:\n  primary:\n    ssh: yoho@203.0.113.10\ndestinations:\n  production:\n    servers: [primary]\n  staging:\n    servers: [primary]\n" +
+		"backups:\n  targets:\n    local: {repository: /tmp/yoho-test-backups, password_secret: BACKUP_PASSWORD}\n  jobs:\n    nightly: {destination: production, target: local}\n    stage: {destination: staging, target: local}\n"
+	for name, body := range map[string]string{
+		"yoho.yml":                 yoho,
+		"compose.yaml":             "services:\n  db: {image: postgres, x-yoho: {stateful: true, backup: {volumes: [data]}}, volumes: [data:/d]}\nvolumes:\n  data: {}\n",
+		".yoho/secrets.production": "BACKUP_PASSWORD=prod-pass\n",
+		".yoho/secrets.staging":    "BACKUP_PASSWORD=staging-pass\n",
+	} {
+		if err := os.MkdirAll(filepath.Dir(filepath.Join(dir, name)), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	g := &globals{configPath: filepath.Join(dir, "yoho.yml"), destination: "staging", json: true}
+	a, err := g.load(backupRestoreCmd(g))
+	if err != nil {
+		t.Fatal(err)
+	}
+	a.ui = ui.New(io.Discard, ui.JSON, false)
+	for dest, want := range map[string]string{"production": "prod-pass", "staging": "staging-pass"} {
+		j, err := a.selectBackupJobFor("", dest)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := a.resolveTargetSecrets(context.Background(), j); err != nil {
+			t.Fatal(err)
+		}
+		if j.password != want {
+			t.Errorf("job of %s restoring into staging: password %q, want %q", dest, j.password, want)
+		}
+	}
+}
+
+func TestRestoreFromAcceptsDestinationEnv(t *testing.T) {
+	t.Setenv("YOHO_DESTINATION", "")
+	g := &globals{configPath: filepath.Join(t.TempDir(), "missing.yml")}
+	c := backupRestoreCmd(g)
+	c.SetArgs([]string{"latest", "--from", "production"})
+	c.SetOut(io.Discard)
+	c.SetErr(io.Discard)
+	if err := c.Execute(); err == nil || !strings.Contains(err.Error(), "--from needs -d") {
+		t.Fatalf("no Destination: %v", err)
+	}
+	t.Setenv("YOHO_DESTINATION", "staging")
+	c = backupRestoreCmd(g)
+	c.SetArgs([]string{"latest", "--from", "production"})
+	c.SetOut(io.Discard)
+	c.SetErr(io.Discard)
+	if err := c.Execute(); err == nil || strings.Contains(err.Error(), "--from needs -d") {
+		t.Fatalf("$YOHO_DESTINATION must name the target: %v", err)
 	}
 }
