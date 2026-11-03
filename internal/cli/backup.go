@@ -370,6 +370,12 @@ func backupRunCmd(g *globals) *cobra.Command {
 			if len(hosts) > 1 {
 				u.Info("Backup runs only on %s (the first Server of %s)", h.Name, a.destName)
 			}
+			// A half-finished rotation means the database may already use a
+			// value generated/KEY does not hold: the Backup's copy of it would
+			// not match the data. Warn; the Backup itself is still useful.
+			if keys, err := deploy.PendingRotations(ctx, h.Host, a.cfg.App, a.destName); err == nil && len(keys) > 0 {
+				u.Warn("%s", deploy.PendingRotationWarning(keys))
+			}
 			hook := a.hookFunc(a.serverVersion(ctx, h.Host), "backup", hosts)
 			hookEnv := map[string]string{"YOHO_SUBCOMMAND": "run", "YOHO_BACKUP_JOB": j.name, "YOHO_BACKUP_TARGET": j.targetName}
 			if err = hook(ctx, "pre-backup", hookEnv); err != nil {

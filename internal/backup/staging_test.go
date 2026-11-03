@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/yoho-build/yoho/internal/release"
 	"github.com/yoho-build/yoho/internal/remote"
@@ -197,5 +198,37 @@ func TestMergePriorResumesFirstAttemptsRunningSet(t *testing.T) {
 	revived, _ = sw.mergePrior([]*restoreState{{Runtime: "swarm", Objects: []restoreObject{{ID: "p_web", Service: "web", Replicas: &three}}}, {Runtime: "compose", Objects: []restoreObject{{ID: "p_web", Service: "web", Status: "running"}}}})
 	if len(revived) != 1 || *sw.Objects[0].Replicas != 3 {
 		t.Fatalf("swarm revived %v replicas %d", revived, *sw.Objects[0].Replicas)
+	}
+}
+
+// A killed `backup run` or `backup check` leaves run-/check- staging with no
+// time in the name: listed only once untouched for StaleAfter.
+func TestStaleRunAndCheckStaging(t *testing.T) {
+	base := stagingRoot(t)
+	ctx := context.Background()
+	h := &remote.Local{}
+	run := makeStaging(t, base, "run-"+tok, tok, false)
+	check := makeStaging(t, base, "check-"+tok, tok, false)
+	old := time.Now().Add(-StaleAfter - time.Hour)
+	os.Chtimes(run, old, old)
+	for kind, want := range map[string]int{StagingRun: 1, StagingCheck: 0} {
+		dirs, err := ListStaging(ctx, h, "shop", "production", kind)
+		if err != nil || len(dirs) != want {
+			t.Fatalf("%s: %+v %v (fresh check staging may be in use)", kind, dirs, err)
+		}
+		if want == 1 {
+			if err := RemoveStaging(ctx, h, "shop", "production", dirs[0]); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	if _, err := os.Stat(run); !os.IsNotExist(err) {
+		t.Fatalf("stale run staging kept: %v", err)
+	}
+	if _, err := os.Stat(check); err != nil {
+		t.Fatalf("fresh check staging removed: %v", err)
+	}
+	if err := RemoveStaging(ctx, h, "shop", "production", StagingDir{Kind: StagingRun, Name: "run-x", Path: base + "/run-x"}); err == nil {
+		t.Fatal("bad name must be refused")
 	}
 }

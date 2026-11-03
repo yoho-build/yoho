@@ -7,6 +7,7 @@ import (
 	"path"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -20,7 +21,23 @@ import (
 const (
 	StagingDrill   = "drill"
 	StagingRestore = "restore"
+	// StagingRun and StagingCheck are what a killed `backup run` or
+	// `backup check` leaves (run-<32 hex>, check-<32 hex>). Their names
+	// carry no time and a check may run without the Destination lock, so
+	// only directories untouched for StaleAfter count as leftovers.
+	StagingRun   = "run"
+	StagingCheck = "check"
 )
+
+// StaleAfter is how long run and check staging must be untouched before it
+// is a leftover: far longer than any Backup or check takes.
+const StaleAfter = 6 * time.Hour
+
+// stagingNow is the clock for StaleAfter (tests replace it).
+var stagingNow = time.Now
+
+// stagingUntimedRe matches run and check staging names.
+var stagingUntimedRe = regexp.MustCompile(`^(run|check)-[0-9a-f]{32}$`)
 
 const priorStateFile = "prior-state.json"
 
@@ -59,7 +76,8 @@ case "$t" in *[!0-9a-f]*|'') yoho_bad "$m";; esac
 // app/dest. Directories that do not match the naming or cannot be proven
 // Yoho-owned are never returned (and never removed). Read-only.
 func ListStaging(ctx context.Context, h remote.Host, app, dest, kind string) ([]StagingDir, error) {
-	if kind != StagingDrill && kind != StagingRestore {
+	untimed := kind == StagingRun || kind == StagingCheck
+	if kind != StagingDrill && kind != StagingRestore && !untimed {
 		return nil, fmt.Errorf("staging: unknown kind %q", kind)
 	}
 	if !nameRe.MatchString(app) || !nameRe.MatchString(dest) {
@@ -74,7 +92,7 @@ func ListStaging(ctx context.Context, h remote.Host, app, dest, kind string) ([]
 		"  [ -d \"$d\" ] && [ ! -L \"$d\" ] || continue\n" +
 		"  (\n" + stagingProof + "  ) >/dev/null 2>&1 || continue\n" +
 		"  p=no; if [ -f \"$d/" + priorStateFile + "\" ] && [ ! -L \"$d/" + priorStateFile + "\" ]; then p=yes; fi\n" +
-		"  printf 'yoho-staging %s %s\\n' \"${d##*/}\" \"$p\"\n" +
+		"  printf 'yoho-staging %s %s %s\\n' \"${d##*/}\" \"$p\" \"$(stat -c %Y \"$d\")\"\n" +
 		"done\n"
 	out, err := h.Output(ctx, remote.Cmd{Script: script})
 	if err != nil {
@@ -83,16 +101,29 @@ func ListStaging(ctx context.Context, h remote.Host, app, dest, kind string) ([]
 	var dirs []StagingDir
 	for _, line := range strings.Split(out, "\n") {
 		f := strings.Fields(line)
-		if len(f) != 3 || f[0] != "yoho-staging" {
+		if len(f) != 4 || f[0] != "yoho-staging" {
 			continue
 		}
-		m := stagingRe.FindStringSubmatch(f[1])
-		if m == nil || m[1] != kind {
-			continue
-		}
-		created, err := time.Parse(tsLayout, m[2])
-		if err != nil {
-			continue
+		var created time.Time
+		if untimed {
+			m := stagingUntimedRe.FindStringSubmatch(f[1])
+			sec, err := strconv.ParseInt(f[3], 10, 64)
+			if m == nil || m[1] != kind || err != nil {
+				continue
+			}
+			created = time.Unix(sec, 0).UTC()
+			if stagingNow().Sub(created) < StaleAfter {
+				continue // may belong to a running Backup or check
+			}
+		} else {
+			m := stagingRe.FindStringSubmatch(f[1])
+			if m == nil || m[1] != kind {
+				continue
+			}
+			var err error
+			if created, err = time.Parse(tsLayout, m[2]); err != nil {
+				continue
+			}
 		}
 		dirs = append(dirs, StagingDir{Kind: kind, Name: f[1], Path: path.Join(base, f[1]), Created: created, PriorState: f[2] == "yes"})
 	}
@@ -106,8 +137,9 @@ func ListStaging(ctx context.Context, h remote.Host, app, dest, kind string) ([]
 // not follow symlinks inside the directory.
 func RemoveStaging(ctx context.Context, h remote.Host, app, dest string, d StagingDir) error {
 	base := release.BackupDir(app, dest)
-	if !stagingRe.MatchString(d.Name) || !strings.HasPrefix(d.Name, d.Kind+"-") || d.Path != path.Join(base, d.Name) {
-		return fmt.Errorf("staging: refusing to remove %q: not a drill or restore staging directory of %s/%s", d.Path, app, dest)
+	named := stagingRe.MatchString(d.Name) || stagingUntimedRe.MatchString(d.Name)
+	if !named || !strings.HasPrefix(d.Name, d.Kind+"-") || d.Path != path.Join(base, d.Name) {
+		return fmt.Errorf("staging: refusing to remove %q: not a Yoho staging directory of %s/%s", d.Path, app, dest)
 	}
 	script := "set -eu\n" + pathSafety +
 		"yoho_private " + remote.Quote(base) + "\n" +
@@ -141,7 +173,7 @@ func FindLeftovers(ctx context.Context, h remote.Host, app, dest, exclude string
 		return l, err
 	}
 	l.Drills = drills
-	for _, kind := range []string{StagingDrill, StagingRestore} {
+	for _, kind := range []string{StagingDrill, StagingRestore, StagingRun, StagingCheck} {
 		dirs, err := ListStaging(ctx, h, app, dest, kind)
 		if err != nil {
 			return l, err

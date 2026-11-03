@@ -59,14 +59,19 @@ func restoreCleanup(cmd *cobra.Command, g *globals, jobName string) (err error) 
 			_ = release() // a failed cleanup already reports its error
 		}
 	}()
-	n, err := removeStaging(ctx, u, h.Name, h.Host, a.cfg.App, a.destName, backup.StagingRestore)
-	if err != nil {
-		return err
+	// Also what a killed `backup run` or `backup check` left, once stale.
+	n := 0
+	for _, kind := range []string{backup.StagingRestore, backup.StagingRun, backup.StagingCheck} {
+		k, err := removeStaging(ctx, u, h.Name, h.Host, a.cfg.App, a.destName, kind)
+		n += k
+		if err != nil {
+			return err
+		}
 	}
 	if err := release(); err != nil {
 		return fmt.Errorf("unlock: %w", err)
 	}
-	u.Finished(nil, fmt.Sprintf("Removed %d restore staging directories of %s (%s)", n, a.cfg.App, a.destName))
+	u.Finished(nil, fmt.Sprintf("Removed %d restore, Backup and check staging directories of %s (%s)", n, a.cfg.App, a.destName))
 	return nil
 }
 
@@ -96,6 +101,8 @@ func warnLeftovers(u *ui.UI, dest string, l backup.Leftovers) {
 		switch {
 		case d.Kind == backup.StagingDrill:
 			u.Warn("leftover drill staging %s (%s) may hold a decrypted Backup; remove it with `yoho backup drill --cleanup -d %s`", d.Path, age, dest)
+		case d.Kind == backup.StagingRun || d.Kind == backup.StagingCheck:
+			u.Warn("leftover %s staging %s (%s) of an interrupted `yoho backup %s` may hold a decrypted Backup; remove it with `yoho backup restore --cleanup -d %s`", d.Kind, d.Path, age, d.Kind, dest)
 		case d.PriorState:
 			u.Warn("interrupted restore staging %s (%s) holds prior-state.json and may hold a decrypted Backup; a successful `yoho backup restore` resumes the Services it stopped and removes it, or remove it with `yoho backup restore --cleanup -d %s`", d.Path, age, dest)
 		default:
