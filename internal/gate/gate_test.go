@@ -222,7 +222,7 @@ func TestPSAndLogs(t *testing.T) {
 		t.Fatalf("ps: %v %q", err, out.String())
 	}
 	out.Reset()
-	if err := g.Call(context.Background(), VerbLogs, LogsArgs{ServicesArgs: ServicesArgs{Services: []string{"web"}}, Lines: 999999}, nil, &out, nil); err != nil || out.String() != "log line\n" {
+	if err := g.Call(context.Background(), VerbLogs, LogsArgs{ServicesArgs: ServicesArgs{Services: []string{"web"}}, Lines: LinesArg(999999)}, nil, &out, nil); err != nil || out.String() != "log line\n" {
 		t.Fatalf("logs: %v %q", err, out.String())
 	}
 	if !strings.Contains(h.all(), "docker compose -p 'yoho-shop-production' logs --tail 10000 'web' 2>&1") {
@@ -250,7 +250,7 @@ func TestPSAndLogs(t *testing.T) {
 	if err := g.Call(context.Background(), VerbLogs, filtered, nil, io.Discard, nil); err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(h.all(), "logs --since '1h' 'web' 2>&1 && echo 0 >&3 || echo \"$?\" >&3; } | grep -F -e 'a'\\''; id' | tail -n 10000 >&4;") {
+	if !strings.Contains(h.all(), "logs --since '1h' --tail 100000 'web' 2>&1 && echo 0 >&3 || echo \"$?\" >&3; } | grep -F -e 'a'\\''; id' | tail -n 10000 >&4;") {
 		t.Fatalf("scripts: %s", h.all())
 	}
 	for _, bad := range []dash.LogFilter{{Since: "1h; id"}, {Until: "banana"}, {Grep: "a\nb"}} {
@@ -385,5 +385,63 @@ func TestStoredSecrets(t *testing.T) {
 	// Only declared names: OLD is not delivered, SESSION is generated.
 	if len(got["web"]) != 1 || got["web"]["DB_URL"] != "postgres://u:p@db/x" {
 		t.Fatalf("secrets %v", got)
+	}
+}
+
+// TestLogLines: what each logs request shows, from old and new clients.
+// v0.5.9 sent lines as an int with omitempty (its -n 0 left it out).
+func TestLogLines(t *testing.T) {
+	for raw, want := range map[string]int{
+		`{"services":["web"]}`:             100, // unset; v0.5.9's -n 0
+		`{"services":["web"],"lines":100}`: 100, // the default -n
+		`{"lines":0}`:                      0,   // -n 0: no history
+		`{"lines":0,"follow":true}`:        0,   // -f -n 0: only new lines
+		`{"lines":-1}`:                     MaxLogLines,
+		`{"lines":10000}`:                  MaxLogLines, // what a client sends for -n -1
+		`{"lines":999999}`:                 MaxLogLines,
+		`{"since":"10m"}`:                  MaxLogLines, // a filter without -n: every selected line
+		`{"grep":"x","lines":0}`:           0,
+		`{"grep":"x","lines":20}`:          20,
+	} {
+		var a LogsArgs
+		dec := json.NewDecoder(strings.NewReader(raw))
+		dec.DisallowUnknownFields()
+		if err := dec.Decode(&a); err != nil {
+			t.Fatalf("%s: %v", raw, err)
+		}
+		if got := LogLines(a); got != want {
+			t.Errorf("%s: %d lines, want %d", raw, got, want)
+		}
+	}
+	// A plain request reads as v0.5.9's did, so a v0.5.9 Gate (lines an
+	// int, unknown fields refused) serves it.
+	type oldLogsArgs struct {
+		ServicesArgs
+		Container  string `json:"container,omitempty"`
+		Lines      int    `json:"lines,omitempty"`
+		Follow     bool   `json:"follow,omitempty"`
+		Timestamps bool   `json:"timestamps,omitempty"`
+	}
+	for _, a := range []LogsArgs{
+		{ServicesArgs: ServicesArgs{Services: []string{"web"}}, Lines: LinesArg(100)},
+		{Lines: LinesArg(0), Follow: true},
+		{Lines: LinesArg(MaxLogLines)},
+		{Container: "c", Timestamps: true},
+	} {
+		b, _ := json.Marshal(a)
+		old := oldLogsArgs{ServicesArgs: a.ServicesArgs, Container: a.Container, Follow: a.Follow, Timestamps: a.Timestamps}
+		if a.Lines != nil {
+			old.Lines = *a.Lines
+		}
+		ob, _ := json.Marshal(old)
+		if (a.Lines == nil || *a.Lines != 0) && string(b) != string(ob) {
+			t.Errorf("%s differs from v0.5.9's %s", b, ob)
+		}
+		var back oldLogsArgs
+		dec := json.NewDecoder(strings.NewReader(string(b)))
+		dec.DisallowUnknownFields()
+		if err := dec.Decode(&back); err != nil {
+			t.Errorf("a v0.5.9 Gate refuses %s: %v", b, err)
+		}
 	}
 }

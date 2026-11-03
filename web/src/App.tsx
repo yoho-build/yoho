@@ -568,7 +568,12 @@ function LogsDialog({ target, onClose }: { target: { server: string; container: 
               placeholder="Search (on the Server, ignoring case)"
               value={search}
               maxLength={512}
-              onChange={(e) => setSearch(e.target.value)}
+              onChange={(e) => {
+                // A search over "all" would scan the whole log: start at the
+                // last hour; "all" can still be picked again.
+                if (!search.trim() && e.target.value.trim() && since === "") setSince("1h")
+                setSearch(e.target.value)
+              }}
               onKeyDown={(e) => e.key === "Enter" && setGrep(search.trim())}
               className="h-7 w-full rounded-md border bg-background pr-2 pl-7 text-xs outline-none focus-visible:ring-2 focus-visible:ring-ring/50"
             />

@@ -99,8 +99,9 @@ func logsServices(names, args []string, all, swarm bool) ([]string, error) {
 	return nil, &hintError{"the App has several Services; name one or more: " + strings.Join(names, ", "), "e.g. `yoho app logs " + example + "`, or --all for every Service"}
 }
 
-// logsOptions checks the `app logs` filter flags. Without -n, --since and
-// --grep show every line they select, like kamal; otherwise 100 lines.
+// logsOptions checks the `app logs` flags. -n 0 shows no history (with -f,
+// only new lines), -n -1 every line. Without -n, --since and --grep show
+// every line they select, like kamal; otherwise 100 lines.
 func logsOptions(o dash.LogsOptions, linesSet, swarm bool) (dash.LogsOptions, error) {
 	if err := dash.CheckTime(o.Since); err != nil {
 		return o, &hintError{"--since: " + err.Error(), dash.TimeHint}
@@ -114,11 +115,11 @@ func logsOptions(o dash.LogsOptions, linesSet, swarm bool) (dash.LogsOptions, er
 	if swarm && o.Until != "" {
 		return o, &hintError{"swarm: --until is not supported, `docker service logs` has no --until", "use --since, or compose"}
 	}
-	if o.Lines < 0 {
-		return o, &hintError{"-n must not be negative", "use -n 0 for every line"}
+	if o.Lines < dash.AllLines {
+		return o, &hintError{"-n must be a number of lines, or -1 for every line", "e.g. `-n 200`, `-n 0` for no history (with -f, only new lines) or `-n -1`"}
 	}
 	if !linesSet && (o.Since != "" || o.Grep != "") {
-		o.Lines = 0
+		o.Lines = dash.AllLines
 	}
 	return o, nil
 }
@@ -134,8 +135,11 @@ func logsCmd(g *globals) *cobra.Command {
 10m, 2h) or a timestamp (2026-11-03T15:04:05Z, 2026-11-03, Unix seconds).
 --grep keeps lines containing a fixed string, filtered on the Server with
 grep; -i ignores case and -E makes it an extended regular expression. With
---grep (and not -f), -n counts matching lines. Without -n, --since and --grep
-show every line they select.`,
+--grep (and not -f), -n counts matching lines.
+
+-n 0 shows no history: with -f, only new lines. -n -1 shows every line.
+Without -n, --since and --grep show every line they select; add -n to bound
+the output, e.g. --since 10m -n 200.`,
 		Example: "  yoho app logs web -f\n  yoho app logs web --since 1h --grep ERROR -i\n  yoho app logs worker --since 2026-11-03T09:00:00Z --until 2026-11-03T10:00:00Z -t\n  yoho app logs --all -n 20",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			a, err := g.load(cmd)
@@ -165,7 +169,7 @@ show every line they select.`,
 				return a.fail(err)
 			}
 			if a.scoped {
-				args := gate.LogsArgs{ServicesArgs: gate.ServicesArgs{Services: svcs}, Lines: opts.Lines, Follow: follow, Timestamps: opts.Timestamps, LogFilter: opts.LogFilter}
+				args := gate.LogsArgs{ServicesArgs: gate.ServicesArgs{Services: svcs}, Lines: gateLines(opts.Lines), Follow: follow, Timestamps: opts.Timestamps, LogFilter: opts.LogFilter}
 				err := a.gateCall(cmd.Context(), "logs", args, nil, cmd.OutOrStdout(), nil)
 				if follow && cmd.Context().Err() != nil {
 					return nil // Ctrl-C ends a follow
@@ -180,12 +184,17 @@ show every line they select.`,
 			if follow && cmd.Context().Err() != nil {
 				return nil // Ctrl-C ends a follow
 			}
+			var ee *remote.ExitError
+			if opts.Regex && errors.As(err, &ee) && ee.Code == dash.ExitBadPattern && strings.Contains(ee.Stderr, "invalid --grep pattern") {
+				// grep's own message is already on stderr.
+				return a.fail(&hintError{"invalid --grep pattern", badPatternHint})
+			}
 			return err
 		},
 	}
 	f := c.Flags()
 	f.BoolVarP(&o.Follow, "follow", "f", false, "Follow")
-	f.IntVarP(&o.Lines, "lines", "n", 100, "Lines from the end (0: all); with --grep, matching lines")
+	f.IntVarP(&o.Lines, "lines", "n", 100, "Lines from the end (0: none, -1: all); with --grep, matching lines")
 	f.BoolVar(&all, "all", false, "Every Service, interleaved (compose only)")
 	f.StringVar(&o.Since, "since", "", "Only logs since a duration back (10m, 2h) or a timestamp (2026-11-03T15:04:05Z)")
 	f.StringVar(&o.Until, "until", "", "Only logs before a duration back or a timestamp (compose only)")
@@ -194,6 +203,19 @@ show every line they select.`,
 	f.BoolVarP(&o.IgnoreCase, "ignore-case", "i", false, "Match --grep ignoring case")
 	f.BoolVarP(&o.Regex, "regex", "E", false, "Treat --grep as an extended regular expression")
 	return c
+}
+
+// badPatternHint is the hint for a --grep -E pattern the Server's grep
+// refuses.
+const badPatternHint = "-E takes an extended regular expression, as the Server's grep reads it; drop -E to match the text as is"
+
+// gateLines is LogsOptions.Lines as gate.LogsArgs.Lines. Every line is
+// MaxLogLines, which Gates of every version read as their bound.
+func gateLines(n int) *int {
+	if n < 0 {
+		n = gate.MaxLogLines
+	}
+	return gate.LinesArg(n)
 }
 
 // appLogsScript is the `app logs` script for svcs (nil: every Service).
@@ -222,7 +244,14 @@ func (a *app) followGrep(cmd *cobra.Command, script string) error {
 		return err
 	}
 	defer h.Close()
-	stdin, hold := io.Pipe()
+	// An OS pipe, not io.Pipe: ssh reads it directly, so when the script
+	// ends on its own (a bad pattern, docker failing) nothing waits for
+	// stdin to close before RunTerminal returns.
+	stdin, hold, err := os.Pipe()
+	if err != nil {
+		return err
+	}
+	defer stdin.Close()
 	stop := context.AfterFunc(ctx, func() { hold.Close() })
 	defer stop()
 	defer hold.Close()

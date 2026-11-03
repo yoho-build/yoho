@@ -89,14 +89,57 @@ func (f LogFilter) Check() error {
 	return nil
 }
 
+// AllLines as LogsOptions.Lines shows every line: no --tail.
+const AllLines = -1
+
+// MaxScan bounds a Grep read without Follow when LogsOptions.Scan asks
+// for it: grep sees at most this many lines from the end of the logs.
+const MaxScan = 100000
+
 // LogsOptions is one logs read.
 type LogsOptions struct {
 	LogFilter
 	// Lines is how many lines to show from the end: with Grep and without
-	// Follow, the last matching lines. 0 shows all.
-	Lines      int
+	// Follow, the last matching lines. 0 shows none (with Follow, only new
+	// lines); AllLines (any negative value) shows every line.
+	Lines int
+	// Scan, when positive, bounds a Grep read without Follow to the last
+	// Scan lines before grep, so a search never reads a container's whole
+	// log (the dashboards and the Gate pass MaxScan). 0 reads everything.
+	Scan       int
 	Follow     bool
 	Timestamps bool
+}
+
+// ExitBadPattern is the exit status of a logs script whose --grep -E
+// pattern the Server's grep refuses.
+const ExitBadPattern = 2
+
+// grepFlags are o's grep matching flags, before -e PATTERN.
+func grepFlags(o LogsOptions) string {
+	g := ""
+	if o.IgnoreCase {
+		g += " -i"
+	}
+	if o.Regex {
+		g += " -E"
+	} else {
+		g += " -F"
+	}
+	return g
+}
+
+// patternCheck refuses an extended regular expression the Server's grep
+// cannot compile, before docker runs; otherwise grep's error would only
+// close the pipe and the read would fail as docker's. BusyBox grep
+// compiles on the first input line, hence one line of input; status 0 or
+// 1 (a match or none) means the pattern is fine. A fixed string always is.
+func patternCheck(o LogsOptions) string {
+	if !o.Regex {
+		return ""
+	}
+	return "prc=0\nperr=$(printf 'x\\n' | grep" + grepFlags(o) + " -e " + remote.Quote(o.Grep) + " 2>&1 >/dev/null) || prc=$?\n" +
+		"if [ \"$prc\" -gt 1 ]; then echo \"invalid --grep pattern: $perr\" >&2; exit " + strconv.Itoa(ExitBadPattern) + "; fi\n"
 }
 
 // LogsScript returns a POSIX sh script running cmd (docker logs, docker
@@ -117,9 +160,14 @@ func LogsScript(cmd, args string, o LogsOptions) string {
 	if o.Follow {
 		s += " -f"
 	}
-	// Without Follow, Grep reads everything and keeps the last matches.
-	tailAfter := o.Grep != "" && !o.Follow && o.Lines > 0
-	if o.Lines > 0 && !tailAfter {
+	// Without Follow, Grep reads everything (or the last Scan lines) and
+	// keeps the last Lines matches.
+	grepRead := o.Grep != "" && !o.Follow
+	switch {
+	case grepRead && o.Scan > 0:
+		s += " --tail " + strconv.Itoa(o.Scan)
+	case grepRead:
+	case o.Lines >= 0:
 		s += " --tail " + strconv.Itoa(o.Lines)
 	}
 	if args != "" {
@@ -130,22 +178,14 @@ func LogsScript(cmd, args string, o LogsOptions) string {
 		return s
 	}
 	g := "grep"
-	pre := "set -eu\n"
+	pre := "set -eu\n" + patternCheck(o)
 	if o.Follow {
 		// Print matches as they arrive; busybox grep lacks --line-buffered.
 		pre += "lb=\nif printf 'x\\n' | grep --line-buffered x >/dev/null 2>&1; then lb=--line-buffered; fi\n"
 		g += " $lb"
 	}
-	if o.IgnoreCase {
-		g += " -i"
-	}
-	if o.Regex {
-		g += " -E"
-	} else {
-		g += " -F"
-	}
-	g += " -e " + remote.Quote(o.Grep)
-	if tailAfter {
+	g += grepFlags(o) + " -e " + remote.Quote(o.Grep)
+	if grepRead && o.Lines >= 0 {
 		g += " | tail -n " + strconv.Itoa(o.Lines)
 	}
 	// POSIX sh has no pipefail, and docker's own errors share stderr with the
@@ -169,18 +209,9 @@ func LogsScript(cmd, args string, o LogsOptions) string {
 func FollowGrepScript(cmd, args string, o LogsOptions) string {
 	s := LogsScript(cmd, args, LogsOptions{LogFilter: LogFilter{Since: o.Since, Until: o.Until}, Lines: o.Lines, Follow: true, Timestamps: o.Timestamps})
 	s = strings.TrimSuffix(s, " 2>&1") // redirected to the fifo below, in order
-	g := "grep $lb"
-	if o.IgnoreCase {
-		g += " -i"
-	}
-	if o.Regex {
-		g += " -E"
-	} else {
-		g += " -F"
-	}
-	g += " -e " + remote.Quote(o.Grep)
+	g := "grep $lb" + grepFlags(o) + " -e " + remote.Quote(o.Grep)
 	return `set -eu
-lb=
+` + patternCheck(o) + `lb=
 if printf 'x\n' | grep --line-buffered x >/dev/null 2>&1; then lb=--line-buffered; fi
 dp= gp= wp=
 d=$(mktemp -d "${TMPDIR:-/tmp}/yoho-logs.XXXXXX")

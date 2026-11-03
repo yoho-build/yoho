@@ -3,6 +3,7 @@ package cli
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"os"
@@ -16,11 +17,13 @@ import (
 	"time"
 
 	"github.com/yoho-build/yoho/internal/dash"
+	"github.com/yoho-build/yoho/internal/gate"
+	"github.com/yoho-build/yoho/internal/remote"
 )
 
 func TestLogsOptions(t *testing.T) {
 	o, err := logsOptions(dash.LogsOptions{Lines: 100, LogFilter: dash.LogFilter{Since: "30s"}}, false, false)
-	if err != nil || o.Lines != 0 {
+	if err != nil || o.Lines != dash.AllLines {
 		t.Errorf("--since without -n shows every line: %+v %v", o, err)
 	}
 	o, err = logsOptions(dash.LogsOptions{Lines: 20, LogFilter: dash.LogFilter{Grep: "x"}}, true, false)
@@ -36,13 +39,68 @@ func TestLogsOptions(t *testing.T) {
 		{dash.LogsOptions{LogFilter: dash.LogFilter{Until: "1h;id"}}, false, "duration like 30s"},
 		{dash.LogsOptions{LogFilter: dash.LogFilter{IgnoreCase: true}}, false, "--grep ERROR -i"},
 		{dash.LogsOptions{LogFilter: dash.LogFilter{Until: "1h"}}, true, "use --since"},
-		{dash.LogsOptions{Lines: -1}, false, "-n 0"},
+		{dash.LogsOptions{Lines: -2}, false, "-n -1"},
 	} {
 		_, err := logsOptions(c.o, true, c.swarm)
 		var he *hintError
 		if !errors.As(err, &he) || !strings.Contains(he.hint, c.want) {
 			t.Errorf("%+v: %v", c.o, err)
 		}
+	}
+}
+
+// TestLogsLinesAgree: -n means the same over SSH and through the Gate.
+// -n 0 is no history (v0.5.9's --tail 0), -n -1 every line (the Gate
+// bounds it), and without -n 100 lines, or with --since or --grep every
+// selected line.
+func TestLogsLinesAgree(t *testing.T) {
+	for _, c := range []struct {
+		name     string
+		lines    int
+		set      bool
+		f        dash.LogFilter
+		follow   bool
+		tail     string // the docker flag over SSH; "" is none
+		gate     int    // the lines the Gate shows
+		wireLine string // the request's lines field
+	}{
+		{"unset", 100, false, dash.LogFilter{}, false, " --tail 100 ", 100, `"lines":100`},
+		{"-n 0", 0, true, dash.LogFilter{}, false, " --tail 0 ", 0, `"lines":0`},
+		{"-f -n 0", 0, true, dash.LogFilter{}, true, " -f --tail 0 ", 0, `"lines":0`},
+		{"-n -1", -1, true, dash.LogFilter{}, false, "", gate.MaxLogLines, `"lines":10000`},
+		{"--since", 100, false, dash.LogFilter{Since: "10m"}, false, "", gate.MaxLogLines, `"lines":10000`},
+		{"--since -n 200", 200, true, dash.LogFilter{Since: "10m"}, false, " --tail 200 ", 200, `"lines":200`},
+	} {
+		o, err := logsOptions(dash.LogsOptions{Lines: c.lines, Follow: c.follow, LogFilter: c.f}, c.set, false)
+		if err != nil {
+			t.Fatalf("%s: %v", c.name, err)
+		}
+		s := appLogsScript("p", []string{"web"}, false, o)
+		if c.tail == "" && strings.Contains(s, "--tail") || c.tail != "" && !strings.Contains(s, c.tail) {
+			t.Errorf("%s over SSH: %s", c.name, s)
+		}
+		a := gate.LogsArgs{Lines: gateLines(o.Lines), Follow: o.Follow, LogFilter: o.LogFilter}
+		if got := gate.LogLines(a); got != c.gate {
+			t.Errorf("%s through the Gate: %d lines, want %d", c.name, got, c.gate)
+		}
+		if b, _ := json.Marshal(a); !strings.Contains(string(b), c.wireLine) {
+			t.Errorf("%s request %s, want %s", c.name, b, c.wireLine)
+		}
+	}
+	// --grep without -n: every matching line over SSH, no tail after grep.
+	o, _ := logsOptions(dash.LogsOptions{Lines: 100, LogFilter: dash.LogFilter{Grep: "x"}}, false, false)
+	if s := appLogsScript("p", []string{"web"}, false, o); strings.Contains(s, "tail") {
+		t.Errorf("--grep without -n: %s", s)
+	}
+}
+
+func TestOlderGateHint(t *testing.T) {
+	ge := refusalHint(&remote.GateError{Message: `logs: bad arguments: json: unknown field "grep"`, Code: "invalid"})
+	if !strings.Contains(ge.Hint, "older than this CLI") || !strings.Contains(ge.Hint, "yoho access install") {
+		t.Errorf("hint: %+v", ge)
+	}
+	if ge := refusalHint(&remote.GateError{Message: "invalid Service name", Code: "invalid"}); ge.Hint != "" {
+		t.Errorf("other refusals keep their hint: %+v", ge)
 	}
 }
 
@@ -56,7 +114,7 @@ func TestAppLogsScript(t *testing.T) {
 	if got != "docker service logs --tail 100 'yoho-shop-production_web' 2>&1" {
 		t.Errorf("swarm: %s", got)
 	}
-	got = appLogsScript("yoho-shop-production", nil, false, dash.LogsOptions{LogFilter: dash.LogFilter{Grep: "ERROR"}})
+	got = appLogsScript("yoho-shop-production", nil, false, dash.LogsOptions{Lines: dash.AllLines, LogFilter: dash.LogFilter{Grep: "ERROR"}})
 	if !strings.Contains(got, "{ { docker compose -p 'yoho-shop-production' logs 2>&1 && echo 0 >&3 || echo \"$?\" >&3; } | grep -F -e 'ERROR' >&4; }") {
 		t.Errorf("--all --grep: %q", got)
 	}

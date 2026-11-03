@@ -55,7 +55,7 @@ To reach it from another machine, forward the port over SSH (`ssh -L 7300:127.0.
 
 ## Logs
 
-The `yoho ui` logs dialog shows the last 100, 200 or 1000 lines, optionally of the last 15 minutes, hour, 6 hours or 24 hours only. The search box filters on the Server (`grep`, fixed string, ignoring case), so the line count is of matching lines and older matches are found too. In `yoho tui` logs, `/` filters the loaded lines as you type (ignoring case); `enter` keeps the filter, `esc` clears it. For more, use `yoho app logs` with `--since`, `--until`, `--grep` and `-f` (see the [CLI reference](cli.md)).
+The `yoho ui` logs dialog shows the last 100, 200 or 1000 lines, optionally of the last 15 minutes, hour, 6 hours or 24 hours only. The search box filters on the Server (`grep`, fixed string, ignoring case), so the line count is of matching lines and older matches are found too. A search reads at most the last 100000 lines of the container's log, and typing one while the time range is "all" sets it to the last hour (pick "all" again to search further back). In `yoho tui` logs, `/` filters the loaded lines as you type (ignoring case); `enter` keeps the filter, `esc` clears it. For more, use `yoho app logs` with `--since`, `--until`, `--grep` and `-f` (see the [CLI reference](cli.md)).
 
 Container output is shown as Docker returns it. Yoho does not resolve your secrets for these views, so it cannot redact a value an application prints; keep secrets out of application logs.
 

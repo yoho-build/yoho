@@ -115,9 +115,34 @@ func (a *app) gateCall(ctx context.Context, verb string, args any, payload io.Re
 func (a *app) gateFail(err error) error {
 	var ge *remote.GateError
 	if errors.As(err, &ge) {
+		ge = refusalHint(ge)
 		return a.fail(&hintError{ge.Message, ge.Hint})
 	}
 	return a.fail(err)
+}
+
+// olderGateHint is the hint for an argument the Gate does not know.
+const olderGateHint = "the Server's Gate is older than this CLI; ask the operator to update it: `yoho access install -d DESTINATION`, run from the App's repository, installs their yoho version as the Gate"
+
+// refusalHint adds a hint to a Gate error that has none: olderGateHint
+// when the Gate refuses an argument it does not know (it decodes them
+// strictly), e.g. a logs filter sent to a Gate of v0.5.9 or older, and
+// badPatternHint when the Server's grep refuses a --grep -E pattern.
+func refusalHint(ge *remote.GateError) *remote.GateError {
+	hint := ""
+	switch {
+	case ge.Hint != "":
+	case ge.Code == "invalid" && strings.Contains(ge.Message, ": bad arguments: json: unknown field "):
+		hint = olderGateHint
+	case strings.Contains(ge.Message, "invalid --grep pattern"):
+		hint = badPatternHint
+	}
+	if hint == "" {
+		return ge
+	}
+	c := *ge
+	c.Hint = hint
+	return &c
 }
 
 // gateAttachFor / gateAttachDelay bound reconnects after a dropped SSH
@@ -508,7 +533,15 @@ func (r gateReader) Server(ctx context.Context) (dash.Server, error) {
 
 func (r gateReader) Logs(ctx context.Context, container string, lines int, f dash.LogFilter) (string, error) {
 	var b strings.Builder
-	err := r.g.Call(ctx, gate.VerbLogs, gate.LogsArgs{Container: container, Lines: lines, Timestamps: true, LogFilter: f}, nil, &b, nil)
+	var n *int
+	if lines > 0 {
+		n = gate.LinesArg(lines)
+	}
+	err := r.g.Call(ctx, gate.VerbLogs, gate.LogsArgs{Container: container, Lines: n, Timestamps: true, LogFilter: f}, nil, &b, nil)
+	var ge *remote.GateError
+	if errors.As(err, &ge) {
+		err = refusalHint(ge)
+	}
 	return b.String(), err
 }
 
