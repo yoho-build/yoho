@@ -96,7 +96,7 @@ yoho init --template postgres,redis      # also works in a project that already 
 
 Each Service is `stateful: true`, has `restart: unless-stopped`, a healthcheck over TCP on 127.0.0.1, a named volume, and no published ports; other Services reach it by name (`postgres:5432`, `redis:6379`, `clickhouse:8123`, `rustfs:9000`). Generated secrets are created on the Server at the first deploy; list them in `x-yoho.secrets` of each Service that connects. A ClickHouse volume Backup copies the whole data directory; for very large tables use ClickHouse's own `BACKUP` to an S3 bucket instead.
 
-Without a compose file, `compose.yaml` is created. An existing one keeps its text and gets the Services and volumes appended, indented like the file. A Service or volume name that already exists is refused and no file is written. Image tags are pinned; update them yourself.
+Without a compose file, `compose.yaml` is created. An existing one keeps its text and gets the Services and volumes appended, indented like the file. A Service or volume name that already exists is refused and no file is written; with a yoho.yml, that includes names in its other `compose:` entries and in every Destination overlay (`compose.<destination>.yaml`), which would otherwise merge into the template. The postgres dump holds only the `postgres` database (no roles or other databases); back up the `pgdata` volume or add `pg_dumpall --globals-only` if you need them. Image tags are pinned; update them yourself.
 
 ## After the first deploy
 

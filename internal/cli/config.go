@@ -258,6 +258,19 @@ func runInit(u *ui.UI, wd string, names []string) error {
 			}
 			return err
 		}
+		// Merge saw only the edited file. Another compose entry or a
+		// Destination overlay declaring the same name would merge into the
+		// template's Service, so check every file the Yoho file deploys.
+		if haveYoho {
+			if err := templateCollisions(wd, yohoPath, composeRel, merged); err != nil {
+				var he *hintError
+				if errors.As(err, &he) {
+					u.Error(err, he.hint)
+					return &silentError{err}
+				}
+				return err
+			}
+		}
 	}
 	name := strings.ToLower(filepath.Base(wd))
 	name = strings.Map(func(r rune) rune {
@@ -330,6 +343,57 @@ func runInit(u *ui.UI, wd string, names []string) error {
 		u.Info("Generated on the Server at the first deploy: %s. List them in x-yoho.secrets of each Service that connects.", strings.Join(keys, ", "))
 	}
 	u.Info("Next: edit yoho.yml (servers, destinations), then `yoho config check`")
+	return nil
+}
+
+// templateCollisions refuses template Services and volumes whose names are
+// already declared in a compose file other than composeRel: the Yoho file's
+// other compose entries and every Destination's compose overlays (and the
+// compose list a yoho.<destination> file sets).
+func templateCollisions(wd, yohoPath, composeRel string, merged *templates.Result) error {
+	cfg, err := config.Load(yohoPath)
+	if err != nil {
+		return err
+	}
+	var d composefile.Declared
+	if err := composefile.DeclaredNames(&d, wd, cfg.Compose, ""); err != nil {
+		return err
+	}
+	for _, dest := range sortedKeys(cfg.Destinations) {
+		files := cfg.Compose
+		if dc, _, _, err := config.LoadForDestination(yohoPath, dest); err == nil {
+			files = dc.Compose
+		}
+		if err := composefile.DeclaredNames(&d, wd, files, dest); err != nil {
+			return err
+		}
+	}
+	target := filepath.Clean(filepath.Join(wd, composeRel))
+	other := func(files []string) string {
+		for _, f := range files {
+			if filepath.Clean(f) != target {
+				if rel, err := filepath.Rel(wd, f); err == nil {
+					return rel
+				}
+				return f
+			}
+		}
+		return ""
+	}
+	for _, kind := range []struct {
+		what  string
+		names []string
+		in    map[string][]string
+	}{{"Service", merged.Services, d.Services}, {"volume", merged.Volumes, d.Volumes}} {
+		for _, n := range kind.names {
+			if f := other(kind.in[n]); f != "" {
+				return &hintError{
+					msg:  fmt.Sprintf("%s %q is already declared in %s; the template would merge into it", kind.what, n, f),
+					hint: "rename or remove " + n + " in " + f + ", or add the template to that file by hand (`yoho init --list-templates`); nothing was written",
+				}
+			}
+		}
+	}
 	return nil
 }
 
