@@ -377,6 +377,17 @@ func (a *app) apply(ctx context.Context, o applyOptions) (err error) {
 	urls := a.urls(s.r, s.hosts)
 	version := ver
 	var images map[string]string
+	// Build and Ship move the Version's image tags before the runtime has
+	// anything to protect; a failure up to the rollout (which restores them
+	// itself) must not leave the deployed Release's tags on a new build.
+	preRollout := true
+	defer func() {
+		if err != nil && preRollout && deployNeeded {
+			for _, h := range s.hosts {
+				deploy.RestoreVersionImages(ctx, h.Host, os.Stdout, h.Name, a.cfg.App, a.destName, ver)
+			}
+		}
+	}()
 	if deployNeeded && !co.deployed(ver) {
 		if images, err = a.buildAndShip(ctx, s, o.SkipBuild); err != nil {
 			return err
@@ -403,6 +414,7 @@ func (a *app) apply(ctx context.Context, o applyOptions) (err error) {
 		if co != nil {
 			d.Cutover = co.j.ID
 		}
+		preRollout = false
 		if rel, err = a.rollout(ctx, s, d, a.lockedRuntime()); err != nil {
 			return co.failed(ctx, err)
 		}
