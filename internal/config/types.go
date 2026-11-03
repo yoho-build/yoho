@@ -429,6 +429,10 @@ type ServiceBackup struct {
 	// Command run inside the container with the dump on stdin to restore it,
 	// e.g. ["psql", "-U", "app", "app"]. Empty: dumps are kept on the Server.
 	RestoreDump []string `json:"restore_dump,omitempty"`
+	// Command run inside the Service's container by `yoho backup drill`
+	// after the restored copy is healthy, e.g. ["psql", "-U", "app", "-c",
+	// "select count(*) from orders"]. A nonzero exit fails the drill.
+	Verify []string `json:"verify,omitempty"`
 }
 
 // SecretRef maps a name seen by the container to a secret key.

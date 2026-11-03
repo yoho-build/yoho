@@ -54,7 +54,7 @@ func (t *target) rcloneConfig() *rcloneRun {
 	if key == "" {
 		return nil
 	}
-	dir := RcloneConfigDir(t.app, t.dest, key)
+	dir := RcloneConfigDir(t.app, t.local, key)
 	conf := path.Join(dir, rcloneConfName)
 	env := " -e RCLONE_CONFIG=" + rcloneMountDir + "/" + rcloneConfName
 	return &rcloneRun{
@@ -77,11 +77,11 @@ func (t *target) prepareRclone(ctx context.Context, h remote.Host, value string,
 	}
 	t.diagnostics = secrets.RcloneConfigValues(value)
 	if value != "" {
-		if _, err := seedRclone(ctx, h, t.app, t.dest, key, value, now); err != nil {
+		if _, err := seedRclone(ctx, h, t.app, t.local, key, value, now); err != nil {
 			return secrets.RedactError(err, t.diagnostics...)
 		}
 	}
-	values, err := RcloneDiagnosticValues(ctx, h, t.app, t.dest, t.cfg)
+	values, err := RcloneDiagnosticValues(ctx, h, t.app, t.local, t.cfg)
 	if err != nil {
 		return err
 	}
@@ -181,7 +181,7 @@ func (t *target) rcloneSeeded(ctx context.Context, h remote.Host) string {
 	if t.cfg.RcloneConfigSecret == "" {
 		return ""
 	}
-	got, err := readRcloneSeed(ctx, h, RcloneConfigDir(t.app, t.dest, t.cfg.RcloneConfigSecret), false)
+	got, err := readRcloneSeed(ctx, h, RcloneConfigDir(t.app, t.local, t.cfg.RcloneConfigSecret), false)
 	f := strings.Fields(got)
 	if err != nil || len(f) < 2 {
 		return "seeded (date unknown)"

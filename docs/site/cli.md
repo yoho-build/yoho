@@ -41,6 +41,10 @@ Global flags (every command): `-c, --config FILE`, `-d, --destination NAME` (def
 | `backup list [JOB]` | Stored Backups, newest first. |
 | `backup pull [JOB] [--to DIR] [--limit N]` | Mirror new archives of an `archive` target to a local directory; never deletes. |
 | `backup restore ID [--job JOB] [-y]` | Restore a Backup (`latest` for the newest); asks for confirmation unless `-y`. |
+| `backup restore ID --from DEST [--copy-generated-secrets] -d DEST2` | Restore a Backup taken by another Destination of the same App (e.g. production into staging). Keeps the target's generated secrets unless `--copy-generated-secrets`. Another App's Backup is refused. |
+| `backup check [JOB] [--id ID \| --read-data]` | Read-only integrity check of the Backup Target or one archive Backup. Not a restore proof. |
+| `backup drill [JOB] [--id ID] [--keep]` | Restore a Backup into a throwaway `yoho-<app>-<dest>-drill-<id>` project (internal network, no ports, no route), wait for health, run `x-yoho.backup.verify`, print per-phase timings and an RTO estimate, then remove it. The running App is untouched. `--keep` leaves it running. |
+| `backup drill --cleanup` | Remove leftover drill projects of the Destination (only drill-labelled containers, volumes and networks). |
 | `schedule install [JOB...] [--binary PATH]` | Install systemd timers for Backup jobs with a schedule (default: all of the Destination). |
 | `schedule status` | Installed Scheduled Jobs, timers, last runs. |
 | `schedule remove [JOB...]` | Disable and delete Scheduled Jobs (default: all of the Destination). |

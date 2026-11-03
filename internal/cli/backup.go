@@ -71,20 +71,29 @@ func (g *globals) loadForJob(cmd *cobra.Command, name string) (*app, error) {
 // selectBackupJob picks job name, the only job of the Destination, or,
 // with no jobs at all, the only Backup Target.
 func (a *app) selectBackupJob(name string) (*backupJob, error) {
+	return a.selectBackupJobFor(name, a.destName)
+}
+
+// selectBackupJobFor is selectBackupJob for the Backups of Destination dest
+// (restore --from selects the source Destination's job and Backup Target).
+func (a *app) selectBackupJobFor(name, dest string) (*backupJob, error) {
 	jobs := a.cfg.Backups.Jobs
 	if name != "" {
 		jc, ok := jobs[name]
 		if !ok {
 			return nil, fmt.Errorf("no Backup job %q in %s%s", name, a.path, jobList(jobs))
 		}
-		if jc.Destination != a.destName {
-			return nil, fmt.Errorf("Backup job %s belongs to Destination %s, not %s\nhint: pass -d %s", name, jc.Destination, a.destName, jc.Destination)
+		if jc.Destination != dest {
+			if dest != a.destName {
+				return nil, fmt.Errorf("Backup job %s belongs to Destination %s, not %s (the --from Destination)", name, jc.Destination, dest)
+			}
+			return nil, fmt.Errorf("Backup job %s belongs to Destination %s, not %s\nhint: pass -d %s", name, jc.Destination, dest, jc.Destination)
 		}
 		return a.newBackupJob(name, jc)
 	}
 	var mine []string
 	for _, n := range sortedKeys(jobs) {
-		if jobs[n].Destination == a.destName {
+		if jobs[n].Destination == dest {
 			mine = append(mine, n)
 		}
 	}
@@ -92,13 +101,13 @@ func (a *app) selectBackupJob(name string) (*backupJob, error) {
 	case len(mine) == 1:
 		return a.newBackupJob(mine[0], jobs[mine[0]])
 	case len(mine) > 1:
-		return nil, fmt.Errorf("several Backup jobs for %s; name one: %s", a.destName, strings.Join(mine, ", "))
+		return nil, fmt.Errorf("several Backup jobs for %s; name one: %s", dest, strings.Join(mine, ", "))
 	case len(a.cfg.Backups.Targets) == 1:
 		for tn := range a.cfg.Backups.Targets {
-			return a.newBackupJob("", config.BackupJob{Destination: a.destName, Target: tn})
+			return a.newBackupJob("", config.BackupJob{Destination: dest, Target: tn})
 		}
 	}
-	return nil, fmt.Errorf("no Backup job for Destination %s\nhint: add backups.targets and backups.jobs to %s", a.destName, a.path)
+	return nil, fmt.Errorf("no Backup job for Destination %s\nhint: add backups.targets and backups.jobs to %s", dest, a.path)
 }
 
 func jobList(jobs map[string]config.BackupJob) string {
@@ -203,7 +212,12 @@ func (j *backupJob) redact(w io.Writer) (io.Writer, func()) {
 
 // prepareBackup resolves job, Services and secrets with UI steps.
 func (a *app) prepareBackup(ctx context.Context, name string, needServices bool) (*backupJob, error) {
-	j, err := a.selectBackupJob(name)
+	return a.prepareBackupFor(ctx, name, a.destName, needServices)
+}
+
+// prepareBackupFor is prepareBackup for the Backup job of Destination dest.
+func (a *app) prepareBackupFor(ctx context.Context, name, dest string, needServices bool) (*backupJob, error) {
+	j, err := a.selectBackupJobFor(name, dest)
 	if err != nil {
 		return nil, err
 	}
@@ -254,7 +268,7 @@ func backupCmd(g *globals) *cobra.Command {
 		Long: `Backups copy the volumes and dumps declared in x-yoho.backup to a Backup
 Target defined in the Yoho file (backups.targets / backups.jobs).`,
 	}
-	c.AddCommand(backupRunCmd(g), backupListCmd(g), backupPullCmd(g), backupRestoreCmd(g), backupCheckCmd(g))
+	c.AddCommand(backupRunCmd(g), backupListCmd(g), backupPullCmd(g), backupRestoreCmd(g), backupCheckCmd(g), backupDrillCmd(g))
 	return c
 }
 
@@ -512,8 +526,8 @@ remotes are not files on the Server and are refused.
 }
 
 func backupRestoreCmd(g *globals) *cobra.Command {
-	var jobName string
-	var yes bool
+	var jobName, from string
+	var yes, copyGenerated bool
 	c := &cobra.Command{
 		Use:   "restore ID",
 		Short: "Restore a Backup, replacing the Services' volume data",
@@ -523,13 +537,33 @@ post-restore Hooks with consumers stopped. Only private restore targets start
 before success. Previously stopped Services stay stopped on success.
 Failure or interruption keeps Services stopped; data is not rolled back. Inspect
 and repair the data before manually resuming. Current volume data is lost.
-Use "latest" as ID for the newest Backup.`,
+Use "latest" as ID for the newest Backup.
+
+--from DESTINATION restores a Backup taken by another Destination of the same
+App (for example production into staging, with -d staging). The Backup job and
+Backup Target are the source Destination's; the Target must be reachable from
+this Destination's Server. The source's generated secrets are not copied unless
+--copy-generated-secrets is given. Another App's Backup is always refused.`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) (err error) {
+			if from != "" && g.destination == "" {
+				return errors.New("--from needs -d to name the Destination to restore into")
+			}
+			if copyGenerated && from == "" {
+				return errors.New("--copy-generated-secrets only applies with --from")
+			}
 			a, err := g.loadForJob(cmd, jobName)
 			if err != nil {
 				return err
 			}
+			source := a.destName
+			if from != "" {
+				if _, ok := a.cfg.Destinations[from]; !ok {
+					return fmt.Errorf("--from: unknown Destination %q (have: %s)", from, strings.Join(sortedKeys(a.cfg.Destinations), ", "))
+				}
+				source = from
+			}
+			cross := source != a.destName
 			ctx := cmd.Context()
 			u := a.ui
 			start := time.Now()
@@ -538,7 +572,10 @@ Use "latest" as ID for the newest Backup.`,
 					u.Finished(err, "")
 				}
 			}()
-			j, err := a.prepareBackup(ctx, jobName, true)
+			if cross {
+				u.Title("Restoring %s (%s) from a Backup of %s", a.cfg.App, a.destName, source)
+			}
+			j, err := a.prepareBackupFor(ctx, jobName, source, true)
 			if err != nil {
 				return err
 			}
@@ -550,9 +587,9 @@ Use "latest" as ID for the newest Backup.`,
 			h := hosts[0]
 			id := args[0]
 
-			step := u.Step(h.Name, "Find Backup %s in %s", id, j.targetName)
+			step := u.Step(h.Name, "Find Backup %s of %s in %s", id, source, j.targetName)
 			entries, err := backup.List(ctx, backup.ListOptions{
-				App: a.cfg.App, Destination: a.destName, Project: a.project(),
+				App: a.cfg.App, Destination: a.destName, Project: a.project(), From: source,
 				Target: j.target, Password: j.password, TargetEnv: j.env, RcloneConfig: j.rcloneConf, Host: h.Host,
 			})
 			if err != nil {
@@ -567,27 +604,31 @@ Use "latest" as ID for the newest Backup.`,
 				}
 			}
 			if found == nil {
-				err = fmt.Errorf("no Backup %q in %s", id, j.targetName)
-				step.Fail(err, "see `yoho backup list`")
+				err = fmt.Errorf("no Backup %q of %s in %s", id, source, j.targetName)
+				hint := "see `yoho backup list`"
+				if cross {
+					hint = fmt.Sprintf("see `yoho backup list -d %s`; the Backup Target must be reachable from the Server of %s", source, a.destName)
+				}
+				step.Fail(err, hint)
 				return &silentError{err}
 			}
 			step.Done(found.Time.Local().Format("2006-01-02 15:04:05"))
 
 			if !yes {
-				if err = confirmRestore(cmd, a, j, h.Host, h.Name, found); err != nil {
+				if err = confirmRestore(cmd, a, j, h.Host, h.Name, found, source, copyGenerated); err != nil {
 					return err
 				}
 			}
 
 			hook := a.hookFunc(a.serverVersion(ctx, h.Host), "backup", hosts)
-			hookEnv := map[string]string{"YOHO_SUBCOMMAND": "restore", "YOHO_BACKUP_JOB": j.name, "YOHO_BACKUP_TARGET": j.targetName, "YOHO_BACKUP_ID": found.ID}
+			hookEnv := map[string]string{"YOHO_SUBCOMMAND": "restore", "YOHO_BACKUP_JOB": j.name, "YOHO_BACKUP_TARGET": j.targetName, "YOHO_BACKUP_ID": found.ID, "YOHO_BACKUP_FROM": source}
 			if err = hook(ctx, "pre-restore", hookEnv); err != nil {
 				return err
 			}
 			step = u.Step(h.Name, "Restore %s", found.ID)
 			out, flush := j.redact(step.Output())
 			res, err := backup.Restore(ctx, backup.RestoreOptions{
-				App: a.cfg.App, Destination: a.destName, Project: a.project(),
+				App: a.cfg.App, Destination: a.destName, Project: a.project(), From: source, CopyGenerated: copyGenerated,
 				Services: j.services, Target: j.target, Password: j.password, TargetEnv: j.env, RcloneConfig: j.rcloneConf,
 				Host: h.Host, Out: out, Lock: a.backupLock(h.Host, "restore"), ID: found.ID, Confirm: true,
 				Runtime: a.dest.Runtime,
@@ -614,13 +655,22 @@ Use "latest" as ID for the newest Backup.`,
 			if len(res.DumpFiles) > 0 {
 				u.Warn("dumps not loaded (no x-yoho.backup.restore_dump); they are on the Server: %s", strings.Join(res.DumpFiles, " "))
 			}
+			if len(res.GeneratedSkipped) > 0 {
+				u.Warn("generated secrets %s of %s were not copied; %s keeps its own. If the restored volume data needs the source's values, rerun with --copy-generated-secrets", strings.Join(res.GeneratedSkipped, ", "), source, a.destName)
+			}
 			warnIfGeneratedChanged(u, res.GeneratedChanged)
-			u.Finished(nil, fmt.Sprintf("Restored %s (%s) from %s in %s", a.cfg.App, a.destName, found.ID, time.Since(start).Round(100*time.Millisecond)))
+			what := found.ID
+			if cross {
+				what = found.ID + " of " + source
+			}
+			u.Finished(nil, fmt.Sprintf("Restored %s (%s) from %s in %s", a.cfg.App, a.destName, what, time.Since(start).Round(100*time.Millisecond)))
 			return nil
 		},
 	}
 	c.Flags().StringVar(&jobName, "job", "", "Backup job whose Backup Target holds the Backup (default: the only one)")
 	c.Flags().BoolVarP(&yes, "yes", "y", false, "Skip the confirmation prompt")
+	c.Flags().StringVar(&from, "from", "", "restore a Backup taken by another Destination of this App (e.g. --from production -d staging)")
+	c.Flags().BoolVar(&copyGenerated, "copy-generated-secrets", false, "with --from: also replace this Destination's generated secrets with the source's copies from the Backup")
 	return c
 }
 
@@ -644,12 +694,20 @@ func restoreHint(err error) string {
 }
 
 // confirmRestore shows what a restore overwrites and asks on a TTY.
-func confirmRestore(cmd *cobra.Command, a *app, j *backupJob, h remote.Host, server string, e *backup.Entry) error {
+func confirmRestore(cmd *cobra.Command, a *app, j *backupJob, h remote.Host, server string, e *backup.Entry, source string, copyGenerated bool) error {
 	if a.g.json || !stdinIsTTY() {
 		return errors.New("restore replaces volume data; pass --yes to confirm non-interactively")
 	}
 	n := 0
-	showGenerated := backup.TargetEncrypts(j.target, j.password)
+	cross := source != a.destName
+	showGenerated := backup.TargetEncrypts(j.target, j.password) && (!cross || copyGenerated)
+	if cross {
+		fmt.Fprintf(cmd.OutOrStdout(), "\nThis Backup was taken by Destination %s of %s.", source, a.cfg.App)
+		if !copyGenerated {
+			fmt.Fprintf(cmd.OutOrStdout(), " %s keeps its own generated secrets.", a.destName)
+		}
+		fmt.Fprintln(cmd.OutOrStdout())
+	}
 	if showGenerated {
 		names, err := backup.ListGenerated(cmd.Context(), h, a.cfg.App, a.destName)
 		if err != nil {

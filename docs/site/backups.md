@@ -13,6 +13,7 @@ x-yoho:
     volumes: [pgdata]
     pre_backup: ["sh", "-c", "sync"]    # optional; otherwise the container is paused
     post_restore: ["sh", "-c", "echo restored"]
+    verify: ["psql", "-U", "postgres", "-tAc", "select count(*) from orders"]   # optional; backup drill only
 ```
 
 ## Targets and jobs (yoho.yml)
@@ -37,7 +38,7 @@ backups:
 - `restic` (default): encrypted, deduplicated.
 - `archive`: files at a path or rclone remote in `tar.gz` (default `format`), AES-256 `zip`, or `7z` (never ZipCrypto); set `format` to choose; `keep_last` trims old files.
 
-Generated secrets (`x-yoho.generate`, on the Server as `generated/<NAME>`) are included as `yoho-generated/<NAME>` only when the target encrypts at rest: restic, or zip/7z with `password_secret`. Any other target leaves them out and warns once. Restore writes them back after volumes and before Services start. A different value already on the Server is replaced by the Backup (the warning names the secret, not the value). The next deploy keeps that file.
+Generated secrets (`x-yoho.generate`, on the Server as `generated/<NAME>`) are included as `yoho-generated/<NAME>` only when the target encrypts at rest: restic, or zip/7z with `password_secret`. Any other target leaves them out and warns once. Restore writes them back after volumes and before Services start. A different value already on the Server is replaced by the Backup (the warning names the secret, not the value). The next deploy keeps that file. A restore with `--from` another Destination leaves the target's generated secrets alone unless you pass `--copy-generated-secrets` (see [Restore from another Destination](#restore-from-another-destination)).
 
 ## OneDrive, Google Drive and other OAuth remotes
 
@@ -83,6 +84,9 @@ yoho backup check [JOB]                    # integrity only; never a restore pro
 yoho backup check [JOB] --read-data        # restic: also read all data packs
 yoho backup check [JOB] --id ID            # archive: selected ID (default latest)
 yoho backup restore ID [--job JOB] [-y]    # restore; confirmation required unless -y
+yoho backup restore ID --from production -d staging [--copy-generated-secrets]
+yoho backup drill [JOB] [--id ID] [--keep] # restore into a throwaway project, check health, time it
+yoho backup drill --cleanup                # remove leftover drills of the Destination
 ```
 
 `JOB` defaults to the Destination's only Backup job (several jobs: name one; `restore` takes `--job`). Pass `-d` to pick the Destination. `ID` is the id shown by `backup list`; `latest` selects the newest. Hooks `pre-backup`, `post-backup`, `pre-restore`, `post-restore` run on your machine and also get `YOHO_BACKUP_JOB`, `YOHO_BACKUP_TARGET` and (after the Backup, or for a restore) `YOHO_BACKUP_ID`.
@@ -153,7 +157,7 @@ The job needs the same SSH access and secrets as an interactive `yoho` run (an a
 
 Checking takes the same Yoho Destination lock as Backup/deploy/restore. Restic uses `--no-lock --no-cache` and local repositories are mounted read-only, so checking does not write repository locks or initialize directories. **Coordinate external restic writers and Yoho jobs from other Destinations sharing the repository yourself**; concurrent writes/pruning can cause transient check failures. The Destination lock is not a repository-wide lock. Helper images may be pulled if absent. `--json` emits UI events and a result row containing `method`, `backup_id`, `verified`, and `restore_proven: "false"`.
 
-A passed check is **not a restore proof**: it does not test dump loading, application consistency or recovery. Plan an explicitly authorized isolated restore drill separately.
+A passed check is **not a restore proof**: it does not test dump loading, application consistency or recovery. Use [`backup drill`](#restore-drills) for that.
 
 ## Filesystem trust and archive handling
 
@@ -183,8 +187,75 @@ On failure or cancellation after isolation starts, Yoho attempts to stop every A
 
 There is **no automatic volume or dump rollback**. If final staging cleanup fails after an otherwise successful restore resumed Services, Yoho performs another bounded stop to preserve fail-closed error behavior; it reports that remaining staged files may be incomplete, rather than promising a recoverable Backup after partial deletion. A failed stop still requires immediate manual isolation. Some volumes, dumps, or generated secrets may already have changed. Fix the cause and rerun the restore, or inspect/repair the data with consumers still stopped. Before manually resuming, use `prior-state.json` to preserve previously inactive Services: start only the recorded running Compose container IDs, or scale each recorded Swarm Service to its previous count. Rerunning a restore after failure snapshots the then-stopped state; it does not automatically recover the original availability. `yoho deploy` can reopen traffic, but does **not** restore old data and may start Services that were intentionally stopped.
 
+## Restore from another Destination
+
+`yoho backup restore ID --from production -d staging` restores a Backup that production took into staging: the usual way to refresh staging with real data, or to rehearse a restore without touching production. Everything in [Restore safety and recovery](#restore-safety-and-recovery) applies to the target (staging): its Services stop first, the same isolation preflight runs, the Destination lock is held and you confirm unless `-y`.
+
+- The Backup job and Backup Target are the **source's** (`--job` names a job of the source Destination). The Target must be reachable from the target's Server: a remote (S3, B2, SFTP, `rclone:`), or a local path when both Destinations share a Server. `-d` is required with `--from`.
+- Only the source's Backups are listed and fetched (restic tag `destination=<source>`, archive names `yoho-<app>-<source>-*`), and the manifest must name the same App and the source Destination. **Another App's Backup is always refused.**
+- **Generated secrets are not copied by default.** A production Backup on an encrypted Target contains production's `x-yoho.generate` values (database passwords, signing keys). Copying them would silently put production credentials into staging, so staging keeps its own and the command warns with the names it skipped. Pass `--copy-generated-secrets` when the restored data needs the source's values, for example a volume-level database restore whose users were created with the source's generated password. Then they replace the target's, as a same-Destination restore does, and `yoho deploy` makes running Services use them. Dump-based restores (`pg_dump` / `psql`) usually do not need them.
+- Hooks get `YOHO_BACKUP_FROM` (the source Destination).
+
+The data is production's: scrub personal data in a `post_restore` command or `post-restore` Hook if staging is less protected than production.
+
+## Restore drills
+
+`yoho backup check` proves a Backup is readable. `yoho backup drill` proves it restores:
+
+```sh
+yoho backup drill -d production              # newest Backup of the Destination's only job
+yoho backup drill nightly --id 3cb5409d      # a specific job and Backup
+yoho backup drill -d production --keep       # leave it running to look around
+yoho backup drill -d production --cleanup    # remove kept or leftover drills
+```
+
+What it does, on the Destination's (first) Server:
+
+1. **download**: fetches the Backup into private staging and checks its manifest belongs to this App/Destination.
+2. **restore**: creates a throwaway compose project `yoho-<app>-<destination>-drill-<8 hex>` from the **deployed Release** (not your local compose file), restores the volumes into the drill's own fresh volumes and loads dumps with `restore_dump`.
+3. **healthy**: starts the backed-up Services and waits until each container is running and its healthcheck reports healthy (5 minutes at most).
+4. **verify**: runs each Service's `x-yoho.backup.verify` command inside its drill container; a nonzero exit fails the drill. Without one, the drill proves restore and health, not your data.
+5. **cleanup**: removes the drill's containers (with anonymous volumes), volumes and network, also when a step fails. `--keep` skips this.
+
+It prints a table of phases with timings; download + restore + healthy is the **RTO estimate** for the data part of a recovery onto this Server. `--json` emits a `drill_phase` event per phase (`phase`, `duration_ms`, `detail`) and a final `drill` event (`project`, `backup_id`, `services`, `volumes`, `dumps`, `verified`, `rto_ms`, `kept`).
+
+Isolation: the running App is never stopped, restarted or written to. The drill project only contains the backed-up Services, with their image, command, environment, env files, healthcheck, user and file-based secrets and configs from the deployed Release. It drops published ports, `networks`/`network_mode` (one `internal: true` network, no route in or out), Proxy labels, `container_name`, `depends_on`, privileges, devices, deploy settings and restart policies. Named volumes become fresh `<drill project>_<key>` volumes: any `name`, `external`, `driver` or `driver_opts` is dropped, so a drill volume can never alias the App's volume or a host path. Bind mounts must be read-only (a read-write bind mount would be shared with the running App, so the drill refuses). Drill objects carry `yoho.drill`, `yoho.drill.app` and `yoho.drill.destination` labels and never `yoho.app` / `yoho.destination`, so nothing that manages the App treats them as its own.
+
+Cleanup removes an object only after proving it belongs to the drill: the project name must be a drill name of this App/Destination; every container, volume and network of the project must carry exactly the drill labels and none of the App's; volumes must be named `<drill project>_*` and used by no container outside the drill. Any mismatch stops the cleanup before it removes anything. The App's own project, volumes and network can never be targets.
+
+The drill holds the Destination lock while it runs (a deploy waits), uses the Server's CPU, memory and disk for a second copy of the data, and reads the deployed Release's secrets. It does not start Web or workers, so it does not prove the App's code works with the data; `restore --from` into staging does. Swarm Destinations are refused for now.
+
+Tip: make the healthcheck mean "ready for connections over the network". PostgreSQL's image runs a temporary socket-only server during first initialization, so `pg_isready` without `-h 127.0.0.1` can report healthy before the real server starts, and a dump load then fails. The drill catches exactly this kind of problem.
+
+QA on a small PostgreSQL 17 App (dump-only Backup in a local restic repository, same Server), three consecutive runs: download 1.3 to 1.8 s, restore 2.3 to 3.1 s, healthy 0.3 s, verify 0.1 s, cleanup 0.6 to 0.7 s; RTO estimate 4.4 to 4.9 s, whole command under 7 s. Expect download and restore to grow with Backup size and Target bandwidth; measure your own.
+
+## Losing a Server
+
+When the Server of a compose Destination (or the first Server of a Swarm Destination) is gone, recovery is: a new Server, the App deployed, the data restored. You need the Backup off the lost Server ([High availability & recovery](high-availability.md#off-server-backups-are-the-recovery-path)) and your Yoho file, compose file and secrets locally.
+
+1. **Provision.** Create the Server, point `servers.<name>.ssh` at it (or reuse the name with the new address), then:
+
+   ```sh
+   yoho setup -d production --plan   # what will change
+   yoho setup -d production -y       # Docker, deploy user, directories, firewall
+   ```
+
+   On Swarm, run `yoho swarm init` and `yoho swarm join` next.
+2. **Deploy.** `yoho deploy -d production` creates the App directory, the volumes and fresh generated secrets, and starts the Services with empty data. If the Proxy routes real traffic, consider keeping DNS (or the Tunnel) pointed away until step 4.
+3. **Restore.** Find the Backup and restore it. The restore stops the Services, restores volumes, generated secrets (encrypted Targets) and dumps, then resumes them:
+
+   ```sh
+   yoho backup list -d production
+   yoho backup restore latest -d production -y
+   ```
+
+   If it warns that generated secrets changed, run `yoho deploy -d production` again so Services read the restored values (the database password from the Backup matches the restored data).
+4. **Check and reopen.** `yoho app ps -d production`, look at your data, then point DNS or the Tunnel back. Re-install Scheduled Jobs with `yoho schedule install -d production` so Backups continue.
+
+Timings from QA (local Server, Docker already installed, small PostgreSQL App, local restic repository; a fresh Destination stands in for the new Server): `yoho setup --plan` 0.6 s (setup itself not run on the shared QA Server; installing Docker usually takes minutes), first `yoho deploy` 4.7 s, `yoho backup restore latest --from production -d dr -y --copy-generated-secrets` 7.0 s, second `yoho deploy` 3.7 s: under 20 s once the Server runs Docker. Real recoveries are dominated by provisioning, image transfer and Backup download; `yoho backup drill` measures the last two parts on your own data.
+
 ## Swarm
 
 On a multi-Server Destination, `yoho backup run`, `list`, and `restore` use only the first Server (the Swarm manager). Stateful Services are pinned there, so that host has the task container and the volume. The container is the running task (`docker ps` filtered by `com.docker.swarm.service.name=<project>_<service>`). Stack volumes are named `<project>_<volume>` (label `com.docker.stack.namespace=<project>`). Restore scales all owned App Services to zero and waits for tasks to stop across the cluster before replacing data. Private restore targets temporarily scale to one for dumps/Hooks; only after success do all Services return to their prior desired counts, including zero. Pause, dump, and `docker exec` use the local Stateful task container, same as compose.
 
-To recover a lost Server: `yoho setup`, `yoho deploy`, `yoho backup restore`. Schedule recurring runs with [scheduled jobs](scheduled-jobs.md).
+Restore drills are not supported on Swarm Destinations yet; drill with `restore --from` into a compose staging Destination. To recover a lost Server, see [Losing a Server](#losing-a-server). Schedule recurring runs with [scheduled jobs](scheduled-jobs.md).
