@@ -157,3 +157,43 @@ func LogsScript(cmd, args string, o LogsOptions) string {
 		"rc=$( { { " + s + " && echo 0 >&3 || echo \"$?\" >&3; } | " + g + " >&4; } 3>&1 ) || :\n" +
 		"if [ \"${rc:-0}\" -ne 0 ]; then echo \"docker logs exited $rc; run without --grep to see its output\" >&2; exit \"$rc\"; fi\n"
 }
+
+// FollowGrepScript is LogsScript for Follow with Grep when the script runs
+// as an `sh -c` argument and ssh's stdin stays open for the whole command
+// (remote.SSH.RunTerminal without a tty). Without a tty nothing tells
+// docker the client left: docker writes only into grep's pipe, so a
+// rarely matching pattern would keep `docker logs -f | grep` running on
+// the Server forever. Here a watcher reads stdin; when the client exits or
+// the connection drops, stdin ends and the script stops docker and grep.
+// The script must not run through `sh -s`, where stdin is the script.
+func FollowGrepScript(cmd, args string, o LogsOptions) string {
+	s := LogsScript(cmd, args, LogsOptions{LogFilter: LogFilter{Since: o.Since, Until: o.Until}, Lines: o.Lines, Follow: true, Timestamps: o.Timestamps})
+	s = strings.TrimSuffix(s, " 2>&1") // redirected to the fifo below, in order
+	g := "grep $lb"
+	if o.IgnoreCase {
+		g += " -i"
+	}
+	if o.Regex {
+		g += " -E"
+	} else {
+		g += " -F"
+	}
+	g += " -e " + remote.Quote(o.Grep)
+	return `set -eu
+lb=
+if printf 'x\n' | grep --line-buffered x >/dev/null 2>&1; then lb=--line-buffered; fi
+dp= gp= wp=
+d=$(mktemp -d "${TMPDIR:-/tmp}/yoho-logs.XXXXXX")
+trap 'kill $dp $gp $wp 2>/dev/null || :; rm -rf "$d"' EXIT
+trap 'exit 130' INT HUP TERM
+mkfifo "$d/p"
+exec 3<&0
+` + s + ` >"$d/p" 2>&1 & dp=$!
+` + g + ` <"$d/p" & gp=$!
+cat <&3 >/dev/null & wp=$!
+while kill -0 "$wp" 2>/dev/null && kill -0 "$gp" 2>/dev/null; do sleep 1; done
+rc=0
+if ! kill -0 "$dp" 2>/dev/null; then wait "$dp" || rc=$?; fi
+if [ "$rc" -ne 0 ]; then echo "docker logs exited $rc; run without --grep to see its output" >&2; exit "$rc"; fi
+`
+}

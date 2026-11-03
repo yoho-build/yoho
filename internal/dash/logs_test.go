@@ -3,8 +3,10 @@ package dash
 import (
 	"errors"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestCheckTime(t *testing.T) {
@@ -138,5 +140,42 @@ func TestLogsScriptGrepKeepsDockerFailure(t *testing.T) {
 	}
 	if out, code := run(working, LogsOptions{LogFilter: LogFilter{Grep: "b"}}); code != 0 || out != "b\n" {
 		t.Errorf("match: %d %q", code, out)
+	}
+}
+
+// TestFollowGrepScriptStopsWhenStdinCloses: the client leaving (stdin EOF)
+// must stop docker and grep, even when nothing ever matches.
+func TestFollowGrepScriptStopsWhenStdinCloses(t *testing.T) {
+	if _, err := exec.LookPath("sh"); err != nil {
+		t.Skip("no sh")
+	}
+	dir := t.TempDir()
+	fake := "docker() { i=0; while :; do i=$((i+1)); echo \"tick $i\"; sleep 0.1; done; }\n"
+	cmd := exec.Command("sh", "-c", fake+FollowGrepScript("docker logs", "'c'", LogsOptions{Lines: 1, LogFilter: LogFilter{Grep: "tick 3"}}))
+	cmd.Env = append(cmd.Environ(), "TMPDIR="+dir)
+	stdin, err := cmd.StdinPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out strings.Builder
+	cmd.Stdout = &out
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(1500 * time.Millisecond)
+	stdin.Close() // the ssh client went away
+	done := make(chan error, 1)
+	go func() { done <- cmd.Wait() }()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		cmd.Process.Kill()
+		t.Fatal("script kept running after stdin closed")
+	}
+	if !strings.Contains(out.String(), "tick 3\n") || strings.Contains(out.String(), "tick 4\n") {
+		t.Errorf("matches: %q", out.String())
+	}
+	if left, _ := filepath.Glob(filepath.Join(dir, "yoho-logs.*")); len(left) > 0 {
+		t.Errorf("temp dir left: %v", left)
 	}
 }

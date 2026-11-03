@@ -172,7 +172,11 @@ show every line they select.`,
 				}
 				return err
 			}
-			err = a.remoteRun(cmd, appLogsScript(a.project(), svcs, swarm, opts))
+			if follow && opts.Grep != "" {
+				err = a.followGrep(cmd, appFollowGrepScript(a.project(), svcs, swarm, opts))
+			} else {
+				err = a.remoteRun(cmd, appLogsScript(a.project(), svcs, swarm, opts))
+			}
 			if follow && cmd.Context().Err() != nil {
 				return nil // Ctrl-C ends a follow
 			}
@@ -198,6 +202,31 @@ func appLogsScript(project string, svcs []string, swarm bool, o dash.LogsOptions
 		return dash.LogsScript("docker service logs", remote.Quote(project+"_"+svcs[0]), o)
 	}
 	return dash.LogsScript("docker compose -p "+remote.Quote(project)+" logs", remote.QuoteArgs(svcs...), o)
+}
+
+func appFollowGrepScript(project string, svcs []string, swarm bool, o dash.LogsOptions) string {
+	if swarm {
+		return dash.FollowGrepScript("docker service logs", remote.Quote(project+"_"+svcs[0]), o)
+	}
+	return dash.FollowGrepScript("docker compose -p "+remote.Quote(project)+" logs", remote.QuoteArgs(svcs...), o)
+}
+
+// followGrep runs a dash.FollowGrepScript: the script travels as an
+// argument and ssh's stdin stays open until this command ends, so the
+// Server stops docker and grep when we exit or the connection drops.
+func (a *app) followGrep(cmd *cobra.Command, script string) error {
+	ctx := cmd.Context()
+	srv := a.cfg.Servers[a.dest.Servers[0]]
+	h, err := remote.NewSSH(a.dest.Servers[0], srv.SSH, srv.Sudo, remote.SSHOptions{})
+	if err != nil {
+		return err
+	}
+	defer h.Close()
+	stdin, hold := io.Pipe()
+	stop := context.AfterFunc(ctx, func() { hold.Close() })
+	defer stop()
+	defer hold.Close()
+	return h.RunTerminal(ctx, script, false, stdin, cmd.OutOrStdout(), cmd.ErrOrStderr())
 }
 
 // exitNoContainers is the exit code of statsScript when the App has no
