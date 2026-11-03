@@ -49,7 +49,7 @@ func TestLogsOptions(t *testing.T) {
 func TestAppLogsScript(t *testing.T) {
 	o := dash.LogsOptions{Lines: 50, Follow: true, Timestamps: true, LogFilter: dash.LogFilter{Since: "10m", Grep: `"; $(id)`, IgnoreCase: true}}
 	got := appLogsScript("yoho-shop-production", []string{"web", "worker"}, false, o)
-	if !strings.Contains(got, `docker compose -p 'yoho-shop-production' logs --since '10m' --timestamps -f --tail 50 'web' 'worker' 2>&1 | grep $lb -i -F -e '"; $(id)' || [`) {
+	if !strings.Contains(got, `docker compose -p 'yoho-shop-production' logs --since '10m' --timestamps -f --tail 50 'web' 'worker' 2>&1 && echo 0 >&3 || echo "$?" >&3; } | grep $lb -i -F -e '"; $(id)' >&4;`) {
 		t.Errorf("compose: %s", got)
 	}
 	got = appLogsScript("yoho-shop-production", []string{"web"}, true, dash.LogsOptions{Lines: 100})
@@ -57,7 +57,7 @@ func TestAppLogsScript(t *testing.T) {
 		t.Errorf("swarm: %s", got)
 	}
 	got = appLogsScript("yoho-shop-production", nil, false, dash.LogsOptions{LogFilter: dash.LogFilter{Grep: "ERROR"}})
-	if got != "set -eu\ndocker compose -p 'yoho-shop-production' logs 2>&1 | grep -F -e 'ERROR' || [ \"$?\" -eq 1 ]\n" {
+	if !strings.Contains(got, "{ { docker compose -p 'yoho-shop-production' logs 2>&1 && echo 0 >&3 || echo \"$?\" >&3; } | grep -F -e 'ERROR' >&4; }") {
 		t.Errorf("--all --grep: %q", got)
 	}
 }

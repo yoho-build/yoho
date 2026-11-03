@@ -1,6 +1,7 @@
 package dash
 
 import (
+	"errors"
 	"os/exec"
 	"strings"
 	"testing"
@@ -32,6 +33,13 @@ func TestLogFilterCheck(t *testing.T) {
 	}
 }
 
+// grepScript is LogsScript's shape with a grep filter: docker's exit
+// status leaves the pipeline on fd 3, matches go to fd 4.
+func grepScript(docker, grep string) string {
+	return "set -eu\nexec 4>&1\nrc=$( { { " + docker + " && echo 0 >&3 || echo \"$?\" >&3; } | " + grep + " >&4; } 3>&1 ) || :\n" +
+		"if [ \"${rc:-0}\" -ne 0 ]; then echo \"docker logs exited $rc; run without --grep to see its output\" >&2; exit \"$rc\"; fi\n"
+}
+
 func TestLogsScript(t *testing.T) {
 	for _, c := range []struct {
 		o    LogsOptions
@@ -42,16 +50,16 @@ func TestLogsScript(t *testing.T) {
 		{LogsOptions{Lines: 5, Follow: true, Timestamps: true, LogFilter: LogFilter{Since: "10m", Until: "2026-11-03T15:04:05Z"}},
 			"docker logs --since '10m' --until '2026-11-03T15:04:05Z' --timestamps -f --tail 5 'c' 2>&1"},
 		{LogsOptions{Lines: 20, LogFilter: LogFilter{Grep: "it's"}},
-			"set -eu\ndocker logs 'c' 2>&1 | grep -F -e 'it'\\''s' | tail -n 20\n"},
+			grepScript("docker logs 'c' 2>&1", "grep -F -e 'it'\\''s' | tail -n 20")},
 		{LogsOptions{LogFilter: LogFilter{Grep: "-v", IgnoreCase: true, Regex: true}},
-			"set -eu\ndocker logs 'c' 2>&1 | grep -i -E -e '-v' || [ \"$?\" -eq 1 ]\n"},
+			grepScript("docker logs 'c' 2>&1", "grep -i -E -e '-v'")},
 	} {
 		if got := LogsScript("docker logs", "'c'", c.o); got != c.want {
 			t.Errorf("%+v:\n got %q\nwant %q", c.o, got, c.want)
 		}
 	}
 	f := LogsScript("docker logs", "'c'", LogsOptions{Lines: 10, Follow: true, LogFilter: LogFilter{Grep: "x"}})
-	if !strings.Contains(f, "-f --tail 10 'c' 2>&1 | grep $lb -F -e 'x' || [") || !strings.Contains(f, "--line-buffered") {
+	if !strings.Contains(f, "-f --tail 10 'c' 2>&1 && echo 0 >&3 || echo \"$?\" >&3; } | grep $lb -F -e 'x' >&4;") || !strings.Contains(f, "--line-buffered") {
 		t.Errorf("follow keeps docker's tail and line-buffers grep: %s", f)
 	}
 }
@@ -96,5 +104,39 @@ func TestLogsScriptRuns(t *testing.T) {
 	}
 	if got := run(LogsOptions{LogFilter: LogFilter{Grep: "a.c"}}); got != "" {
 		t.Errorf("fixed string by default: %q", got)
+	}
+}
+
+// TestLogsScriptGrepKeepsDockerFailure: grep must not hide a failing docker
+// (POSIX sh has no pipefail), while no match on a working docker is fine.
+func TestLogsScriptGrepKeepsDockerFailure(t *testing.T) {
+	if _, err := exec.LookPath("sh"); err != nil {
+		t.Skip("no sh")
+	}
+	run := func(fake string, o LogsOptions) (string, int) {
+		t.Helper()
+		out, err := exec.Command("sh", "-c", fake+LogsScript("docker logs", "'c'", o)).CombinedOutput()
+		code := 0
+		var ee *exec.ExitError
+		if errors.As(err, &ee) {
+			code = ee.ExitCode()
+		} else if err != nil {
+			t.Fatal(err)
+		}
+		return string(out), code
+	}
+	failing := "docker() { echo 'Error response from daemon: No such container: c' >&2; return 3; }\n"
+	for _, o := range []LogsOptions{{LogFilter: LogFilter{Grep: "x"}}, {Lines: 5, LogFilter: LogFilter{Grep: "x"}}, {Follow: true, LogFilter: LogFilter{Grep: "x"}}} {
+		out, code := run(failing, o)
+		if code != 3 || !strings.Contains(out, "docker logs exited 3") {
+			t.Errorf("%+v: failing docker must fail (exit %d): %q", o, code, out)
+		}
+	}
+	working := "docker() { printf '%s\\n' 'a' 'b'; }\n"
+	if out, code := run(working, LogsOptions{LogFilter: LogFilter{Grep: "zzz"}}); code != 0 || out != "" {
+		t.Errorf("no match is not an error: %d %q", code, out)
+	}
+	if out, code := run(working, LogsOptions{LogFilter: LogFilter{Grep: "b"}}); code != 0 || out != "b\n" {
+		t.Errorf("match: %d %q", code, out)
 	}
 }

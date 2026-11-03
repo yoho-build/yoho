@@ -250,7 +250,7 @@ func TestPSAndLogs(t *testing.T) {
 	if err := g.Call(context.Background(), VerbLogs, filtered, nil, io.Discard, nil); err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(h.all(), "logs --since '1h' 'web' 2>&1 | grep -F -e 'a'\\''; id' | tail -n 10000") {
+	if !strings.Contains(h.all(), "logs --since '1h' 'web' 2>&1 && echo 0 >&3 || echo \"$?\" >&3; } | grep -F -e 'a'\\''; id' | tail -n 10000 >&4;") {
 		t.Fatalf("scripts: %s", h.all())
 	}
 	for _, bad := range []dash.LogFilter{{Since: "1h; id"}, {Until: "banana"}, {Grep: "a\nb"}} {

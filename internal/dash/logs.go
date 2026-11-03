@@ -145,10 +145,15 @@ func LogsScript(cmd, args string, o LogsOptions) string {
 		g += " -F"
 	}
 	g += " -e " + remote.Quote(o.Grep)
-	s += " | " + g
 	if tailAfter {
-		return pre + s + " | tail -n " + strconv.Itoa(o.Lines) + "\n"
+		g += " | tail -n " + strconv.Itoa(o.Lines)
 	}
-	// grep exits 1 when nothing matched: not an error.
-	return pre + s + " || [ \"$?\" -eq 1 ]\n"
+	// POSIX sh has no pipefail, and docker's own errors share stderr with the
+	// container's, so grep would hide a failing docker. Carry docker's exit
+	// status out on fd 3, from an &&/|| list that set -e leaves running;
+	// matches go to the real stdout (fd 4). grep exiting 1 (nothing
+	// matched) is not an error.
+	return pre + "exec 4>&1\n" +
+		"rc=$( { { " + s + " && echo 0 >&3 || echo \"$?\" >&3; } | " + g + " >&4; } 3>&1 ) || :\n" +
+		"if [ \"${rc:-0}\" -ne 0 ]; then echo \"docker logs exited $rc; run without --grep to see its output\" >&2; exit \"$rc\"; fi\n"
 }
