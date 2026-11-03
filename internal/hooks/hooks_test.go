@@ -7,6 +7,9 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/yoho-build/yoho/internal/config"
+	"github.com/yoho-build/yoho/internal/plan"
 )
 
 func writeHook(t *testing.T, dir, name, body string, mode os.FileMode) {
@@ -61,5 +64,65 @@ func TestNonExecutableSkipped(t *testing.T) {
 	}
 	if !strings.Contains(out.String(), "not executable") {
 		t.Errorf("missing warning: %q", out.String())
+	}
+}
+
+func TestHosts(t *testing.T) {
+	got := Hosts([]plan.NamedHost{
+		{Name: "a", Server: config.Server{SSH: "root@127.0.0.1:2222"}},
+		{Name: "b", Server: config.Server{SSH: "ssh://deploy@web.example.com"}},
+		{Name: "c", Server: config.Server{SSH: "[::1]:22"}},
+		{Name: "local"},
+	})
+	if got != "127.0.0.1:2222,web.example.com,[::1]:22,local" {
+		t.Errorf("Hosts = %q", got)
+	}
+}
+
+// TestHookOrderAndEnv runs scripts that append "$0 $YOHO_COMMAND $YOHO_LOCK
+// $YOHO_HOSTS" to a log, like the QA hooks.
+func TestHookOrderAndEnv(t *testing.T) {
+	dir := t.TempDir()
+	log := filepath.Join(t.TempDir(), "hooks.log")
+	for _, n := range []string{"pre-deploy", "post-deploy"} {
+		writeHook(t, dir, n, `echo "$(basename "$0") $YOHO_COMMAND $YOHO_LOCK $YOHO_HOSTS" >> `+log, 0o755)
+	}
+	h := New(dir, map[string]string{"YOHO_COMMAND": "rollback", "YOHO_HOSTS": "h1"}, nil)
+	ctx := context.Background()
+	if err := h(ctx, "pre-deploy", nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := h(ctx, "post-deploy", map[string]string{"YOHO_LOCK": LockHeld, "YOHO_HOSTS": "h1:22,h2"}); err != nil {
+		t.Fatal(err)
+	}
+	b, err := os.ReadFile(log)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := "pre-deploy rollback false h1\npost-deploy rollback true h1:22,h2\n"; string(b) != want {
+		t.Errorf("log\n%s\nwant\n%s", b, want)
+	}
+}
+
+func TestSamplesRun(t *testing.T) {
+	dir := t.TempDir()
+	for _, n := range Names {
+		if when[n] == "" {
+			t.Errorf("hook %s has no description", n)
+		}
+		s := Sample(n)
+		for _, env := range []string{"YOHO_HOSTS", "YOHO_LOCK", "YOHO_COMMAND", "YOHO_RUNTIME"} {
+			if !strings.Contains(s, env) {
+				t.Errorf("%s.sample does not mention %s", n, env)
+			}
+		}
+		// Enabled as is, a sample must run (set -u with no YOHO_* env).
+		if err := os.WriteFile(filepath.Join(dir, n), []byte(s), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		var out bytes.Buffer
+		if err := New(dir, nil, &out)(context.Background(), n, nil); err != nil {
+			t.Errorf("%s sample: %v\n%s", n, err, out.String())
+		}
 	}
 }

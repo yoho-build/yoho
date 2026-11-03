@@ -17,6 +17,7 @@ import (
 
 	"go.yaml.in/yaml/v3"
 
+	"github.com/yoho-build/yoho/internal/hooks"
 	"github.com/yoho-build/yoho/internal/migrate"
 	"github.com/yoho-build/yoho/internal/plan"
 	"github.com/yoho-build/yoho/internal/proxy"
@@ -54,17 +55,27 @@ func newRunner(d *plan.Deploy, composeFile string) *runner {
 	}
 }
 
-func (Compose) hook(ctx context.Context, d *plan.Deploy, name string, extra map[string]string) error {
+// hook runs a Hook of a deploy or rollback of version. Every runtime Hook
+// runs with the Destination lock held (taken here or by the caller).
+func (Compose) hook(ctx context.Context, d *plan.Deploy, version, name string, extra map[string]string) error {
+	return RunHook(ctx, d, version, name, extra)
+}
+
+// RunHook runs d.Hook (when set) for version with the runtime env: App,
+// Destination, Version, Performer, YOHO_HOSTS of d.Servers and
+// YOHO_LOCK=true. Runtimes call it only while the Destination lock is held.
+func RunHook(ctx context.Context, d *plan.Deploy, version, name string, extra map[string]string) error {
 	if d.Hook == nil {
 		return nil
 	}
 	env := map[string]string{
 		"YOHO_APP":             d.App,
 		"YOHO_DESTINATION":     d.Destination,
-		"YOHO_VERSION":         d.Version,
-		"YOHO_SERVICE_VERSION": d.App + "@" + d.Version,
+		"YOHO_VERSION":         version,
+		"YOHO_SERVICE_VERSION": d.App + "@" + version,
 		"YOHO_PERFORMER":       d.Performer,
-		"YOHO_HOSTS":           hostsList(d),
+		"YOHO_HOSTS":           hooks.Hosts(d.Servers),
+		"YOHO_LOCK":            hooks.LockHeld,
 	}
 	for k, v := range extra {
 		env[k] = v
@@ -72,20 +83,15 @@ func (Compose) hook(ctx context.Context, d *plan.Deploy, name string, extra map[
 	return d.Hook(ctx, name, env)
 }
 
-// hostsList is the comma-separated Server addresses (ssh target without user).
-func hostsList(d *plan.Deploy) string {
-	var hs []string
-	for _, s := range d.Servers {
-		h := s.Server.SSH
-		if i := strings.LastIndex(h, "@"); i >= 0 {
-			h = h[i+1:]
-		}
-		if h == "" {
-			h = s.Name
-		}
-		hs = append(hs, h)
+// ProxyRebootHook returns proxy.BootOptions.OnReboot running the
+// pre/post-proxy-reboot Hooks for Server s (nil without Hooks).
+func ProxyRebootHook(d *plan.Deploy, version string, s plan.NamedHost) func(context.Context, string) error {
+	if d.Hook == nil {
+		return nil
 	}
-	return strings.Join(hs, ",")
+	return func(ctx context.Context, name string) error {
+		return RunHook(ctx, d, version, name, map[string]string{"YOHO_HOSTS": hooks.Hosts([]plan.NamedHost{s})})
+	}
 }
 
 // needsProxy reports whether the Proxy (and the yoho network) must be up:
@@ -268,17 +274,21 @@ func (c Compose) Deploy(ctx context.Context, d *plan.Deploy) (_ *release.Release
 		}
 	}
 	r.phase = "pre-deploy"
-	if err := c.hook(ctx, d, "pre-deploy", nil); err != nil {
+	if err := c.hook(ctx, d, d.Version, "pre-deploy", nil); err != nil {
 		return nil, err
 	}
 	if needsProxy(plans) {
 		r.phase = "proxy-boot"
-		if err := proxy.Boot(ctx, h, d.Proxy, r.out); err != nil {
+		if err := proxy.BootWith(ctx, h, d.Proxy, r.out, proxy.BootOptions{OnReboot: ProxyRebootHook(d, d.Version, srv)}); err != nil {
 			return nil, err
 		}
 		if err := ensureScopedNetwork(ctx, h, d); err != nil {
 			return nil, err
 		}
+	}
+	r.phase = "pre-app-boot"
+	if err := c.hook(ctx, d, d.Version, "pre-app-boot", nil); err != nil {
+		return nil, err
 	}
 	if len(d.Restart) == 0 {
 		if err := r.startDependencies(ctx, plans); err != nil {
@@ -300,10 +310,14 @@ func (c Compose) Deploy(ctx context.Context, d *plan.Deploy) (_ *release.Release
 		return nil, err
 	}
 	committed = true
+	r.phase = "post-app-boot"
+	if err := c.hook(ctx, d, d.Version, "post-app-boot", nil); err != nil {
+		return rel, err
+	}
 	pruneImages(ctx, r, d)
 	runtime := int(now().Sub(start).Round(time.Second) / time.Second)
 	r.phase = "post-deploy"
-	if err := c.hook(ctx, d, "post-deploy", map[string]string{"YOHO_RUNTIME": strconv.Itoa(runtime)}); err != nil {
+	if err := c.hook(ctx, d, d.Version, "post-deploy", map[string]string{"YOHO_RUNTIME": strconv.Itoa(runtime)}); err != nil {
 		return rel, err
 	}
 	r.logf("deployed %s in %ds", d.Version, runtime)
@@ -479,6 +493,11 @@ func (c Compose) Rollback(ctx context.Context, d *plan.Deploy, version string) (
 	prev, _ := h.Output(ctx, remote.Cmd{Script: "readlink " + remote.Quote(path.Join(dir, "current")) + " 2>/dev/null || true"})
 	prevVersion := path.Base(strings.TrimSpace(prev))
 
+	r.phase = "pre-deploy"
+	if err := c.hook(ctx, d, version, "pre-deploy", nil); err != nil {
+		return nil, err
+	}
+	r.phase = "prepare-release"
 	r.logf("rolling back to %s (volumes, data and migrations are not reverted)", version)
 	// Retained values can differ from today's secrets. Do not print arbitrary
 	// container text without a complete redaction inventory.
@@ -488,12 +507,16 @@ func (c Compose) Rollback(ctx context.Context, d *plan.Deploy, version string) (
 	}
 	if needsProxy(plans) {
 		r.phase = "proxy-boot"
-		if err := proxy.Boot(ctx, h, d.Proxy, r.out); err != nil {
+		if err := proxy.BootWith(ctx, h, d.Proxy, r.out, proxy.BootOptions{OnReboot: ProxyRebootHook(d, version, srv)}); err != nil {
 			return nil, err
 		}
 		if err := ensureScopedNetwork(ctx, h, d); err != nil {
 			return nil, err
 		}
+	}
+	r.phase = "pre-app-boot"
+	if err := c.hook(ctx, d, version, "pre-app-boot", nil); err != nil {
+		return nil, err
 	}
 	if err := r.cutover(ctx, plans); err != nil {
 		return nil, err
@@ -514,6 +537,15 @@ func (c Compose) Rollback(ctx context.Context, d *plan.Deploy, version string) (
 	r.phase = "record-release"
 	if err := c.finish(ctx, d, r, rel); err != nil {
 		return nil, err
+	}
+	r.phase = "post-app-boot"
+	if err := c.hook(ctx, d, version, "post-app-boot", nil); err != nil {
+		return rel, err
+	}
+	r.phase = "post-deploy"
+	secs := int(now().Sub(start).Round(time.Second) / time.Second)
+	if err := c.hook(ctx, d, version, "post-deploy", map[string]string{"YOHO_RUNTIME": strconv.Itoa(secs)}); err != nil {
+		return rel, err
 	}
 	r.logf("rolled back to %s", version)
 	return rel, nil

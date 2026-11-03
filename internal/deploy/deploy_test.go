@@ -7,10 +7,12 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/yoho-build/yoho/internal/hooks"
 	"github.com/yoho-build/yoho/internal/release"
 	"github.com/yoho-build/yoho/internal/remote"
 )
@@ -88,8 +90,13 @@ func TestDeployEndToEnd(t *testing.T) {
 	var out bytes.Buffer
 	var hooks []string
 	d := testDeploy(t, h, &out)
+	// scriptsAt is how many docker scripts ran before each Hook.
+	scriptsAt := map[string]int{}
 	d.Hook = func(_ context.Context, name string, env map[string]string) error {
-		hooks = append(hooks, name+":"+env["YOHO_SERVICE_VERSION"]+":"+env["YOHO_HOSTS"])
+		hooks = append(hooks, name+":"+env["YOHO_SERVICE_VERSION"]+":"+env["YOHO_HOSTS"]+":"+env["YOHO_LOCK"])
+		h.mu.Lock()
+		scriptsAt[name] = len(h.scripts)
+		h.mu.Unlock()
 		return nil
 	}
 
@@ -106,8 +113,20 @@ func TestDeployEndToEnd(t *testing.T) {
 	if a := rel.Secrets["web/DATABASE_PASSWORD"]; a.Ref != "generated" {
 		t.Errorf("generated audit %+v", a)
 	}
-	if strings.Join(hooks, ",") != "pre-deploy:shop@v1:203.0.113.10,post-deploy:shop@v1:203.0.113.10" {
-		t.Errorf("hooks %v", hooks)
+	if got, want := strings.Join(hooks, ","), "pre-deploy:shop@v1:203.0.113.10:true,pre-app-boot:shop@v1:203.0.113.10:true,post-app-boot:shop@v1:203.0.113.10:true,post-deploy:shop@v1:203.0.113.10:true"; got != want {
+		t.Errorf("hooks\n got %s\nwant %s", got, want)
+	}
+	// pre-app-boot runs after the Proxy boot, before any container starts;
+	// post-app-boot after the cutover.
+	h.mu.Lock()
+	scripts := slices.Clone(h.scripts)
+	h.mu.Unlock()
+	before, after := strings.Join(scripts[:scriptsAt["pre-app-boot"]], "\n"), strings.Join(scripts[scriptsAt["pre-app-boot"]:scriptsAt["post-app-boot"]], "\n")
+	if !strings.Contains(before, "kamal-proxy") || strings.Contains(before, "'up'") || strings.Contains(before, "'run' '--rm'") {
+		t.Errorf("before pre-app-boot:\n%s", before)
+	}
+	if !strings.Contains(after, "'run' '--rm'") || !strings.Contains(after, "kamal-proxy' 'deploy") {
+		t.Errorf("between pre-app-boot and post-app-boot:\n%s", after)
 	}
 
 	// Command order: proxy boot, deps, release command, one plain up for
@@ -221,6 +240,24 @@ func TestDeployProxyFailureKeepsOld(t *testing.T) {
 	}
 }
 
+func TestPreAppBootFailureAborts(t *testing.T) {
+	withRoot(t)
+	h := &dockerHost{local: &remote.Local{}, respond: respond(nil)}
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "pre-app-boot"), []byte("#!/bin/sh\nexit 4\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	d := testDeploy(t, h, nil)
+	d.Hook = hooks.New(dir, nil, nil)
+	_, err := Compose{}.Deploy(context.Background(), d)
+	if err == nil || !strings.Contains(err.Error(), "hook pre-app-boot failed (exit 4)") {
+		t.Fatalf("err = %v", err)
+	}
+	if all := h.all(); strings.Contains(all, "'run' '--rm'") || strings.Contains(all, "kamal-proxy' 'deploy") {
+		t.Error("no container may start after a failed pre-app-boot")
+	}
+}
+
 func TestReleaseCommandFailureAborts(t *testing.T) {
 	withRoot(t)
 	h := &dockerHost{local: &remote.Local{}}
@@ -313,9 +350,17 @@ func TestRollbackAndPrune(t *testing.T) {
 	if _, err := (Compose{}).Rollback(ctx, d, "v1"); err == nil {
 		t.Error("rollback to a pruned release must fail")
 	}
+	var hooks []string
+	d.Hook = func(_ context.Context, name string, env map[string]string) error {
+		hooks = append(hooks, name+":"+env["YOHO_SERVICE_VERSION"]+":"+env["YOHO_LOCK"])
+		return nil
+	}
 	rel, err := Compose{}.Rollback(ctx, d, "v2")
 	if err != nil {
 		t.Fatal(err)
+	}
+	if got, want := strings.Join(hooks, ","), "pre-deploy:shop@v2:true,pre-app-boot:shop@v2:true,post-app-boot:shop@v2:true,post-deploy:shop@v2:true"; got != want {
+		t.Errorf("rollback hooks\n got %s\nwant %s", got, want)
 	}
 	if rel.Version != "v2" || rel.Status != "deployed" {
 		t.Errorf("rollback release %+v", rel)

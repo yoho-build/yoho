@@ -108,30 +108,10 @@ func (r *runner) logf(format string, a ...any) {
 	fmt.Fprintf(r.out, "["+r.server+"] "+format+"\n", a...)
 }
 
-func hook(ctx context.Context, d *plan.Deploy, name string, extra map[string]string) error {
-	if d.Hook == nil {
-		return nil
-	}
-	var hs []string
-	for _, s := range d.Servers {
-		_, h, _, err := remote.ParseTarget(s.Server.SSH)
-		if err != nil || h == "" {
-			h = s.Name
-		}
-		hs = append(hs, h)
-	}
-	env := map[string]string{
-		"YOHO_APP":             d.App,
-		"YOHO_DESTINATION":     d.Destination,
-		"YOHO_VERSION":         d.Version,
-		"YOHO_SERVICE_VERSION": d.App + "@" + d.Version,
-		"YOHO_PERFORMER":       d.Performer,
-		"YOHO_HOSTS":           strings.Join(hs, ","),
-	}
-	for k, v := range extra {
-		env[k] = v
-	}
-	return d.Hook(ctx, name, env)
+// hook runs a Hook of a deploy or rollback of version, once for the whole
+// Destination (YOHO_HOSTS lists every Server), with the Destination lock held.
+func hook(ctx context.Context, d *plan.Deploy, version, name string, extra map[string]string) error {
+	return deploy.RunHook(ctx, d, version, name, extra)
 }
 
 // checkSwarm verifies the first Server is a Swarm manager and the others are
@@ -318,13 +298,16 @@ func (Runtime) Deploy(ctx context.Context, d *plan.Deploy) (_ *release.Release, 
 		}
 	}()
 
-	if err := hook(ctx, d, "pre-deploy", nil); err != nil {
+	if err := hook(ctx, d, d.Version, "pre-deploy", nil); err != nil {
 		return nil, err
 	}
 	if c.Plan.needsProxy() {
-		if err := r.bootProxy(ctx, d); err != nil {
+		if err := r.bootProxy(ctx, d, d.Version); err != nil {
 			return nil, err
 		}
+	}
+	if err := hook(ctx, d, d.Version, "pre-app-boot", nil); err != nil {
+		return nil, err
 	}
 	auth := registryAuth(d, c.Plan)
 	stackTouched = true // release_command may deploy dependencies first
@@ -346,8 +329,11 @@ func (Runtime) Deploy(ctx context.Context, d *plan.Deploy) (_ *release.Release, 
 		return nil, err
 	}
 	committed = true
+	if err := hook(ctx, d, d.Version, "post-app-boot", nil); err != nil {
+		return rel, err
+	}
 	secs := int(now().Sub(start).Round(time.Second) / time.Second)
-	if err := hook(ctx, d, "post-deploy", map[string]string{"YOHO_RUNTIME": strconv.Itoa(secs)}); err != nil {
+	if err := hook(ctx, d, d.Version, "post-deploy", map[string]string{"YOHO_RUNTIME": strconv.Itoa(secs)}); err != nil {
 		return rel, err
 	}
 	r.logf("deployed %s in %ds", d.Version, secs)
@@ -479,7 +465,7 @@ func (r *runner) createSecrets(ctx context.Context, d *plan.Deploy, svcSecrets m
 // bootProxy ensures the attachable overlay network `yoho` (cluster-wide, so
 // both kamal-proxy containers and Swarm tasks can join it) and boots the
 // Proxy on every Server. DNS or a Cloudflare Tunnel can point at any node.
-func (r *runner) bootProxy(ctx context.Context, d *plan.Deploy) error {
+func (r *runner) bootProxy(ctx context.Context, d *plan.Deploy, version string) error {
 	script := `set -eu
 s=$(docker network inspect -f '{{.Driver}}|{{.Scope}}|{{.Attachable}}' ` + proxy.Network + ` 2>/dev/null || true)
 case "$s" in
@@ -502,7 +488,7 @@ esac`
 		}
 		// Never let the proxy create `yoho` here: on a worker that would be a
 		// local bridge instead of the manager's overlay.
-		if err := proxy.BootWith(ctx, s.Host, d.Proxy, r.out, proxy.BootOptions{SkipNetwork: true}); err != nil {
+		if err := proxy.BootWith(ctx, s.Host, d.Proxy, r.out, proxy.BootOptions{SkipNetwork: true, OnReboot: deploy.ProxyRebootHook(d, version, s)}); err != nil {
 			return fmt.Errorf("boot proxy on %s: %w", s.Name, err)
 		}
 	}
@@ -1261,11 +1247,17 @@ func (Runtime) Rollback(ctx context.Context, d *plan.Deploy, version string) (_ 
 		}
 	}
 
+	if err := hook(ctx, d, version, "pre-deploy", nil); err != nil {
+		return nil, err
+	}
 	r.logf("rolling back to %s (volumes, data and migrations are not reverted)", version)
 	if p.needsProxy() {
-		if err := r.bootProxy(ctx, d); err != nil {
+		if err := r.bootProxy(ctx, d, version); err != nil {
 			return nil, err
 		}
+	}
+	if err := hook(ctx, d, version, "pre-app-boot", nil); err != nil {
+		return nil, err
 	}
 	if err := r.deployStack(ctx, stackFile, r.stack, true, registryAuth(d, *p), stackServiceNames(*p)...); err != nil {
 		return nil, err
@@ -1285,6 +1277,13 @@ func (Runtime) Rollback(ctx context.Context, d *plan.Deploy, version string) (_ 
 	rel.Performer = d.Performer
 	if err := r.finish(ctx, d, rel); err != nil {
 		return nil, err
+	}
+	if err := hook(ctx, d, version, "post-app-boot", nil); err != nil {
+		return rel, err
+	}
+	secs := int(now().Sub(start).Round(time.Second) / time.Second)
+	if err := hook(ctx, d, version, "post-deploy", map[string]string{"YOHO_RUNTIME": strconv.Itoa(secs)}); err != nil {
+		return rel, err
 	}
 	r.logf("rolled back to %s", version)
 	return rel, nil

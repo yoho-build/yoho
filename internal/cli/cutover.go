@@ -9,6 +9,7 @@ import (
 
 	"github.com/yoho-build/yoho/internal/config"
 	"github.com/yoho-build/yoho/internal/deploy"
+	"github.com/yoho-build/yoho/internal/hooks"
 	"github.com/yoho-build/yoho/internal/migrate"
 	"github.com/yoho-build/yoho/internal/plan"
 	"github.com/yoho-build/yoho/internal/proxy"
@@ -196,7 +197,7 @@ func (c *cutoverRun) prepare(ctx context.Context) error {
 		"containers": containerNames(p.Containers), "hostnames": hostnames, "duration_ms": time.Since(start).Milliseconds(),
 	})
 	if c.hook != nil && !c.j.StopComplete {
-		if err := c.hook(ctx, "pre-cutover", map[string]string{"YOHO_CUTOVER": c.j.ID}); err != nil {
+		if err := c.hook(ctx, "pre-cutover", map[string]string{"YOHO_CUTOVER": c.j.ID, "YOHO_LOCK": hooks.LockHeld}); err != nil {
 			return err
 		}
 	}
@@ -257,7 +258,7 @@ func (c *cutoverRun) finish(ctx context.Context, rel *release.Release) error {
 		}
 	}
 	if c.hook != nil {
-		if err := c.hook(ctx, "post-cutover", map[string]string{"YOHO_CUTOVER": c.j.ID}); err != nil {
+		if err := c.hook(ctx, "post-cutover", map[string]string{"YOHO_CUTOVER": c.j.ID, "YOHO_LOCK": hooks.LockHeld}); err != nil {
 			return fmt.Errorf("%w\nhint: rerun `yoho deploy --cutover-resume` to retry post-cutover", err)
 		}
 	}

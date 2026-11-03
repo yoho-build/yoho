@@ -77,7 +77,9 @@ Executable scripts in `.yoho/hooks/<name>` (dir configurable via `hooks.path`), 
 
 Names: `docker-setup`, `pre-connect`, `pre-build`, `pre-deploy`, `post-deploy`, `pre-app-boot`, `post-app-boot`, `pre-proxy-reboot`, `post-proxy-reboot`, `pre-backup`, `post-backup`, `pre-restore`, `post-restore`.
 
-Hook env: `YOHO_APP`, `YOHO_DESTINATION`, `YOHO_VERSION`, `YOHO_SERVICE_VERSION` (`<app>@<version>`), `YOHO_HOSTS` (comma list), `YOHO_COMMAND`, `YOHO_SUBCOMMAND`, `YOHO_PERFORMER`, `YOHO_RECORDED_AT` (UTC RFC3339), `YOHO_LOCK`, `YOHO_RUNTIME` (seconds, post-deploy).
+Hook env: `YOHO_APP`, `YOHO_DESTINATION`, `YOHO_VERSION`, `YOHO_SERVICE_VERSION` (`<app>@<version>`), `YOHO_HOSTS` (comma list of `host[:port]`, no ssh user), `YOHO_COMMAND` (`deploy`, `rollback`, `proxy`, `backup`, ...), `YOHO_SUBCOMMAND`, `YOHO_PERFORMER`, `YOHO_RECORDED_AT` (UTC RFC3339), `YOHO_LOCK` (`true` while the Destination lock is held), `YOHO_RUNTIME` (seconds, post-deploy).
+
+Order for deploy: `pre-connect`, `pre-build`, `pre-deploy`, (`pre-proxy-reboot`/`post-proxy-reboot` if a changed Proxy is recreated), `pre-app-boot`, `post-app-boot`, `post-deploy`. `rollback` runs the same without `pre-build` (`YOHO_COMMAND=rollback`); `yoho proxy boot` runs `pre-connect`, then `pre-proxy-reboot`/`post-proxy-reboot` per Server. `docker-setup` is not run yet. `yoho init` writes `.yoho/hooks/*.sample`.
 
 ## Container env (injected unless compose sets them)
 

@@ -13,6 +13,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"slices"
+	"strings"
 	"time"
 
 	"github.com/yoho-build/yoho/internal/plan"
@@ -49,10 +50,36 @@ var EnvNames = []string{
 	"YOHO_RECORDED_AT", "YOHO_LOCK", "YOHO_RUNTIME", "YOHO_CUTOVER",
 }
 
+// Hosts formats YOHO_HOSTS: the comma-separated Servers as host or
+// host:port, without the ssh user or scheme (a Server's name when it has no
+// ssh target). Deploy, rollback, proxy and backup Hooks all use it.
+func Hosts(hosts []plan.NamedHost) string {
+	hs := make([]string, 0, len(hosts))
+	for _, h := range hosts {
+		t := strings.TrimPrefix(strings.TrimSpace(h.Server.SSH), "ssh://")
+		if i := strings.LastIndex(t, "@"); i >= 0 {
+			t = t[i+1:]
+		}
+		if t == "" {
+			t = h.Name
+		}
+		hs = append(hs, t)
+	}
+	return strings.Join(hs, ",")
+}
+
+// YOHO_LOCK values: LockHeld while the running command holds the
+// Destination lock, LockNotHeld otherwise (the default).
+const (
+	LockHeld    = "true"
+	LockNotHeld = "false"
+)
+
 // New returns a HookFunc running Hooks from dir with base env (YOHO_APP,
 // YOHO_DESTINATION, ...) plus per-call extras, which win over base.
 // YOHO_RECORDED_AT defaults to the call time; YOHO_SERVICE_VERSION defaults
-// to <app>@<version>. Hook stdout/stderr go to out.
+// to <app>@<version>; YOHO_LOCK defaults to "false". Hook stdout/stderr go
+// to out.
 func New(dir string, base map[string]string, out io.Writer) plan.HookFunc {
 	if dir == "" {
 		dir = DefaultDir
@@ -80,7 +107,7 @@ func New(dir string, base map[string]string, out io.Writer) plan.HookFunc {
 			return nil
 		}
 
-		env := map[string]string{"YOHO_RECORDED_AT": time.Now().UTC().Format(time.RFC3339)}
+		env := map[string]string{"YOHO_RECORDED_AT": time.Now().UTC().Format(time.RFC3339), "YOHO_LOCK": LockNotHeld}
 		for k, v := range base {
 			env[k] = v
 		}
