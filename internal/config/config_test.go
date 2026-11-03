@@ -139,6 +139,34 @@ func TestTypeErrorHasField(t *testing.T) {
 	}
 }
 
+// TestTypeErrorWording: type errors name the full path (with map keys),
+// say what a value looks like rather than a Go type, never echo the value,
+// and for secrets.values point at .yoho/secrets.
+func TestTypeErrorWording(t *testing.T) {
+	cases := map[string][]string{
+		"app: a\nsecrets:\n  values:\n    DB_PASSWORD: hunter2\n": {
+			"secrets.values.DB_PASSWORD: expected a mapping like {provider: vault, ref: ...}, got a string",
+			"hint: ", ".yoho/secrets", "DB_PASSWORD=$(",
+		},
+		"app: a\nservers: {s: {ssh: x, sudo: [1]}}\n": {"servers.s.sudo: expected true or false, got a list"},
+		"app: a\nretain_releases: many\n":             {"retain_releases: expected a whole number, got a string"},
+	}
+	for src, wants := range cases {
+		_, err := Parse([]byte(src), "t")
+		if err == nil {
+			t.Fatalf("%q: no error", src)
+		}
+		for _, w := range wants {
+			if !strings.Contains(err.Error(), w) {
+				t.Errorf("%q: want %q in %v", src, w, err)
+			}
+		}
+		if strings.Contains(err.Error(), "hunter2") || strings.Contains(err.Error(), "config.") {
+			t.Errorf("%q: leaks a value or Go type: %v", src, err)
+		}
+	}
+}
+
 func TestValidateMessages(t *testing.T) {
 	c, err := Parse([]byte(`
 app: Bad_App

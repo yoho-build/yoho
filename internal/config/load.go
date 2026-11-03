@@ -186,11 +186,133 @@ func decodeStrict(generic any, out any) error {
 	if err := dec.Decode(out); err != nil {
 		var ute *json.UnmarshalTypeError
 		if errors.As(err, &ute) && ute.Field != "" {
-			return fmt.Errorf("%s: expected %s, got %s", ute.Field, ute.Type, ute.Value)
+			return typeError(generic, reflect.TypeOf(out).Elem(), ute)
 		}
 		return err
 	}
 	return nil
+}
+
+// typeError words a JSON type error for the Yoho file: the full path (json
+// leaves map keys and list indexes out of Field), what a value looks like
+// instead of a Go type, and for secrets.values where plain values go.
+func typeError(generic any, root reflect.Type, ute *json.UnmarshalTypeError) error {
+	field := ute.Field
+	if p, ok := typePath(generic, root, strings.Split(ute.Field, "."), "", ute); ok {
+		field = p
+	}
+	msg := fmt.Sprintf("%s: expected %s, got %s", field, describeType(ute.Type), describeValue(ute.Value))
+	if ute.Type == reflect.TypeOf(SecretValue{}) {
+		key := field[strings.LastIndex(field, ".")+1:]
+		msg += fmt.Sprintf("\nhint: secrets.values maps a key to a password-manager reference, e.g. %s: {provider: vault, ref: op://vault/item/field}; put plain values or commands in .yoho/secrets instead, e.g. %s=$(op read op://vault/item/field)", key, key)
+	}
+	return errors.New(msg)
+}
+
+// typePath finds where in v (of Go type t) the value of ute sits: segs are
+// the struct fields of ute.Field still to walk, prefix the path so far.
+func typePath(v any, t reflect.Type, segs []string, prefix string, ute *json.UnmarshalTypeError) (string, bool) {
+	for t.Kind() == reflect.Ptr {
+		t = t.Elem()
+	}
+	if len(segs) == 0 && t == ute.Type && strings.HasPrefix(ute.Value, jsonKind(v)) {
+		return prefix, true
+	}
+	switch t.Kind() {
+	case reflect.Struct:
+		m, ok := v.(map[string]any)
+		if !ok || len(segs) == 0 {
+			return "", false
+		}
+		ft, known := jsonFields(t)[segs[0]]
+		if !known {
+			return "", false
+		}
+		return typePath(m[segs[0]], ft, segs[1:], join(prefix, segs[0]), ute)
+	case reflect.Map:
+		m, ok := v.(map[string]any)
+		if !ok {
+			return "", false
+		}
+		keys := make([]string, 0, len(m))
+		for k := range m {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		for _, k := range keys {
+			if p, ok := typePath(m[k], t.Elem(), segs, join(prefix, k), ute); ok {
+				return p, true
+			}
+		}
+	case reflect.Slice:
+		l, ok := v.([]any)
+		if !ok {
+			return "", false
+		}
+		for i, x := range l {
+			if p, ok := typePath(x, t.Elem(), segs, fmt.Sprintf("%s[%d]", prefix, i), ute); ok {
+				return p, true
+			}
+		}
+	}
+	return "", false
+}
+
+// jsonKind is the JSON kind of a decoded value, as UnmarshalTypeError.Value
+// starts.
+func jsonKind(v any) string {
+	switch v.(type) {
+	case string:
+		return "string"
+	case bool:
+		return "bool"
+	case []any:
+		return "array"
+	case map[string]any:
+		return "object"
+	case nil:
+		return "null"
+	}
+	return "number"
+}
+
+// describeType says what a value of Go type t looks like in the Yoho file.
+func describeType(t reflect.Type) string {
+	for t.Kind() == reflect.Ptr {
+		t = t.Elem()
+	}
+	switch {
+	case t == reflect.TypeOf(SecretValue{}):
+		return "a mapping like {provider: vault, ref: ...}"
+	case t.Kind() == reflect.Struct || t.Kind() == reflect.Map:
+		return "a mapping"
+	case t.Kind() == reflect.Slice || t.Kind() == reflect.Array:
+		return "a list"
+	case t.Kind() == reflect.String:
+		return "a string"
+	case t.Kind() == reflect.Bool:
+		return "true or false"
+	case t.Kind() >= reflect.Int && t.Kind() <= reflect.Uintptr:
+		return "a whole number"
+	case t.Kind() == reflect.Float32 || t.Kind() == reflect.Float64:
+		return "a number"
+	}
+	return t.String()
+}
+
+// describeValue words UnmarshalTypeError.Value.
+func describeValue(v string) string {
+	switch v {
+	case "string":
+		return "a string"
+	case "array":
+		return "a list"
+	case "object":
+		return "a mapping"
+	case "bool":
+		return "true or false"
+	}
+	return v // number, number 1.5
 }
 
 // normalize converts map[any]any (from YAML with odd keys) to map[string]any.
