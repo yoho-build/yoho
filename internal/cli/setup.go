@@ -83,7 +83,11 @@ Supports Debian and Ubuntu.`,
 					_, cerr = h.Output(ctx, remote.Cmd{Script: "true"})
 				}
 				if cerr != nil {
-					step.Fail(cerr, "check `ssh "+srv.SSH+"` works without a password")
+					hint := "check `" + sshCommand(srv.SSH) + "` works without a password"
+					if ce, ok := remote.AsConnectError(cerr); ok {
+						hint = ce.Hint
+					}
+					step.Fail(cerr, hint)
 					return &silentError{cerr}
 				}
 				step.Done()

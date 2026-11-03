@@ -190,9 +190,12 @@ the output, e.g. --since 10m -n 200.`,
 			if opts.Grep != "" {
 				stderr = nil
 			}
-			if follow && opts.Grep != "" {
-				err = a.followGrep(cmd, stderr, appFollowGrepScript(a.project(), svcs, swarm, opts))
-			} else {
+			switch {
+			case follow && opts.Grep != "":
+				err = a.follow(cmd, stderr, appFollowGrepScript(a.project(), svcs, swarm, opts))
+			case follow:
+				err = a.follow(cmd, stderr, appFollowScript(a.project(), svcs, swarm, opts))
+			default:
 				err = a.logsRun(cmd, stderr, appLogsScript(a.project(), svcs, swarm, opts))
 			}
 			if follow && cmd.Context().Err() != nil {
@@ -288,13 +291,37 @@ func appFollowGrepScript(project string, svcs []string, swarm bool, o dash.LogsO
 	return dash.FollowGrepScript("docker compose -p "+remote.Quote(project)+" logs", remote.QuoteArgs(svcs...), o)
 }
 
-// followGrep runs a dash.FollowGrepScript: the script travels as an
-// argument and ssh's stdin stays open until this command ends, so the
-// Server stops docker and grep when we exit or the connection drops.
-func (a *app) followGrep(cmd *cobra.Command, stderr io.Writer, script string) error {
+// appFollowScript is the `app logs -f` script without --grep, built like
+// dash.FollowGrepScript: it runs as an `sh -c` argument while ssh's stdin
+// stays open, and a watcher stops docker when stdin ends (the client left
+// or the connection dropped). Through `sh -s` nothing tells docker the
+// client left: with a ControlMaster, killing the ssh client leaves the
+// session, and a quiet Service's `logs -f`, running on the Server.
+func appFollowScript(project string, svcs []string, swarm bool, o dash.LogsOptions) string {
+	o.LogFilter = dash.LogFilter{Since: o.Since}
+	o.Follow = true
+	return `set -eu
+dp= wp=
+trap 'kill $dp $wp 2>/dev/null || :' EXIT
+trap 'exit 130' INT HUP TERM
+exec 3<&0
+` + appLogsScript(project, svcs, swarm, o) + ` </dev/null & dp=$!
+cat <&3 >/dev/null & wp=$!
+while kill -0 "$wp" 2>/dev/null && kill -0 "$dp" 2>/dev/null; do sleep 1; done
+rc=0
+if ! kill -0 "$dp" 2>/dev/null; then wait "$dp" || rc=$?; dp=; fi
+exit "$rc"
+`
+}
+
+// follow runs a follow script (appFollowScript, dash.FollowGrepScript):
+// the script travels as an argument and ssh's stdin stays open until this
+// command ends, so the Server stops docker (and grep) when we exit or the
+// connection drops.
+func (a *app) follow(cmd *cobra.Command, stderr io.Writer, script string) error {
 	ctx := cmd.Context()
 	srv := a.cfg.Servers[a.dest.Servers[0]]
-	h, err := remote.NewSSH(a.dest.Servers[0], srv.SSH, srv.Sudo, remote.SSHOptions{})
+	h, err := remote.NewSSH(a.dest.Servers[0], srv.SSH, srv.Sudo, a.sshOptions())
 	if err != nil {
 		return err
 	}

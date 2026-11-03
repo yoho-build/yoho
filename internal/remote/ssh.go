@@ -520,9 +520,93 @@ func (s *SSH) execWith(ctx context.Context, run ExecFunc, label string, argv []s
 	}
 	var ec interface{ ExitCode() int }
 	if errors.As(err, &ec) && ec.ExitCode() >= 0 {
-		return &ExitError{Host: s.name, Script: label, Code: ec.ExitCode(), Stderr: strings.TrimSpace(stderr.String())}
+		ee := &ExitError{Host: s.name, Script: label, Code: ec.ExitCode(), Stderr: strings.TrimSpace(stderr.String())}
+		if line := sshFailure(ee); line != "" {
+			return &ConnectError{ExitError: ee, Target: s.Target(), Line: line, Shown: stderrW != nil, Hint: s.connectHint()}
+		}
+		return ee
 	}
 	return fmt.Errorf("ssh %s: %w", s.name, err)
+}
+
+// ConnectError is ssh failing to reach or log in to a Server: exit 255
+// with ssh's own message as the last line of stderr. It wraps the
+// ExitError, so code checks keep working.
+type ConnectError struct {
+	*ExitError
+	// Target is [user@]host[:port] as configured.
+	Target string
+	// Line is ssh's message, e.g. "ssh: connect to host h port 22:
+	// Connection refused".
+	Line string
+	// Shown: ssh's stderr was streamed to the user, so Error leaves Line
+	// out instead of printing it twice.
+	Shown bool
+	// Hint is the next step: the ssh command to try and the Yoho file key.
+	Hint string
+}
+
+func (e *ConnectError) Error() string {
+	msg := "cannot connect to Server " + e.Host + " (" + e.Target + ") over ssh"
+	if e.Shown {
+		return msg + " (exit " + strconv.Itoa(e.Code) + ")"
+	}
+	return msg + ": " + e.Line
+}
+
+func (e *ConnectError) Unwrap() error { return e.ExitError }
+
+// AsConnectError returns err's ConnectError, if any.
+func AsConnectError(err error) (*ConnectError, bool) {
+	var ce *ConnectError
+	ok := errors.As(err, &ce)
+	return ce, ok
+}
+
+// sshFailures start the messages the ssh client prints when it cannot
+// connect or log in (not when an open session drops).
+var sshFailures = []string{
+	"ssh: ", "Permission denied", "Host key verification failed", "kex_exchange_identification",
+	"ssh_exchange_identification", "Connection closed by ", "Connection reset by ",
+	"Connection timed out during banner exchange", "banner exchange:", "Bad owner or permissions",
+	"Unable to negotiate", "no matching host key type",
+}
+
+// sshFailure is ssh's connect failure line of a 255 exit, or "". A remote
+// command may exit 255 too; only ssh's own last words count.
+func sshFailure(ee *ExitError) string {
+	if ee.Code != 255 {
+		return ""
+	}
+	lines := strings.Split(strings.TrimSpace(ee.Stderr), "\n")
+	last := strings.TrimSpace(lines[len(lines)-1])
+	for _, p := range sshFailures {
+		if strings.HasPrefix(last, p) {
+			return last
+		}
+	}
+	return ""
+}
+
+// Command is how the operator reaches this Server by hand, e.g.
+// `ssh -p 2222 root@host`.
+func (s *SSH) Command() string {
+	c := "ssh "
+	if s.port != 0 {
+		c += "-p " + strconv.Itoa(s.port) + " "
+	}
+	if h := s.opts.CloudflareHostname; h != "" {
+		c += "-o " + Quote("ProxyCommand=cloudflared access ssh --hostname "+h) + " "
+	}
+	return c + s.Destination()
+}
+
+func (s *SSH) connectHint() string {
+	h := "check that `" + s.Command() + " true` works without a password; the target is servers." + s.name + ".ssh in the Yoho file"
+	if s.opts.CloudflareHostname != "" {
+		h += "; through Cloudflare, log in to Cloudflare Access or set TUNNEL_SERVICE_TOKEN_ID/TUNNEL_SERVICE_TOKEN_SECRET"
+	}
+	return h
 }
 
 // Output implements Host.
@@ -593,8 +677,17 @@ func (s *SSH) Forward(ctx context.Context, localPort int, remoteAddr string) (st
 	}, nil
 }
 
+// execWaitDelay bounds how long a cancelled ssh may hold us after ctx
+// ends. A ControlMaster that ssh forked (ControlPersist) runs ssh's first
+// session itself, with ssh's stdin, stdout and stderr: killing ssh leaves
+// the master writing to our pipes until the remote command ends, which for
+// `logs -f` is never. WaitDelay stops waiting for them.
+var execWaitDelay = 5 * time.Second
+
+// osExec runs argv, killing it when ctx ends.
 func osExec(ctx context.Context, argv []string, stdin io.Reader, stdout, stderr io.Writer) error {
 	c := exec.CommandContext(ctx, argv[0], argv[1:]...)
+	c.WaitDelay = execWaitDelay
 	c.Stdin, c.Stdout, c.Stderr = stdin, stdout, stderr
 	return c.Run()
 }
@@ -605,7 +698,7 @@ func osExec(ctx context.Context, argv []string, stdin io.Reader, stdout, stderr 
 func osExecInterrupt(ctx context.Context, argv []string, stdin io.Reader, stdout, stderr io.Writer) error {
 	c := exec.CommandContext(ctx, argv[0], argv[1:]...)
 	c.Cancel = func() error { return c.Process.Signal(os.Interrupt) }
-	c.WaitDelay = 5 * time.Second
+	c.WaitDelay = execWaitDelay
 	c.Stdin, c.Stdout, c.Stderr = stdin, stdout, stderr
 	return c.Run()
 }

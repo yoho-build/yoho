@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"os/exec"
@@ -16,8 +17,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/yoho-build/yoho/internal/config"
 	"github.com/yoho-build/yoho/internal/dash"
 	"github.com/yoho-build/yoho/internal/gate"
+	"github.com/yoho-build/yoho/internal/proxy"
 	"github.com/yoho-build/yoho/internal/remote"
 	"github.com/yoho-build/yoho/internal/ui"
 )
@@ -141,6 +144,88 @@ func TestAppLogsScript(t *testing.T) {
 	if !strings.Contains(got, "{ { docker compose -p 'yoho-shop-production' logs 2>&1 && echo 0 >&3 || echo \"$?\" >&3; } | { $gw grep -F -e 'ERROR' || echo \"g$?\" >&3; } >&4; }") || !strings.Contains(got, "timeout --foreground 60") {
 		t.Errorf("--all --grep: %q", got)
 	}
+}
+
+// TestAppFollowScriptStopsWhenStdinCloses: a plain `app logs -f` must stop
+// docker on the Server when the client leaves (ssh's stdin ends), even for
+// a Service that never logs, and keep docker's own exit status otherwise.
+func TestAppFollowScriptStopsWhenStdinCloses(t *testing.T) {
+	if _, err := exec.LookPath("sh"); err != nil {
+		t.Skip("no sh")
+	}
+	o := dash.LogsOptions{Lines: 5, Follow: true, Timestamps: true, LogFilter: dash.LogFilter{Since: "10m"}}
+	script := appFollowScript("yoho-shop-production", []string{"web"}, false, o)
+	if !strings.Contains(script, "docker compose -p 'yoho-shop-production' logs --since '10m' --timestamps -f --tail 5 'web' 2>&1 </dev/null & dp=$!") {
+		t.Fatalf("script: %s", script)
+	}
+	dir := t.TempDir()
+	pidFile := filepath.Join(dir, "docker.pid")
+	// A quiet Service: docker prints one line, then nothing. A program, not
+	// a shell function, so the script's pid is docker's, as on a Server.
+	fake := "#!/bin/sh\necho $$ >" + remote.Quote(pidFile) + "\necho hello\nexec sleep 300\n"
+	if err := os.WriteFile(filepath.Join(dir, "docker"), []byte(fake), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command("sh", "-c", script)
+	cmd.Env = append(os.Environ(), "PATH="+dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	stdin, err := cmd.StdinPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	cmd.Stdout = &out
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for !strings.Contains(fileText(pidFile), "\n") && time.Now().Before(deadline) {
+		time.Sleep(50 * time.Millisecond)
+	}
+	pid, err := strconv.Atoi(strings.TrimSpace(fileText(pidFile)))
+	if err != nil {
+		cmd.Process.Kill()
+		t.Fatalf("fake docker did not start: %v", err)
+	}
+	stdin.Close() // the ssh client went away
+	done := make(chan error, 1)
+	go func() { done <- cmd.Wait() }()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		cmd.Process.Kill()
+		t.Fatal("script kept running after stdin closed")
+	}
+	if out.String() != "hello\n" {
+		t.Errorf("output: %q", out.String())
+	}
+	deadline = time.Now().Add(3 * time.Second)
+	for exec.Command("kill", "-0", strconv.Itoa(pid)).Run() == nil {
+		if time.Now().After(deadline) {
+			exec.Command("kill", "-KILL", strconv.Itoa(pid)).Run()
+			t.Fatal("docker kept running after the client left")
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+
+	// docker ending on its own (the Service was removed) ends the follow
+	// with docker's status, while stdin stays open.
+	cmd = exec.Command("sh", "-c", "docker() { echo gone >&2; return 3; }\n"+script)
+	hold, err := cmd.StdinPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer hold.Close()
+	start := time.Now()
+	err = cmd.Run()
+	var ee *exec.ExitError
+	if !errors.As(err, &ee) || ee.ExitCode() != 3 || time.Since(start) > 5*time.Second {
+		t.Errorf("docker failing: %v after %s", err, time.Since(start))
+	}
+}
+
+func fileText(p string) string {
+	b, _ := os.ReadFile(p)
+	return string(b)
 }
 
 func TestLogsServices(t *testing.T) {
@@ -394,6 +479,8 @@ func TestAppCommandsFailBeforeSSH(t *testing.T) {
 		{"swarm", false, []string{"logs", "--all"}, []string{"--all is not supported"}},
 		{"compose", false, []string{"stats", "api"}, []string{"unknown Service api"}},
 		{"compose", true, []string{"stats", "api"}, []string{`"event":"error"`, "unknown Service api"}},
+		{"compose", false, []string{"exec", "nope", "--", "ls"}, []string{"✗ unknown Service nope; Services: db, web", "hint: use a Service name"}},
+		{"swarm", true, []string{"exec", "debug", "--", "ls"}, []string{`"event":"error"`, "unknown Service debug"}},
 	}
 	for _, c := range cases {
 		t.Run(c.runtime+" "+strings.Join(c.args, " "), func(t *testing.T) {
@@ -411,6 +498,54 @@ func TestAppCommandsFailBeforeSSH(t *testing.T) {
 				t.Errorf("human output in --json:\n%s", out)
 			}
 		})
+	}
+}
+
+// TestRolloutHintOverride: a route conflict with another Destination of the
+// App over a hostname of the base compose file points at !override; other
+// conflicts keep the generic hint.
+func TestRolloutHintOverride(t *testing.T) {
+	dir := t.TempDir()
+	base := "services:\n  web:\n    image: nginx\n    x-yoho:\n      proxy:\n        hosts: [shop.example.com]\n        port: 80\n"
+	if err := os.WriteFile(filepath.Join(dir, "compose.yaml"), []byte(base), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "compose.staging.yaml"), []byte("services:\n  web:\n    x-yoho:\n      proxy:\n        hosts: [staging.example.com]\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	a := &app{dir: dir, cfg: &config.Config{App: "shop"}, destName: "staging"}
+	conflict := func(existing, host string) error {
+		return fmt.Errorf("deploy: %w", &proxy.RouteConflictError{Desired: "shop-staging-web", Existing: existing, Host: host, Path: "/"})
+	}
+	if h := a.rolloutHint(context.Background(), conflict("shop-production-web", "shop.example.com"), "def"); !strings.Contains(h, "!override") || !strings.Contains(h, "compose.staging.yaml") || !strings.Contains(h, "services.web.x-yoho.proxy") {
+		t.Errorf("cross-Destination: %s", h)
+	}
+	for _, err := range []error{
+		conflict("shop-staging-old", "shop.example.com"),     // this Destination's own route
+		conflict("other-production-web", "shop.example.com"), // another App
+		conflict("shop-production-web", "staging.example.com"),
+	} {
+		if h := a.rolloutHint(context.Background(), err, "def"); h != proxy.RouteConflictHint {
+			t.Errorf("%v: %s", err, h)
+		}
+	}
+}
+
+// TestExecError: a failing `app exec` command already printed its stderr,
+// so it ends silently with its exit code; ssh failing to connect does not.
+func TestExecError(t *testing.T) {
+	err := execError(&remote.ExitError{Host: "s", Code: 7, Stderr: `service "web" is not running`})
+	var silent *silentError
+	var ee *exitError
+	if !errors.As(err, &silent) || !errors.As(err, &ee) || ee.code != 7 {
+		t.Errorf("exit 7: %#v", err)
+	}
+	ce := &remote.ConnectError{ExitError: &remote.ExitError{Host: "s", Code: 255}, Line: "ssh: connect to host", Hint: "h"}
+	if err := execError(ce); errors.As(err, &silent) {
+		t.Errorf("connect failure is reported: %v", err)
+	}
+	if execError(nil) != nil {
+		t.Error("success")
 	}
 }
 

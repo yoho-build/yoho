@@ -16,6 +16,7 @@ import (
 	"github.com/yoho-build/yoho/internal/composefile"
 	"github.com/yoho-build/yoho/internal/config"
 	"github.com/yoho-build/yoho/internal/release"
+	"github.com/yoho-build/yoho/internal/remote"
 	"github.com/yoho-build/yoho/internal/secrets"
 	"github.com/yoho-build/yoho/internal/ui"
 )
@@ -68,6 +69,9 @@ kamal-proxy, keeps secrets in your password manager, and backs up volumes.`,
 		var silent *silentError
 		if !errors.As(err, &silent) {
 			fmt.Fprintln(os.Stderr, "Error:", err)
+			if ce, ok := remote.AsConnectError(err); ok {
+				fmt.Fprintln(os.Stderr, "hint:", ce.Hint)
+			}
 		}
 		var ee *exitError
 		if errors.As(err, &ee) {
