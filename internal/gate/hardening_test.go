@@ -8,13 +8,16 @@ import (
 	"errors"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
 	"testing"
 	"time"
 
+	"github.com/yoho-build/yoho/internal/dash"
 	"github.com/yoho-build/yoho/internal/deploy"
 	"github.com/yoho-build/yoho/internal/release"
 	"github.com/yoho-build/yoho/internal/remote"
@@ -432,4 +435,111 @@ func TestClientWriterCancelsFollow(t *testing.T) {
 	if _, err := w.Write([]byte("y")); err == nil || cancelled != 1 {
 		t.Fatalf("second write: %v, cancelled %d", err, cancelled)
 	}
+}
+
+// searchHost answers the Gate's lookups like fakeHost and runs the logs
+// script for real, in its own process group, with a fake docker.
+type searchHost struct {
+	*fakeHost
+	local *remote.Local
+}
+
+func (h *searchHost) Run(ctx context.Context, c remote.Cmd) error {
+	if !strings.Contains(c.Script, " logs ") {
+		return h.fakeHost.Run(ctx, c)
+	}
+	c.Script = "docker() { i=0; while [ $i -lt 500 ]; do i=$((i+1)); echo 'aaaaaaaaab'; done; }\n" + c.Script
+	return h.local.Run(ctx, c)
+}
+
+// TestLogsSearchStopsWhenClientLeaves: a Member's search without -f that
+// matches nothing writes nothing, so no failed write stops it; the Gate
+// watches stdin and, when the client leaves, kills the read's process
+// group, grep and its time limit included.
+func TestLogsSearchStopsWhenClientLeaves(t *testing.T) {
+	if _, err := exec.LookPath("sh"); err != nil {
+		t.Skip("no sh")
+	}
+	if _, err := os.Stat("/proc/self/stat"); err != nil {
+		t.Skip("no /proc")
+	}
+	setup(t, "")
+	dir := t.TempDir()
+	pidFile := filepath.Join(dir, "pid")
+	look := func(name string) string {
+		p, err := exec.LookPath(name)
+		if err != nil {
+			t.Skip("no " + name)
+		}
+		return p
+	}
+	// grep for SLOW hangs, as a pathological -E pattern would.
+	fake := "#!/bin/sh\nfor a; do if [ \"$a\" = SLOW ]; then " + look("cat") + " >/dev/null; echo $$ >" + pidFile + "; exec " + look("sleep") + " 60; fi; done\nexec " + look("grep") + " \"$@\"\n"
+	if err := os.WriteFile(filepath.Join(dir, "grep"), []byte(fake), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+":"+os.Getenv("PATH"))
+	h := &searchHost{
+		fakeHost: &fakeHost{reply: func(s string) (string, error) { return "c0ffee|shop|production|web|running", nil }},
+		local:    &remote.Local{Group: true},
+	}
+	req, err := remote.EncodeGateRequest("shop", "production", VerbLogs, LogsArgs{LogFilter: dash.LogFilter{Grep: "SLOW"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	pr, pw := io.Pipe()
+	done := make(chan int, 1)
+	go func() {
+		done <- Serve(context.Background(), Options{Member: "alice", In: pr, Out: io.Discard, HostFor: func(string) (remote.Host, error) { return h, nil }})
+	}()
+	if _, err := pw.Write(req); err != nil {
+		t.Fatal(err)
+	}
+	var pid string
+	for start := time.Now(); pid == "" && time.Since(start) < 10*time.Second; time.Sleep(20 * time.Millisecond) {
+		if b, err := os.ReadFile(pidFile); err == nil && strings.HasSuffix(string(b), "\n") {
+			pid = strings.TrimSpace(string(b))
+		}
+	}
+	if pid == "" {
+		t.Fatal("grep did not start")
+	}
+	select {
+	case <-done:
+		t.Fatal("the search ended on its own")
+	case <-time.After(300 * time.Millisecond):
+	}
+	pw.Close() // the client went away
+	select {
+	case code := <-done:
+		if code == ExitOK {
+			t.Errorf("a cut-off search reported success")
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("the Gate kept serving after the client left")
+	}
+	for start := time.Now(); procAlive(pid) && time.Since(start) < 5*time.Second; time.Sleep(20 * time.Millisecond) {
+	}
+	if procAlive(pid) {
+		syscall.Kill(atoi(pid), syscall.SIGKILL)
+		t.Fatalf("grep %s outlived the client", pid)
+	}
+	if e := lastAudit(t); e.Error != errClientGone.Error() || e.Args["grep"] != true {
+		t.Errorf("audit: %+v", e)
+	}
+}
+
+// procAlive reports whether pid runs (a zombie does not).
+func procAlive(pid string) bool {
+	b, err := os.ReadFile("/proc/" + pid + "/stat")
+	if err != nil {
+		return false
+	}
+	_, rest, _ := strings.Cut(string(b), ") ")
+	return !strings.HasPrefix(rest, "Z")
+}
+
+func atoi(s string) int {
+	n, _ := strconv.Atoi(s)
+	return n
 }

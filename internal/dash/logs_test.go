@@ -42,10 +42,23 @@ func grepScript(docker, grep string) string {
 	return grepScriptChecked("", docker, grep)
 }
 
-// grepScriptChecked is grepScript after the -E pattern check check.
+// grepScriptChecked is grepScript after the -E pattern check check. grep
+// runs under nice and the time limit and leaves its status on fd 3 after
+// a "g"; a tail after it stays outside.
 func grepScriptChecked(check, docker, grep string) string {
-	return "set -eu\n" + check + "exec 4>&1\nrc=$( { { " + docker + " && echo 0 >&3 || echo \"$?\" >&3; } | " + grep + " >&4; } 3>&1 ) || :\n" +
-		"if [ \"${rc:-0}\" -ne 0 ]; then echo \"docker logs exited $rc; run without --grep to see its output\" >&2; exit \"$rc\"; fi\n"
+	grep, tail, _ := strings.Cut(grep, " | tail")
+	if tail != "" {
+		tail = " | tail" + tail
+	}
+	guard := "gw= to=\nif command -v nice >/dev/null 2>&1; then gw=nice; fi\n" +
+		"if timeout --foreground 1 true >/dev/null 2>&1; then to=\"timeout --foreground 60\"\n" +
+		"elif timeout 1 true >/dev/null 2>&1; then to=\"timeout 60\"\n" +
+		"elif timeout -t 1 true >/dev/null 2>&1; then to=\"timeout -t 60\"\n" +
+		"fi\ngw=\"$gw $to\"\n"
+	return "set -eu\n" + check + guard + "exec 4>&1\nrc=$( { { " + docker + " && echo 0 >&3 || echo \"$?\" >&3; } | { $gw " + grep + " || echo \"g$?\" >&3; }" + tail + " >&4; } 3>&1 ) || :\n" +
+		"drc=0 grc=0\nfor w in $rc; do case $w in g*) grc=${w#g} ;; *) drc=$w ;; esac; done\n" +
+		"if [ -n \"$to\" ] && { [ \"$grc\" -eq 124 ] || [ \"$grc\" -eq 143 ]; }; then echo '--grep search took longer than 60s; narrow it with --since or -n' >&2; exit 124; fi\n" +
+		"if [ \"$drc\" -ne 0 ]; then echo \"docker logs exited $drc; run without --grep to see its output\" >&2; exit \"$drc\"; fi\n"
 }
 
 func TestLogsScript(t *testing.T) {
@@ -80,8 +93,15 @@ func TestLogsScript(t *testing.T) {
 		}
 	}
 	f := LogsScript("docker logs", "'c'", LogsOptions{Lines: 10, Follow: true, LogFilter: LogFilter{Grep: "x"}})
-	if !strings.Contains(f, "-f --tail 10 'c' 2>&1 && echo 0 >&3 || echo \"$?\" >&3; } | grep $lb -F -e 'x' >&4;") || !strings.Contains(f, "--line-buffered") {
+	if !strings.Contains(f, "-f --tail 10 'c' 2>&1 && echo 0 >&3 || echo \"$?\" >&3; } | { $gw grep $lb -F -e 'x' || echo \"g$?\" >&3; } >&4;") || !strings.Contains(f, "--line-buffered") {
 		t.Errorf("follow keeps docker's tail and line-buffers grep: %s", f)
+	}
+	// A follow runs grep under nice but with no time limit: the client's
+	// leaving stops it.
+	for _, s := range []string{f, FollowGrepScript("docker logs", "'c'", LogsOptions{LogFilter: LogFilter{Grep: "x"}})} {
+		if !strings.Contains(s, "then gw=nice; fi") || !strings.Contains(s, "$gw grep $lb") || strings.Contains(s, "timeout") {
+			t.Errorf("follow: nice, no limit: %s", s)
+		}
 	}
 }
 
@@ -245,5 +265,102 @@ func TestLogsScriptBadPattern(t *testing.T) {
 		if code != 0 || out != want {
 			t.Errorf("%q: exit %d %q", grep, code, out)
 		}
+	}
+}
+
+// fakeGrepDir returns a directory with a grep that, for the pattern SLOW,
+// drains its input and then hangs (as a pathological -E pattern would),
+// writing its pid to pidFile; otherwise it runs the real grep. With
+// tools, the directory also links them, so PATH can be the directory
+// alone.
+func fakeGrepDir(t *testing.T, pidFile string, tools ...string) string {
+	t.Helper()
+	dir := t.TempDir()
+	path := func(name string) string {
+		p, err := exec.LookPath(name)
+		if err != nil {
+			t.Skip("no " + name)
+		}
+		return p
+	}
+	script := "#!/bin/sh\nfor a; do if [ \"$a\" = SLOW ]; then " + path("cat") + " >/dev/null; echo $$ >" + pidFile + "; exec " + path("sleep") + " 30; fi; done\nexec " + path("grep") + " \"$@\"\n"
+	if err := os.WriteFile(filepath.Join(dir, "grep"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, tool := range tools {
+		if err := os.Symlink(path(tool), filepath.Join(dir, tool)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return dir
+}
+
+// alive reports whether pid runs (a zombie does not).
+func alive(pid string) bool {
+	b, err := os.ReadFile("/proc/" + pid + "/stat")
+	if err != nil {
+		return false
+	}
+	_, rest, _ := strings.Cut(string(b), ") ")
+	return !strings.HasPrefix(rest, "Z")
+}
+
+// TestLogsScriptTimeLimit: a search without Follow stops at GrepLimit with
+// a clear error, not docker's, and leaves no grep running; without a
+// timeout command it still runs, unbounded. Run it under BusyBox too, as
+// TestLogsScriptBadPattern says.
+func TestLogsScriptTimeLimit(t *testing.T) {
+	if _, err := exec.LookPath("sh"); err != nil {
+		t.Skip("no sh")
+	}
+	if _, err := os.Stat("/proc/self/stat"); err != nil {
+		t.Skip("no /proc")
+	}
+	old := GrepLimit
+	GrepLimit = 1
+	t.Cleanup(func() { GrepLimit = old })
+	pidFile := filepath.Join(t.TempDir(), "pid")
+	fake := "docker() { i=0; while [ $i -lt 500 ]; do i=$((i+1)); echo 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaab'; done; }\n"
+	run := func(path string, o LogsOptions) (string, int, time.Duration) {
+		t.Helper()
+		cmd := exec.Command("sh", "-c", fake+LogsScript("docker logs", "'c'", o))
+		cmd.Env = append(os.Environ(), "PATH="+path)
+		start := time.Now()
+		out, err := cmd.CombinedOutput()
+		code := 0
+		var ee *exec.ExitError
+		if errors.As(err, &ee) {
+			code = ee.ExitCode()
+		} else if err != nil {
+			t.Fatal(err)
+		}
+		return string(out), code, time.Since(start)
+	}
+	dir := fakeGrepDir(t, pidFile)
+	for _, lines := range []int{AllLines, 10} {
+		os.Remove(pidFile)
+		out, code, took := run(dir+":"+os.Getenv("PATH"), LogsOptions{Lines: lines, Scan: MaxScan, LogFilter: LogFilter{Grep: "SLOW"}})
+		if code != ExitGrepTimeout || !strings.Contains(out, "--grep search took longer than 1s; narrow it with --since or -n") || strings.Contains(out, "docker logs exited") || took > 10*time.Second {
+			t.Fatalf("lines %d: exit %d after %s: %q", lines, code, took, out)
+		}
+		pid, err := os.ReadFile(pidFile)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if p := strings.TrimSpace(string(pid)); alive(p) {
+			t.Errorf("lines %d: grep %s still runs", lines, p)
+		}
+	}
+	// Without nice and timeout (PATH has only grep and tail), a search runs.
+	bare := fakeGrepDir(t, pidFile, "tail")
+	if out, code, _ := run(bare, LogsOptions{Lines: 2, Scan: MaxScan, LogFilter: LogFilter{Grep: "b$", Regex: true}}); code != 0 || strings.Count(out, "\n") != 2 {
+		t.Errorf("without timeout: exit %d %q", code, out)
+	}
+	// A failing docker still fails as docker, under the limit.
+	failing := "docker() { echo 'No such container: c' >&2; return 3; }\n"
+	out, err := exec.Command("sh", "-c", failing+LogsScript("docker logs", "'c'", LogsOptions{Lines: 5, LogFilter: LogFilter{Grep: "x"}})).CombinedOutput()
+	var ee *exec.ExitError
+	if !errors.As(err, &ee) || ee.ExitCode() != 3 || !strings.Contains(string(out), "docker logs exited 3") {
+		t.Errorf("failing docker: %v %q", err, out)
 	}
 }

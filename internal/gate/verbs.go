@@ -194,14 +194,21 @@ func logs(ctx context.Context, c *call) (any, error) {
 	if err := a.LogFilter.Check(); err != nil {
 		return nil, invalid(err.Error())
 	}
+	if err := checkMemberPattern(a.LogFilter); err != nil {
+		return nil, err
+	}
 	lines := LogLines(a)
 	c.audit["services"], c.audit["lines"], c.audit["follow"] = a.Services, lines, a.Follow
+	// Whether there was a search, never the pattern: it may hold data.
 	if a.Since != "" || a.Until != "" || a.Grep != "" {
 		c.audit["since"], c.audit["until"], c.audit["grep"] = a.Since, a.Until, a.Grep != ""
 	}
-	if a.Follow {
-		c.watchStdin()
+	if a.Regex {
+		c.audit["regex"] = true
 	}
+	// Every read stops when the client leaves, a search as much as a
+	// follow: without a tty nothing else stops a grep that writes nothing.
+	c.watchStdin()
 	// A search reads at most dash.MaxScan lines, like the dashboards.
 	opts := dash.LogsOptions{LogFilter: a.LogFilter, Lines: lines, Scan: dash.MaxScan, Follow: a.Follow, Timestamps: a.Timestamps}
 	var script string
@@ -230,10 +237,35 @@ func logs(ctx context.Context, c *call) (any, error) {
 		script = dash.LogsScript("docker compose -p "+remote.Quote(c.project())+" logs", remote.QuoteArgs(a.Services...), opts)
 	}
 	err := c.host.Run(ctx, remote.Cmd{Script: script, Stdout: c.fw})
-	if a.Follow && ctx.Err() != nil {
-		return nil, nil
+	if ctx.Err() != nil {
+		if a.Follow {
+			return nil, nil // the client ended the follow
+		}
+		return nil, errClientGone
 	}
 	return nil, err
+}
+
+// checkMemberPattern refuses back-references (\1 to \9) in a Member's -E
+// pattern: they make grep backtrack, and a short pattern can then keep a
+// Server's CPU busy for hours on the lines a search reads. Fixed strings
+// and other extended regular expressions pass. An escaped backslash (\\)
+// is not one; a backslash in a bracket expression is refused as well, the
+// safe side.
+func checkMemberPattern(f dash.LogFilter) error {
+	if !f.Regex {
+		return nil
+	}
+	for i := 0; i+1 < len(f.Grep); i++ {
+		if f.Grep[i] != '\\' {
+			continue
+		}
+		if d := f.Grep[i+1]; d >= '1' && d <= '9' {
+			return &remote.GateError{Message: "--grep: back-references (\\1 to \\9) are not allowed in -E patterns with scoped access", Hint: "drop -E to match the text as is, or use a pattern without back-references", Code: "invalid"}
+		}
+		i++
+	}
+	return nil
 }
 
 func dashVerb(ctx context.Context, c *call) (any, error) {
