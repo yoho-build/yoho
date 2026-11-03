@@ -65,11 +65,76 @@ func drillLabels(app, dest, project string) map[string]any {
 // Service keys copied from the deployed Release into the drill. Everything
 // else is dropped: published ports, networks and network_mode (the drill
 // gets one internal network), Proxy labels, container_name, depends_on,
-// devices, privileges, deploy settings and restart policies.
+// devices, privileges (privileged, cap_add, pid/ipc/userns/cgroup modes,
+// sysctls), settings that name host paths or devices (blkio_config,
+// device_cgroup_rules, cgroup_parent), other deploy settings and restart
+// policies. The hardening and limits the Release ran with (the Gate's on a
+// Member deploy, ADR 0011) are kept: cap_drop, pids, memory and CPU limits,
+// read_only, user, ulimits and tmpfs here; security_opt and
+// deploy.resources.limits through drillHarden.
 var drillServiceKeys = []string{
-	"command", "entrypoint", "env_file", "environment", "healthcheck", "image", "init",
-	"platform", "read_only", "shm_size", "stop_grace_period", "stop_signal", "tmpfs",
-	"ulimits", "user", "working_dir",
+	"cap_drop", "command", "cpu_count", "cpu_percent", "cpu_period", "cpu_quota", "cpu_shares",
+	"cpus", "cpuset", "entrypoint", "env_file", "environment", "healthcheck", "image", "init",
+	"mem_limit", "mem_reservation", "mem_swappiness", "memswap_limit", "pids_limit",
+	"platform", "read_only", "shm_size", "stop_grace_period", "stop_signal", "storage_opt",
+	"tmpfs", "ulimits", "user", "working_dir",
+}
+
+// drillHarden copies security_opt and deploy.resources.limits of a deployed
+// Service into its drill service s, forces pull_policy never (a drill never
+// pulls, so the Server's registry login never serves a Release a Member may
+// have deployed) and adds no-new-privileges when the Release does not set
+// it. seccomp profile files are dropped: they name a path on the Server,
+// and Docker's default profile applies instead.
+func drillHarden(svc string, raw, s map[string]any) error {
+	var opts []any
+	nnp := false
+	if v, ok := raw["security_opt"]; ok {
+		list, ok := v.([]any)
+		if !ok {
+			return fmt.Errorf("drill: Service %s: unexpected security_opt", svc)
+		}
+		for _, item := range list {
+			o, ok := item.(string)
+			if !ok {
+				return fmt.Errorf("drill: Service %s: unexpected security_opt entry", svc)
+			}
+			key, val := o, ""
+			if i := strings.IndexAny(o, "=:"); i >= 0 {
+				key, val = o[:i], o[i+1:]
+			}
+			switch strings.TrimSpace(key) {
+			case "seccomp":
+				if strings.TrimSpace(val) != "unconfined" {
+					continue // a profile file on the Server
+				}
+			case "no-new-privileges":
+				nnp = true
+			}
+			opts = append(opts, o)
+		}
+	}
+	if !nnp {
+		opts = append(opts, "no-new-privileges:true")
+	}
+	s["security_opt"] = opts
+	s["pull_policy"] = "never"
+	if d, ok := raw["deploy"].(map[string]any); ok {
+		if r, ok := d["resources"].(map[string]any); ok {
+			if l, ok := r["limits"].(map[string]any); ok {
+				lim := map[string]any{}
+				for _, k := range []string{"cpus", "memory", "pids"} {
+					if v, ok := l[k]; ok {
+						lim[k] = v
+					}
+				}
+				if len(lim) > 0 {
+					s["deploy"] = map[string]any{"resources": map[string]any{"limits": lim}}
+				}
+			}
+		}
+	}
+	return nil
 }
 
 // DrillCompose turns the deployed Release's compiled compose file into the
@@ -109,6 +174,9 @@ func DrillCompose(compiled []byte, app, dest, project string, services []string)
 			if v, ok := raw[k]; ok {
 				s[k] = v
 			}
+		}
+		if err := drillHarden(name, raw, s); err != nil {
+			return nil, err
 		}
 		s["labels"] = labels
 		s["restart"] = "no"
@@ -572,6 +640,9 @@ func Drill(ctx context.Context, o DrillOptions) (res *DrillResult, err error) {
 			return nil, fmt.Errorf("drill: volume %s of Service %s is in the Backup but not mounted by the deployed Release", v.key, v.svc)
 		}
 	}
+	if err := drillImages(ctx, o.Host, drillYAML); err != nil {
+		return nil, err
+	}
 	if err := drillFresh(ctx, o.Host, project); err != nil {
 		return nil, err
 	}
@@ -722,6 +793,53 @@ func composeDeclaresVolume(doc []byte, key string) bool {
 	}
 	_, ok := d.Volumes[key]
 	return ok
+}
+
+// DrillImages returns the image of each service of a drill compose file.
+func DrillImages(doc []byte) (map[string]string, error) {
+	var d struct {
+		Services map[string]struct {
+			Image string `yaml:"image"`
+		} `yaml:"services"`
+	}
+	if err := yaml.Unmarshal(doc, &d); err != nil {
+		return nil, fmt.Errorf("drill: parse drill compose file: %w", err)
+	}
+	imgs := make(map[string]string, len(d.Services))
+	for svc, s := range d.Services {
+		imgs[svc] = s.Image
+	}
+	return imgs, nil
+}
+
+// drillImagesScript prints the Services whose image is not on the Server.
+func drillImagesScript(imgs map[string]string) string {
+	script := "set -eu\n"
+	for _, svc := range sortedKeys(imgs) {
+		script += "docker image inspect " + remote.Quote(imgs[svc]) + " >/dev/null 2>&1 || printf '%s\\n' " + remote.Quote(svc) + "\n"
+	}
+	return script
+}
+
+// drillImages refuses a drill whose images are not on the Server: drill
+// services run with pull_policy never.
+func drillImages(ctx context.Context, h remote.Host, doc []byte) error {
+	imgs, err := DrillImages(doc)
+	if err != nil {
+		return err
+	}
+	out, err := h.Output(ctx, remote.Cmd{Script: drillImagesScript(imgs)})
+	if err != nil {
+		return fmt.Errorf("drill: inspect images: %w", err)
+	}
+	if missing := strings.Fields(out); len(missing) > 0 {
+		var list []string
+		for _, svc := range missing {
+			list = append(list, svc+" ("+imgs[svc]+")")
+		}
+		return fmt.Errorf("drill: image of Service %s is not on the Server; a drill never pulls (redeploy the Release, or pull the image on the Server, and retry)", strings.Join(list, ", "))
+	}
+	return nil
 }
 
 // drillFresh refuses a project name that already has any Docker object.

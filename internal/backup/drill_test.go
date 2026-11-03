@@ -322,3 +322,147 @@ func TestDrillScriptsParse(t *testing.T) {
 		t.Fatalf("sh -n: %v %s", err, out)
 	}
 }
+
+// A Member-deployed Release (ADR 0011) as the Gate hardened it, plus keys a
+// drill must never carry.
+const hardenedRelease = `name: yoho-shop-production
+services:
+  db:
+    image: registry.example.com/shop/db:v1
+    pull_policy: if_not_present
+    cap_add: [SYS_ADMIN]
+    cap_drop: [NET_RAW]
+    security_opt: [apparmor=docker-default, "seccomp=/etc/yoho/seccomp.json", "label:disable"]
+    pids_limit: 256
+    mem_limit: 536870912
+    memswap_limit: 536870912
+    cpus: 0.5
+    cpu_shares: 512
+    read_only: true
+    user: "70:70"
+    ulimits: {nofile: {soft: 1024, hard: 2048}}
+    tmpfs: ["/tmp:size=1048576"]
+    devices: ["/dev/sda:/dev/sda"]
+    device_cgroup_rules: ["b 8:* rmw"]
+    blkio_config: {device_read_bps: [{path: /dev/sda, rate: 1048576}]}
+    cgroup_parent: /host
+    pid: host
+    ipc: host
+    userns_mode: host
+    sysctls: {net.ipv4.ip_forward: "1"}
+    deploy:
+      replicas: 3
+      resources:
+        limits: {cpus: "0.5", memory: "536870912", pids: 256}
+        reservations: {devices: [{capabilities: [gpu]}]}
+      placement: {constraints: [node.role==manager]}
+  plain:
+    image: postgres:17-alpine
+    pull_policy: always
+    security_opt: ["no-new-privileges:false", "seccomp:unconfined"]
+`
+
+func TestDrillComposeKeepsHardening(t *testing.T) {
+	p := DrillProject("shop", "production", "0a1b2c3d")
+	out, err := DrillCompose([]byte(hardenedRelease), "shop", "production", p, []string{"db", "plain"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var doc map[string]any
+	if err := yaml.Unmarshal(out, &doc); err != nil {
+		t.Fatal(err)
+	}
+	svcs := doc["services"].(map[string]any)
+	db := svcs["db"].(map[string]any)
+	want := map[string]any{
+		"pids_limit": 256, "mem_limit": 536870912, "memswap_limit": 536870912, "cpus": 0.5,
+		"cpu_shares": 512, "read_only": true, "user": "70:70", "pull_policy": "never",
+	}
+	for k, v := range want {
+		if db[k] != v {
+			t.Errorf("%s = %#v, want %#v", k, db[k], v)
+		}
+	}
+	if c := db["cap_drop"].([]any); len(c) != 1 || c[0] != "NET_RAW" {
+		t.Errorf("cap_drop %v", c)
+	}
+	if db["ulimits"] == nil || db["tmpfs"] == nil {
+		t.Errorf("ulimits/tmpfs dropped: %v", db)
+	}
+	opts := db["security_opt"].([]any)
+	if len(opts) != 3 || opts[0] != "apparmor=docker-default" || opts[1] != "label:disable" || opts[2] != "no-new-privileges:true" {
+		t.Errorf("security_opt %v", opts)
+	}
+	dep := db["deploy"].(map[string]any)
+	if len(dep) != 1 {
+		t.Errorf("deploy keeps more than resources.limits: %v", dep)
+	}
+	res := dep["resources"].(map[string]any)
+	lim := res["limits"].(map[string]any)
+	if len(res) != 1 || lim["cpus"] != "0.5" || lim["memory"] != "536870912" || lim["pids"] != 256 {
+		t.Errorf("deploy.resources %v", res)
+	}
+	for _, k := range []string{"cap_add", "devices", "device_cgroup_rules", "blkio_config", "cgroup_parent", "pid", "ipc", "userns_mode", "sysctls"} {
+		if _, ok := db[k]; ok {
+			t.Errorf("drill keeps %s", k)
+		}
+	}
+	for _, s := range []string{"/etc/yoho/seccomp.json", "/dev/sda", "SYS_ADMIN", "gpu", "manager", "replicas"} {
+		if strings.Contains(string(out), s) {
+			t.Errorf("drill compose contains %q:\n%s", s, out)
+		}
+	}
+
+	plain := svcs["plain"].(map[string]any)
+	if plain["pull_policy"] != "never" {
+		t.Errorf("pull_policy %v", plain["pull_policy"])
+	}
+	// The operator's explicit choices stay; nothing is added twice.
+	if o := plain["security_opt"].([]any); len(o) != 2 || o[0] != "no-new-privileges:false" || o[1] != "seccomp:unconfined" {
+		t.Errorf("security_opt %v", o)
+	}
+
+	// A Release without security_opt gets no-new-privileges.
+	out, err = DrillCompose([]byte(compiledRelease), "shop", "production", p, []string{"db"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := yaml.Unmarshal(out, &doc); err != nil {
+		t.Fatal(err)
+	}
+	db = doc["services"].(map[string]any)["db"].(map[string]any)
+	if o := db["security_opt"].([]any); len(o) != 1 || o[0] != "no-new-privileges:true" || db["pull_policy"] != "never" {
+		t.Errorf("security_opt %v pull_policy %v", o, db["pull_policy"])
+	}
+}
+
+func TestDrillImagesRefusesMissingImage(t *testing.T) {
+	p := DrillProject("shop", "production", "0a1b2c3d")
+	doc, err := DrillCompose([]byte(hardenedRelease), "shop", "production", p, []string{"db", "plain"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	imgs, err := DrillImages(doc)
+	if err != nil || imgs["db"] != "registry.example.com/shop/db:v1" || imgs["plain"] != "postgres:17-alpine" {
+		t.Fatalf("images %v %v", imgs, err)
+	}
+	if out, err := exec.Command("sh", "-n", "-c", drillImagesScript(imgs)).CombinedOutput(); err != nil {
+		t.Fatalf("sh -n: %v %s", err, out)
+	}
+	h := &fakeHost{respond: func(_ context.Context, script string) (string, error) {
+		if strings.Contains(script, "docker image inspect") {
+			return "db\n", nil
+		}
+		return "", nil
+	}}
+	err = drillImages(context.Background(), h, doc)
+	if err == nil || !strings.Contains(err.Error(), "db (registry.example.com/shop/db:v1)") || !strings.Contains(err.Error(), "never pulls") {
+		t.Fatalf("err %v", err)
+	}
+	if strings.Contains(h.cmds[0].Script, "docker pull") {
+		t.Fatal("drill pulls")
+	}
+	if err := drillImages(context.Background(), &fakeHost{}, doc); err != nil {
+		t.Fatal(err)
+	}
+}
