@@ -13,6 +13,7 @@ import (
 	"golang.org/x/term"
 
 	"github.com/yoho-build/yoho/internal/composefile"
+	"github.com/yoho-build/yoho/internal/dash"
 	"github.com/yoho-build/yoho/internal/gate"
 	"github.com/yoho-build/yoho/internal/remote"
 )
@@ -98,17 +99,55 @@ func logsServices(names, args []string, all, swarm bool) ([]string, error) {
 	return nil, &hintError{"the App has several Services; name one or more: " + strings.Join(names, ", "), "e.g. `yoho app logs " + example + "`, or --all for every Service"}
 }
 
+// logsOptions checks the `app logs` filter flags. Without -n, --since and
+// --grep show every line they select, like kamal; otherwise 100 lines.
+func logsOptions(o dash.LogsOptions, linesSet, swarm bool) (dash.LogsOptions, error) {
+	if err := dash.CheckTime(o.Since); err != nil {
+		return o, &hintError{"--since: " + err.Error(), dash.TimeHint}
+	}
+	if err := dash.CheckTime(o.Until); err != nil {
+		return o, &hintError{"--until: " + err.Error(), dash.TimeHint}
+	}
+	if err := o.Check(); err != nil {
+		return o, &hintError{err.Error(), "e.g. `yoho app logs web --grep ERROR -i`"}
+	}
+	if swarm && o.Until != "" {
+		return o, &hintError{"swarm: --until is not supported, `docker service logs` has no --until", "use --since, or compose"}
+	}
+	if o.Lines < 0 {
+		return o, &hintError{"-n must not be negative", "use -n 0 for every line"}
+	}
+	if !linesSet && (o.Since != "" || o.Grep != "") {
+		o.Lines = 0
+	}
+	return o, nil
+}
+
 func logsCmd(g *globals) *cobra.Command {
-	var follow, all bool
-	var tail int
+	var all bool
+	o := dash.LogsOptions{Lines: 100}
 	c := &cobra.Command{
 		Use: "logs [SERVICE...]", Short: "Show logs of one or more Services",
+		Long: `Show logs of one or more Services, like docker compose logs.
+
+--since and --until take what docker takes: a duration back from now (30s,
+10m, 2h) or a timestamp (2026-11-03T15:04:05Z, 2026-11-03, Unix seconds).
+--grep keeps lines containing a fixed string, filtered on the Server with
+grep; -i ignores case and -E makes it an extended regular expression. With
+--grep (and not -f), -n counts matching lines. Without -n, --since and --grep
+show every line they select.`,
+		Example: "  yoho app logs web -f\n  yoho app logs web --since 1h --grep ERROR -i\n  yoho app logs worker --since 2026-11-03T09:00:00Z --until 2026-11-03T10:00:00Z -t\n  yoho app logs --all -n 20",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			a, err := g.load(cmd)
 			if err != nil {
 				return err
 			}
 			swarm := a.dest.Runtime == "swarm"
+			opts, err := logsOptions(o, cmd.Flags().Changed("lines"), swarm)
+			if err != nil {
+				return a.fail(err)
+			}
+			follow := opts.Follow
 			names, derr := a.serviceNames(cmd.Context())
 			if derr != nil {
 				if !all && len(args) == 0 {
@@ -126,33 +165,39 @@ func logsCmd(g *globals) *cobra.Command {
 				return a.fail(err)
 			}
 			if a.scoped {
-				err := a.gateCall(cmd.Context(), "logs", gate.LogsArgs{ServicesArgs: gate.ServicesArgs{Services: svcs}, Lines: tail, Follow: follow}, nil, cmd.OutOrStdout(), nil)
+				args := gate.LogsArgs{ServicesArgs: gate.ServicesArgs{Services: svcs}, Lines: opts.Lines, Follow: follow, Timestamps: opts.Timestamps, LogFilter: opts.LogFilter}
+				err := a.gateCall(cmd.Context(), "logs", args, nil, cmd.OutOrStdout(), nil)
 				if follow && cmd.Context().Err() != nil {
 					return nil // Ctrl-C ends a follow
 				}
 				return err
 			}
-			if swarm {
-				s := fmt.Sprintf("docker service logs --tail %d", tail)
-				if follow {
-					s += " -f"
-				}
-				return a.remoteRun(cmd, s+" "+remote.Quote(a.project()+"_"+svcs[0])+" 2>&1")
+			err = a.remoteRun(cmd, appLogsScript(a.project(), svcs, swarm, opts))
+			if follow && cmd.Context().Err() != nil {
+				return nil // Ctrl-C ends a follow
 			}
-			s := fmt.Sprintf("docker compose -p %s logs --tail %d", remote.Quote(a.project()), tail)
-			if follow {
-				s += " -f"
-			}
-			if len(svcs) > 0 {
-				s += " " + remote.QuoteArgs(svcs...)
-			}
-			return a.remoteRun(cmd, s+" 2>&1")
+			return err
 		},
 	}
-	c.Flags().BoolVarP(&follow, "follow", "f", false, "Follow")
-	c.Flags().IntVarP(&tail, "lines", "n", 100, "Lines from the end")
-	c.Flags().BoolVar(&all, "all", false, "Every Service, interleaved (compose only)")
+	f := c.Flags()
+	f.BoolVarP(&o.Follow, "follow", "f", false, "Follow")
+	f.IntVarP(&o.Lines, "lines", "n", 100, "Lines from the end (0: all); with --grep, matching lines")
+	f.BoolVar(&all, "all", false, "Every Service, interleaved (compose only)")
+	f.StringVar(&o.Since, "since", "", "Only logs since a duration back (10m, 2h) or a timestamp (2026-11-03T15:04:05Z)")
+	f.StringVar(&o.Until, "until", "", "Only logs before a duration back or a timestamp (compose only)")
+	f.BoolVarP(&o.Timestamps, "timestamps", "t", false, "Show timestamps")
+	f.StringVar(&o.Grep, "grep", "", "Only lines containing this text, filtered on the Server")
+	f.BoolVarP(&o.IgnoreCase, "ignore-case", "i", false, "Match --grep ignoring case")
+	f.BoolVarP(&o.Regex, "regex", "E", false, "Treat --grep as an extended regular expression")
 	return c
+}
+
+// appLogsScript is the `app logs` script for svcs (nil: every Service).
+func appLogsScript(project string, svcs []string, swarm bool, o dash.LogsOptions) string {
+	if swarm {
+		return dash.LogsScript("docker service logs", remote.Quote(project+"_"+svcs[0]), o)
+	}
+	return dash.LogsScript("docker compose -p "+remote.Quote(project)+" logs", remote.QuoteArgs(svcs...), o)
 }
 
 // exitNoContainers is the exit code of statsScript when the App has no

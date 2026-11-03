@@ -14,6 +14,7 @@ import {
   PlayIcon,
   RefreshCwIcon,
   ScrollTextIcon,
+  SearchIcon,
   ServerIcon,
   SunIcon,
   WaypointsIcon,
@@ -470,26 +471,38 @@ function ReleasesCard({ releases, now }: { releases: Release[]; now: number }) {
 
 function LogsDialog({ target, onClose }: { target: { server: string; container: Container } | null; onClose: () => void }) {
   const [lines, setLines] = useState(200)
+  const [since, setSince] = useState("")
+  const [search, setSearch] = useState("")
+  const [grep, setGrep] = useState("")
   const [text, setText] = useState("")
   const [err, setErr] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
   const pre = useRef<HTMLPreElement>(null)
+
+  // Search on the Server once typing pauses.
+  useEffect(() => {
+    const t = setTimeout(() => setGrep(search.trim()), 400)
+    return () => clearTimeout(t)
+  }, [search])
 
   const fetchLogs = useCallback(
     async (signal?: AbortSignal) => {
       if (!target) return
       setBusy(true)
       try {
-        const r = await api.logs(target.server, target.container.name, lines, signal)
+        const r = await api.logs(target.server, target.container.name, lines, { since, grep }, signal)
         setText(r.logs)
         setErr(null)
       } catch (e) {
-        if (!signal?.aborted) setErr((e as Error).message)
+        if (!signal?.aborted) {
+          const h = e instanceof ApiError && e.hint ? ` (${e.hint})` : ""
+          setErr((e as Error).message + h)
+        }
       } finally {
         if (!signal?.aborted) setBusy(false)
       }
     },
-    [target, lines],
+    [target, lines, since, grep],
   )
 
   useEffect(() => {
@@ -526,6 +539,40 @@ function LogsDialog({ target, onClose }: { target: { server: string; container: 
               {n} lines
             </Button>
           ))}
+          <label className="flex items-center gap-1.5 text-xs text-muted-foreground">
+            Since
+            <select
+              aria-label="Since"
+              value={since}
+              onChange={(e) => setSince(e.target.value)}
+              className="h-7 rounded-md border bg-background px-1.5 text-xs text-foreground"
+            >
+              {[
+                ["15m", "15 min"],
+                ["1h", "1 hour"],
+                ["6h", "6 hours"],
+                ["24h", "24 hours"],
+                ["", "all"],
+              ].map(([v, l]) => (
+                <option key={v} value={v}>
+                  {l}
+                </option>
+              ))}
+            </select>
+          </label>
+          <div className="relative min-w-40 flex-1">
+            <SearchIcon className="pointer-events-none absolute top-1/2 left-2 size-3.5 -translate-y-1/2 text-muted-foreground" />
+            <input
+              type="search"
+              aria-label="Search logs"
+              placeholder="Search (on the Server, ignoring case)"
+              value={search}
+              maxLength={512}
+              onChange={(e) => setSearch(e.target.value)}
+              onKeyDown={(e) => e.key === "Enter" && setGrep(search.trim())}
+              className="h-7 w-full rounded-md border bg-background pr-2 pl-7 text-xs outline-none focus-visible:ring-2 focus-visible:ring-ring/50"
+            />
+          </div>
           <Button size="sm" variant="outline" className="ml-auto" disabled={busy} onClick={() => fetchLogs()}>
             <RefreshCwIcon className={busy ? "animate-spin" : undefined} />
             Reload
@@ -537,7 +584,7 @@ function LogsDialog({ target, onClose }: { target: { server: string; container: 
           className="min-h-48 flex-1 overflow-auto rounded-lg bg-muted p-3 font-mono text-xs leading-relaxed"
         >
           {parsed.length === 0 ? (
-            <span className="text-muted-foreground">{busy ? "Loading…" : "No output."}</span>
+            <span className="text-muted-foreground">{busy ? "Loading…" : grep || since ? "No matching lines." : "No output."}</span>
           ) : (
             parsed.map((l, i) => (
               <div key={i} className="flex gap-3 hover:bg-foreground/5">

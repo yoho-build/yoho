@@ -124,6 +124,32 @@ func TestLogScroll(t *testing.T) {
 	}
 }
 
+func TestLogFilter(t *testing.T) {
+	if k := ParseKeys([]byte{0x7f}); len(k) != 1 || k[0] != KeyBackspace {
+		t.Fatalf("backspace: %v", k)
+	}
+	m := &Model{Logs: &LogView{Server: "web-1", Container: "c", Text: "tick 1\nERROR boom\ntick 2\nerror low\n"}}
+	m.Update("/", 20)
+	for _, k := range []Key{"e", "r", "r", "x", KeyBackspace, "q"} {
+		m.Update(k, 20)
+	}
+	if m.Logs == nil || m.Logs.Filter != "errq" {
+		t.Fatalf("typing: %+v", m.Logs)
+	}
+	m.Update(KeyBackspace, 20)
+	m.Update(KeyEnter, 20)
+	out := Render(m, 80, 20)
+	if !strings.Contains(out, "ERROR boom") || !strings.Contains(out, "error low") || strings.Contains(out, "tick") || !strings.Contains(out, "/err") {
+		t.Errorf("filtered view:\n%s", out)
+	}
+	if m.Update(KeyEsc, 20); m.Logs == nil || m.Logs.Filter != "" {
+		t.Fatal("esc clears the filter first")
+	}
+	if m.Update(KeyBackspace, 20); m.Logs != nil {
+		t.Error("backspace without a filter goes back")
+	}
+}
+
 func TestWideCharacters(t *testing.T) {
 	if got := cut("日本語abc", 5); got != "日本" {
 		t.Errorf("cut by columns: %q", got)

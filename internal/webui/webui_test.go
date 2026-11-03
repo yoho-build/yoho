@@ -18,6 +18,7 @@ import (
 type fakeData struct {
 	logsFor   []string
 	diskFresh []bool
+	filters   []dash.LogFilter
 }
 
 func (f *fakeData) Disk(_ context.Context, fresh bool) (*dash.DiskUsage, error) {
@@ -29,8 +30,9 @@ func (f *fakeData) Snapshot(context.Context, bool) (*dash.Snapshot, error) {
 	return &dash.Snapshot{App: "shop", Destination: "production", Servers: []dash.Server{{Name: "web-1"}}}, nil
 }
 
-func (f *fakeData) Logs(_ context.Context, server, name string, lines int) (string, error) {
+func (f *fakeData) Logs(_ context.Context, server, name string, lines int, lf dash.LogFilter) (string, error) {
 	f.logsFor = append(f.logsFor, server+"/"+name)
+	f.filters = append(f.filters, lf)
 	if name != "yoho-proxy" {
 		return "", errors.New("unknown container")
 	}
@@ -223,6 +225,28 @@ func TestLogsAPI(t *testing.T) {
 	}
 	if strings.Join(data.logsFor, ",") != "web-1/yoho-proxy,web-1/postgres" {
 		t.Errorf("logs calls: %v", data.logsFor)
+	}
+
+	q := url.Values{"server": {"web-1"}, "container": {"yoho-proxy"}, "since": {"15m"}, "grep": {`it's "x"; $(id)`}, "icase": {"1"}}
+	if res, body := get(t, base+"/api/logs?"+q.Encode(), tok); res.StatusCode != 200 {
+		t.Fatalf("filtered logs: %d %s", res.StatusCode, body)
+	}
+	want := dash.LogFilter{Since: "15m", Grep: `it's "x"; $(id)`, IgnoreCase: true}
+	if got := data.filters[len(data.filters)-1]; got != want {
+		t.Errorf("filter: %+v", got)
+	}
+	n := len(data.logsFor)
+	for _, bad := range []string{"since=banana", "until=10m%3Bid", "since=-5m", "grep=a%0Ab", "icase=yes", "since=1h&since=2h"} {
+		res, body := get(t, base+"/api/logs?server=web-1&container=yoho-proxy&"+bad, tok)
+		if res.StatusCode != http.StatusBadRequest || !strings.Contains(body, "error") {
+			t.Errorf("%s: %d %s", bad, res.StatusCode, body)
+		}
+		if bad == "since=banana" && !strings.Contains(body, "duration") {
+			t.Errorf("bad since needs a hint: %s", body)
+		}
+	}
+	if len(data.logsFor) != n {
+		t.Error("invalid filters must not reach the Server")
 	}
 }
 

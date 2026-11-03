@@ -19,9 +19,11 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io/fs"
 	"net"
 	"net/http"
+	"net/url"
 	"path"
 	"strconv"
 	"strings"
@@ -46,7 +48,7 @@ func Assets() fs.FS {
 // Data is what the API reads. *dash.Live implements it.
 type Data interface {
 	Snapshot(ctx context.Context, fresh bool) (*dash.Snapshot, error)
-	Logs(ctx context.Context, server, name string, lines int) (string, error)
+	Logs(ctx context.Context, server, name string, lines int, f dash.LogFilter) (string, error)
 	Disk(ctx context.Context, fresh bool) (*dash.DiskUsage, error)
 }
 
@@ -208,7 +210,12 @@ func (s *Server) api(w http.ResponseWriter, r *http.Request) {
 	case "/api/logs":
 		q := r.URL.Query()
 		lines, _ := strconv.Atoi(q.Get("lines"))
-		out, err := s.data.Logs(ctx, q.Get("server"), q.Get("container"), lines)
+		f, hint, err := logFilter(q)
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error(), "hint": hint})
+			return
+		}
+		out, err := s.data.Logs(ctx, q.Get("server"), q.Get("container"), lines, f)
 		if err != nil {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 			return
@@ -247,4 +254,31 @@ func writeJSON(w http.ResponseWriter, code int, v any) {
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.WriteHeader(code)
 	json.NewEncoder(w).Encode(v)
+}
+
+// logFilter reads the /api/logs filter: since and until (docker durations
+// or timestamps), grep (a fixed string, matched on the Server) and icase=1.
+// Anything else is refused, with a hint for a bad time.
+func logFilter(q url.Values) (dash.LogFilter, string, error) {
+	for _, k := range []string{"since", "until", "grep", "icase"} {
+		if len(q[k]) > 1 {
+			return dash.LogFilter{}, "", fmt.Errorf("%s given more than once", k)
+		}
+	}
+	f := dash.LogFilter{Since: q.Get("since"), Until: q.Get("until"), Grep: q.Get("grep")}
+	switch q.Get("icase") {
+	case "", "0":
+	case "1":
+		f.IgnoreCase = f.Grep != ""
+	default:
+		return f, "", errors.New("icase must be 0 or 1")
+	}
+	if err := f.Check(); err != nil {
+		hint := ""
+		if dash.CheckTime(f.Since) != nil || dash.CheckTime(f.Until) != nil {
+			hint = dash.TimeHint
+		}
+		return f, hint, err
+	}
+	return f, "", nil
 }

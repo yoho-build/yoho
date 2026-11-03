@@ -19,7 +19,7 @@ import (
 // Data is what the TUI reads. *dash.Live implements it.
 type Data interface {
 	Snapshot(ctx context.Context, fresh bool) (*dash.Snapshot, error)
-	Logs(ctx context.Context, server, name string, lines int) (string, error)
+	Logs(ctx context.Context, server, name string, lines int, f dash.LogFilter) (string, error)
 	Disk(ctx context.Context, fresh bool) (*dash.DiskUsage, error)
 }
 
@@ -45,6 +45,26 @@ type LogView struct {
 	Err                        error
 	Loading                    bool
 	Offset                     int // lines scrolled up from the bottom
+	// Filter keeps lines containing it, ignoring case (`/`). Typing is
+	// true while it is being edited.
+	Filter string
+	Typing bool
+}
+
+// lines returns the log lines that match Filter.
+func (lv *LogView) lines() []string {
+	text := strings.Split(strings.TrimRight(lv.Text, "\n"), "\n")
+	if lv.Filter == "" {
+		return text
+	}
+	f := strings.ToLower(lv.Filter)
+	var out []string
+	for _, t := range text {
+		if strings.Contains(strings.ToLower(t), f) {
+			out = append(out, t)
+		}
+	}
+	return out
 }
 
 // rows lists the selectable containers of the current Server: the Proxy
@@ -99,6 +119,8 @@ const (
 	KeyCtrlC    Key = "ctrl-c"
 	KeyPageUp   Key = "pgup"
 	KeyPageDown Key = "pgdn"
+	// KeyBackspace edits a filter; elsewhere it acts as KeyEsc.
+	KeyBackspace Key = "backspace"
 )
 
 // ParseKeys decodes a raw-mode read into key presses.
@@ -137,7 +159,7 @@ func ParseKeys(b []byte) []Key {
 			keys = append(keys, KeyEnter)
 			b = b[1:]
 		case b[0] == 0x7f || b[0] == 8:
-			keys = append(keys, KeyEsc)
+			keys = append(keys, KeyBackspace)
 			b = b[1:]
 		default:
 			r, n := utf8.DecodeRune(b)
@@ -165,10 +187,38 @@ func (m *Model) Update(k Key, height int) Action {
 	if k == KeyCtrlC || k == "q" && m.Logs == nil && m.Details == nil && m.Disk == nil {
 		return ActQuit
 	}
+	if m.Logs != nil && m.Logs.Typing {
+		lv := m.Logs
+		switch k {
+		case KeyEnter:
+			lv.Typing = false
+		case KeyEsc:
+			lv.Typing, lv.Filter = false, ""
+		case KeyBackspace:
+			if r := []rune(lv.Filter); len(r) > 0 {
+				lv.Filter = string(r[:len(r)-1])
+			}
+		default:
+			if r := []rune(string(k)); len(r) == 1 && r[0] >= ' ' {
+				lv.Filter += string(k)
+			}
+		}
+		lv.Offset = 0
+		return ActNone
+	}
+	if k == KeyBackspace {
+		k = KeyEsc
+	}
 	if m.Logs != nil {
 		page := max(1, height-6)
 		switch k {
+		case "/":
+			m.Logs.Typing = true
 		case KeyEsc, "q", KeyLeft, "h":
+			if m.Logs.Filter != "" && k == KeyEsc {
+				m.Logs.Filter, m.Logs.Offset = "", 0
+				break
+			}
 			m.Logs = nil
 		case KeyUp, "k":
 			m.Logs.Offset++
@@ -320,7 +370,7 @@ func Run(ctx context.Context, data Data, in *os.File, out io.Writer, opt Options
 		lv.Loading = true
 		key := lv.Server + "/" + lv.Container
 		go func() {
-			t, err := data.Logs(ctx, lv.Server, lv.Container, opt.Lines)
+			t, err := data.Logs(ctx, lv.Server, lv.Container, opt.Lines, dash.LogFilter{})
 			select {
 			case logs <- logResult{key, t, err}:
 			case <-ctx.Done():
