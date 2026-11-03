@@ -38,7 +38,7 @@ yoho migrate draft --from examples/quickstart/railway/inventory.json
 yoho migrate draft --from examples/quickstart/railway/inventory.json --out /tmp/shop-draft
 ```
 
-The first command prints `compose.yaml` and `yoho.yml`. `--out` writes those two names only when neither exists, and it does not write `.yoho/secrets`. For one service's `railway.json` or `railway.toml`, pass `--service` (default `web`) and `--project` (default `app`). Nothing is deployed and no Server is contacted.
+The first command prints `compose.yaml` and `yoho.yml`. Both forms end with a rotation checklist (on stderr when the files go to stdout; a `migrate_rotation_checklist` event with `--json`): every secret name of the inventory, the Services that use it, and "rotate at the provider before first deploy". The values lived at Railway, so treat them as known to it and to anyone who could read the project. `POSTGRES_PASSWORD` is marked as generated on the Server instead. `--out` writes those two names only when neither exists, and it does not write `.yoho/secrets`. For one service's `railway.json` or `railway.toml`, pass `--service` (default `web`) and `--project` (default `app`). Nothing is deployed and no Server is contacted.
 
 The reviewed App you deploy is still `examples/quickstart/compose.yaml`. It matches the draft except for empty `proxy.hosts` (a Quick Tunnel catch-all), `stop_grace_period`, and a 2s Postgres health interval. The drafted `yoho.yml` is the switch file: it contains `migrate`. `examples/quickstart/yoho.yml` is the first deploy: no `migrate` block, Quick Tunnel, Railway keeps the hostname.
 
@@ -63,6 +63,8 @@ APP_GREETING=$(bw get password shop-greeting)
 Do not copy `DATABASE_URL`. It contains a password and points at Railway. If the app needs a URL, store a new one whose host is the compose Service name `db`.
 
 `yoho config check --offline` does not run `$(...)`. `yoho secrets list` shows keys and lengths.
+
+Work through the draft's rotation checklist before the first deploy: create a new value in 1Password or Bitwarden for each name, and revoke the old one at its issuer (API dashboards, OAuth apps) once Railway no longer runs. If anything leaks later, follow [Rotate everything after an incident](secrets.md#rotate-everything-after-an-incident).
 
 ## 4. Deploy once, while Railway still serves
 

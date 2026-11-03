@@ -37,6 +37,7 @@ Global flags (every command): `-c, --config FILE`, `-d, --destination NAME` (def
 | `secrets list` | Keys, sources, lengths. |
 | `secrets print KEY... --reveal` | Print values; terminal only. |
 | `secrets rotate [SERVICE...] [--dry-run]` | Re-resolve secrets (no rebuild), restart only Services whose values changed, record the current Release again. Needs a checkout of the deployed Version. Named Services must be the only ones that changed. `--dry-run` lists what would restart. |
+| `secrets rotate --generated KEY [--generated KEY...] [--dry-run]` | Replace an `x-yoho.generate` secret: apply the new value to the database (Postgres, MySQL/MariaDB, or an `x-yoho.rotate` command), then swap it in and restart every Service that uses it. A failed database step keeps the old value; a re-run reuses the pending one. See [Secrets](secrets.md#rotating-generated-secrets). |
 | `backup run [JOB]` | Take a Backup now. |
 | `backup list [JOB]` | Stored Backups, newest first. |
 | `backup pull [JOB] [--to DIR] [--limit N]` | Mirror new archives of an `archive` target to a local directory; never deletes. |

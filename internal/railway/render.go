@@ -67,6 +67,7 @@ func render(inv inventory, source string, extra []string) (*Result, error) {
 	if wget {
 		d.Warnings = append([]string{"HTTP healthchecks use wget. The image must include wget; change the test to curl if it does not."}, d.Warnings...)
 	}
+	d.Rotation = rotationChecklist(inv, d.Generated)
 	d.Compose = renderCompose(source, inv, d.Warnings)
 	d.Yoho, d.SecretLines, d.SecretKeys = renderYoho(source, inv, d)
 	return d, nil
@@ -584,4 +585,35 @@ func flow(ss []string) string {
 		parts[i] = strconv.Quote(s)
 	}
 	return "[" + strings.Join(parts, ", ") + "]"
+}
+
+// rotationChecklist lists each secret name of inv (after RAILWAY_* are
+// dropped) and generated key, in declaration order, with its Services.
+func rotationChecklist(inv inventory, generated []string) []RotationItem {
+	var out []RotationItem
+	idx := map[string]int{}
+	use := func(k, svc string) {
+		i, ok := idx[k]
+		if !ok {
+			it := RotationItem{Key: k, Action: RotateAtProvider}
+			if contains(generated, k) {
+				it.Generated, it.Action = true, RotateGenerated
+			}
+			out = append(out, it)
+			i = len(out) - 1
+			idx[k] = i
+		}
+		if !contains(out[i].Services, svc) {
+			out[i].Services = append(out[i].Services, svc)
+		}
+	}
+	for _, s := range inv.Services {
+		if isPostgres(s.Image) && contains(generated, "POSTGRES_PASSWORD") && !contains(s.SecretKeys, "POSTGRES_PASSWORD") {
+			use("POSTGRES_PASSWORD", s.Name)
+		}
+		for _, k := range s.SecretKeys {
+			use(k, s.Name)
+		}
+	}
+	return out
 }

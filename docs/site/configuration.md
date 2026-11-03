@@ -178,6 +178,7 @@ The Cloudflare API token needs Account > Cloudflare Tunnel > Edit. It is resolve
 | `secrets` | List `["KEY", "NAME:KEY"]` or map `{NAME: KEY}`; `NAME` is the name inside the container. |
 | `secrets_as_env` | Default `false`: mount secret files. `true`: use `env_file`; values become container environment variables visible through `docker inspect`. |
 | `generate` | `{NAME: kind}`: `password32`, `password64`, `hex32`, `hex64`, `base64_32`, `base64_64`. Created once on the Server. |
+| `rotate` | `{NAME: {strategy, user, command}}` for a `generate` key of this Service: how `yoho secrets rotate --generated NAME` applies a new value. `strategy`: `postgres`, `mysql`, `command` (run `command` in this Service's container, current and new value on stdin) or `none`. Default: detected; see [Secrets](secrets.md#rotating-generated-secrets). |
 | `release_command` | One-off container from the new image before cutover (migrations). Failure aborts the deploy. |
 | `backup.volumes` | Named compose volumes to archive. |
 | `backup.dump` | Command run in the container; stdout is the dump. |

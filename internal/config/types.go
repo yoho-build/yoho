@@ -367,6 +367,12 @@ type ServiceExt struct {
 	// Secrets generated once on the Server: {NAME: kind}, kind one of
 	// password32, password64, hex32, hex64, base64_32, base64_64.
 	Generate map[string]string `json:"generate,omitempty"`
+	// How `yoho secrets rotate --generated NAME` applies a new value of a
+	// secret this Service generates, before its consumers restart:
+	// {NAME: {strategy, user, command}}. Default: postgres for
+	// POSTGRES_PASSWORD, mysql for MYSQL_/MARIADB_ (ROOT_)PASSWORD, none for
+	// other keys of non-database, non-stateful Services.
+	Rotate map[string]GeneratedRotate `json:"rotate,omitempty"`
 	// Command run in a one-off container from the new image before cutover
 	// (e.g. migrations). Failure aborts the deploy.
 	ReleaseCommand []string       `json:"release_command,omitempty"`
@@ -375,6 +381,22 @@ type ServiceExt struct {
 	StrictDrain bool `json:"strict_drain,omitempty"`
 	// Reserved for Roles: address other Servers use to reach this Service.
 	Endpoint string `json:"endpoint,omitempty"`
+}
+
+// GeneratedRotate says how a new value of a generated secret reaches the
+// database (or other system) that stores the old one.
+type GeneratedRotate struct {
+	// postgres: ALTER ROLE through psql in this Service's container.
+	// mysql: ALTER USER through mysql/mariadb in this Service's container.
+	// command: run Command in this Service's container with the current and
+	// new value on stdin (two lines). none: only swap the value and restart.
+	Strategy string `json:"strategy" jsonschema:"required,enum=postgres,enum=mysql,enum=command,enum=none"`
+	// Database role (postgres, mysql). Default: POSTGRES_USER or postgres;
+	// root for *_ROOT_PASSWORD, else MYSQL_USER / MARIADB_USER.
+	User string `json:"user,omitempty"`
+	// Command for strategy command, run with docker exec -i. It must be
+	// idempotent: Yoho may run it again with the same values.
+	Command []string `json:"command,omitempty"`
 }
 
 // ServiceProxy configures how the Proxy routes to a Service.
