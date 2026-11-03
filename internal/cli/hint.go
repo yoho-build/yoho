@@ -30,6 +30,10 @@ func hintFor(err error, def string) string {
 	if errors.As(err, &ae) && ae.Hint != "" {
 		return ae.Hint
 	}
+	var le *deploy.LogDriverError
+	if errors.As(err, &le) {
+		return deploy.LogDriverHint
+	}
 	var sc *deploy.SubnetChangeError
 	if errors.As(err, &sc) {
 		return subnetChangeHint(sc)

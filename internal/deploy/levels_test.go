@@ -94,7 +94,7 @@ func TestDependencyLevelsSkipInactiveProfiles(t *testing.T) {
 	d := testDeploy(t, &remote.Local{}, &bytes.Buffer{})
 	d.Project = loaded.Project
 	d.Ext = loaded.Ext
-	_, plans, err := compile(d, "primary", "/secrets", nil, []byte("key"), "", "")
+	_, plans, err := compile(d, "primary", "/secrets", nil, []byte("key"), "", DaemonLogging{})
 	if err != nil {
 		t.Fatal(err)
 	}

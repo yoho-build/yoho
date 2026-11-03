@@ -100,7 +100,7 @@ type filesDoc struct {
 
 func compileFiles(t *testing.T, d *plan.Deploy) filesDoc {
 	t.Helper()
-	out, _, err := compile(d, "primary", "/gen", nil, []byte("0123456789abcdef0123456789abcdef"), "", "")
+	out, _, err := compile(d, "primary", "/gen", nil, []byte("0123456789abcdef0123456789abcdef"), "", DaemonLogging{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -142,7 +142,7 @@ func TestCompileRewritesAppFiles(t *testing.T) {
 	if again := compileFiles(t, filesDeploy(nil, reload(t, dir, filesCompose), "v2")); again.Services["db"].Volumes[0].Source != srcs[0] || again.Services["db"].Labels[LabelFiles] != label {
 		t.Error("unchanged App files must keep their Server path across Versions")
 	}
-	before, _, _ := compile(filesDeploy(nil, p, "v1"), "primary", planGenDir, nil, planKey, "", "")
+	before, _, _ := compile(filesDeploy(nil, p, "v1"), "primary", planGenDir, nil, planKey, "", DaemonLogging{})
 	// Mode changes count as content.
 	if err := os.Chmod(filepath.Join(dir, "cfg", "init.sql"), 0o644); err != nil {
 		t.Fatal(err)
@@ -152,7 +152,7 @@ func TestCompileRewritesAppFiles(t *testing.T) {
 		t.Errorf("mode change: %+v", changed.Services["db"])
 	}
 	// What `yoho plan` compares.
-	after, _, _ := compile(filesDeploy(nil, reload(t, dir, filesCompose), "v2"), "primary", planGenDir, nil, planKey, "", "")
+	after, _, _ := compile(filesDeploy(nil, reload(t, dir, filesCompose), "v2"), "primary", planGenDir, nil, planKey, "", DaemonLogging{})
 	a, _ := serviceEntries(before)
 	b, _ := serviceEntries(after)
 	if keys := strings.Join(changedKeys(a["db"], b["db"]), ","); keys != "labels,volumes" {
@@ -170,7 +170,7 @@ func TestCompileRewritesAppFiles(t *testing.T) {
 func TestCompileRejectsWritableAppBind(t *testing.T) {
 	withRoot(t)
 	_, p := appDirProject(t, "services:\n  db:\n    image: x\n    volumes: [\"./cfg:/cfg\"]\n")
-	_, _, err := compile(filesDeploy(nil, p, "v1"), "primary", "/gen", nil, nil, "", "")
+	_, _, err := compile(filesDeploy(nil, p, "v1"), "primary", "/gen", nil, nil, "", DaemonLogging{})
 	if err == nil || !strings.Contains(err.Error(), "writable bind mount") || !strings.Contains(err.Error(), "named volume") {
 		t.Fatalf("err = %v", err)
 	}
@@ -182,7 +182,7 @@ func TestAppFilesSizeLimit(t *testing.T) {
 	if err := os.Truncate(filepath.Join(dir, "conf", "app.conf"), maxAppFilesBytes+1); err != nil {
 		t.Fatal(err)
 	}
-	_, _, err := compile(filesDeploy(nil, reload(t, dir, filesCompose), "v1"), "primary", "/gen", nil, nil, "", "")
+	_, _, err := compile(filesDeploy(nil, reload(t, dir, filesCompose), "v1"), "primary", "/gen", nil, nil, "", DaemonLogging{})
 	if err == nil || !strings.Contains(err.Error(), "50 MB") || !strings.Contains(err.Error(), "named volume") {
 		t.Fatalf("err = %v", err)
 	}
