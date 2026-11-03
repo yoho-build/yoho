@@ -59,8 +59,8 @@ the swap it reuses the pending value (generated/KEY.next), after the swap
 it finishes the restart without generating another value. Until then
 deploy, rollback and a plain rotate refuse while generated/KEY.next
 exists; after the swap a plain ` + "`yoho secrets rotate`" + ` also finishes the
-restart. A killed run leaves the Destination lock behind: remove the lock
-directory named in the error, then re-run.`,
+restart. A killed run leaves the Destination lock behind: run
+` + "`yoho lock release --force`" + `, then re-run.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			a, err := g.load(cmd)
 			if err != nil {
@@ -75,6 +75,7 @@ directory named in the error, then re-run.`,
 	}
 	c.Flags().BoolVar(&dryRun, "dry-run", false, "List Services that would restart; change nothing")
 	c.Flags().StringArrayVar(&generated, "generated", nil, "Rotate this x-yoho.generate secret (repeatable); applies it to the database first")
+	addLockWaitFlag(c)
 	return c
 }
 
@@ -204,10 +205,10 @@ func (a *app) rotateSecrets(ctx context.Context, services, generated []string, d
 			return err
 		}
 	}
-	if len(generated) > 0 && !dryRun {
+	if !dryRun {
 		// Lock before reading the current Release, so no deploy can land
-		// between that read and the database change.
-		unlock, lerr := deploy.AcquireLock(ctx, hosts[0].Host, a.cfg.App, a.destName, deploy.LockInfo{Performer: performer(), Command: "secrets rotate"})
+		// between that read and the restart (or the database change).
+		unlock, lerr := a.acquireLock(ctx, hosts[0].Host, deploy.LockInfo{Command: "secrets rotate"})
 		if lerr != nil {
 			err = lerr
 			u.Error(err, appDirHint(err))
@@ -218,7 +219,10 @@ func (a *app) rotateSecrets(ctx context.Context, services, generated []string, d
 				err = uerr
 			}
 		}()
-		runtime = deploy.Compose{LockHeld: true, Rotating: generated}
+		runtime = a.lockedRuntime()
+		if len(generated) > 0 {
+			runtime = deploy.Compose{LockHeld: true, Rotating: generated}
+		}
 		// A pending rotation of another key would roll out its old value.
 		if err = a.refusePendingRotations(ctx, hosts, generated); err != nil {
 			return err

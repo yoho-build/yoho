@@ -695,9 +695,10 @@ func scheduleRunCmd(g *globals) *cobra.Command {
 			h := &remote.Local{}
 			host, _ := os.Hostname()
 			lock := func(ctx context.Context) (func(context.Context) error, error) {
-				return deploy.AcquireLock(ctx, h, s.App, s.Destination, deploy.LockInfo{
+				unlock, err := deploy.AcquireLock(ctx, h, s.App, s.Destination, deploy.LockInfo{
 					Performer: "schedule@" + host, Command: "backup " + s.Job,
 				})
+				return unlock, scheduledLockError(err)
 			}
 			start := time.Now()
 			out := cmd.OutOrStdout()
@@ -714,4 +715,15 @@ func scheduleRunCmd(g *globals) *cobra.Command {
 	}
 	c.Flags().StringVar(&specPath, "job", "", "Job spec path on this Server")
 	return c
+}
+
+// scheduledLockError explains a Scheduled Backup refused by a lock taken
+// with `yoho lock acquire`: it is skipped, not retried, until the lock is
+// released.
+func scheduledLockError(err error) error {
+	var le *deploy.LockedError
+	if errors.As(err, &le) && le.Manual() {
+		return fmt.Errorf("skipped: the Destination is locked by hand (%w); this Scheduled Backup runs again at its next time after `yoho lock release`", err)
+	}
+	return err
 }

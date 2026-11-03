@@ -93,6 +93,28 @@ yoho proxy logs
 
 `yoho releases` lists Releases (image digests and compiled compose). `yoho rollback VERSION` redeploys one with the same zero-downtime cutover. Volumes and migrations are not reverted. The last `retain_releases` (5) are kept.
 
+Secrets are not rolled back: the Services keep the current secret values and generated values, so a rotated or leaked secret never comes back. A Release that reads a secret the current one lacks is refused with the missing names. `--with-release-secrets` runs the Release's own secrets generation instead and warns that rotated values come back. See [Secrets](secrets.md#rollback-keeps-the-current-secrets).
+
 Each Release records the image IDs it ran. Image tags can move (the same Version built for another Destination on the same Server, or a rebuild), so rollback points a Yoho-built tag back at the recorded image before the cutover, and fails if that image is gone. Third-party tags such as `postgres:17` are not retagged; a moved one is a warning. Rollback also removes the routes of Services that the Release does not proxy.
 
-Retention keeps the newest `retain_releases` successful Releases, the current one, and the newest failed record, so failed deploys never push a rollback target out. If the route has switched but the old containers cannot be stopped, the deploy still succeeds and logs a warning with the `docker rm -f` to run. Changing only `x-yoho.release_command` is a plan change: the next deploy runs it even though no container is replaced. Yoho-built image tags include the Destination (`yoho/<app>-<destination>-<service>:<version>`).
+Retention keeps the newest `retain_releases` successful Releases (with their secrets generations, including the one a rollback replaced), the current one, and the newest failed record, so failed deploys never push a rollback target out. If the route has switched but the old containers cannot be stopped, the deploy still succeeds and logs a warning with the `docker rm -f` to run. Changing only `x-yoho.release_command` is a plan change: the next deploy runs it even though no container is replaced. Yoho-built image tags include the Destination (`yoho/<app>-<destination>-<service>:<version>`).
+
+## Locks
+
+Each App Destination has one lock, a `lock/` directory in the App directory on its (first) Server with `info.json` (who, command, Version, message, time). `deploy` and `apply` take it before they build and ship, and hold it through the rollout and Tunnel, so a second deploy is refused at once, before it builds or retags this Version's image on the Server, naming the holder:
+
+```
+✗ [main] Acquire lock
+  locked by alice@laptop (deploy 3f2a…) since 2026-11-03T12:00:11Z; if the lock is stale (its run was killed), run `yoho lock release --force`
+```
+
+`rollback`, `secrets rotate`, `backup run`, `backup restore`, `backup drill`, `schedule install` and Scheduled Backups take the same lock. With `--lock-wait` (15 minutes) or `--lock-wait=DURATION`, `deploy`, `apply`, `rollback`, `secrets rotate` and `backup run|restore|drill` wait instead, checking every 15 seconds and printing who holds it (`--json`: `step_wait` events with a `holder` object, then `lock_acquired`). The default is to refuse.
+
+```sh
+yoho lock acquire -m "database maintenance"   # hold it by hand
+yoho lock status                               # who holds it, since when, why
+yoho lock release                              # release a lock taken with acquire
+yoho lock release --force                      # also a lock a killed command left
+```
+
+While a lock taken with `yoho lock acquire` is held, deploys and rollbacks refuse with its message, and a Scheduled Backup is skipped (``skipped: the Destination is locked by hand (…); this Scheduled Backup runs again at its next time after `yoho lock release` ``). `yoho lock release` without `--force` refuses a lock a command holds: wait for it, or use `--force` when that run was killed. `--json` emits a `lock` event (`action`, `locked`, `performer`, `command`, `version`, `message`, `since`, `manual`). A held Destination gate (`<root>/appdirs/<app>/d/<destination>/gate`, taken for a moment by every lock taker) is not the lock: remove it by hand when a killed run left it.

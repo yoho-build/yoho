@@ -40,7 +40,11 @@ import (
 )
 
 // Runtime implements plan.Runtime with Docker Swarm.
-type Runtime struct{}
+type Runtime struct {
+	// LockHeld means the caller owns the Destination lock (it took it
+	// before building).
+	LockHeld bool
+}
 
 var _ plan.Runtime = Runtime{}
 
@@ -139,7 +143,7 @@ func checkSwarm(ctx context.Context, d *plan.Deploy) (string, error) {
 }
 
 // Deploy implements plan.Runtime.
-func (Runtime) Deploy(ctx context.Context, d *plan.Deploy) (_ *release.Release, err error) {
+func (rt Runtime) Deploy(ctx context.Context, d *plan.Deploy) (_ *release.Release, err error) {
 	if err := validate(d); err != nil {
 		return nil, err
 	}
@@ -153,19 +157,21 @@ func (Runtime) Deploy(ctx context.Context, d *plan.Deploy) (_ *release.Release, 
 		err = deploy.AnnotatePoolExhausted(ctx, h, r.stack, []string{proxy.Network}, err)
 	}()
 
-	cmd := "deploy"
-	if len(d.Restart) > 0 {
-		cmd = "secrets rotate"
-	}
-	unlock, err := deploy.AcquireLock(ctx, h, d.App, d.Destination, deploy.LockInfo{Performer: d.Performer, Version: d.Version, Command: cmd, Time: start})
-	if err != nil {
-		return nil, err
-	}
-	defer func() {
-		if uerr := unlock(ctx); uerr != nil && err == nil {
-			err = uerr
+	if !rt.LockHeld {
+		cmd := "deploy"
+		if len(d.Restart) > 0 {
+			cmd = "secrets rotate"
 		}
-	}()
+		unlock, err := deploy.AcquireLock(ctx, h, d.App, d.Destination, deploy.LockInfo{Performer: d.Performer, Version: d.Version, Command: cmd, Time: start})
+		if err != nil {
+			return nil, err
+		}
+		defer func() {
+			if uerr := unlock(ctx); uerr != nil && err == nil {
+				err = uerr
+			}
+		}()
+	}
 	if err := deploy.CheckPendingRotations(ctx, h, d.App, d.Destination, nil); err != nil {
 		return nil, err
 	}
@@ -450,14 +456,23 @@ func (r *runner) createSecrets(ctx context.Context, d *plan.Deploy, svcSecrets m
 				continue
 			}
 			done[sn] = true
-			q := remote.Quote(sn)
-			script := "set -eu\nif ! docker secret inspect " + q + " >/dev/null 2>&1; then\n  docker secret create " +
-				remote.QuoteArgs("--label", deploy.LabelApp+"="+d.App, "--label", deploy.LabelDestination+"="+d.Destination, sn, "-") +
-				" >/dev/null\nfi"
-			if err := r.h.Run(ctx, remote.Cmd{Script: script, Stdin: strings.NewReader(m[name])}); err != nil {
-				return fmt.Errorf("create swarm secret %s: %w", sn, err)
+			if err := r.createSecret(ctx, d, sn, m[name]); err != nil {
+				return err
 			}
 		}
+	}
+	return nil
+}
+
+// createSecret creates Swarm secret sn with value (on stdin) unless it
+// exists.
+func (r *runner) createSecret(ctx context.Context, d *plan.Deploy, sn, value string) error {
+	q := remote.Quote(sn)
+	script := "set -eu\nif ! docker secret inspect " + q + " >/dev/null 2>&1; then\n  docker secret create " +
+		remote.QuoteArgs("--label", deploy.LabelApp+"="+d.App, "--label", deploy.LabelDestination+"="+d.Destination, sn, "-") +
+		" >/dev/null\nfi"
+	if err := r.h.Run(ctx, remote.Cmd{Script: script, Stdin: strings.NewReader(value)}); err != nil {
+		return fmt.Errorf("create swarm secret %s: %w", sn, err)
 	}
 	return nil
 }
@@ -1087,7 +1102,7 @@ func (r *runner) prune(ctx context.Context, d *plan.Deploy, current string) erro
 	retained := deploy.RetainedReleases(rels, retain, current)
 	for _, rel := range rels {
 		if retained[rel.Version] {
-			keepGen[rel.SecretsGeneration] = true
+			keepGen[rel.SecretsGeneration], keepGen[rel.BaseSecretsGeneration] = true, true
 			p, err := readPlan(ctx, r.h, release.Dir(d.App, d.Destination, rel.Version))
 			if err != nil {
 				secretsKnown = false
@@ -1171,9 +1186,10 @@ func readPlan(ctx context.Context, h remote.Host, relDir string) (*stackPlan, er
 }
 
 // Rollback implements plan.Runtime: it redeploys a retained Release's stack
-// file, which still references that Release's Swarm secrets. No build, no
+// file, re-pointed at the current Release's Swarm secrets and env values
+// (or, with d.RollbackReleaseSecrets, the Release's own). No build, no
 // release_command; volumes and migrations are not reverted.
-func (Runtime) Rollback(ctx context.Context, d *plan.Deploy, version string) (_ *release.Release, err error) {
+func (rt Runtime) Rollback(ctx context.Context, d *plan.Deploy, version string) (_ *release.Release, err error) {
 	if len(d.Servers) == 0 || slices.ContainsFunc(d.Servers, func(s plan.NamedHost) bool { return s.Host == nil }) {
 		return nil, errors.New("swarm rollback needs open connections to the Destination's Servers")
 	}
@@ -1187,15 +1203,17 @@ func (Runtime) Rollback(ctx context.Context, d *plan.Deploy, version string) (_ 
 	relDir := release.Dir(d.App, d.Destination, version)
 	stackFile := path.Join(relDir, "compose.yaml")
 
-	unlock, err := deploy.AcquireLock(ctx, h, d.App, d.Destination, deploy.LockInfo{Performer: d.Performer, Version: version, Command: "rollback", Time: start})
-	if err != nil {
-		return nil, err
-	}
-	defer func() {
-		if uerr := unlock(ctx); uerr != nil && err == nil {
-			err = uerr
+	if !rt.LockHeld {
+		unlock, err := deploy.AcquireLock(ctx, h, d.App, d.Destination, deploy.LockInfo{Performer: d.Performer, Version: version, Command: "rollback", Time: start})
+		if err != nil {
+			return nil, err
 		}
-	}()
+		defer func() {
+			if uerr := unlock(ctx); uerr != nil && err == nil {
+				err = uerr
+			}
+		}()
+	}
 	if err := deploy.CheckPendingRotations(ctx, h, d.App, d.Destination, nil); err != nil {
 		return nil, err
 	}
@@ -1225,6 +1243,10 @@ func (Runtime) Rollback(ctx context.Context, d *plan.Deploy, version string) (_ 
 	if rel.ComposeSHA256 != "" && deploy.SHA256Hex(stackYAML) != rel.ComposeSHA256 {
 		return nil, fmt.Errorf("release %s: stack file does not match its recorded sha256", version)
 	}
+	baseYAML, baseGen, err := deploy.BaseCompose(ctx, h, d.App, d.Destination, rel, stackYAML)
+	if err != nil {
+		return nil, err
+	}
 	p, err := readPlan(ctx, h, relDir)
 	if err != nil {
 		return nil, fmt.Errorf("release %s: %w", version, err)
@@ -1236,15 +1258,52 @@ func (Runtime) Rollback(ctx context.Context, d *plan.Deploy, version string) (_ 
 	if err := preflightRoutes(ctx, d, desiredRoutes); err != nil {
 		return nil, err
 	}
-	if len(p.Secrets) > 0 {
-		if err := h.Run(ctx, remote.Cmd{Script: "docker secret inspect " + remote.QuoteArgs(p.Secrets...) + " >/dev/null"}); err != nil {
+	sec, err := r.planRollbackSecrets(ctx, d, rel, p, stackYAML, baseYAML, baseGen, start.Format("20060102T150405Z")+"-"+version)
+	if err != nil {
+		return nil, err
+	}
+	r.secretVals = append(r.secretVals, sec.values...)
+	if err := sec.apply(ctx, r, d); err != nil {
+		return nil, err
+	}
+	if len(sec.secrets) > 0 {
+		if err := h.Run(ctx, remote.Cmd{Script: "docker secret inspect " + remote.QuoteArgs(sec.secrets...) + " >/dev/null"}); err != nil {
 			return nil, fmt.Errorf("release %s: its Swarm secrets are gone (pruned?): %w", version, err)
 		}
 	}
-	if p.EnvFiles && rel.SecretsGeneration != "" {
-		if err := h.Run(ctx, remote.Cmd{Script: "test -d " + remote.Quote(release.SecretsDir(d.App, d.Destination, rel.SecretsGeneration))}); err != nil {
-			return nil, fmt.Errorf("release %s: secrets generation %s is gone", version, rel.SecretsGeneration)
+	if p.EnvFiles && sec.gen != "" {
+		if err := h.Run(ctx, remote.Cmd{Script: "test -d " + remote.Quote(release.SecretsDir(d.App, d.Destination, sec.gen))}); err != nil {
+			return nil, fmt.Errorf("release %s: secrets generation %s is gone", version, sec.gen)
 		}
+	}
+	if sec.write {
+		snap := deploy.SnapshotRelease(ctx, h, relDir)
+		defer func() {
+			if err != nil {
+				deploy.RestoreRelease(ctx, h, relDir, snap, r.logf)
+			}
+		}()
+		if sec.base != nil {
+			if err := h.WriteFile(ctx, path.Join(relDir, deploy.BaseComposeFile), sec.base, 0o600, false); err != nil {
+				return nil, fmt.Errorf("write %s: %w", deploy.BaseComposeFile, err)
+			}
+		}
+		if err := h.WriteFile(ctx, stackFile, sec.yaml, 0o600, false); err != nil {
+			return nil, fmt.Errorf("write stack file: %w", err)
+		}
+		p.Secrets = sec.plan
+		if err := deploy.WriteJSON(ctx, h, path.Join(relDir, "plan.json"), p); err != nil {
+			return nil, err
+		}
+	}
+	from := sec.from
+	if from == "" {
+		from = "none"
+	}
+	if sec.mode == deploy.RollbackSecretsRelease {
+		r.logf("secrets: Release %s's own values (generation %s)", version, from)
+	} else {
+		r.logf("secrets: the current values (from generation %s)", from)
 	}
 
 	if err := hook(ctx, d, version, "pre-deploy", nil); err != nil {
@@ -1275,6 +1334,7 @@ func (Runtime) Rollback(ctx context.Context, d *plan.Deploy, version string) (_ 
 	rel.Status = "deployed"
 	rel.DeployedAt = start
 	rel.Performer = d.Performer
+	sec.record(rel)
 	if err := r.finish(ctx, d, rel); err != nil {
 		return nil, err
 	}

@@ -305,7 +305,7 @@ func (a *app) prepareBackupFor(ctx context.Context, name, dest string, needServi
 
 func (a *app) backupLock(h remote.Host, command string) backup.LockFunc {
 	return func(ctx context.Context) (func(context.Context) error, error) {
-		return deploy.AcquireLock(ctx, h, a.cfg.App, a.destName, deploy.LockInfo{Performer: performer(), Command: command})
+		return a.acquireLock(ctx, h, deploy.LockInfo{Command: command})
 	}
 }
 
@@ -329,7 +329,11 @@ func backupCmd(g *globals) *cobra.Command {
 		Long: `Backups copy the volumes and dumps declared in x-yoho.backup to a Backup
 Target defined in the Yoho file (backups.targets / backups.jobs).`,
 	}
-	c.AddCommand(backupRunCmd(g), backupListCmd(g), backupPullCmd(g), backupRestoreCmd(g), backupCheckCmd(g), backupDrillCmd(g))
+	run, restore, drill := backupRunCmd(g), backupRestoreCmd(g), backupDrillCmd(g)
+	for _, s := range []*cobra.Command{run, restore, drill} {
+		addLockWaitFlag(s)
+	}
+	c.AddCommand(run, backupListCmd(g), backupPullCmd(g), restore, backupCheckCmd(g), drill)
 	return c
 }
 

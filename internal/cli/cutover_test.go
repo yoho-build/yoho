@@ -249,20 +249,23 @@ func TestCutoverLockSerializesAndRereadsJournal(t *testing.T) {
 	a, s, h, _, _ := cutoverFixture(t, "")
 	first, _ := a.beginCutover(ctx, s, false, false)
 	second, _ := a.beginCutover(ctx, s, false, false)
-	unlock, err := first.lock(ctx)
+	unlock, err := a.deployLock(ctx, s.hosts[0], "v1")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := second.lock(ctx); err == nil {
+	if _, err := a.deployLock(ctx, s.hosts[0], "v1"); err == nil {
 		t.Fatal("second cutover acquired held lock")
 	} else {
 		var locked *deploy.LockedError
-		if !errors.As(err, &locked) || !strings.Contains(err.Error(), "if the lock is stale") {
+		if !errors.As(err, &locked) || !strings.Contains(err.Error(), "yoho lock release --force") {
 			t.Fatalf("error %v", err)
 		}
 	}
 	if _, err := deploy.AcquireLock(ctx, h, "shop", "production", deploy.LockInfo{Command: "rollback --cutover"}); err == nil {
 		t.Fatal("rollback acquired held lock")
+	}
+	if err := first.recheck(ctx); err != nil {
+		t.Fatal(err)
 	}
 	if err := first.prepare(ctx); err != nil {
 		t.Fatal(err)
@@ -271,7 +274,7 @@ func TestCutoverLockSerializesAndRereadsJournal(t *testing.T) {
 		t.Fatal(err)
 	}
 	// second began before first saved the journal; it must see the new state.
-	if _, err := second.lock(ctx); err == nil || !strings.Contains(err.Error(), "unfinished") {
+	if err := second.recheck(ctx); err == nil || !strings.Contains(err.Error(), "unfinished") {
 		t.Fatalf("stale journal accepted: %v", err)
 	}
 	if h.Locked {
@@ -298,11 +301,9 @@ func TestCutoverResumeAfterIngressOnlyFinishes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	unlock, err := co.lock(ctx)
-	if err != nil {
+	if err := co.recheck(ctx); err != nil {
 		t.Fatal(err)
 	}
-	defer unlock(ctx)
 	if !co.deployed("v1") || co.deployed("v2") || !co.j.TunnelReconciled {
 		t.Fatalf("resume phases %+v", co.j)
 	}

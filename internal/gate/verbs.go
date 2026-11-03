@@ -826,7 +826,7 @@ func rollbackVerb(ctx context.Context, c *call) (any, error) {
 		RetainReleases: s.RetainReleases, Out: c.fw,
 		Scoped: c.scoped(func(compose []byte, rel *release.Release) error { return c.vetRollback(ctx, s, version, compose, rel) }),
 	}
-	for _, w := range deploy.RollbackWarnings(ctx, d.Servers[0].Host, d.App, d.Destination, version) {
+	for _, w := range deploy.RollbackWarnings(ctx, d.Servers[0].Host, d.App, d.Destination, version, false) {
 		fmt.Fprintf(c.fw, "warning: %s\n", w)
 	}
 	rel, err := composeRollback(ctx, d, version)

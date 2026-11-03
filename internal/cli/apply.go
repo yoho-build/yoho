@@ -94,6 +94,7 @@ from the configuration.`,
 	c.Flags().BoolVar(&o.SkipBuild, "skip-build", false, "Use images already built for this version")
 	c.Flags().BoolVar(&o.AutoApprove, "auto-approve", false, "Apply without asking for confirmation")
 	addCutoverFlags(c, &o)
+	addLockWaitFlag(c)
 	return c
 }
 
@@ -348,7 +349,21 @@ func (a *app) apply(ctx context.Context, o applyOptions) (err error) {
 	if err = a.ensureAppDirs(ctx, s.hosts); err != nil {
 		return err
 	}
-	// Refuse before building: the runtime checks again under the lock.
+	// Take the Destination lock before building and shipping, and hold it
+	// through the rollout: a second deploy fails fast, before it retags
+	// this Version's images on the Server under a running one.
+	unlock, err := a.deployLock(ctx, s.hosts[0], ver)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if unlock != nil {
+			if uerr := unlock(context.WithoutCancel(ctx)); uerr != nil && err == nil {
+				err = uerr
+			}
+		}
+	}()
+	// Refuse before building: the runtime checks again.
 	if err = a.refusePendingRotations(ctx, s.hosts, nil); err != nil {
 		return err
 	}
@@ -367,23 +382,11 @@ func (a *app) apply(ctx context.Context, o applyOptions) (err error) {
 			return err
 		}
 	}
-	var cutoverUnlock func(context.Context) error
-	defer func() {
-		if cutoverUnlock != nil {
-			_ = cutoverUnlock(context.WithoutCancel(ctx))
-		}
-	}()
 	if co != nil {
-		unlock, lerr := co.lock(ctx)
-		if lerr != nil {
-			return lerr
+		if err = co.recheck(ctx); err != nil {
+			return err
 		}
-		cutoverUnlock = unlock
 		if co.action == migrate.Skip {
-			if err = cutoverUnlock(ctx); err != nil {
-				return err
-			}
-			cutoverUnlock = nil
 			co = nil
 		} else {
 			if err = co.prepare(ctx); err != nil {
@@ -400,11 +403,7 @@ func (a *app) apply(ctx context.Context, o applyOptions) (err error) {
 		if co != nil {
 			d.Cutover = co.j.ID
 		}
-		runtime := a.runtime()
-		if co != nil {
-			runtime = deploy.Compose{LockHeld: true}
-		}
-		if rel, err = a.rollout(ctx, s, d, runtime); err != nil {
+		if rel, err = a.rollout(ctx, s, d, a.lockedRuntime()); err != nil {
 			return co.failed(ctx, err)
 		}
 		version = rel.Version
@@ -433,11 +432,10 @@ func (a *app) apply(ctx context.Context, o applyOptions) (err error) {
 			return err
 		}
 	}
-	if cutoverUnlock != nil {
-		if err = cutoverUnlock(ctx); err != nil {
-			return err
-		}
-		cutoverUnlock = nil
+	// Installing Scheduled Jobs takes the lock itself.
+	err, unlock = unlock(ctx), nil
+	if err != nil {
+		return err
 	}
 	if err = a.applySchedules(ctx, s.hosts, s.store); err != nil {
 		u.Step("", "Scheduled Jobs").Fail(err, hintFor(err, "run `yoho schedule status`"))
@@ -445,6 +443,23 @@ func (a *app) apply(ctx context.Context, o applyOptions) (err error) {
 	}
 	u.Finished(nil, fmt.Sprintf("Deployed %s@%s to %s in %s%s", a.cfg.App, shortVersion(version), a.destName, time.Since(start).Round(100*time.Millisecond), urls))
 	return nil
+}
+
+// deployLock takes the Destination lock for a deploy or apply (waiting
+// with --lock-wait), as a step that shows the holder when it is refused.
+func (a *app) deployLock(ctx context.Context, h plan.NamedHost, ver string) (func(context.Context) error, error) {
+	command := "deploy"
+	if a.dest.Migrate != nil {
+		command = "deploy --cutover"
+	}
+	step := a.ui.Step(h.Name, "Acquire lock")
+	unlock, err := a.acquireLock(ctx, h.Host, deploy.LockInfo{Version: ver, Command: command})
+	if err != nil {
+		step.Fail(err, hintFor(err, "check that the Server is reachable"))
+		return nil, &silentError{err}
+	}
+	step.Done()
+	return unlock, nil
 }
 
 // confirmPrecheck rejects an unconfirmable apply before connecting anywhere.

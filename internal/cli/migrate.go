@@ -235,7 +235,7 @@ func (a *app) rollbackCutover(ctx context.Context, force bool) (err error) {
 		return err
 	}
 	h := hosts[0]
-	unlock, err := deploy.AcquireLock(ctx, h.Host, a.cfg.App, a.destName, deploy.LockInfo{Performer: performer(), Command: "rollback --cutover"})
+	unlock, err := a.acquireLock(ctx, h.Host, deploy.LockInfo{Command: "rollback --cutover"})
 	if err != nil {
 		u.Step(h.Name, "Lock").Fail(err, "")
 		return &silentError{err}

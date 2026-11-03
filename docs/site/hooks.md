@@ -8,7 +8,7 @@ Names match Kamal's (`.kamal/hooks`), with `YOHO_*` for `KAMAL_*`.
 |---|---|
 | `docker-setup` | reserved for `yoho setup`; not run yet |
 | `pre-connect` | before connecting to Servers: `deploy`, `rollback`, `proxy boot`, `secrets rotate` |
-| `pre-build` | before building images (`deploy`) |
+| `pre-build` | before building images (`deploy`): the Destination lock is already held, so `YOHO_LOCK=true` |
 | `pre-deploy` | `deploy`, `rollback`, `secrets rotate`: after the Destination lock is taken and the Release is prepared or checked, before the Proxy boot and any container change |
 | `pre-app-boot` | after `pre-deploy` and the Proxy boot, before any new container starts (dependencies, release commands, the new Service containers) |
 | `post-app-boot` | after the new containers are healthy, routed, the old ones removed and the Release recorded |
@@ -46,7 +46,7 @@ Scoped Members (team access) run `pre-connect`, `pre-build`, `pre-deploy` and `p
 
 Backup and restore hooks add `YOHO_BACKUP_JOB`, `YOHO_BACKUP_TARGET` and `YOHO_BACKUP_ID` (`post-backup`, `pre-restore`, `post-restore`).
 
-`YOHO_LOCK` is `true` in `pre-deploy`, `pre-app-boot`, `post-app-boot`, `post-deploy` and the proxy hooks of a `deploy`, `rollback` or `secrets rotate`, in `post-restore`, and in `pre-cutover` and `post-cutover`. It is `false` in `pre-connect`, `pre-build`, `pre-backup`, `post-backup`, `pre-restore`, the hooks of `yoho proxy boot` (which takes no Destination lock), and for scoped Members (the Gate holds the lock on the Server).
+`YOHO_LOCK` is `true` in `pre-build` (a `deploy` or `apply` takes the Destination lock before it builds), `pre-deploy`, `pre-app-boot`, `post-app-boot`, `post-deploy` and the proxy hooks of a `deploy`, `rollback` or `secrets rotate`, in `post-restore`, and in `pre-cutover` and `post-cutover`. It is `false` in `pre-connect` (no connection, so no lock yet), `pre-backup`, `post-backup`, `pre-restore`, the hooks of `yoho proxy boot` (which takes no Destination lock), and for scoped Members (the Gate holds the lock on the Server).
 
 Secrets are never injected into hooks.
 
