@@ -406,13 +406,15 @@ func postgresAlterScript(cid, user string) string {
 }
 
 // postgresVerifyScript logs in over TCP on the container's network
-// address: the official images trust the local socket and loopback, so
-// only a non-loopback login checks the password (loopback is a fallback).
+// address, read with docker inspect on the Server (nothing needed in the
+// image): the official images trust the local socket and loopback, so only
+// a non-loopback login checks the password. Without a network address the
+// check is skipped and says so, rather than passing over loopback.
 func postgresVerifyScript(cid, user string) string {
-	inner := `h=$(hostname -i 2>/dev/null | awk '{print $1}') || h=
-[ -n "$h" ] || h=127.0.0.1
-exec psql -X -q -w -h "$h" -U "$1" -d postgres -c 'SELECT 1'`
-	return "set -eu\ndocker exec -e PGPASSWORD " + remote.Quote(cid) + " sh -c " + remote.Quote(inner) + " yoho " + remote.Quote(user) + " >/dev/null"
+	return "set -eu\n" +
+		"set -- $(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}} {{end}}' " + remote.Quote(cid) + ")\n" +
+		"if [ -z \"${1:-}\" ]; then echo 'no container network address: skipped checking the new password over the network' >&2; exit 0; fi\n" +
+		"docker exec -e PGPASSWORD " + remote.Quote(cid) + " psql -X -q -w -h \"$1\" -U " + remote.Quote(user) + " -d postgres -c 'SELECT 1' >/dev/null\n"
 }
 
 // mysqlString quotes s as a MySQL string literal (backslash escapes on).
