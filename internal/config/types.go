@@ -261,7 +261,7 @@ type SecretValue struct {
 // ProxyConfig configures the shared kamal-proxy on a Server.
 type ProxyConfig struct {
 	// Image, default basecamp/kamal-proxy:v0.10.2 (pinned).
-	Image string `json:"image,omitempty"`
+	Image string `json:"image,omitempty" jsonschema:"description=kamal-proxy image. Default: the version pinned by this Yoho release (basecamp/kamal-proxy:v0.10.2). Pin a tag to adopt a newer or older kamal-proxy; yoho plan shows 'proxy: upgrade vX -> vY' and yoho deploy or yoho proxy upgrade recreates yoho-proxy (brief proxy downtime; routes are kept). Proxy settings are Server-wide: set the same value in every App on a Server"`
 	// Published host ports. Default 80/443. 0 disables publishing that port
 	// (e.g. behind Cloudflare Tunnel only).
 	HTTPPort  *int `json:"http_port,omitempty"`
