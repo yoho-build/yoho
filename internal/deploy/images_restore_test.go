@@ -126,6 +126,29 @@ func TestRotateRetagsFromRecordedID(t *testing.T) {
 	}
 }
 
+// Before Build/Ship move the Version tag, the recorded image gets a second
+// tag (the containerd image store deletes an image whose last tag moves);
+// dropping the holds removes only those extra tags.
+func TestHoldVersionImages(t *testing.T) {
+	withRoot(t)
+	ctx := context.Background()
+	tag, fail := "sha256:aaaa1111", false
+	h := tagHost(&tag, &fail)
+	if _, err := (Compose{}).Deploy(ctx, builtWeb(t, testDeploy(t, h, nil))); err != nil {
+		t.Fatal(err)
+	}
+	h.scripts = nil
+	drop := HoldVersionImages(ctx, h, &bytes.Buffer{}, "s1", "shop", "production", "v1")
+	if got := h.all(); !strings.Contains(got, "docker tag '"+restoreRef+"' '"+restoreRef+"-held'") || strings.Contains(got, "postgres") {
+		t.Fatalf("hold scripts:\n%s", got)
+	}
+	h.scripts = nil
+	drop()
+	if got := h.all(); !strings.Contains(got, "docker image rm '"+restoreRef+"-held'") {
+		t.Fatalf("drop scripts:\n%s", got)
+	}
+}
+
 func tagHostGone(tag *string) *dockerHost {
 	h := &dockerHost{local: &remote.Local{}}
 	h.respond = func(s string) (string, error) {
