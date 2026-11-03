@@ -152,6 +152,33 @@ func TestInterpolatedVars(t *testing.T) {
 	}
 }
 
+// TestDestinationOverlayListsAppend pins what docs/site/configuration.md
+// says: an overlay's list is appended to the base file's, and !override
+// replaces it.
+func TestDestinationOverlayListsAppend(t *testing.T) {
+	for overlay, want := range map[string]string{
+		"hosts: [staging.example.com]":           "example.com,staging.example.com",
+		"hosts: !override [staging.example.com]": "staging.example.com",
+	} {
+		dir := t.TempDir()
+		base := "services:\n  web:\n    image: app\n    x-yoho:\n      proxy:\n        hosts: [example.com]\n        port: 80\n"
+		ov := "services:\n  web:\n    x-yoho:\n      proxy:\n        " + overlay + "\n"
+		if err := os.WriteFile(filepath.Join(dir, "compose.yaml"), []byte(base), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, "compose.staging.yaml"), []byte(ov), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		r, err := Load(context.Background(), dir, nil, nil, "shop", "staging")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := strings.Join(r.Ext["web"].Proxy.Hosts, ","); got != want {
+			t.Errorf("%s: hosts %s, want %s", overlay, got, want)
+		}
+	}
+}
+
 func TestDestinationOverlay(t *testing.T) {
 	dir := t.TempDir()
 	base := "services:\n  web:\n    image: app:base\n"

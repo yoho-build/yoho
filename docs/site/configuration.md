@@ -61,7 +61,17 @@ Resolution order:
 
 An optional overlay next to the Yoho file, `yoho.<destination>.<ext>` (`yml`, `yaml`, `toml`, `json`, or `jsonc`), is deep-merged over the base before decoding. Maps merge recursively; scalars and lists replace. More than one overlay for the same Destination is an error. `yoho config show` prints the selected Destination and overlay path to stderr. The secrets file `.yoho/secrets.<destination>` is layered over `.yoho/secrets` the same way.
 
-Compose files follow the same idea. After the base files are resolved, Yoho also loads `name.<destination>.ext` when it exists (`compose.yaml` and `compose.staging.yaml` for `-d staging`) and appends those overlays so they override.
+Compose files follow the same idea. After the base files are resolved, Yoho also loads `name.<destination>.ext` when it exists (`compose.yaml` and `compose.staging.yaml` for `-d staging`) and merges those overlays after them, with Compose's own rules: scalars (`image`, `x-yoho.proxy.port`) and `command`/`entrypoint` replace, maps merge, and most lists, including `x-yoho.proxy.hosts`, `ports` and `volumes`, are appended. A staging overlay that lists `hosts: [staging.example.com]` therefore keeps the base file's hosts too, and its routes clash with production's on a shared Server. Replace a list with `!override`, or drop it with `!reset`:
+
+```yaml
+# compose.staging.yaml
+services:
+  web:
+    x-yoho:
+      proxy:
+        hosts: !override [staging.example.com]
+    ports: !reset []
+```
 
 ### App directory (`app_dir`)
 
