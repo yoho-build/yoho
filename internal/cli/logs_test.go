@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"os/exec"
@@ -16,8 +17,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/yoho-build/yoho/internal/config"
 	"github.com/yoho-build/yoho/internal/dash"
 	"github.com/yoho-build/yoho/internal/gate"
+	"github.com/yoho-build/yoho/internal/proxy"
 	"github.com/yoho-build/yoho/internal/remote"
 	"github.com/yoho-build/yoho/internal/ui"
 )
@@ -476,6 +479,8 @@ func TestAppCommandsFailBeforeSSH(t *testing.T) {
 		{"swarm", false, []string{"logs", "--all"}, []string{"--all is not supported"}},
 		{"compose", false, []string{"stats", "api"}, []string{"unknown Service api"}},
 		{"compose", true, []string{"stats", "api"}, []string{`"event":"error"`, "unknown Service api"}},
+		{"compose", false, []string{"exec", "nope", "--", "ls"}, []string{"✗ unknown Service nope; Services: db, web", "hint: use a Service name"}},
+		{"swarm", true, []string{"exec", "debug", "--", "ls"}, []string{`"event":"error"`, "unknown Service debug"}},
 	}
 	for _, c := range cases {
 		t.Run(c.runtime+" "+strings.Join(c.args, " "), func(t *testing.T) {
@@ -493,6 +498,54 @@ func TestAppCommandsFailBeforeSSH(t *testing.T) {
 				t.Errorf("human output in --json:\n%s", out)
 			}
 		})
+	}
+}
+
+// TestRolloutHintOverride: a route conflict with another Destination of the
+// App over a hostname of the base compose file points at !override; other
+// conflicts keep the generic hint.
+func TestRolloutHintOverride(t *testing.T) {
+	dir := t.TempDir()
+	base := "services:\n  web:\n    image: nginx\n    x-yoho:\n      proxy:\n        hosts: [shop.example.com]\n        port: 80\n"
+	if err := os.WriteFile(filepath.Join(dir, "compose.yaml"), []byte(base), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "compose.staging.yaml"), []byte("services:\n  web:\n    x-yoho:\n      proxy:\n        hosts: [staging.example.com]\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	a := &app{dir: dir, cfg: &config.Config{App: "shop"}, destName: "staging"}
+	conflict := func(existing, host string) error {
+		return fmt.Errorf("deploy: %w", &proxy.RouteConflictError{Desired: "shop-staging-web", Existing: existing, Host: host, Path: "/"})
+	}
+	if h := a.rolloutHint(context.Background(), conflict("shop-production-web", "shop.example.com"), "def"); !strings.Contains(h, "!override") || !strings.Contains(h, "compose.staging.yaml") || !strings.Contains(h, "services.web.x-yoho.proxy") {
+		t.Errorf("cross-Destination: %s", h)
+	}
+	for _, err := range []error{
+		conflict("shop-staging-old", "shop.example.com"),     // this Destination's own route
+		conflict("other-production-web", "shop.example.com"), // another App
+		conflict("shop-production-web", "staging.example.com"),
+	} {
+		if h := a.rolloutHint(context.Background(), err, "def"); h != proxy.RouteConflictHint {
+			t.Errorf("%v: %s", err, h)
+		}
+	}
+}
+
+// TestExecError: a failing `app exec` command already printed its stderr,
+// so it ends silently with its exit code; ssh failing to connect does not.
+func TestExecError(t *testing.T) {
+	err := execError(&remote.ExitError{Host: "s", Code: 7, Stderr: `service "web" is not running`})
+	var silent *silentError
+	var ee *exitError
+	if !errors.As(err, &silent) || !errors.As(err, &ee) || ee.code != 7 {
+		t.Errorf("exit 7: %#v", err)
+	}
+	ce := &remote.ConnectError{ExitError: &remote.ExitError{Host: "s", Code: 255}, Line: "ssh: connect to host", Hint: "h"}
+	if err := execError(ce); errors.As(err, &silent) {
+		t.Errorf("connect failure is reported: %v", err)
+	}
+	if execError(nil) != nil {
+		t.Error("success")
 	}
 }
 

@@ -442,6 +442,56 @@ func TestHopCloudflare(t *testing.T) {
 	}
 }
 
+// TestConnectError: ssh failing to connect (exit 255, ssh's own last line)
+// is a ConnectError with a runnable ssh command as its hint, and prints
+// ssh's line only when it was not streamed; a remote command exiting 255
+// stays an ExitError.
+func TestConnectError(t *testing.T) {
+	run := func(stderr string, streamed bool) error {
+		t.Helper()
+		fake := func(_ context.Context, _ []string, _ io.Reader, _, w io.Writer) error {
+			io.WriteString(w, stderr)
+			return exitCode(255)
+		}
+		s, err := NewSSH("web1", "root@203.0.113.9:2222", false, SSHOptions{ControlDir: t.TempDir(), Exec: fake})
+		if err != nil {
+			t.Fatal(err)
+		}
+		var w io.Writer
+		if streamed {
+			w = io.Discard
+		}
+		return s.Run(context.Background(), Cmd{Script: "true", Stderr: w})
+	}
+	refused := "ssh: connect to host 203.0.113.9 port 2222: Connection refused\n"
+	ce, ok := AsConnectError(run(refused, false))
+	if !ok {
+		t.Fatal("connection refused is not a ConnectError")
+	}
+	if got := ce.Error(); got != "cannot connect to Server web1 (root@203.0.113.9:2222) over ssh: ssh: connect to host 203.0.113.9 port 2222: Connection refused" {
+		t.Errorf("message: %s", got)
+	}
+	if !strings.Contains(ce.Hint, "`ssh -p 2222 root@203.0.113.9 true`") || !strings.Contains(ce.Hint, "servers.web1.ssh") {
+		t.Errorf("hint: %s", ce.Hint)
+	}
+	var ee *ExitError
+	if !errors.As(ce, &ee) || ee.Code != 255 {
+		t.Errorf("must wrap the ExitError: %v", ee)
+	}
+	if ce, _ := AsConnectError(run(refused, true)); ce == nil || strings.Contains(ce.Error(), "refused") {
+		t.Errorf("streamed: ssh's line printed twice: %v", ce)
+	}
+	for _, s := range []string{"Permission denied (publickey).", "Host key verification failed.", "kex_exchange_identification: read: Connection reset by peer"} {
+		if _, ok := AsConnectError(run("debug\n"+s+"\n", false)); !ok {
+			t.Errorf("%q is a connect failure", s)
+		}
+	}
+	err := run("my script failed\n", false)
+	if _, ok := AsConnectError(err); ok || !errors.As(err, &ee) || ee.Code != 255 {
+		t.Errorf("a remote exit 255 is an ExitError: %v", err)
+	}
+}
+
 // TestOsExecCancelWithHeldPipes: a cancelled ssh must not keep us waiting
 // while another process (the ControlMaster ssh forked, which runs ssh's
 // first session) still holds its stdout and stderr.

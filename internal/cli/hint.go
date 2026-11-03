@@ -1,9 +1,15 @@
 package cli
 
 import (
+	"context"
 	"errors"
+	"fmt"
+	"slices"
+	"sort"
 	"strconv"
+	"strings"
 
+	"github.com/yoho-build/yoho/internal/composefile"
 	"github.com/yoho-build/yoho/internal/deploy"
 	"github.com/yoho-build/yoho/internal/proxy"
 	"github.com/yoho-build/yoho/internal/release"
@@ -111,6 +117,34 @@ func secretsHint(err error, def string) string {
 		return "check the ref in secrets.values or .yoho/secrets: " + pe.Provider + " could not find that item or field"
 	}
 	return def
+}
+
+// rolloutHint is hintFor for a failed rollout. A Proxy route conflict with
+// another Destination of this App over a hostname the base compose files
+// list gets its own: Destination overlays append to lists, so an overlay's
+// x-yoho.proxy.hosts keeps the base file's hosts unless it says !override.
+func (a *app) rolloutHint(ctx context.Context, err error, def string) string {
+	h := hintFor(err, def)
+	var c *proxy.RouteConflictError
+	if !errors.As(err, &c) || c.Host == "" || !strings.HasPrefix(c.Existing, a.cfg.App+"-") || strings.HasPrefix(c.Existing, a.cfg.App+"-"+a.destName+"-") {
+		return h
+	}
+	base, lerr := composefile.Load(ctx, a.dir, a.cfg.Compose, a.dest.Env, a.project(), "")
+	if lerr != nil {
+		return h
+	}
+	names := make([]string, 0, len(base.Ext))
+	for n := range base.Ext {
+		names = append(names, n)
+	}
+	sort.Strings(names)
+	for _, n := range names {
+		if pr := base.Ext[n].Proxy; pr != nil && slices.Contains(pr.Hosts, c.Host) {
+			return fmt.Sprintf("hostname %s comes from the base compose file (Service %s), and Destination overlays append to lists rather than replace them: in the %s overlay (e.g. compose.%s.yaml) write `hosts: !override [...]` under services.%s.x-yoho.proxy, then deploy again",
+				c.Host, n, a.destName, a.destName, n)
+		}
+	}
+	return h
 }
 
 func subnetChangeHint(e *deploy.SubnetChangeError) string {

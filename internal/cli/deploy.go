@@ -60,9 +60,12 @@ func (a *app) connect(ctx context.Context) ([]plan.NamedHost, func(), error) {
 			_, err = h.Output(ctx, remote.Cmd{Script: "docker version --format '{{.Server.Version}}'"})
 		}
 		if err != nil {
-			hint := "check `ssh " + srv.SSH + "` works without a password and the user can run docker (run `yoho setup`)"
+			hint := "check `" + sshCommand(srv.SSH) + "` works without a password and the user can run docker (run `yoho setup`)"
 			if a.dest.SSH != nil {
 				hint += "; through Cloudflare, log in to Cloudflare Access or set TUNNEL_SERVICE_TOKEN_ID/TUNNEL_SERVICE_TOKEN_SECRET"
+			}
+			if ce, ok := remote.AsConnectError(err); ok {
+				hint = ce.Hint
 			}
 			step.Fail(err, hint)
 			closeAll()
@@ -524,7 +527,7 @@ func (a *app) rollout(ctx context.Context, s *session, d *plan.Deploy, runtime p
 		f.Flush()
 	}
 	if err != nil {
-		step.Fail(err, hintFor(err, "inspect per-Service failure facts, `yoho app ps`, and `yoho releases`; Services may already have changed; no automatic data/migration rollback"))
+		step.Fail(err, a.rolloutHint(ctx, err, "inspect per-Service failure facts, `yoho app ps`, and `yoho releases`; Services may already have changed; no automatic data/migration rollback"))
 		return nil, &silentError{err}
 	}
 	step.Done()
@@ -949,13 +952,32 @@ func appCmds(g *globals) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			if a.dest.Runtime == "swarm" {
-				return a.swarmExec(cmd, args[0], args[1:])
+			names, derr := a.serviceNames(cmd.Context())
+			if derr != nil {
+				a.ui.Warn("cannot list the App's Services, not checking %s: %v", args[0], derr)
+			} else if err := checkServices(names, args[:1]); err != nil {
+				return a.fail(err)
 			}
-			return a.remoteRun(cmd, "docker compose -p "+remote.Quote(a.project())+" exec -T "+remote.QuoteArgs(args...))
+			if a.dest.Runtime == "swarm" {
+				err = a.swarmExec(cmd, args[0], args[1:])
+			} else {
+				err = a.remoteRun(cmd, "docker compose -p "+remote.Quote(a.project())+" exec -T "+remote.QuoteArgs(args...))
+			}
+			return execError(err)
 		},
 	})
 	return c
+}
+
+// execError is the result of `app exec`: the command's (or docker's) own
+// stderr already reached the user, so a failure only carries its exit
+// code, like ssh and docker exec. A Server ssh cannot reach still says so.
+func execError(err error) error {
+	var ee *remote.ExitError
+	if _, ok := remote.AsConnectError(err); ok || !errors.As(err, &ee) {
+		return err
+	}
+	return &silentError{&exitError{code: ee.Code, err: err}}
 }
 
 // swarmTaskContainer returns the id of a running task container of the stack
