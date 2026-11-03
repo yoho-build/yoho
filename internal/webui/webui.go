@@ -31,6 +31,7 @@ import (
 	"time"
 
 	"github.com/yoho-build/yoho/internal/dash"
+	"github.com/yoho-build/yoho/internal/remote"
 )
 
 //go:embed all:dist
@@ -217,7 +218,13 @@ func (s *Server) api(w http.ResponseWriter, r *http.Request) {
 		}
 		out, err := s.data.Logs(ctx, q.Get("server"), q.Get("container"), lines, f)
 		if err != nil {
-			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+			res := map[string]string{"error": err.Error()}
+			// The Gate's hint, e.g. that it is older than this CLI.
+			var ge *remote.GateError
+			if errors.As(err, &ge) && ge.Hint != "" {
+				res["hint"] = ge.Hint
+			}
+			writeJSON(w, http.StatusBadRequest, res)
 			return
 		}
 		writeJSON(w, http.StatusOK, map[string]string{"logs": out})

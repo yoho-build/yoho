@@ -182,6 +182,10 @@ func TestLogsScriptClampsLines(t *testing.T) {
 	if s := ContainerLogsScript("x", 999999, LogFilter{}); !strings.Contains(s, "--tail 200 ") {
 		t.Error(s)
 	}
+	// A search reads at most MaxScan lines, then keeps the last matches.
+	if s := ContainerLogsScript("x", 100, LogFilter{Grep: "e", IgnoreCase: true}); !strings.Contains(s, "docker logs --timestamps --tail 100000 'x' 2>&1") || !strings.Contains(s, "grep -i -F -e 'e' | tail -n 100 >&4") {
+		t.Error(s)
+	}
 }
 
 func TestLiveCachesAndRefreshesForNewContainers(t *testing.T) {

@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/yoho-build/yoho/internal/dash"
+	"github.com/yoho-build/yoho/internal/remote"
 )
 
 type fakeData struct {
@@ -33,6 +34,9 @@ func (f *fakeData) Snapshot(context.Context, bool) (*dash.Snapshot, error) {
 func (f *fakeData) Logs(_ context.Context, server, name string, lines int, lf dash.LogFilter) (string, error) {
 	f.logsFor = append(f.logsFor, server+"/"+name)
 	f.filters = append(f.filters, lf)
+	if name == "old-gate" {
+		return "", &remote.GateError{Message: `logs: bad arguments: json: unknown field "grep"`, Hint: "the Server's Gate is older than this CLI", Code: "invalid"}
+	}
 	if name != "yoho-proxy" {
 		return "", errors.New("unknown container")
 	}
@@ -247,6 +251,10 @@ func TestLogsAPI(t *testing.T) {
 	}
 	if len(data.logsFor) != n {
 		t.Error("invalid filters must not reach the Server")
+	}
+	// The Gate's hint reaches the page.
+	if res, body := get(t, base+"/api/logs?server=web-1&container=old-gate&grep=x", tok); res.StatusCode != http.StatusBadRequest || !strings.Contains(body, `"hint":"the Server's Gate is older`) {
+		t.Errorf("older Gate: %d %s", res.StatusCode, body)
 	}
 }
 

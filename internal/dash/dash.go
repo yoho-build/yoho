@@ -456,13 +456,13 @@ func container(l psLine) Container {
 }
 
 // ContainerLogsScript prints the last lines of a container's logs with
-// timestamps, filtered by f. The caller must check that name is a
-// container of the Snapshot and f.
+// timestamps, filtered by f; a search reads at most MaxScan lines. The
+// caller must check that name is a container of the Snapshot, and f.
 func ContainerLogsScript(name string, lines int, f LogFilter) string {
 	if lines <= 0 || lines > 5000 {
 		lines = 200
 	}
-	return LogsScript("docker logs", remote.Quote(name), LogsOptions{LogFilter: f, Lines: lines, Timestamps: true})
+	return LogsScript("docker logs", remote.Quote(name), LogsOptions{LogFilter: f, Lines: lines, Scan: MaxScan, Timestamps: true})
 }
 
 // HasContainer reports whether name is a container (or the Proxy) of the

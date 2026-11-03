@@ -36,8 +36,8 @@ var (
 	versionRe   = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]*$`)
 )
 
-// maxLogLines bounds a non-following logs request.
-const maxLogLines = 10000
+// MaxLogLines bounds the lines of history one logs request shows.
+const MaxLogLines = 10000
 
 func (c *call) project() string { return release.ProjectName(c.req.App, c.req.Destination) }
 
@@ -155,11 +155,32 @@ func stats(ctx context.Context, c *call) (any, error) {
 // and refuses filtered ones as unknown arguments.
 type LogsArgs struct {
 	ServicesArgs
-	Container  string `json:"container,omitempty"`
-	Lines      int    `json:"lines,omitempty"`
-	Follow     bool   `json:"follow,omitempty"`
-	Timestamps bool   `json:"timestamps,omitempty"`
+	Container string `json:"container,omitempty"`
+	// Lines of history: unset is the default, 100 (with Since or Grep,
+	// every selected line up to MaxLogLines); 0 is none (with Follow, only
+	// new lines); negative or above MaxLogLines is MaxLogLines. A Gate of
+	// v0.5.9 or older reads an explicit 0 or a negative value as 100, so
+	// clients send MaxLogLines, not a negative value, for every line.
+	Lines      *int `json:"lines,omitempty"`
+	Follow     bool `json:"follow,omitempty"`
+	Timestamps bool `json:"timestamps,omitempty"`
 	dash.LogFilter
+}
+
+// LinesArg is n as LogsArgs.Lines.
+func LinesArg(n int) *int { return &n }
+
+// LogLines resolves a.Lines to the lines of history the Gate shows.
+func LogLines(a LogsArgs) int {
+	switch {
+	case a.Lines == nil && (a.Since != "" || a.Grep != ""):
+		return MaxLogLines
+	case a.Lines == nil:
+		return 100
+	case *a.Lines < 0 || *a.Lines > MaxLogLines:
+		return MaxLogLines
+	}
+	return *a.Lines
 }
 
 func logs(ctx context.Context, c *call) (any, error) {
@@ -173,22 +194,16 @@ func logs(ctx context.Context, c *call) (any, error) {
 	if err := a.LogFilter.Check(); err != nil {
 		return nil, invalid(err.Error())
 	}
-	switch {
-	case a.Lines <= 0 && (a.Since != "" || a.Grep != ""):
-		a.Lines = maxLogLines
-	case a.Lines <= 0:
-		a.Lines = 100
-	case a.Lines > maxLogLines:
-		a.Lines = maxLogLines
-	}
-	c.audit["services"], c.audit["lines"], c.audit["follow"] = a.Services, a.Lines, a.Follow
+	lines := LogLines(a)
+	c.audit["services"], c.audit["lines"], c.audit["follow"] = a.Services, lines, a.Follow
 	if a.Since != "" || a.Until != "" || a.Grep != "" {
 		c.audit["since"], c.audit["until"], c.audit["grep"] = a.Since, a.Until, a.Grep != ""
 	}
 	if a.Follow {
 		c.watchStdin()
 	}
-	opts := dash.LogsOptions{LogFilter: a.LogFilter, Lines: a.Lines, Follow: a.Follow, Timestamps: a.Timestamps}
+	// A search reads at most dash.MaxScan lines, like the dashboards.
+	opts := dash.LogsOptions{LogFilter: a.LogFilter, Lines: lines, Scan: dash.MaxScan, Follow: a.Follow, Timestamps: a.Timestamps}
 	var script string
 	if a.Container != "" {
 		c.audit["container"] = a.Container
