@@ -282,8 +282,8 @@ func (t *target) storeRestic(ctx context.Context, h remote.Host, base, staging s
 	if len(res.ID) > 8 {
 		res.ID = res.ID[:8]
 	}
-	if t.cfg.KeepLast > 0 {
-		fs := t.resticPrelude(base) + fmt.Sprintf("r forget --tag %s --group-by tags --keep-last %d --prune >&2\n", remote.Quote(t.tags()), t.cfg.KeepLast)
+	if keep := t.resticKeepFlags(); keep != "" {
+		fs := t.resticPrelude(base) + "r forget --tag " + remote.Quote(t.tags()) + " --group-by tags" + keep + " --prune >&2\n"
 		if err := h.Run(ctx, remote.Cmd{Script: fs, Env: t.env}); err != nil {
 			return res, fmt.Errorf("restic forget (Backup %s was stored): %w", res.ID, err)
 		}
@@ -332,7 +332,7 @@ func (t *target) storeArchive(ctx context.Context, h remote.Host, base, ts strin
 	if copyErr != nil {
 		return nil, fmt.Errorf("copy archive to %s: %w", t.cfg.Repository, copyErr)
 	}
-	if t.cfg.KeepLast > 0 {
+	if t.retention() {
 		if err := t.pruneArchives(ctx, h); err != nil {
 			return res, fmt.Errorf("retention (Backup %s was stored): %w", name, err)
 		}
@@ -340,17 +340,75 @@ func (t *target) storeArchive(ctx context.Context, h remote.Host, base, ts strin
 	return res, nil
 }
 
-// pruneArchives keeps the newest KeepLast archives of this App/Destination.
-// Names sort by timestamp, so lexical order is chronological.
+// retention reports whether the Target has a retention rule.
+func (t *target) retention() bool { return t.cfg.KeepLast > 0 || t.cfg.KeepWithin != "" }
+
+// resticKeepFlags are the restic forget policy flags (with a leading
+// space), or "" without retention.
+func (t *target) resticKeepFlags() string {
+	var b strings.Builder
+	if t.cfg.KeepLast > 0 {
+		fmt.Fprintf(&b, " --keep-last %d", t.cfg.KeepLast)
+	}
+	if t.cfg.KeepWithin != "" {
+		if kw, err := config.ParseKeepWithin(t.cfg.KeepWithin); err == nil {
+			b.WriteString(" --keep-within " + remote.Quote(kw.String()))
+		}
+	}
+	return b.String()
+}
+
+// expiredArchives returns the entries (newest first) that neither rule
+// keeps: keep_last keeps the newest N, keep_within keeps every archive taken
+// within the duration of the newest one (as restic does). An archive is
+// kept when either rule keeps it. Undated entries are never expired by
+// keep_within alone.
+func expiredArchives(entries []Entry, keepLast int, keepWithin string) []Entry {
+	if len(entries) == 0 || (keepLast <= 0 && keepWithin == "") {
+		return nil
+	}
+	var cutoff time.Time
+	within := false
+	if keepWithin != "" {
+		kw, err := config.ParseKeepWithin(keepWithin)
+		if err != nil {
+			return nil // invalid config keeps everything; validation reports it
+		}
+		var newest time.Time
+		for _, e := range entries {
+			if e.Time.After(newest) {
+				newest = e.Time
+			}
+		}
+		if newest.IsZero() {
+			return nil
+		}
+		cutoff, within = kw.Cutoff(newest), true
+	}
+	var old []Entry
+	for i, e := range entries {
+		if keepLast > 0 && i < keepLast {
+			continue
+		}
+		if within && (e.Time.IsZero() || !e.Time.Before(cutoff)) {
+			continue
+		}
+		old = append(old, e)
+	}
+	return old
+}
+
+// pruneArchives applies keep_last and keep_within to the archives of this
+// App/Destination. Names sort by timestamp, so lexical order is chronological.
 func (t *target) pruneArchives(ctx context.Context, h remote.Host) error {
 	entries, err := t.list(ctx, h, "")
 	if err != nil {
 		return err
 	}
-	if len(entries) <= t.cfg.KeepLast {
+	old := expiredArchives(entries, t.cfg.KeepLast, t.cfg.KeepWithin) // list is newest first
+	if len(old) == 0 {
 		return nil
 	}
-	old := entries[t.cfg.KeepLast:] // list is newest first
 	var b strings.Builder
 	if t.isRclone() {
 		b.WriteString(t.rclonePrelude())

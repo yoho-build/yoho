@@ -310,6 +310,10 @@ type BackupTarget struct {
 	RcloneConfigSecret string `json:"rclone_config_secret,omitempty"`
 	// Retention: keep last N (archive) or restic forget --keep-last N.
 	KeepLast int `json:"keep_last,omitempty"`
+	// Retention: keep every Backup taken within this duration of the newest
+	// one (restic forget --keep-within), e.g. 30d, 12h, 1y6m. Units y, m
+	// (months), d, h. With keep_last, a Backup either rule keeps stays.
+	KeepWithin string `json:"keep_within,omitempty" jsonschema:"pattern=^([0-9]+y)?([0-9]+m)?([0-9]+d)?([0-9]+h)?$"`
 }
 
 // BackupJob is a scheduled or on-demand Backup of an App's Services.

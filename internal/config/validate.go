@@ -174,6 +174,14 @@ func Validate(c *Config) []error {
 		if t.Type != "" && t.Type != "restic" && t.Type != "archive" {
 			add("backups.targets.%s.type %q must be restic or archive", n, t.Type)
 		}
+		if t.KeepLast < 0 {
+			add("backups.targets.%s.keep_last must not be negative", n)
+		}
+		if t.KeepWithin != "" {
+			if _, err := ParseKeepWithin(t.KeepWithin); err != nil {
+				add("backups.targets.%s.keep_within: %v", n, err)
+			}
+		}
 		if k := t.RcloneConfigSecret; k != "" {
 			if !secretKeyPattern.MatchString(k) {
 				add("backups.targets.%s.rclone_config_secret must be a secret key matching [A-Za-z_][A-Za-z0-9_]*", n)

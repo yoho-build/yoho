@@ -291,6 +291,10 @@ func runInit(u *ui.UI, wd string, names []string) error {
 		".yoho/secrets":      initSecrets,
 		".yoho/hooks/README": "Executable scripts named after a hook run on your machine: pre-connect, pre-build, pre-deploy, post-deploy, pre-backup, post-backup, ...\nEnv: YOHO_APP, YOHO_DESTINATION, YOHO_VERSION, YOHO_HOSTS, YOHO_COMMAND, YOHO_PERFORMER.\n",
 	}
+	if merged != nil {
+		// Every template is a Stateful Service: suggest a Backup next to it.
+		files["yoho.yml"] += "\n" + templates.BackupsExample("production")
+	}
 	for _, rel := range []string{"yoho.yml", ".yoho/secrets", ".yoho/hooks/README"} {
 		p := filepath.Join(wd, rel)
 		if rel == "yoho.yml" && haveYoho {
@@ -341,6 +345,13 @@ func runInit(u *ui.UI, wd string, names []string) error {
 	}
 	if len(keys) > 0 {
 		u.Info("Generated on the Server at the first deploy: %s. List them in x-yoho.secrets of each Service that connects.", strings.Join(keys, ", "))
+	}
+	if haveYoho {
+		ex := templates.BackupsExample("production")
+		u.Event("backups_example", "Back them up: add a backups block to "+filepath.Base(yohoPath)+" (uncomment and adjust the Destination), for example:\n"+strings.TrimRight(ex, "\n"),
+			map[string]any{"file": filepath.Base(yohoPath), "yaml": ex})
+	} else {
+		u.Info("yoho.yml has a commented-out backups example for these Services; uncomment it to back them up")
 	}
 	u.Info("Next: edit yoho.yml (servers, destinations), then `yoho config check`")
 	return nil
@@ -497,6 +508,7 @@ func runConfigCheck(cmd *cobra.Command, g *globals, offline bool) error {
 	keyCount = len(keys)
 	findings := composefile.Check(r, a.dest.Runtime, keys)
 	findings = append(findings, composefile.CheckCloudflareSSH(a.destName, a.dest, r.Project)...)
+	findings = append(findings, composefile.CheckBackupCoverage(a.destName, a.cfg.Backups, r)...)
 	for _, warning := range config.RcloneWarnings(a.cfg) {
 		findings = append(findings, composefile.Finding{Level: composefile.LevelWarning, Message: warning})
 	}
