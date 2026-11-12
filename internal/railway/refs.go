@@ -12,7 +12,6 @@ var (
 	referencePattern       = regexp.MustCompile(`\$\{\{\s*([A-Za-z0-9_ -]+)\.([A-Za-z_][A-Za-z0-9_]*)\s*\}\}`)
 	singleReferencePattern = regexp.MustCompile(`\$\{\{\s*([A-Za-z_][A-Za-z0-9_]*)\s*\}\}`)
 	inventoryEnvPath       = regexp.MustCompile(`^services\[[0-9]+\]\.env\.[A-Za-z_][A-Za-z0-9_]*$`)
-	literalPassword        = regexp.MustCompile(`:[^/\s:@]+@`)
 )
 
 func inventoryEnvRef(value, at string, allowRefs bool) bool {
@@ -45,11 +44,16 @@ func resolveTarget(inv *inventory, name string) *service {
 // merely because its Service happened to be visited earlier.
 func resolveRefs(inv *inventory) (warnings []string, composed map[string]string, err error) {
 	original := inventory{Services: append([]service(nil), inv.Services...)}
+	postgresCount := 0
 	for i := range original.Services {
 		original.Services[i].Env = maps.Clone(original.Services[i].Env)
+		if isPostgres(original.Services[i].Image) {
+			postgresCount++
+		}
 	}
 	composed = map[string]string{}
 	owners := map[string]string{}
+	consumers := map[string]map[string]bool{}
 	for i := range inv.Services {
 		s := &inv.Services[i]
 		keys := make([]string, 0, len(s.Env))
@@ -61,12 +65,6 @@ func resolveRefs(inv *inventory) (warnings []string, composed map[string]string,
 			value := s.Env[k]
 			if !strings.Contains(value, "${{") {
 				continue
-			}
-			if !keyPattern.MatchString(k) {
-				return nil, nil, &InputError{Message: s.Name + ": env key is not a shell name", Hint: "use names like DATABASE_URL"}
-			}
-			if err := noNewlines(s.Name+" env."+k, value); err != nil {
-				return nil, nil, err
 			}
 			unresolved := func(ref string) error {
 				return &InputError{
@@ -81,6 +79,8 @@ func resolveRefs(inv *inventory) (warnings []string, composed map[string]string,
 				}
 				return nil, nil, unresolved("${{ }}")
 			}
+			parts := referencePattern.FindStringSubmatch(value)
+			passwordAlias := k == "POSTGRES_PASSWORD" && parts[0] == value && (parts[2] == "POSTGRES_PASSWORD" || parts[2] == "PGPASSWORD")
 			secret := false
 			var dotenv strings.Builder
 			cursor := 0
@@ -96,6 +96,15 @@ func resolveRefs(inv *inventory) (warnings []string, composed map[string]string,
 					if replacement, bearing, ok := referenceValue(target, variable); ok {
 						if bearing {
 							secret = true
+						}
+						if bearing && !passwordAlias {
+							if postgresCount > 1 {
+								refErr = &InputError{
+									Message: s.Name + ": env." + k + " requires composition with more than one Postgres Service",
+									Hint:    "add " + k + " to secret_keys and write " + k + "=$(op read op://Production/" + inv.Project + "/" + k + ") in .yoho/secrets by hand",
+								}
+								return ""
+							}
 							for j := range inv.Services {
 								t := &inv.Services[j]
 								if t.Name == target.Name && !contains(t.SecretKeys, "POSTGRES_PASSWORD") {
@@ -121,6 +130,13 @@ func resolveRefs(inv *inventory) (warnings []string, composed map[string]string,
 				s.Env[k] = resolved
 				continue
 			}
+			delete(s.Env, k)
+			if !contains(s.SecretKeys, k) {
+				s.SecretKeys = append(s.SecretKeys, k)
+			}
+			if passwordAlias {
+				continue
+			}
 			if k == "POSTGRES_PASSWORD" && resolved != "${POSTGRES_PASSWORD}" {
 				return nil, nil, &InputError{Message: s.Name + ": env.POSTGRES_PASSWORD conflicts with the composed secret's password dependency", Hint: "rename the consuming env key"}
 			}
@@ -134,11 +150,18 @@ func resolveRefs(inv *inventory) (warnings []string, composed map[string]string,
 				return nil, nil, &InputError{Message: "env." + k + " resolves differently in " + owners[k] + " and " + s.Name + "; rename one", Hint: "give the consuming env keys different names"}
 			}
 			composed[k], owners[k] = resolved, s.Name
-			delete(s.Env, k)
-			if !contains(s.SecretKeys, k) {
-				s.SecretKeys = append(s.SecretKeys, k)
+			if consumers[k] == nil {
+				consumers[k] = map[string]bool{}
 			}
-			warnings = append(warnings, s.Name+": env."+k+" is composed in .yoho/secrets from POSTGRES_PASSWORD; POSTGRES_PASSWORD is resolved locally instead of generated on the Server")
+			consumers[k][s.Name] = true
+			warnings = append(warnings, s.Name+": env."+k+" is composed in .yoho/secrets from POSTGRES_PASSWORD; POSTGRES_PASSWORD is resolved locally instead of generated on the Server; POSTGRES_PASSWORD must be URL-safe (letters and digits) because it is inserted into DATABASE_URL unencoded")
+		}
+	}
+	for _, s := range original.Services {
+		for _, k := range s.SecretKeys {
+			if _, ok := composed[k]; ok && !consumers[k][s.Name] {
+				return nil, nil, &InputError{Message: k + " is composed for " + owners[k] + " and listed in secret_keys of " + s.Name + "; rename one", Hint: "give the consuming secret keys different names"}
+			}
 		}
 	}
 	return warnings, composed, nil
@@ -174,9 +197,6 @@ func referenceValue(target *service, variable string) (value string, secret, ok 
 			return "${POSTGRES_PASSWORD}", true, true
 		case "DATABASE_URL", "DATABASE_PRIVATE_URL":
 			user, db := target.Env["POSTGRES_USER"], target.Env["POSTGRES_DB"]
-			if ident("POSTGRES_USER", user) != nil || ident("POSTGRES_DB", db) != nil {
-				return "", false, false
-			}
 			return "postgres://" + user + ":${POSTGRES_PASSWORD}@" + target.Name + ":5432/" + db, true, true
 		}
 	}

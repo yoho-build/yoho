@@ -7,8 +7,8 @@
 #   yoho deploy --skip-build --cutover-allow-empty
 # No claim: Railway volumes are not on this Server.
 # HTTP healthchecks use wget. The image must include wget; change the test to curl if it does not.
-# web: env.DATABASE_URL is composed in .yoho/secrets from POSTGRES_PASSWORD; POSTGRES_PASSWORD is resolved locally instead of generated on the Server
-# worker: env.DATABASE_URL is composed in .yoho/secrets from POSTGRES_PASSWORD; POSTGRES_PASSWORD is resolved locally instead of generated on the Server
+# web: env.DATABASE_URL is composed in .yoho/secrets from POSTGRES_PASSWORD; POSTGRES_PASSWORD is resolved locally instead of generated on the Server; POSTGRES_PASSWORD must be URL-safe (letters and digits) because it is inserted into DATABASE_URL unencoded
+# worker: env.DATABASE_URL is composed in .yoho/secrets from POSTGRES_PASSWORD; POSTGRES_PASSWORD is resolved locally instead of generated on the Server; POSTGRES_PASSWORD must be URL-safe (letters and digits) because it is inserted into DATABASE_URL unencoded
 # yaml-language-server: $schema=https://yohobuild.com/schema/yoho.schema.json
 app: shop
 

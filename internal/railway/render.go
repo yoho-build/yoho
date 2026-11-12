@@ -12,8 +12,13 @@ import (
 
 func render(inv inventory, source string, extra []string) (*Result, error) {
 	allowNoImage := strings.HasPrefix(source, "config-as-code")
+	if err := prepare(&inv, allowNoImage); err != nil {
+		return nil, err
+	}
+	d := &Result{Warnings: append([]string{}, extra...)}
 	for i := range inv.Services {
 		s := &inv.Services[i]
+		s.Env, s.SecretKeys = dropRailway(d, s.Name, s.Env, s.SecretKeys)
 		if isPostgres(s.Image) {
 			if s.Env == nil {
 				s.Env = map[string]string{}
@@ -24,16 +29,19 @@ func render(inv inventory, source string, extra []string) (*Result, error) {
 			if _, ok := s.Env["POSTGRES_DB"]; !ok {
 				s.Env["POSTGRES_DB"] = "postgres"
 			}
+			if err := ident("POSTGRES_USER", s.Env["POSTGRES_USER"]); err != nil {
+				return nil, err
+			}
+			if err := ident("POSTGRES_DB", s.Env["POSTGRES_DB"]); err != nil {
+				return nil, err
+			}
 		}
 	}
 	warnings, composed, err := resolveRefs(&inv)
 	if err != nil {
 		return nil, err
 	}
-	if err := prepare(&inv, allowNoImage); err != nil {
-		return nil, err
-	}
-	d := &Result{Warnings: append(append([]string{}, extra...), warnings...)}
+	d.Warnings = append(d.Warnings, warnings...)
 	buckets, err := prepareBuckets(&inv)
 	if err != nil {
 		return nil, err
@@ -47,14 +55,7 @@ func render(inv inventory, source string, extra []string) (*Result, error) {
 		if s.Cron != "" {
 			d.Warnings = append(d.Warnings, s.Name+": Railway cron ("+s.Cron+") is not a Yoho Scheduled Job. Scheduled Jobs are Backups. Run the command as a Service.")
 		}
-		s.Env, s.SecretKeys = dropRailway(d, s.Name, s.Env, s.SecretKeys)
 		if isPostgres(s.Image) {
-			if err := ident("POSTGRES_USER", s.Env["POSTGRES_USER"]); err != nil {
-				return nil, err
-			}
-			if err := ident("POSTGRES_DB", s.Env["POSTGRES_DB"]); err != nil {
-				return nil, err
-			}
 			if !contains(s.SecretKeys, "POSTGRES_PASSWORD") {
 				if contains(d.Generated, "POSTGRES_PASSWORD") {
 					return nil, &InputError{Message: "only one Postgres Service can generate POSTGRES_PASSWORD", Hint: "use one database Service, or put POSTGRES_PASSWORD in secret_keys"}
@@ -81,7 +82,7 @@ func render(inv inventory, source string, extra []string) (*Result, error) {
 	if wget {
 		d.Warnings = append([]string{"HTTP healthchecks use wget. The image must include wget; change the test to curl if it does not."}, d.Warnings...)
 	}
-	d.Rotation = rotationChecklist(inv, d.Generated)
+	d.Rotation = rotationChecklist(inv, d.Generated, composed)
 	d.Compose = renderCompose(source, inv, d.Warnings)
 	if err := renderBuckets(d, inv); err != nil {
 		return nil, err
@@ -190,7 +191,7 @@ func prepare(inv *inventory, allowNoImage bool) error {
 			if !keyPattern.MatchString(k) {
 				return &InputError{Message: s.Name + ": env key " + quote(k) + " is not a shell name", Hint: "use names like POSTGRES_USER"}
 			}
-			if sensitiveKey(strings.ToLower(k)) {
+			if sensitiveKey(strings.ToLower(k)) && !strings.Contains(v, "${{") {
 				return &InputError{Message: s.Name + ": env." + k + " looks like a secret", Hint: "move the name to secret_keys. Do not put the value in the inventory"}
 			}
 			if strings.TrimSpace(v) == "" {
@@ -641,10 +642,14 @@ func flow(ss []string) string {
 
 // rotationChecklist lists each secret name of inv (after RAILWAY_* are
 // dropped) and generated key, in declaration order, with its Services.
-func rotationChecklist(inv inventory, generated []string) []RotationItem {
+// Composed keys derive from source secrets and do not need separate rotation.
+func rotationChecklist(inv inventory, generated []string, composed map[string]string) []RotationItem {
 	var out []RotationItem
 	idx := map[string]int{}
 	use := func(k, svc string) {
+		if _, ok := composed[k]; ok {
+			return
+		}
 		i, ok := idx[k]
 		if !ok {
 			it := RotationItem{Key: k, Action: RotateAtProvider}

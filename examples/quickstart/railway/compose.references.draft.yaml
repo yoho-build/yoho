@@ -2,8 +2,8 @@
 # Review before use. Nothing here is deployed by the draft.
 # Railway volumes are not Docker volumes on this Server. Postgres is filled with pg_restore.
 # HTTP healthchecks use wget. The image must include wget; change the test to curl if it does not.
-# web: env.DATABASE_URL is composed in .yoho/secrets from POSTGRES_PASSWORD; POSTGRES_PASSWORD is resolved locally instead of generated on the Server
-# worker: env.DATABASE_URL is composed in .yoho/secrets from POSTGRES_PASSWORD; POSTGRES_PASSWORD is resolved locally instead of generated on the Server
+# web: env.DATABASE_URL is composed in .yoho/secrets from POSTGRES_PASSWORD; POSTGRES_PASSWORD is resolved locally instead of generated on the Server; POSTGRES_PASSWORD must be URL-safe (letters and digits) because it is inserted into DATABASE_URL unencoded
+# worker: env.DATABASE_URL is composed in .yoho/secrets from POSTGRES_PASSWORD; POSTGRES_PASSWORD is resolved locally instead of generated on the Server; POSTGRES_PASSWORD must be URL-safe (letters and digits) because it is inserted into DATABASE_URL unencoded
 services:
   web:
     build: .

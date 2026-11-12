@@ -353,7 +353,7 @@ func walkSecrets(v any, at string, allowRefs bool) error {
 		} else if strings.Contains(t, "${{") {
 			return &InputError{Message: labelAt(at) + " contains an unresolved Railway ${{ }} reference", Hint: "put the variable name in secret_keys; this draft does not call Railway"}
 		}
-		if urlPassword.MatchString(t) || (allowRefs && inventoryEnvPath.MatchString(at) && literalPassword.MatchString(t)) {
+		if urlPassword.MatchString(t) {
 			return &InputError{Message: labelAt(at) + " looks like a URL with a password", Hint: "remove the URL. Point the app at the db Service with a secret reference, not at Railway's DATABASE_URL"}
 		}
 	}

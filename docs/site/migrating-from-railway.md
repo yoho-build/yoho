@@ -67,7 +67,9 @@ Inventory `env` values can use Railway `${{Service.VAR}}` references, with space
 
 - `RAILWAY_PRIVATE_DOMAIN` becomes the compose Service name. `PORT` uses its port, or 5432 for Postgres.
 - Postgres `PGHOST`, `PGPORT`, `PGUSER` / `POSTGRES_USER`, and `PGDATABASE` / `POSTGRES_DB` use the new Service's settings (user and database default to `postgres`). Other literal `env` keys can also be referenced.
-- Postgres `DATABASE_URL`, `DATABASE_PRIVATE_URL`, `PGPASSWORD`, and `POSTGRES_PASSWORD` become composed lines in `.yoho/secrets`. The consuming key moves to `x-yoho.secrets`. `POSTGRES_PASSWORD` is then resolved locally from a password manager, before the composed line, instead of generated on the Server. Create a new password; do not copy Railway's value.
+- Postgres `DATABASE_URL`, `DATABASE_PRIVATE_URL`, `PGPASSWORD`, and `POSTGRES_PASSWORD` become composed lines in `.yoho/secrets`. The consuming key moves to `x-yoho.secrets`. `POSTGRES_PASSWORD` is then resolved locally from a password manager, before the composed line, instead of generated on the Server. Create a new password; do not copy Railway's value. `POSTGRES_PASSWORD` must be URL-safe (letters and digits) because it is inserted into `DATABASE_URL` unencoded.
+
+A lone `${{Postgres.POSTGRES_PASSWORD}}` (or `PGPASSWORD`) under `POSTGRES_PASSWORD` just declares that secret and keeps generation on the Server. With multiple Postgres Services, write composed secrets by hand using the error's hint.
 
 Shared variables, same-Service references without a Service name, public domains, TCP proxy variables, and unknown references are refused. The error names the reference and tells you to add the consuming key to `secret_keys` and write `KEY=$(op read op://Production/<project>/KEY)` in `.yoho/secrets`. `railway.json`, `railway.toml`, and commands still refuse references.
 
