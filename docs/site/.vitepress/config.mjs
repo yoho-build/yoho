@@ -10,6 +10,7 @@ const guide = [
   ['Set up with your AI agent', 'agents'],
   ['Configuration', 'configuration'],
   ['Secrets', 'secrets'],
+  ['What is in the deploy path', 'deploy-path'],
   ['Zero-downtime & proxy', 'zero-downtime'],
   ['Customer-owned domains', 'custom-domains'],
   ['Cloudflare Tunnel', 'cloudflare-tunnel'],

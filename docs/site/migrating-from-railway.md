@@ -1,5 +1,7 @@
 # Migrating from Railway
 
+Read [What is in the deploy path](/deploy-path/) for outage dependencies and the [rotate and redeploy runbook](secrets.md#rotate-everything-after-an-incident).
+
 Railway runs off the Yoho Server. Yoho cannot `docker stop` those containers or reuse those volumes. Move Postgres with a logical dump, keep Railway running until the new App is checked, and switch the hostname once. The cutover is the existing [`migrate` block](configuration.md#migration-cutover-migrate) ([ADR 0012](https://github.com/yoho-build/yoho/blob/main/docs/adr/0012-one-shot-migration-cutover.md)). `migrate.from` stays `coolify`, `dokploy`, or `compose`; record Railway as `compose`.
 
 The sample is `examples/quickstart`: web, worker, and Postgres. Its names-only inventory is `examples/quickstart/railway/inventory.json`. An agent can follow `skills/yoho/references/migrate-railway.md` after `yoho skill install`.
