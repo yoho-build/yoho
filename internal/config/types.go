@@ -24,6 +24,8 @@ type Config struct {
 	// Destinations by name, e.g. production, staging.
 	Destinations map[string]Destination `json:"destinations" jsonschema:"required"`
 
+	Previews *PreviewsConfig `json:"previews,omitempty"`
+
 	Builder   Builder       `json:"builder,omitempty"`
 	Transport Transport     `json:"transport,omitempty"`
 	Registry  *Registry     `json:"registry,omitempty"`
@@ -474,3 +476,9 @@ type SecretRef struct {
 
 // SecretRefs accepts map or list form; see ServiceExt.Secrets.
 type SecretRefs []SecretRef
+
+// PreviewsConfig derives ephemeral Destinations from one configured template.
+type PreviewsConfig struct {
+	From string `json:"from" jsonschema:"required"`
+	Host string `json:"host" jsonschema:"required"`
+}

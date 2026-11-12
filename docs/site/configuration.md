@@ -242,3 +242,18 @@ services:
 volumes:
   chdata:
 ```
+
+## Preview Destinations
+
+```yaml
+previews:
+  from: staging
+  host: "{name}.preview.example.com"
+```
+
+`from` names one configured compose Destination with operator access. `host`
+must contain `{name}` and render valid DNS hostnames; include `{service}` when
+several proxied Services have hosts. Previews reuse the template's overlays,
+Servers and secrets, with separate App directories and named volumes. They
+exclude Migration Cutover, Backup jobs, tunnel management and fixed subnets.
+See [Preview environments](previews.md) for `up`, `down`, limits and CI setup.

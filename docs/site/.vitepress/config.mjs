@@ -9,6 +9,7 @@ const guide = [
   ['5-minute quickstart', 'quickstart'],
   ['Set up with your AI agent', 'agents'],
   ['Configuration', 'configuration'],
+  ['Preview environments', 'previews'],
   ['Secrets', 'secrets'],
   ['What is in the deploy path', 'deploy-path'],
   ['Zero-downtime & proxy', 'zero-downtime'],

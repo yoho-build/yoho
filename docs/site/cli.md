@@ -126,3 +126,18 @@ jobs:
 ```
 
 Compose interpolation reads only the App's `.env` and the Destination's `env`, never the job's process environment. Commit those values (non-secret ones only) or put them in `destinations.<name>.env`, as for a deploy.
+
+## `preview up`, `preview down`, `preview list`
+
+```sh
+yoho preview up --name pr-123 [--version VERSION] [--skip-build] [--lock-wait]
+yoho preview down --name pr-123 [--yes] [--lock-wait]
+yoho preview list
+```
+
+Derive an ephemeral Destination from `previews.from`, list its Server markers,
+or remove a verified preview including its volumes. Names normalize to lowercase
+letters, digits and dashes, at most 40 characters. `down --yes` confirms data
+deletion for CI and is required with `--json`. `up` and `down` emit `preview.up`
+and `preview.down` JSON events with name and hosts. See [Previews](previews.md)
+for configuration, safety limits, secrets layering and GitHub Actions.

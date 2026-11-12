@@ -120,6 +120,9 @@ func (g *globals) ui(cmd *cobra.Command) *ui.UI {
 
 // app is a loaded App: Yoho file plus selected Destination.
 type app struct {
+	previewName  string
+	templateName string
+
 	g        *globals
 	dir      string
 	path     string
@@ -224,9 +227,14 @@ func (a *app) root() string {
 func (a *app) project() string { return release.ProjectName(a.cfg.App, a.destName) }
 
 func (a *app) compose(ctx context.Context) (*composefile.Result, error) {
-	r, err := composefile.Load(ctx, a.dir, a.cfg.Compose, a.dest.Env, a.project(), a.destName)
+	r, err := composefile.Load(ctx, a.dir, a.cfg.Compose, a.dest.Env, a.project(), a.sourceDestination())
 	if err != nil {
 		return nil, err
+	}
+	if a.previewName != "" {
+		if err := a.preparePreviewCompose(r); err != nil {
+			return nil, err
+		}
 	}
 	for _, key := range a.cfg.Secrets.Nonempty {
 		for _, name := range sortedKeys(r.Ext) {
@@ -246,7 +254,7 @@ func destSelectErr(err error) bool {
 // secretKeys lists every key a Service may reference: file keys, provider
 // values for this Destination, and keys generated on the Server.
 func (a *app) secretKeys(r *composefile.Result) ([]string, error) {
-	keys, err := secrets.FileKeys(a.dir, a.destName)
+	keys, err := secrets.FileKeys(a.dir, a.sourceDestination())
 	if err != nil {
 		return nil, err
 	}
@@ -255,7 +263,7 @@ func (a *app) secretKeys(r *composefile.Result) ([]string, error) {
 		seen[k] = true
 	}
 	for k, v := range a.cfg.Secrets.Values {
-		if len(v.Destinations) == 0 || contains(v.Destinations, a.destName) {
+		if len(v.Destinations) == 0 || contains(v.Destinations, a.sourceDestination()) {
 			seen[k] = true
 		}
 	}
@@ -300,7 +308,7 @@ func (a *app) loadSecrets(ctx context.Context, step *ui.Step) (*secrets.Store, e
 			return nil, err
 		}
 	}
-	return secrets.Load(ctx, a.dir, a.destName, a.cfg.Secrets, secrets.LoadOptions{
+	return secrets.Load(ctx, a.dir, a.sourceDestination(), a.cfg.Secrets, secrets.LoadOptions{
 		Warn:    func(msg string) { a.ui.Warn("%s", msg) },
 		Retries: resolveSecretsRetries(a.g.secretsRetries, os.Getenv("YOHO_SECRETS_RETRIES"), stdinIsTTY()),
 		OnWait: func(ev secrets.WaitEvent) {
@@ -322,4 +330,12 @@ func contains(xs []string, s string) bool {
 		}
 	}
 	return false
+}
+
+// sourceDestination keeps template overlays and secret-provider filters on previews.
+func (a *app) sourceDestination() string {
+	if a.templateName != "" {
+		return a.templateName
+	}
+	return a.destName
 }

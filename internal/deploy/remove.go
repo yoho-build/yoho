@@ -243,11 +243,15 @@ func RemoveRoutes(ctx context.Context, h remote.Host, routes []string) error {
 // project (including `compose run` one-offs), selected by the exact project
 // label.
 func RemoveContainersScript(o RemoveOptions) string {
+	rmFlags := "-f"
+	if o.Volumes {
+		rmFlags = "-fv"
+	}
 	var b strings.Builder
 	b.WriteString("set -eu\n")
 	for _, sel := range o.selectors() {
 		b.WriteString("ids=$(docker ps -aq --filter " + remote.Quote(sel) + ")\n" +
-			"if [ -n \"$ids\" ]; then docker stop $ids >/dev/null; docker rm -f $ids >/dev/null; fi\n")
+			"if [ -n \"$ids\" ]; then docker stop $ids >/dev/null; docker rm " + rmFlags + " $ids >/dev/null; fi\n")
 	}
 	return b.String()
 }

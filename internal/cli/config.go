@@ -14,6 +14,7 @@ import (
 	"github.com/yoho-build/yoho/internal/composefile"
 	"github.com/yoho-build/yoho/internal/config"
 	"github.com/yoho-build/yoho/internal/hooks"
+	"github.com/yoho-build/yoho/internal/release"
 	"github.com/yoho-build/yoho/internal/secrets"
 	"github.com/yoho-build/yoho/internal/templates"
 	"github.com/yoho-build/yoho/internal/ui"
@@ -521,6 +522,21 @@ func runConfigCheck(cmd *cobra.Command, g *globals, offline bool) error {
 			code = exitFindings
 		}
 		return fail(code, err, "fix the compose file, then run `yoho config check` again")
+	}
+	// Validate the preview template too, including Service-dependent host patterns.
+	// This only loads config and compose: no Server connection or secret resolution.
+	if a.cfg.Previews != nil {
+		previousRoot := release.Root
+		preview, previewErr := g.loadPreviewTemplate(cmd)
+		if previewErr == nil {
+			preview.derivePreview("config-check")
+			_, previewErr = preview.compose(cmd.Context())
+		}
+		release.Root = previousRoot
+		if previewErr != nil {
+			errCount = 1
+			return fail(exitFindings, previewErr, "fix previews or its template overlay, then run `yoho config check` again")
+		}
 	}
 	services = len(r.Project.Services)
 	keys, err := a.secretKeys(r)
