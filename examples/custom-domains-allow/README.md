@@ -16,7 +16,8 @@ Never approve arbitrary input: that would let strangers consume your ACME
 orders and failed-validation allowance.
 
 Set `VERIFIED_FILE` (default `verified-hosts.txt`) to a file containing one
-verified hostname per line; blank lines and # comments are accepted. Replace it
+verified hostname per line; blank lines and # comments are accepted. The included
+sample lists only `example.com` hostnames so `go run .` works immediately. Replace it
 atomically. Hostnames are lowercased with one trailing dot stripped; IPs,
 ports, non-ASCII names (use punycode), invalid labels and oversized names are
 rejected. The source reloads on mtime/size changes or SIGHUP, and source read or

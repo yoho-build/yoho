@@ -441,16 +441,23 @@ func (c Compose) Diff(ctx context.Context, d *plan.Deploy) ([]plan.Change, error
 		name := RouteName(d.App, d.Destination, sp.Name)
 		wantRoutes[name] = true
 		r, ok := have[name]
-		switch {
-		case !ok:
+		if !ok {
 			add("route", name, plan.ActionCreate, false, "hosts "+routeHostsLabel(sp.Proxy))
-		case !sameHosts(r.Hosts, sp.Proxy.Hosts):
-			add("route", name, plan.ActionUpdate, false, "hosts "+hostsLabel(r.Hosts)+" → "+routeHostsLabel(sp.Proxy))
-		case cur != nil && currentTLSStaging(cur, sp.Name) != sp.Proxy.TLSStaging:
-			add("route", name, plan.ActionUpdate, false, fmt.Sprintf("tls_staging %t → %t", currentTLSStaging(cur, sp.Name), sp.Proxy.TLSStaging))
-		case cur != nil && currentAllow(cur, sp.Name) != sp.Proxy.CustomDomainsAllow():
+			continue
+		}
+		var reasons []string
+		if !sameHosts(r.Hosts, sp.Proxy.Hosts) {
+			reasons = append(reasons, "hosts "+hostsLabel(r.Hosts)+" → "+routeHostsLabel(sp.Proxy))
+		}
+		if cur != nil && currentTLSStaging(cur, sp.Name) != sp.Proxy.TLSStaging {
+			reasons = append(reasons, fmt.Sprintf("tls_staging %t → %t", currentTLSStaging(cur, sp.Name), sp.Proxy.TLSStaging))
+		}
+		if cur != nil && currentAllow(cur, sp.Name) != sp.Proxy.CustomDomainsAllow() {
 			// kamal-proxy lists no on-demand URL; the current plan has it.
-			add("route", name, plan.ActionUpdate, false, "hosts "+routeHostsLabel(cur.plans[sp.Name].Proxy)+" → "+routeHostsLabel(sp.Proxy))
+			reasons = append(reasons, "hosts "+routeHostsLabel(cur.plans[sp.Name].Proxy)+" → "+routeHostsLabel(sp.Proxy))
+		}
+		if len(reasons) > 0 {
+			add("route", name, plan.ActionUpdate, false, reasons...)
 		}
 	}
 	for _, r := range StaleRoutes(routes, d.App, d.Destination, wantRoutes) {

@@ -221,13 +221,17 @@ func main() {
 			}
 		}()
 	}
-	mux := http.NewServeMux()
-	mux.Handle("/custom-domains/allow", &handler{source: source, now: time.Now})
-	mux.HandleFunc("/up", func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusOK) })
-	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) { _, _ = w.Write([]byte("scale App\n")) })
 	addr := os.Getenv("LISTEN_ADDR")
 	if addr == "" {
 		addr = ":8080"
 	}
-	log.Fatal((&http.Server{Addr: addr, Handler: mux, ReadHeaderTimeout: 2 * time.Second, WriteTimeout: 2 * time.Second, IdleTimeout: 30 * time.Second}).ListenAndServe())
+	log.Fatal((&http.Server{Addr: addr, Handler: newMux(source), ReadHeaderTimeout: 2 * time.Second, WriteTimeout: 2 * time.Second, IdleTimeout: 30 * time.Second}).ListenAndServe())
+}
+
+func newMux(source Verified) *http.ServeMux {
+	mux := http.NewServeMux()
+	mux.Handle("/custom-domains/allow", &handler{source: source, now: time.Now})
+	mux.HandleFunc("/up", func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusOK) })
+	mux.HandleFunc("/{$}", func(w http.ResponseWriter, r *http.Request) { _, _ = w.Write([]byte("scale App\n")) })
+	return mux
 }

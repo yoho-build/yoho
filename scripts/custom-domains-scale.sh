@@ -10,6 +10,8 @@
 # Use fresh hostnames/Server for cold issuance: repeat runs measure cached TLS.
 # Local dependencies: curl, ssh, awk, sort, xargs and basic POSIX utilities.
 set -eu
+LC_ALL=C
+export LC_ALL
 
 if [ "$#" -lt 2 ] || [ "$#" -gt 3 ]; then
     echo "Usage: $0 <server-ip> <N> [concurrency]" >&2
@@ -34,13 +36,14 @@ trap 'rm -rf "$work"' EXIT HUP INT TERM
 rss_before=$(ssh -o BatchMode=yes "$server" 'docker stats --no-stream --format "{{.MemUsage}}" yoho-proxy')
 start=$(date +%s)
 dashed=$(printf '%s' "$server" | awk '{gsub(/\./,"-"); print}')
+: > "$work/results"
 export work dashed
 awk -v n="$count" 'BEGIN {for(i=1;i<=n;i++)print i}' |
     xargs -P "$concurrency" -n 1 sh -c '
         host="c$1-$dashed.sslip.io"
         # curl writes its timing even on failure; keep exactly one record.
         result=$(curl --noproxy "*" -sk -o /dev/null --max-time 60 -w "%{http_code} %{time_total}" "https://$host/") || :
-        printf "%s %s\n" "$host" "$result" > "$work/$1"
+        printf "%s %s\n" "$host" "$result" >> "$work/results"
     ' sh
 end=$(date +%s)
 rss_after=$(ssh -o BatchMode=yes "$server" 'docker stats --no-stream --format "{{.MemUsage}}" yoho-proxy')
@@ -51,15 +54,15 @@ path=$(docker volume inspect --format '{{.Mountpoint}}' yoho-proxy-config)
 case "$path" in /*) ;; *) echo "invalid volume mountpoint" >&2; exit 1;; esac
 if [ "$(id -u)" = 0 ]; then
     du -sh "$path"
-    files=$(find "$path/certs" -type f)
+    files=$(find "$path" -type f -path "$path/certs/*")
     printf '%s\n' "$files" | awk 'NF {n++} END {print "cert files: " n+0}'
 else
     sudo -n du -sh "$path"
-    files=$(sudo -n find "$path/certs" -type f)
+    files=$(sudo -n find "$path" -type f -path "$path/certs/*")
     printf '%s\n' "$files" | awk 'NF {n++} END {print "cert files: " n+0}'
 fi
 REMOTE
-awk '$2 ~ /^2[0-9][0-9]$/ {print $3}' "$work/"* | sort -n > "$work/times"
+awk '$2 ~ /^2[0-9][0-9]$/ {print $3}' "$work/results" | sort -n > "$work/times"
 stats=$(awk '
 {a[NR]=$1}
 END {

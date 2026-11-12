@@ -155,3 +155,19 @@ func TestTimeout(t *testing.T) {
 		t.Fatal(w.Code)
 	}
 }
+
+func TestMuxRejectsUnknownAllowPaths(t *testing.T) {
+	mux := newMux(sourceFunc(func(context.Context, string) (bool, error) {
+		t.Error("unexpected allow check")
+		return true, nil
+	}))
+	for _, path := range []string{"/check", "/allow", "/custom-domains/allow/"} {
+		t.Run(path, func(t *testing.T) {
+			w := httptest.NewRecorder()
+			mux.ServeHTTP(w, httptest.NewRequest("GET", path+"?host=evil.example", nil))
+			if w.Code != 404 {
+				t.Fatalf("got %d, want 404", w.Code)
+			}
+		})
+	}
+}
