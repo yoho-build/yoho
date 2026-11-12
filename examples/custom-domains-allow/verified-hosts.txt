@@ -1,0 +1,3 @@
+# Example entries only. Replace with customer hostnames after ownership verification.
+example.com
+customer.example.com

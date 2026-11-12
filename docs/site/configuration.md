@@ -183,6 +183,7 @@ The Cloudflare API token needs Account > Cloudflare Tunnel > Edit. It is resolve
 | `proxy.health_port` | Optional Proxy HTTP probe port, 1–65535. Omitted: use `proxy.port` (traffic still uses `proxy.port`). Explicit `0` is invalid. |
 | `proxy.health_timeout` | Optional positive Go duration per Proxy HTTP probe, e.g. `750ms` or `2s`. Omitted: pinned kamal-proxy default. Empty, zero, negative and unitless values are invalid. Separate from `deploy_timeout` and Docker `healthcheck.timeout`. |
 | `proxy.tls` | Let's Encrypt in the Proxy. Leave off behind a tunnel. |
+| `proxy.tls_staging` | Use untrusted Let's Encrypt staging certificates for trials. Default false; requires `tls: true`. Changing this updates the route. See [Customer-owned domains](custom-domains.md#staging-trials). |
 | `proxy.deploy_timeout`, `drain_timeout` | Seconds; default 30 each. |
 | `stateful` | Pin to one Server, stop-first recreate, never scaled. |
 | `secrets` | List `["KEY", "NAME:KEY"]` or map `{NAME: KEY}`; `NAME` is the name inside the container. |
