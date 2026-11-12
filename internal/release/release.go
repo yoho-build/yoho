@@ -134,6 +134,9 @@ type Release struct {
 	// SHA-256 of the compiled compose file.
 	ComposeSHA256 string `json:"compose_sha256"`
 	Status        string `json:"status"` // deployed | failed | rolled_back
+	// Refreshed records a rebuild with newer base images and no layer cache.
+	Refreshed bool `json:"refreshed,omitempty"`
+
 	// Cutover is the id of the one-shot migration cutover (ADR 0012) this
 	// Release performed; its Journal is <app dir>/cutover.json.
 	Cutover string `json:"cutover,omitempty"`

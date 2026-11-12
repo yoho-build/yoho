@@ -30,3 +30,15 @@ setup:
 ```
 
 The hook `docker-setup` runs during setup. Other OSes: install Docker yourself; everything else works.
+
+## Reboots after kernel updates
+
+With `setup.auto_updates: true`, setup enables unattended-upgrades, but Yoho never reboots the Server or enables automatic reboots. Kernel updates may leave `/var/run/reboot-required`; check it and reboot manually in a quiet window:
+
+```sh
+ssh <server> 'test -f /var/run/reboot-required && sudo reboot'
+```
+
+Alternatively, configure unattended-upgrades yourself with `Unattended-Upgrade::Automatic-Reboot "true";` and `Unattended-Upgrade::Automatic-Reboot-Time "04:00";` in its apt configuration, choosing a suitable maintenance window.
+
+Services return after boot only according to their restart policies: use `restart: unless-stopped` or `restart: always` where appropriate (`unless-stopped` keeps manually stopped containers stopped). Yoho runs the Proxy with `--restart unless-stopped`, so it returns after boot unless it was stopped manually. Allow for downtime during a reboot; a single Server cannot provide uninterrupted service while it is offline.

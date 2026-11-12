@@ -5,14 +5,17 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"github.com/yoho-build/yoho/internal/composefile"
-	"github.com/yoho-build/yoho/internal/config"
-	"github.com/yoho-build/yoho/internal/release"
-	"github.com/yoho-build/yoho/internal/secrets"
 	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/spf13/cobra"
+
+	"github.com/yoho-build/yoho/internal/composefile"
+	"github.com/yoho-build/yoho/internal/config"
+	"github.com/yoho-build/yoho/internal/plan"
+	"github.com/yoho-build/yoho/internal/release"
+	"github.com/yoho-build/yoho/internal/secrets"
 	"github.com/yoho-build/yoho/internal/ui"
 )
 
@@ -132,5 +135,31 @@ func TestNewDeployPreservesProxyHealthProbeForPlan(t *testing.T) {
 		if p.Port != 3000 || p.HealthPort == nil || *p.HealthPort != 9090 || p.HealthTimeout == nil || *p.HealthTimeout != "750ms" || p.DeployTimeout != 47 || p.DrainTimeout != 19 {
 			t.Fatalf("mapped Proxy %+v", p)
 		}
+	}
+}
+
+func TestRefreshSkipBuildRefusedBeforeLoad(t *testing.T) {
+	for _, command := range []func(*globals) *cobra.Command{deployCmd, applyCmd} {
+		c := command(&globals{configPath: "does-not-exist.yml"})
+		c.SilenceErrors, c.SilenceUsage = true, true
+		c.SetArgs([]string{"--refresh", "--skip-build"})
+		err := c.ExecuteContext(context.Background())
+		if err == nil || !strings.Contains(err.Error(), "refresh") || !strings.Contains(err.Error(), "skip-build") {
+			t.Fatalf("got %v", err)
+		}
+	}
+}
+
+func TestRefreshForcesUnchangedApply(t *testing.T) {
+	a := &app{cfg: &config.Config{App: "shop"}}
+	unchanged := []plan.Change{{Kind: "service", Name: "web", Action: plan.ActionNoop}}
+	for _, refresh := range []bool{false, true} {
+		changes, deployNeeded := a.applyPlanChanges(unchanged, false, applyOptions{Refresh: refresh})
+		if deployNeeded != refresh || ui.HasChanges(changes) != refresh {
+			t.Fatalf("refresh=%v deploy=%v changes=%v", refresh, deployNeeded, changes)
+		}
+	}
+	if err := (applyOptions{Refresh: true, SkipBuild: true}).validate(); err == nil {
+		t.Fatal("invalid options accepted")
 	}
 }

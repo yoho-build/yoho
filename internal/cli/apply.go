@@ -34,6 +34,8 @@ var (
 type applyOptions struct {
 	Version     string
 	SkipBuild   bool
+	Refresh     bool
+	Scan        bool
 	AutoApprove bool
 	// ShowPlan prints the plan first and skips work when nothing changes
 	// (`yoho apply`). `yoho deploy` leaves it false.
@@ -82,6 +84,9 @@ func applyCmd(g *globals) *cobra.Command {
 changed, converge the Tunnel and Scheduled Jobs, and remove what was deleted
 from the configuration.`,
 		RunE: func(cmd *cobra.Command, _ []string) error {
+			if err := o.validate(); err != nil {
+				return err
+			}
 			a, err := g.load(cmd)
 			if err != nil {
 				return err
@@ -93,6 +98,7 @@ from the configuration.`,
 	c.Flags().StringVar(&o.Version, "version", "", "Version to deploy (default: git SHA)")
 	c.Flags().BoolVar(&o.SkipBuild, "skip-build", false, "Use images already built for this version")
 	c.Flags().BoolVar(&o.AutoApprove, "auto-approve", false, "Apply without asking for confirmation")
+	addBuildFlags(c, &o)
 	addCutoverFlags(c, &o)
 	addLockWaitFlag(c)
 	return c
@@ -303,6 +309,9 @@ func (a *app) apply(ctx context.Context, o applyOptions) (err error) {
 			u.Finished(err, "")
 		}
 	}()
+	if err = o.validate(); err != nil {
+		return err
+	}
 	// Fail before any work when we could not ask.
 	if o.ShowPlan {
 		if err = a.confirmPrecheck(o); err != nil {
@@ -340,6 +349,7 @@ func (a *app) apply(ctx context.Context, o applyOptions) (err error) {
 		if changes, deployNeeded, err = a.collectChanges(ctx, s); err != nil {
 			return err
 		}
+		changes, deployNeeded = a.applyPlanChanges(changes, deployNeeded, o)
 		u.Plan(changes)
 		if !ui.HasChanges(changes) {
 			u.Finished(nil, "")
@@ -406,8 +416,8 @@ func (a *app) apply(ctx context.Context, o applyOptions) (err error) {
 			drops = append(drops, deploy.HoldVersionImages(ctx, h.Host, os.Stdout, h.Name, a.cfg.App, a.destName, ver))
 		}
 	}
-	if deployNeeded && !co.deployed(ver) {
-		if images, err = a.buildAndShip(ctx, s, o.SkipBuild); err != nil {
+	if deployNeeded && (o.Refresh || !co.deployed(ver)) {
+		if images, err = a.buildAndShip(ctx, s, o); err != nil {
 			return err
 		}
 	}
@@ -424,11 +434,12 @@ func (a *app) apply(ctx context.Context, o applyOptions) (err error) {
 		}
 	}
 	var rel *release.Release
-	if deployNeeded && !co.deployed(ver) {
+	if deployNeeded && (o.Refresh || !co.deployed(ver)) {
 		d, derr := a.newDeploy(s, images, false)
 		if derr != nil {
 			return co.failed(ctx, derr)
 		}
+		d.Refreshed = o.Refresh
 		if co != nil {
 			d.Cutover = co.j.ID
 		}
@@ -535,4 +546,26 @@ func (e *jobsFailedError) fields() map[string]any {
 		"rollout": "ok", "jobs": "failed", "app": e.app, "destination": e.dest,
 		"version": e.version, "error": e.reason(),
 	}
+}
+
+func (o applyOptions) validate() error {
+	if o.Refresh && o.SkipBuild {
+		return errors.New("--refresh cannot be used with --skip-build")
+	}
+	return nil
+}
+
+func addBuildFlags(c *cobra.Command, o *applyOptions) {
+	c.Flags().BoolVar(&o.Refresh, "refresh", false, "Pull base images and rebuild without cache (build Services only; bump image-only Service tags explicitly)")
+	c.Flags().BoolVar(&o.Scan, "scan", false, "Scan locally built images with Trivy or Grype before rollout (warnings only)")
+	c.MarkFlagsMutuallyExclusive("refresh", "skip-build")
+}
+
+// applyPlanChanges includes the explicit rebuild request even when the
+// read-only plan sees the same Version and configuration on the Server.
+func (a *app) applyPlanChanges(changes []plan.Change, deployNeeded bool, o applyOptions) ([]plan.Change, bool) {
+	if o.Refresh {
+		return append(changes, plan.Change{Kind: "images", Name: a.cfg.App, Action: plan.ActionUpdate, Reasons: []string{"refresh base images (pull, no cache)"}}), true
+	}
+	return changes, deployNeeded
 }

@@ -84,7 +84,7 @@ func TestBuildAndShipRejectsWrongPlatformBeforeBuild(t *testing.T) {
 	a := &app{cfg: &config.Config{Builder: config.Builder{Platforms: []string{"linux/arm64"}}}, ui: ui.Discard()}
 	s := &session{hosts: []plan.NamedHost{{Name: "s1", Host: &platformHost{platform: "linux/amd64"}}}}
 	// No Hook or compose project: validation must fail before invoking either.
-	if _, err := a.buildAndShip(context.Background(), s, false); err == nil || !strings.Contains(err.Error(), "does not include Server platform linux/amd64") {
+	if _, err := a.buildAndShip(context.Background(), s, applyOptions{}); err == nil || !strings.Contains(err.Error(), "does not include Server platform linux/amd64") {
 		t.Fatalf("got %v", err)
 	}
 }

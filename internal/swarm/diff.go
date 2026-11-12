@@ -429,6 +429,12 @@ func normService(s map[string]any) (map[string]any, error) {
 	if out == nil {
 		out = map[string]any{}
 	}
+	if labels := mapOf(out, "labels"); labels != nil {
+		delete(labels, refreshLabel)
+		if len(labels) == 0 {
+			delete(out, "labels")
+		}
+	}
 	return out, nil
 }
 

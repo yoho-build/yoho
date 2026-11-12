@@ -233,7 +233,11 @@ func (rt Runtime) Deploy(ctx context.Context, d *plan.Deploy) (_ *release.Releas
 	generation := start.Format("20060102T150405Z") + "-" + d.Version
 	genDir := release.SecretsDir(d.App, d.Destination, generation)
 
-	c, err := compile(d, compileInput{PinHost: pinHost, GenerationDir: genDir, SvcSecrets: svcSecrets, HMACKey: key, DockerVersion: deploy.DockerServerVersion(ctx, h), LogDriver: logDriver})
+	refresh := ""
+	if d.Refreshed {
+		refresh = start.Format(time.RFC3339Nano)
+	}
+	c, err := compile(d, compileInput{Refresh: refresh, PinHost: pinHost, GenerationDir: genDir, SvcSecrets: svcSecrets, HMACKey: key, DockerVersion: deploy.DockerServerVersion(ctx, h), LogDriver: logDriver})
 	if err != nil {
 		return nil, err
 	}
@@ -280,7 +284,7 @@ func (rt Runtime) Deploy(ctx context.Context, d *plan.Deploy) (_ *release.Releas
 		Runtime: "swarm", Role: "all", DeployedAt: start, Performer: d.Performer,
 		Images: map[string]string{}, SecretsGeneration: generation,
 		Secrets:       deploy.SecretAudit(d, svcSecrets, generated, key),
-		ComposeSHA256: deploy.SHA256Hex(c.YAML), Status: "failed",
+		ComposeSHA256: deploy.SHA256Hex(c.YAML), Status: "failed", Cutover: d.Cutover, Refreshed: d.Refreshed,
 	}
 	for _, sp := range c.Plan.Services {
 		if sp.Image != "" {

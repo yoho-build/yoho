@@ -45,6 +45,8 @@ func TestRedeploySameVersionFailureKeepsRelease(t *testing.T) {
 
 	sim.failMain = true
 	d := testDeploy(t, h, nil)
+	d.Refreshed = true
+	d.Built = []string{"web"}
 	setWebImage(d, "shop-web:other")
 	if _, err := (Runtime{}).Deploy(ctx, d); err == nil {
 		t.Fatal("want error")
@@ -64,6 +66,10 @@ func TestRedeploySameVersionFailureKeepsRelease(t *testing.T) {
 	sim.failMain = false
 	if _, err := (Runtime{}).Deploy(ctx, d); err != nil {
 		t.Fatal(err)
+	}
+	rels, err = Runtime{}.Releases(ctx, d)
+	if err != nil || len(rels) != 1 || !rels[0].Refreshed {
+		t.Fatalf("refresh not recorded: %+v %v", rels, err)
 	}
 	if b, _ := os.ReadFile(filepath.Join(relDir, "compose.yaml")); bytes.Equal(b, before["compose.yaml"]) {
 		t.Error("successful redeploy did not write the new stack file")
