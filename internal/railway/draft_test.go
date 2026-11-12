@@ -544,3 +544,20 @@ func TestComposedURLPasswordWarning(t *testing.T) {
 		t.Fatal("missing warning about unencoded passwords")
 	}
 }
+
+func TestPostgresPasswordSelfReferenceKeepsGeneration(t *testing.T) {
+	for _, variable := range []string{"POSTGRES_PASSWORD", "PGPASSWORD"} {
+		t.Run(variable, func(t *testing.T) {
+			inv := inventory{Project: "shop", Services: []service{
+				{Name: "db", Image: "postgres:17", Env: map[string]string{"POSTGRES_PASSWORD": "${{Postgres." + variable + "}}"}},
+			}}
+			d, err := render(inv, "inventory test", nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if join(d.Generated) != "POSTGRES_PASSWORD" || len(d.SecretLines) != 0 || len(d.Warnings) != 0 || strings.Contains(d.Compose, "- POSTGRES_PASSWORD") || strings.Contains(d.Compose, "${POSTGRES_PASSWORD}") || !strings.Contains(d.Compose, "POSTGRES_PASSWORD: password32") {
+				t.Fatal("password self-reference must be dropped and keep Server generation")
+			}
+		})
+	}
+}

@@ -82,6 +82,7 @@ func resolveRefs(inv *inventory) (warnings []string, composed map[string]string,
 			parts := referencePattern.FindStringSubmatch(value)
 			passwordAlias := k == "POSTGRES_PASSWORD" && parts[0] == value && (parts[2] == "POSTGRES_PASSWORD" || parts[2] == "PGPASSWORD")
 			secret := false
+			selfPasswordAlias := false
 			var dotenv strings.Builder
 			cursor := 0
 			var refErr error
@@ -96,6 +97,7 @@ func resolveRefs(inv *inventory) (warnings []string, composed map[string]string,
 					if replacement, bearing, ok := referenceValue(target, variable); ok {
 						if bearing {
 							secret = true
+							selfPasswordAlias = passwordAlias && target.Name == s.Name
 						}
 						if bearing && !passwordAlias {
 							if postgresCount > 1 {
@@ -131,6 +133,9 @@ func resolveRefs(inv *inventory) (warnings []string, composed map[string]string,
 				continue
 			}
 			delete(s.Env, k)
+			if selfPasswordAlias {
+				continue
+			}
 			if !contains(s.SecretKeys, k) {
 				s.SecretKeys = append(s.SecretKeys, k)
 			}
