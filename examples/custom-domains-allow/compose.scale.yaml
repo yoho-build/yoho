@@ -1,6 +1,7 @@
 services:
   web:
     build: .
+    restart: unless-stopped
     environment:
       # TEST ONLY: bypasses customer ownership verification.
       ALLOW_SUFFIX: .sslip.io

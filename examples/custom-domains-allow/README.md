@@ -57,10 +57,11 @@ Run `yoho deploy -d staging` from that directory on a dedicated public Server
 with ports 80/443 available. Then from the Yoho checkout:
 
 ```sh
-scripts/custom-domains-scale.sh YOUR_PUBLIC_IPV4 100 5
+PREFIX=trial1 scripts/custom-domains-scale.sh deploy@YOUR_PUBLIC_IPV4 100 10
 ```
 
-Configure SSH so the IP logs in as your deploy user. The script only inspects
+Pass an IP or `user@IP` for SSH. Set `PREFIX` (default `c`) to a new value
+for a cold run, or reuse it for a cached run. The script only inspects
 the existing Proxy and volume; root or passwordless sudo for du/find is
 required for volume statistics. It records first-request TLS plus HTTP time,
 2xx success count, successful-request percentiles, wall time, Proxy memory,

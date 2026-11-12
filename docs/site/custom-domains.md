@@ -127,29 +127,51 @@ certificates for other hostnames remain usable.
 ### Scale test
 
 [scripts/custom-domains-scale.sh](https://github.com/yoho-build/yoho/blob/main/scripts/custom-domains-scale.sh)
-runs bounded concurrent HTTPS requests to `c<i>-<ip-with-dashes>.sslip.io`,
+runs bounded concurrent HTTPS requests to `<PREFIX><i>-<ip-with-dashes>.sslip.io` (default `PREFIX=c`),
 using staging certificates and a 60-second request timeout. The
 [example scale App](https://github.com/yoho-build/yoho/tree/main/examples/custom-domains-allow)
 includes the exact Compose and Yoho configuration and a warning-emitting,
 test-only `ALLOW_SUFFIX=.sslip.io` mode.
 
 ```sh
-scripts/custom-domains-scale.sh PUBLIC_SERVER_IP 100 5
+PREFIX=trial1 scripts/custom-domains-scale.sh deploy@PUBLIC_SERVER_IP 100 10
 ```
 
-Use a dedicated public Server reachable on 80/443. Configure SSH for that IP
-and root or passwordless sudo access to inspect volume usage. The script reads
+Use a dedicated public Server reachable on 80/443. Pass its IP or `user@IP`
+for SSH, with root or passwordless sudo access to inspect volume usage. The script reads
 Proxy memory, volume size and cache file count without launching helper
 containers or changing Proxy resources. Percentiles include successful 2xx
 requests only and measure TLS plus HTTP latency, not ACME alone. Repeat runs
-reuse certificates; record whether the cache was cold, concurrency, Server
+reuse certificates with the same `PREFIX`; choose a new prefix for a cold run.
+Record whether the cache was cold, concurrency, Server
 size and DNS/network conditions when comparing results.
 
-<!-- results: filled by a dated run -->
+Measured **2026-11-12, approximately 11:14–11:19 UTC**: Azure Standard_B2s
+(2 vCPU, 4 GB), Ubuntu 24.04, kamal-proxy v0.10.2, concurrency 10, with a Mac
+client over the internet. This used **Let's Encrypt staging**, with issuer
+`(STAGING) Artificial Amaranth YE1`; production rate limits differ.
 
-| Date | N | Concurrency | Success | p50 / p95 / max | Wall | Proxy memory before / after | Volume / cert files |
+| Run | N | Success | p50 / p95 / max | Wall | Proxy RSS before → after | Volume | Cert files |
 |---|---|---|---|---|---|---|---|
-| Pending public staging Server | — | — | — | — | — | — | — |
+| Cold | 50 | 50 | 5.991 / 6.708 / 9.025 s | 31 s | 7.3 → 9.6 MiB | 428K | 52 |
+| Cached | 50 | 50 | 0.262 / 0.275 / 0.278 s | 2 s | 9.6 → 9.7 MiB | 428K | 52 |
+| Cold | 300 | 299 | 6.002 / 9.063 / 9.449 s | 190 s | 9.7 → 18.3 MiB | 2.8M | 352 |
+| Cached | 300 | 300 | 0.258 / 0.267 / 5.273 s | 15 s | 18.3 → 19.4 MiB | 2.8M | 352 |
+
+The one cold failure was a client-side TLS handshake I/O timeout with a
+60-second maximum request time. The Proxy log showed no ACME, rate-limit or
+DNS errors, and the hostname succeeded on the second pass. Percentiles exclude
+failures. Cold issuance took about 6 seconds per hostname, or about 1.6
+hostnames/second at concurrency 10. Certificate file counts include
+certificates plus one account key; volume and file totals reflect the
+accumulated cache.
+
+Yoho adds no per-domain cost. At this tested scale, issuance throughput and
+totals are bounded by [Let's Encrypt limits](#limits), rather than Proxy
+resource use: production allows 300 new orders per account per 3 hours.
+The 300-host cold run added about 9 MiB of Proxy memory, with total certificate
+volume usage of about 2.8 MB including the earlier run. These staging results
+do not establish a maximum Proxy capacity.
 
 ## Scoped access
 

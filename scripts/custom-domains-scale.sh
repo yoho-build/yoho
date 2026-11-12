@@ -1,9 +1,11 @@
 #!/bin/sh
-# Usage: scripts/custom-domains-scale.sh <server-ip> <N> [concurrency]
+# Usage: scripts/custom-domains-scale.sh <[user@]server-ip> <N> [concurrency]
 # Requires a public IPv4 Server with an App deployed by Yoho:
 # tls: true, tls_staging: true, custom_domains.allow accepts *.sslip.io.
 # See examples/custom-domains-allow/README.md. Ports 80/443 must be reachable.
-# SSH uses your normal config/user for the IP. Read access to the Docker socket
+# The first argument accepts an IPv4 address or user@IPv4; SSH uses that target.
+# PREFIX (default c) starts each hostname; change it to keep repeat runs cold.
+# Reuse the same PREFIX to measure cached TLS. Read access to the Docker socket
 # and root (or sudo -n du/find) is needed to inspect yoho-proxy-config.
 # Only inspects yoho-proxy and its existing volume; never starts a container,
 # mounts a volume, removes certificates, or changes Proxy configuration.
@@ -14,10 +16,12 @@ LC_ALL=C
 export LC_ALL
 
 if [ "$#" -lt 2 ] || [ "$#" -gt 3 ]; then
-    echo "Usage: $0 <server-ip> <N> [concurrency]" >&2
+    echo "Usage: $0 <[user@]server-ip> <N> [concurrency]" >&2
     exit 2
 fi
-server=$1
+ssh_target=$1
+server=${ssh_target##*@}
+PREFIX=${PREFIX:-c}
 count=$2
 concurrency=${3:-5}
 if ! awk -v ip="$server" 'BEGIN { n=split(ip,a,"."); if(n!=4)exit 1; for(i=1;i<=n;i++)if(a[i]!~/^[0-9]+$/ || a[i]>255)exit 1 }'; then
@@ -33,22 +37,22 @@ for value in "$count" "$concurrency"; do
 done
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT HUP INT TERM
-rss_before=$(ssh -o BatchMode=yes "$server" 'docker stats --no-stream --format "{{.MemUsage}}" yoho-proxy')
+rss_before=$(ssh -o BatchMode=yes "$ssh_target" 'docker stats --no-stream --format "{{.MemUsage}}" yoho-proxy')
 start=$(date +%s)
 dashed=$(printf '%s' "$server" | awk '{gsub(/\./,"-"); print}')
 : > "$work/results"
-export work dashed
+export work dashed PREFIX
 awk -v n="$count" 'BEGIN {for(i=1;i<=n;i++)print i}' |
     xargs -P "$concurrency" -n 1 sh -c '
-        host="c$1-$dashed.sslip.io"
+        host="$PREFIX$1-$dashed.sslip.io"
         # curl writes its timing even on failure; keep exactly one record.
         result=$(curl --noproxy "*" -sk -o /dev/null --max-time 60 -w "%{http_code} %{time_total}" "https://$host/") || :
         printf "%s %s\n" "$host" "$result" >> "$work/results"
     ' sh
 end=$(date +%s)
-rss_after=$(ssh -o BatchMode=yes "$server" 'docker stats --no-stream --format "{{.MemUsage}}" yoho-proxy')
+rss_after=$(ssh -o BatchMode=yes "$ssh_target" 'docker stats --no-stream --format "{{.MemUsage}}" yoho-proxy')
 # Inspect the existing volume directly: docker run -v could create a volume.
-ssh -o BatchMode=yes "$server" 'sh -s' > "$work/volume" <<'REMOTE'
+ssh -o BatchMode=yes "$ssh_target" 'sh -s' > "$work/volume" <<'REMOTE'
 set -eu
 path=$(docker volume inspect --format '{{.Mountpoint}}' yoho-proxy-config)
 case "$path" in /*) ;; *) echo "invalid volume mountpoint" >&2; exit 1;; esac
