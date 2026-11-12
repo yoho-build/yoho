@@ -409,3 +409,40 @@ func TestPreviewKeepsSelectedOverlaySettingsWithTemplateOverlay(t *testing.T) {
 		t.Fatalf("lost effective settings or template overlay: %+v %+v", a.cfg.Previews, a.dest)
 	}
 }
+
+func TestPreviewDefaultsToTemplateWithoutProduction(t *testing.T) {
+	g := previewFixture(t, "")
+	t.Setenv("YOHO_DESTINATION", "")
+	b, err := os.ReadFile(g.configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writePreviewTestFile(t, g.configPath, strings.Replace(string(b), "  staging: {servers:", "  qa: {servers: [s]}\n  staging: {servers:", 1))
+	a, err := g.loadPreviewTemplate(&cobra.Command{Use: "list"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if a.destName != "staging" || a.dest.Env["FROM_TEMPLATE"] != "yes" {
+		t.Fatalf("template Destination and overlay not selected: %s %+v", a.destName, a.dest)
+	}
+}
+
+func TestPreviewCollisionUsesTemplateProjectInterpolation(t *testing.T) {
+	g := previewFixture(t, "")
+	f := filepath.Join(filepath.Dir(g.configPath), "compose.yaml")
+	b, err := os.ReadFile(f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writePreviewTestFile(t, f, strings.Replace(string(b), "original.example.com", `"${COMPOSE_PROJECT_NAME}.preview.example.com"`, 1))
+	// This preview hostname equals the template's configured hostname, but
+	// differs from the hostname produced by loading Compose as the preview.
+	a, err := g.loadPreview(&cobra.Command{Use: "up"}, "yoho-shop-staging")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = a.compose(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "yoho-shop-staging.preview.example.com is already configured on staging/web") {
+		t.Fatalf("template's interpolated hostname collision accepted: %v", err)
+	}
+}

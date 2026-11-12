@@ -128,7 +128,24 @@ func previewCmd(g *globals) *cobra.Command {
 func (g *globals) loadPreviewTemplate(cmd *cobra.Command) (*app, error) {
 	// Start with the same selected Destination overlay as ordinary loading;
 	// the previews block can be supplied or corrected there.
-	selected, err := g.loadApp(cmd)
+	initial := *g
+	if initial.destination == "" && os.Getenv("YOHO_DESTINATION") == "" {
+		file, err := g.yohoFile()
+		if err != nil {
+			return nil, err
+		}
+		base, err := config.Load(file)
+		if err != nil {
+			return nil, err
+		}
+		if base.Previews != nil {
+			// Keep ordinary overlay loading available to correct an invalid base ref.
+			if _, exists := base.Destinations[base.Previews.From]; exists {
+				initial.destination = base.Previews.From
+			}
+		}
+	}
+	selected, err := initial.loadApp(cmd)
 	if err != nil {
 		return nil, err
 	}
@@ -151,6 +168,7 @@ func (g *globals) loadPreviewTemplate(cmd *cobra.Command) (*app, error) {
 		return nil, err
 	}
 	a := *selected
+	a.g = g
 	a.cfg, a.destName, a.dest, a.overlay = cfg, name, dest, overlay
 	if a.scoped, err = scopedAccess(dest, os.Getenv); err != nil {
 		return nil, err
@@ -203,13 +221,7 @@ func (a *app) checkPreviewHostCollisions(ctx context.Context, template *composef
 		}
 		return nil
 	}
-	if err := collect(a.templateName, template); err != nil {
-		return err
-	}
 	for _, dest := range sortedKeys(a.cfg.Destinations) {
-		if dest == a.templateName {
-			continue
-		}
 		cfg, _, _, err := config.LoadForDestination(a.path, dest)
 		if err != nil {
 			return fmt.Errorf("check configured hosts for Destination %s: %w", dest, err)
