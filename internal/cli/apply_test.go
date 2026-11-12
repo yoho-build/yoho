@@ -13,7 +13,6 @@ import (
 
 	"github.com/yoho-build/yoho/internal/composefile"
 	"github.com/yoho-build/yoho/internal/config"
-	"github.com/yoho-build/yoho/internal/plan"
 	"github.com/yoho-build/yoho/internal/release"
 	"github.com/yoho-build/yoho/internal/secrets"
 	"github.com/yoho-build/yoho/internal/ui"
@@ -150,16 +149,38 @@ func TestRefreshSkipBuildRefusedBeforeLoad(t *testing.T) {
 	}
 }
 
-func TestRefreshForcesUnchangedApply(t *testing.T) {
-	a := &app{cfg: &config.Config{App: "shop"}}
-	unchanged := []plan.Change{{Kind: "service", Name: "web", Action: plan.ActionNoop}}
-	for _, refresh := range []bool{false, true} {
-		changes, deployNeeded := a.applyPlanChanges(unchanged, false, applyOptions{Refresh: refresh})
-		if deployNeeded != refresh || ui.HasChanges(changes) != refresh {
-			t.Fatalf("refresh=%v deploy=%v changes=%v", refresh, deployNeeded, changes)
-		}
+func TestRefreshSkipBuildDirectCallerRejected(t *testing.T) {
+	a := &app{ui: ui.Discard()}
+	if err := a.apply(context.Background(), applyOptions{Refresh: true, SkipBuild: true}); err == nil || !strings.Contains(err.Error(), "--skip-build") {
+		t.Fatalf("error=%v", err)
 	}
-	if err := (applyOptions{Refresh: true, SkipBuild: true}).validate(); err == nil {
-		t.Fatal("invalid options accepted")
+}
+
+func TestRefreshRejectsUnsupportedAppsBeforeConnect(t *testing.T) {
+	t.Setenv("PATH", t.TempDir()) // Any regression must fail locally instead of reaching SSH.
+	for _, tc := range []struct{ name, runtime, source, want string }{
+		{"swarm", "swarm", "services:\n  web: {build: .}\n", "--refresh supports compose Destinations; on Swarm, change the Version"},
+		{"no-build", "compose", "services:\n  web: {image: nginx}\n", "nothing to refresh: no Service has build:"},
+	} {
+		for _, command := range []func(*globals) *cobra.Command{deployCmd, applyCmd} {
+			t.Run(tc.name, func(t *testing.T) {
+				oldRoot := release.Root
+				t.Cleanup(func() { release.Root = oldRoot })
+				c := command(&globals{configPath: appDir(t, tc.runtime, tc.source)})
+				var out bytes.Buffer
+				c.SetOut(&out)
+				c.SetErr(&out)
+				args := []string{"--version", "v1", "--refresh"}
+				if c.Name() == "apply" {
+					args = append(args, "--auto-approve")
+				}
+				c.SetArgs(args)
+				c.SilenceErrors, c.SilenceUsage = true, true
+				err := c.ExecuteContext(context.Background())
+				if err == nil || !strings.Contains(err.Error()+out.String(), tc.want) || strings.Contains(out.String(), "Connect") {
+					t.Fatalf("error=%v output=%s", err, out.String())
+				}
+			})
+		}
 	}
 }

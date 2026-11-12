@@ -59,7 +59,7 @@ func (c *scanCounts) add(severity string) {
 // ScanImages reports fixed High/Critical vulnerabilities in locally built images.
 // Scanner failures and findings are warnings and never prevent rollout. run is
 // injectable; nil uses os/exec. Scanner output is parsed, never printed.
-func ScanImages(ctx context.Context, refs []string, engine string, u *ui.UI, run Exec) {
+func ScanImages(ctx context.Context, refs []string, engine, platform string, u *ui.UI, run Exec) {
 	scanner := "trivy"
 	bin, err := lookPath(scanner)
 	if err != nil {
@@ -74,7 +74,7 @@ func ScanImages(ctx context.Context, refs []string, engine string, u *ui.UI, run
 		run = osExec
 	}
 	for _, ref := range refs {
-		counts, err := scanImage(ctx, ref, engine, scanner, bin, run)
+		counts, err := scanImage(ctx, ref, engine, platform, scanner, bin, run)
 		fields := map[string]any{"image": ref, "scanner": scanner, "critical": counts.Critical, "high": counts.High}
 		if err != nil {
 			fields["ok"] = false
@@ -91,7 +91,7 @@ func ScanImages(ctx context.Context, refs []string, engine string, u *ui.UI, run
 	}
 }
 
-func scanImage(ctx context.Context, ref, engine, scanner, bin string, run Exec) (scanCounts, error) {
+func scanImage(ctx context.Context, ref, engine, platform, scanner, bin string, run Exec) (scanCounts, error) {
 	target := "docker:" + ref
 	input := ""
 	if engine == "container" {
@@ -101,7 +101,7 @@ func scanImage(ctx context.Context, ref, engine, scanner, bin string, run Exec) 
 		}
 		defer os.RemoveAll(dir)
 		input = filepath.Join(dir, "image.tar")
-		if err := run(ctx, Command{Argv: []string{"container", "image", "save", "--output", input, ref}}); err != nil {
+		if err := run(ctx, Command{Argv: []string{"container", "image", "save", "--platform", platform, "--output", input, ref}}); err != nil {
 			return scanCounts{}, err
 		}
 		target = "oci-archive:" + input
@@ -116,6 +116,9 @@ func scanImage(ctx context.Context, ref, engine, scanner, bin string, run Exec) 
 			argv = append(argv, "--image-src", "docker", ref)
 		}
 		parse = parseTrivy
+	}
+	if platform != "" {
+		argv = append(argv, "--platform", platform)
 	}
 	var out bytes.Buffer
 	if err := run(ctx, Command{Argv: argv, Stdout: &out}); err != nil {

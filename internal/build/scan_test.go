@@ -43,7 +43,7 @@ func TestScanMissing(t *testing.T) {
 	var names []string
 	lookPath = func(name string) (string, error) { names = append(names, name); return "", errors.New("missing") }
 	var out bytes.Buffer
-	ScanImages(context.Background(), []string{"app:v1"}, "docker", ui.New(&out, ui.Human, false), func(context.Context, Command) error { t.Fatal("ran scanner"); return nil })
+	ScanImages(context.Background(), []string{"app:v1"}, "docker", "linux/amd64", ui.New(&out, ui.Human, false), func(context.Context, Command) error { t.Fatal("ran scanner"); return nil })
 	if !strings.Contains(out.String(), "install trivy or grype") || !reflect.DeepEqual(names, []string{"trivy", "grype"}) {
 		t.Fatal(out.String(), names)
 	}
@@ -61,10 +61,10 @@ func TestScanCommandsAndWarnings(t *testing.T) {
 				return name, nil
 			}
 			var out bytes.Buffer
-			ScanImages(context.Background(), []string{"app:v1"}, "docker", ui.New(&out, ui.JSON, false), func(_ context.Context, c Command) error {
-				want := []string{"trivy", "image", "--quiet", "--ignore-unfixed", "--severity", "HIGH,CRITICAL", "--format", "json", "--image-src", "docker", "app:v1"}
+			ScanImages(context.Background(), []string{"app:v1"}, "docker", "linux/amd64", ui.New(&out, ui.JSON, false), func(_ context.Context, c Command) error {
+				want := []string{"trivy", "image", "--quiet", "--ignore-unfixed", "--severity", "HIGH,CRITICAL", "--format", "json", "--image-src", "docker", "app:v1", "--platform", "linux/amd64"}
 				if scanner == "grype" {
-					want = []string{"grype", "docker:app:v1", "--only-fixed", "-o", "json"}
+					want = []string{"grype", "docker:app:v1", "--only-fixed", "-o", "json", "--platform", "linux/amd64"}
 				}
 				if !reflect.DeepEqual(c.Argv, want) {
 					t.Fatalf("argv %v", c.Argv)
@@ -112,13 +112,13 @@ func TestScanContainerArchiveCleanup(t *testing.T) {
 		for _, fail := range []bool{false, true} {
 			var archive string
 			calls := 0
-			counts, err := scanImage(context.Background(), "app:v1", "container", scanner, scanner, func(_ context.Context, c Command) error {
+			counts, err := scanImage(context.Background(), "app:v1", "container", "linux/amd64", scanner, scanner, func(_ context.Context, c Command) error {
 				calls++
 				if calls == 1 {
-					if !reflect.DeepEqual(c.Argv[:4], []string{"container", "image", "save", "--output"}) || c.Argv[5] != "app:v1" {
+					if !reflect.DeepEqual(c.Argv[:6], []string{"container", "image", "save", "--platform", "linux/amd64", "--output"}) || c.Argv[7] != "app:v1" {
 						t.Fatal(c.Argv)
 					}
-					archive = c.Argv[4]
+					archive = c.Argv[6]
 					if err := os.WriteFile(archive, []byte("archive"), 0600); err != nil {
 						t.Fatal(err)
 					}
@@ -127,7 +127,7 @@ func TestScanContainerArchiveCleanup(t *testing.T) {
 				if _, err := os.Stat(archive); err != nil {
 					t.Fatal(err)
 				}
-				if scanner == "trivy" && !reflect.DeepEqual(c.Argv[len(c.Argv)-2:], []string{"--input", archive}) {
+				if scanner == "trivy" && !reflect.DeepEqual(c.Argv[len(c.Argv)-4:], []string{"--input", archive, "--platform", "linux/amd64"}) {
 					t.Fatal(c.Argv)
 				}
 				if scanner == "grype" && c.Argv[1] != "oci-archive:"+archive {

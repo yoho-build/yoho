@@ -104,11 +104,8 @@ func SecretName(stack, name, value string, key []byte) string {
 	return n + "_" + h
 }
 
-const refreshLabel = "yoho.refresh"
-
 // compileInput is everything compile needs besides the Deploy.
 type compileInput struct {
-	Refresh string // Unique task-template marker for built Services on refresh.
 	// Hostname of the Server Stateful Services are pinned to.
 	PinHost string
 	// Secrets generation directory (env_file delivery).
@@ -396,9 +393,6 @@ func compile(d *plan.Deploy, in compileInput) (*compiled, error) {
 		isVersioned := versioned(ps.Image, d.Version)
 		labels := map[string]any{
 			deploy.LabelApp: d.App, deploy.LabelDestination: d.Destination, deploy.LabelService: name,
-		}
-		if in.Refresh != "" && slices.Contains(d.Built, name) {
-			ensureMap(s, "labels")[refreshLabel] = in.Refresh
 		}
 		if isVersioned {
 			labels[deploy.LabelVersion] = d.Version

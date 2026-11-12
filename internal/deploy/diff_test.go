@@ -356,3 +356,37 @@ func TestDiffAllowsMissingAndLegacyProxyHealthPlan(t *testing.T) {
 		})
 	}
 }
+
+func TestDiffRefreshUsesServiceRolloutActions(t *testing.T) {
+	h, _, _ := deployed(t)
+	d := testDeploy(t, h, io.Discard)
+	d.Refreshed = true
+	d.Built = []string{"web", "db", "cloudflared"} // Proxied, Stateful, and plain built Services.
+	changes, err := Compose{}.Diff(context.Background(), d)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := byKey(changes)
+	for _, tc := range []struct {
+		name     string
+		action   plan.Action
+		downtime bool
+	}{
+		{"web", plan.ActionUpdate, false}, {"db", plan.ActionReplace, true}, {"cloudflared", plan.ActionReplace, true},
+	} {
+		got := m["service "+tc.name]
+		if got.Action != tc.action || got.Downtime != tc.downtime || !strings.Contains(strings.Join(got.Reasons, " "), "refresh") {
+			t.Errorf("%s: %+v", tc.name, got)
+		}
+	}
+	d.Built = []string{"web"}
+	changes, err = Compose{}.Diff(context.Background(), d)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"db", "cloudflared"} {
+		if got := byKey(changes)["service "+name]; got.Action != plan.ActionNoop {
+			t.Errorf("image-only Service changed: %+v", got)
+		}
+	}
+}

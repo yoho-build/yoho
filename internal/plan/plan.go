@@ -56,7 +56,7 @@ type Deploy struct {
 	Hook           HookFunc
 
 	// Refreshed records a rebuild with newer base images and no layer cache.
-	Refreshed bool `json:"refreshed,omitempty"`
+	Refreshed bool
 
 	// Cutover is the id of the migration cutover this deploy performs, or
 	// "". Recorded in the Release.

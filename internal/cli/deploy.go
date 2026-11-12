@@ -114,9 +114,6 @@ func deployCmd(g *globals) *cobra.Command {
 		Use:   "deploy",
 		Short: "Build, ship and deploy the App with zero downtime",
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			if err := o.validate(); err != nil {
-				return err
-			}
 			a, err := g.load(cmd)
 			if err != nil {
 				return err
@@ -183,13 +180,24 @@ func (a *app) resolveDeployVersion(ver string) (string, error) {
 
 // openSession loads compose, resolves secrets and connects. readOnly skips
 // the pre-connect Hook (plan must not run user scripts that deploy).
-func (a *app) openSession(ctx context.Context, ver string, readOnly bool) (_ *session, err error) {
+func (a *app) openSession(ctx context.Context, ver string, readOnly, refresh bool) (_ *session, err error) {
 	u := a.ui
 	step := u.Step("", "Load compose")
 	r, err := a.compose(ctx)
 	if err != nil {
 		step.Fail(err, "run `yoho config check`")
 		return nil, &silentError{err}
+	}
+	if refresh {
+		hasBuild := false
+		for _, svc := range r.Project.Services {
+			hasBuild = hasBuild || svc.Build != nil
+		}
+		if !hasBuild {
+			err = errors.New("nothing to refresh: no Service has build:")
+			step.Fail(err, "add build: to a Service, or deploy without --refresh")
+			return nil, &silentError{err}
+		}
 	}
 	keys, _ := a.secretKeys(r)
 	findings := composefile.Check(r, a.dest.Runtime, keys)
@@ -332,7 +340,7 @@ func (a *app) buildAndShip(ctx context.Context, s *session, o applyOptions) (map
 		case builder != nil:
 			u.Info("scan skipped: images remain on the remote Builder")
 		default:
-			build.ScanImages(ctx, built, engine, u, nil)
+			build.ScanImages(ctx, built, engine, platform, u, nil)
 		}
 	}
 
