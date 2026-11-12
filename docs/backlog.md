@@ -1,5 +1,6 @@
 # Backlog (decided as future work)
 
+- Scale to zero: defer a waker; track [kamal-proxy PR #228](https://github.com/basecamp/kamal-proxy/pull/228) and revisit when idle stop/wake ships or a concrete user needs it ([ADR 0014](adr/0014-scale-to-zero.md)).
 - Fast-start health probes (`start_period`/`start_interval`) for every compose Service that is a `depends_on: condition: service_healthy` target, not only proxied and Stateful ones.
 - Roles: place subsets of Services on subsets of Servers (Kamal-style). Design must be ready before v1 config freezes.
 - Manage Cloudflare Tunnel itself: create tunnels, DNS routes, ingress rules via API. Cloudflare for SaaS custom hostnames (create/delete customer hostnames and SSL via API) for the documented alternative to kamal-proxy on-demand TLS (#25).
