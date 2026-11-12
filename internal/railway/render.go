@@ -12,10 +12,28 @@ import (
 
 func render(inv inventory, source string, extra []string) (*Result, error) {
 	allowNoImage := strings.HasPrefix(source, "config-as-code")
+	for i := range inv.Services {
+		s := &inv.Services[i]
+		if isPostgres(s.Image) {
+			if s.Env == nil {
+				s.Env = map[string]string{}
+			}
+			if _, ok := s.Env["POSTGRES_USER"]; !ok {
+				s.Env["POSTGRES_USER"] = "postgres"
+			}
+			if _, ok := s.Env["POSTGRES_DB"]; !ok {
+				s.Env["POSTGRES_DB"] = "postgres"
+			}
+		}
+	}
+	warnings, composed, err := resolveRefs(&inv)
+	if err != nil {
+		return nil, err
+	}
 	if err := prepare(&inv, allowNoImage); err != nil {
 		return nil, err
 	}
-	d := &Result{Warnings: append([]string{}, extra...)}
+	d := &Result{Warnings: append(append([]string{}, extra...), warnings...)}
 	buckets, err := prepareBuckets(&inv)
 	if err != nil {
 		return nil, err
@@ -31,15 +49,6 @@ func render(inv inventory, source string, extra []string) (*Result, error) {
 		}
 		s.Env, s.SecretKeys = dropRailway(d, s.Name, s.Env, s.SecretKeys)
 		if isPostgres(s.Image) {
-			if s.Env == nil {
-				s.Env = map[string]string{}
-			}
-			if _, ok := s.Env["POSTGRES_USER"]; !ok {
-				s.Env["POSTGRES_USER"] = "postgres"
-			}
-			if _, ok := s.Env["POSTGRES_DB"]; !ok {
-				s.Env["POSTGRES_DB"] = "postgres"
-			}
 			if err := ident("POSTGRES_USER", s.Env["POSTGRES_USER"]); err != nil {
 				return nil, err
 			}
@@ -77,7 +86,7 @@ func render(inv inventory, source string, extra []string) (*Result, error) {
 	if err := renderBuckets(d, inv); err != nil {
 		return nil, err
 	}
-	d.Yoho, d.SecretLines, d.SecretKeys = renderYoho(source, inv, d)
+	d.Yoho, d.SecretLines, d.SecretKeys = renderYoho(source, inv, d, composed)
 	return d, nil
 }
 
@@ -386,7 +395,7 @@ func writeHealth(b *strings.Builder, s service) {
 	b.WriteString("      retries: 20\n")
 }
 
-func renderYoho(source string, inv inventory, d *Result) (string, []string, []string) {
+func renderYoho(source string, inv inventory, d *Result, composed map[string]string) (string, []string, []string) {
 	var b strings.Builder
 	b.WriteString("# yoho.yml — drafted by `yoho migrate draft` from " + source + ".\n")
 	b.WriteString("# Switch configuration. On the first deploy, delete the migrate block so\n")
@@ -440,6 +449,10 @@ func renderYoho(source string, inv inventory, d *Result) (string, []string, []st
 
 	var lines []string
 	seen := map[string]bool{}
+	if len(composed) > 0 {
+		seen["POSTGRES_PASSWORD"] = true
+		lines = append(lines, "POSTGRES_PASSWORD=$(op read op://Production/"+inv.Project+"/POSTGRES_PASSWORD)")
+	}
 	for _, s := range inv.Services {
 		for _, k := range s.SecretKeys {
 			if isPostgres(s.Image) && k == "POSTGRES_PASSWORD" && contains(d.Generated, "POSTGRES_PASSWORD") {
@@ -449,7 +462,11 @@ func renderYoho(source string, inv inventory, d *Result) (string, []string, []st
 				continue
 			}
 			seen[k] = true
-			lines = append(lines, k+"=$(op read op://Production/"+inv.Project+"/"+k+")")
+			if value, ok := composed[k]; ok {
+				lines = append(lines, k+"="+value)
+			} else {
+				lines = append(lines, k+"=$(op read op://Production/"+inv.Project+"/"+k+")")
+			}
 		}
 	}
 	for _, bk := range d.Buckets {
@@ -476,7 +493,7 @@ func renderYoho(source string, inv inventory, d *Result) (string, []string, []st
 		keys = append(keys, k)
 	}
 	sort.Strings(keys)
-	// SecretLines follow the compose declaration order, not the sorted keys.
+	// SecretLines follow declaration order after the password dependency.
 	if len(lines) > 0 {
 		b.WriteString("\n# Copy into .yoho/secrets. These are references, not values.\n")
 		b.WriteString("# Bitwarden alternative: KEY=$(bw get password item)\n")

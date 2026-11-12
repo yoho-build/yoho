@@ -48,7 +48,7 @@ Checked output for the sample inventory is `examples/quickstart/railway/compose.
 ## 3. Secrets
 
 ::: warning
-Never paste a secret value into a file, a command, or a log. `yoho migrate draft` refuses values, including `KEY=value`, `registryCredentials`, a URL with a password, and `${{ }}` references.
+Never paste a secret value into a file, a command, or a log. `yoho migrate draft` refuses values, including `KEY=value`, `registryCredentials`, a URL with a password, and references outside inventory `env` values.
 :::
 
 References, same as [Secrets](secrets.md):
@@ -61,7 +61,17 @@ APP_GREETING=$(bw get password shop-greeting)
 
 `POSTGRES_PASSWORD` is generated on the Server (`x-yoho.generate: password32`). Do not copy Railway's password. The draft does not emit an `op://` line for it. Web and worker still list `POSTGRES_PASSWORD` under `x-yoho.secrets`, so they receive the generated value. Yoho sets `POSTGRES_PASSWORD_FILE=/run/secrets/POSTGRES_PASSWORD`; the official Postgres image reads that, and the sample reads it too.
 
-Do not copy `DATABASE_URL`. It contains a password and points at Railway. If the app needs a URL, store a new one whose host is the compose Service name `db`.
+### Reference variables
+
+Inventory `env` values can use Railway `${{Service.VAR}}` references, with spaces and several references in one value. Service names match without regard to case, with spaces mapped to hyphens; `Postgres` and `PostgreSQL` also select the only Postgres Service.
+
+- `RAILWAY_PRIVATE_DOMAIN` becomes the compose Service name. `PORT` uses its port, or 5432 for Postgres.
+- Postgres `PGHOST`, `PGPORT`, `PGUSER` / `POSTGRES_USER`, and `PGDATABASE` / `POSTGRES_DB` use the new Service's settings (user and database default to `postgres`). Other literal `env` keys can also be referenced.
+- Postgres `DATABASE_URL`, `DATABASE_PRIVATE_URL`, `PGPASSWORD`, and `POSTGRES_PASSWORD` become composed lines in `.yoho/secrets`. The consuming key moves to `x-yoho.secrets`. `POSTGRES_PASSWORD` is then resolved locally from a password manager, before the composed line, instead of generated on the Server. Create a new password; do not copy Railway's value.
+
+Shared variables, same-Service references without a Service name, public domains, TCP proxy variables, and unknown references are refused. The error names the reference and tells you to add the consuming key to `secret_keys` and write `KEY=$(op read op://Production/<project>/KEY)` in `.yoho/secrets`. `railway.json`, `railway.toml`, and commands still refuse references.
+
+See `examples/quickstart/railway/inventory-references.json` and its `compose.references.draft.yaml` / `yoho.references.draft.yml` drafts. For example, `${{Postgres.DATABASE_URL}}` becomes `DATABASE_URL=postgres://postgres:${POSTGRES_PASSWORD}@db:5432/postgres`.
 
 `yoho config check --offline` does not run `$(...)`. `yoho secrets list` shows keys and lengths.
 

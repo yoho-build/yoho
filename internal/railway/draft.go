@@ -152,7 +152,7 @@ type service struct {
 }
 
 func draftInventory(r Request, data []byte) (*Result, error) {
-	if err := rejectSecretValues(data); err != nil {
+	if err := rejectSecretValues(data, true); err != nil {
 		return nil, err
 	}
 	dec := json.NewDecoder(bytes.NewReader(data))
@@ -211,7 +211,7 @@ func draftRailway(r Request, data []byte, tomlFile bool) (*Result, error) {
 			return nil, &InputError{Message: "a TOML file with services is not an inventory", Hint: "inventory files are JSON. railway.toml is one service's build and deploy tables"}
 		}
 	}
-	if err := walkSecrets(raw, ""); err != nil {
+	if err := walkSecrets(raw, "", false); err != nil {
 		return nil, err
 	}
 	var file railwayFile
@@ -313,15 +313,15 @@ func blank(s, fallback string) string {
 	return s
 }
 
-func rejectSecretValues(data []byte) error {
+func rejectSecretValues(data []byte, allowRefs bool) error {
 	var raw any
 	if err := json.Unmarshal(data, &raw); err != nil {
 		return &InputError{Message: "inventory JSON: " + err.Error(), Hint: "the field list is in docs/site/migrating-from-railway.md"}
 	}
-	return walkSecrets(raw, "")
+	return walkSecrets(raw, "", allowRefs)
 }
 
-func walkSecrets(v any, at string) error {
+func walkSecrets(v any, at string, allowRefs bool) error {
 	switch t := v.(type) {
 	case map[string]any:
 		for k, child := range t {
@@ -333,24 +333,27 @@ func walkSecrets(v any, at string) error {
 			if lk == "registrycredentials" && child != nil {
 				return &InputError{Message: here + " is set", Hint: "remove registryCredentials; it can hold a password"}
 			}
-			if s, ok := child.(string); ok && s != "" && sensitiveKey(lk) {
+			if s, ok := child.(string); ok && s != "" && sensitiveKey(lk) && !inventoryEnvRef(s, here, allowRefs) {
 				return &InputError{Message: here + " holds a value", Hint: "keep the name in secret_keys and put the value in 1Password or Bitwarden"}
 			}
-			if err := walkSecrets(child, here); err != nil {
+			if err := walkSecrets(child, here, allowRefs); err != nil {
 				return err
 			}
 		}
 	case []any:
 		for i, child := range t {
-			if err := walkSecrets(child, fmt.Sprintf("%s[%d]", at, i)); err != nil {
+			if err := walkSecrets(child, fmt.Sprintf("%s[%d]", at, i), allowRefs); err != nil {
 				return err
 			}
 		}
 	case string:
-		if strings.Contains(t, "${{") {
+		if inventoryEnvRef(t, at, allowRefs) {
+			// Remove references so any literal password fragments remain visible.
+			t = referencePattern.ReplaceAllString(t, "")
+		} else if strings.Contains(t, "${{") {
 			return &InputError{Message: labelAt(at) + " contains an unresolved Railway ${{ }} reference", Hint: "put the variable name in secret_keys; this draft does not call Railway"}
 		}
-		if urlPassword.MatchString(t) {
+		if urlPassword.MatchString(t) || (allowRefs && inventoryEnvPath.MatchString(at) && literalPassword.MatchString(t)) {
 			return &InputError{Message: labelAt(at) + " looks like a URL with a password", Hint: "remove the URL. Point the app at the db Service with a secret reference, not at Railway's DATABASE_URL"}
 		}
 	}
