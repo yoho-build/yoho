@@ -465,3 +465,15 @@ func TestRcloneWarningsAcrossDestinations(t *testing.T) {
 		t.Fatalf("same Destination warned: %v", warnings)
 	}
 }
+
+func TestTLSStagingRequiresTLS(t *testing.T) {
+	p := ServiceProxy{TLSStaging: true}
+	if err := p.Validate(); err == nil || !strings.Contains(err.Error(), "tls_staging requires tls: true") {
+		t.Fatalf("got %v", err)
+	}
+	p.TLS = true
+	p.Hosts = []string{"example.com"}
+	if err := p.Validate(); err != nil {
+		t.Fatal(err)
+	}
+}

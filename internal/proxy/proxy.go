@@ -391,6 +391,7 @@ type DeployOptions struct {
 	HealthPort    int
 	HealthTimeout time.Duration
 	TLS           bool
+	TLSStaging    bool
 	// TLSOnDemandURL is kamal-proxy --tls-on-demand-url: a path on the
 	// Service or an absolute http(s) URL. Requires TLS and forbids Hosts.
 	TLSOnDemandURL string
@@ -409,6 +410,7 @@ func ServiceDeployOptions(p config.ServiceProxy) (DeployOptions, error) {
 	o := DeployOptions{
 		Hosts: p.Hosts, HealthPath: p.HealthPath, TLS: p.TLS,
 		TLSOnDemandURL: p.CustomDomainsAllow(),
+		TLSStaging:     p.TLSStaging,
 		DeployTimeout:  time.Duration(p.DeployTimeout) * time.Second,
 		DrainTimeout:   time.Duration(p.DrainTimeout) * time.Second,
 	}
@@ -442,6 +444,9 @@ func DeployArgs(service, target string, opts DeployOptions) []string {
 	if opts.TLS {
 		argv = append(argv, "--tls")
 	}
+	if opts.TLSStaging {
+		argv = append(argv, "--tls-staging")
+	}
 	if opts.TLSOnDemandURL != "" {
 		argv = append(argv, "--tls-on-demand-url", opts.TLSOnDemandURL)
 	}
@@ -460,6 +465,9 @@ func DeployArgs(service, target string, opts DeployOptions) []string {
 func Deploy(ctx context.Context, host remote.Host, service, target string, opts DeployOptions) error {
 	if service == "" || target == "" {
 		return errors.New("proxy deploy: service and target are required")
+	}
+	if opts.TLSStaging && !opts.TLS {
+		return fmt.Errorf("proxy deploy %s: tls-staging requires tls", service)
 	}
 	if opts.HealthPort < 0 || opts.HealthPort > 65535 || opts.HealthTimeout < 0 {
 		return fmt.Errorf("proxy deploy %s: invalid HTTP probe port or timeout", service)

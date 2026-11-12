@@ -390,3 +390,20 @@ func TestDiffRefreshUsesServiceRolloutActions(t *testing.T) {
 		}
 	}
 }
+
+func TestDiffTLSStagingRoute(t *testing.T) {
+	h, _, _ := deployed(t)
+	d := testDeploy(t, h, io.Discard)
+	e := d.Ext["web"]
+	e.Proxy.TLS = true
+	e.Proxy.TLSStaging = true
+	d.Ext["web"] = e
+	cs, err := (Compose{}).Diff(context.Background(), d)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c := byKey(cs)["route shop-production-web"]
+	if c.Action != plan.ActionUpdate || !strings.Contains(strings.Join(c.Reasons, " "), "tls_staging false → true") {
+		t.Fatalf("%+v", c)
+	}
+}

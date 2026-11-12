@@ -446,6 +446,8 @@ func (c Compose) Diff(ctx context.Context, d *plan.Deploy) ([]plan.Change, error
 			add("route", name, plan.ActionCreate, false, "hosts "+routeHostsLabel(sp.Proxy))
 		case !sameHosts(r.Hosts, sp.Proxy.Hosts):
 			add("route", name, plan.ActionUpdate, false, "hosts "+hostsLabel(r.Hosts)+" → "+routeHostsLabel(sp.Proxy))
+		case cur != nil && currentTLSStaging(cur, sp.Name) != sp.Proxy.TLSStaging:
+			add("route", name, plan.ActionUpdate, false, fmt.Sprintf("tls_staging %t → %t", currentTLSStaging(cur, sp.Name), sp.Proxy.TLSStaging))
 		case cur != nil && currentAllow(cur, sp.Name) != sp.Proxy.CustomDomainsAllow():
 			// kamal-proxy lists no on-demand URL; the current plan has it.
 			add("route", name, plan.ActionUpdate, false, "hosts "+routeHostsLabel(cur.plans[sp.Name].Proxy)+" → "+routeHostsLabel(sp.Proxy))
@@ -538,4 +540,11 @@ func StaleRoutes(routes []proxy.Route, app, dest string, keep map[string]bool) [
 		out = append(out, r)
 	}
 	return out
+}
+
+func currentTLSStaging(cur *currentState, name string) bool {
+	if p := cur.plans[name].Proxy; p != nil {
+		return p.TLSStaging
+	}
+	return false
 }

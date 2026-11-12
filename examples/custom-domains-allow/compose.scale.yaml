@@ -1,0 +1,16 @@
+services:
+  web:
+    build: .
+    environment:
+      # TEST ONLY: bypasses customer ownership verification.
+      ALLOW_SUFFIX: .sslip.io
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8080/up"]
+      interval: 5s
+    x-yoho:
+      proxy:
+        port: 8080
+        tls: true
+        tls_staging: true
+        custom_domains:
+          allow: /custom-domains/allow

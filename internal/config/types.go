@@ -421,6 +421,8 @@ type ServiceProxy struct {
 	HealthTimeout *string `json:"health_timeout,omitempty" jsonschema:"minLength=1,description=Positive Go duration per Proxy HTTP probe (e.g. 750ms or 2s); omitted uses the pinned Proxy default; separate from deploy_timeout and Docker healthcheck"`
 	// Terminate TLS with Let's Encrypt in the Proxy. Off behind Cloudflare Tunnel.
 	TLS bool `json:"tls,omitempty"`
+	// Use untrusted Let's Encrypt staging certificates for trials. Requires TLS.
+	TLSStaging bool `json:"tls_staging,omitempty" jsonschema:"description=Use the Let's Encrypt staging directory for untrusted trial certificates; requires tls: true"`
 	// Customer-owned hostnames: on-demand Let's Encrypt via kamal-proxy
 	// --tls-on-demand-url. Requires tls and cannot be combined with hosts
 	// (the route is a catch-all; known hostnames belong on another Service

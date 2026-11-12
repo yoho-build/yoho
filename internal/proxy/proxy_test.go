@@ -543,3 +543,19 @@ func TestBootReattachesAppNetworks(t *testing.T) {
 		t.Errorf("no reattach:\n%s", all)
 	}
 }
+
+func TestTLSStaging(t *testing.T) {
+	for _, staging := range []bool{false, true} {
+		o, err := ServiceDeployOptions(config.ServiceProxy{TLS: true, TLSStaging: staging, Hosts: []string{"example.com"}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		args := strings.Join(DeployArgs("app", "web:80", o), " ")
+		if strings.Contains(args, "--tls-staging") != staging {
+			t.Fatal(args)
+		}
+	}
+	if err := Deploy(context.Background(), &fakeHost{}, "app", "web:80", DeployOptions{TLSStaging: true}); err == nil {
+		t.Fatal("staging without TLS accepted")
+	}
+}

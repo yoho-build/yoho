@@ -334,6 +334,9 @@ func (p ServiceProxy) CustomDomainsAllow() string {
 
 // ValidateRouting checks TLS hosts versus custom_domains.allow.
 func (p ServiceProxy) ValidateRouting() error {
+	if p.TLSStaging && !p.TLS {
+		return fmt.Errorf("x-yoho.proxy.tls_staging requires tls: true")
+	}
 	if p.CustomDomains != nil {
 		if p.CustomDomainsAllow() == "" {
 			return fmt.Errorf("x-yoho.proxy.custom_domains.allow is required")

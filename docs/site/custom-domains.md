@@ -15,7 +15,7 @@ kamal-proxy deploy <service> --target host:port --tls --tls-on-demand-url=/custo
 - `--tls-on-demand-url` cannot be combined with `--host`. The route is a catch-all. Other Services on the same Proxy with explicit `hosts` still take precedence (exact host, then `*.suffix`, then catch-all).
 - The value is either a **path on this Service** (kamal-proxy routes the check through the App) or an **absolute `http`/`https` URL** (called directly).
 - Before issuing a certificate, kamal-proxy `GET`s the endpoint with `?host=<hostname>`. A path check also sets `Host` to that hostname. HTTP **200** allows; any other status denies. Checks time out after 2 seconds and do not follow redirects.
-- Hosts that already have a cached certificate skip the allow check on later handshakes, so an endpoint outage does not drop existing TLS. Revoking approval stops **new** certificates; an already-issued certificate is served until it expires.
+- Hosts that already have a cached certificate skip the allow check on later handshakes, so an endpoint outage does not drop existing TLS. Removing approval denies hostnames without cached certificates; it does not revoke existing certificates or reliably stop their automatic renewal. Enforce customer access in the App as well.
 - Automatic TLS does not support wildcard certificates (`*.example.com`). Each customer hostname is issued its own certificate.
 - kamal-proxy has no extra ACME rate limiter. Let's Encrypt [rate limits](https://letsencrypt.org/docs/rate-limits/) still apply. The allow endpoint is the place to refuse unknown or abusive hostnames before a certificate is requested.
 
@@ -51,7 +51,107 @@ Rate-limit and authenticate as you would any public-adjacent endpoint. A path ch
 
 A **static list in Yoho config** would still need an HTTP check at certificate time (kamal-proxy has no allowlist flag). Put known hostnames in `proxy.hosts` (that is a redeploy when the list changes) or keep the list in the App and check it here.
 
-### Scoped access
+### Reference endpoint
+
+[examples/custom-domains-allow](https://github.com/yoho-build/yoho/tree/main/examples/custom-domains-allow)
+is a standalone Go 1.26, standard-library-only endpoint with a file-backed verified
+set and a `Verified` interface for your database. It normalizes DNS names, rejects
+IPs and ports, and returns 503 on source errors with a 1.5 second request budget.
+Verify customer ownership first with an account-bound TXT token at
+`_yoho-verify.<host>` or a customer-specific CNAME, then verify that DNS reaches
+the Server before inserting the hostname.
+
+Positive checks are cached for 5 minutes and negative checks for 30 seconds,
+bounded to 10,000 entries; errors are not cached. File updates and SIGHUP reload
+the source but do not flush this cache. Removal can take 5 minutes to affect new
+issuance. Already-cached Proxy certificates bypass approval checks regardless.
+
+### Staging trials
+
+Use untrusted certificates during trials:
+
+```yaml
+x-yoho:
+  proxy:
+    port: 3000
+    tls: true
+    tls_staging: true
+    custom_domains:
+      allow: /custom-domains/allow
+```
+
+`tls_staging` requires `tls: true` and passes `--tls-staging` to kamal-proxy.
+Changing it is a route update in `yoho plan`.
+[Let's Encrypt staging](https://letsencrypt.org/docs/staging-environment/) has
+higher issuance limits and certificates browsers do not trust. Use `curl -k`
+only for these trials.
+
+Set `tls_staging: false` and redeploy to use production. The next handshake
+issues a production certificate unless one is already cached for that directory.
+kamal-proxy separates caches by ACME directory under `certs/` in the
+`yoho-proxy-config` volume, so staging certificates do not get served as
+production certificates. Keep that volume across deploys.
+
+## Limits
+
+Production defaults, checked on 2026-11-12 against
+[Let's Encrypt rate limits](https://letsencrypt.org/docs/rate-limits/):
+
+| Limit | Budget |
+|---|---|
+| New orders per account | 300 / 3 hours |
+| Certificates per registered domain, across accounts | 50 / 7 days |
+| Certificates for an identical identifier set (duplicates) | 5 / 7 days |
+| Authorization failures per identifier per account | 5 / hour |
+| New account registrations per IP | 10 / 3 hours |
+| New account registrations per IPv6 /48 | 500 / 3 hours |
+
+Budgets refill gradually. ARI-coordinated renewals are exempt from all limits.
+Classic renewals with the same identifiers are exempt from new-order and
+registered-domain limits, but still face duplicate and failed-authorization
+limits. Other request limits also apply; consult the linked policy.
+
+kamal-proxy uses Go's
+[`autocert`](https://github.com/golang/crypto/tree/v0.57.0/acme/autocert):
+it renews about 30 days before expiry for 90-day certificates (or one third of
+the lifetime for shorter certificates). Its order creation does not send ARI
+`replaces`; renewals count as classic renewals.
+
+When issuance fails, that hostname's TLS handshake fails. A later handshake
+can retry; autocert retains failed issuance state for about a minute, so an
+immediate retry may return the same failure. Repeated validation failures
+consume the failed-authorization allowance. Verify DNS (including stale AAAA),
+ownership, and port reachability before allowing a hostname. Existing cached
+certificates for other hostnames remain usable.
+
+### Scale test
+
+[scripts/custom-domains-scale.sh](https://github.com/yoho-build/yoho/blob/main/scripts/custom-domains-scale.sh)
+runs bounded concurrent HTTPS requests to `c<i>-<ip-with-dashes>.sslip.io`,
+using staging certificates and a 60-second request timeout. The
+[example scale App](https://github.com/yoho-build/yoho/tree/main/examples/custom-domains-allow)
+includes the exact Compose and Yoho configuration and a warning-emitting,
+test-only `ALLOW_SUFFIX=.sslip.io` mode.
+
+```sh
+scripts/custom-domains-scale.sh PUBLIC_SERVER_IP 100 5
+```
+
+Use a dedicated public Server reachable on 80/443. Configure SSH for that IP
+and root or passwordless sudo access to inspect volume usage. The script reads
+Proxy memory, volume size and cache file count without launching helper
+containers or changing Proxy resources. Percentiles include successful 2xx
+requests only and measure TLS plus HTTP latency, not ACME alone. Repeat runs
+reuse certificates; record whether the cache was cold, concurrency, Server
+size and DNS/network conditions when comparing results.
+
+<!-- results: filled by a dated run -->
+
+| Date | N | Concurrency | Success | p50 / p95 / max | Wall | Proxy memory before / after | Volume / cert files |
+|---|---|---|---|---|---|---|---|
+| Pending public staging Server | — | — | — | — | — | — | — |
+
+## Scoped access
 
 `custom_domains` is a catch-all Proxy route that also mints certificates and makes the Proxy call the allow endpoint. `yoho access secrets push` records it together with its `allow` value. A Member's deploy may use custom domains only with exactly that `allow`; a plain catch-all grant is not enough. Keep secrets out of an absolute `allow` URL, query string included: kamal-proxy gets it on the command line and `yoho plan` prints it (userinfo is refused). Protect the endpoint by network instead. See [Sharing one App with a team](team-access.md).
 
