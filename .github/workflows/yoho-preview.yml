@@ -1,0 +1,74 @@
+name: Yoho preview
+on:
+  workflow_call:
+    inputs:
+      yoho-version:
+        description: Yoho release with preview support (tag or latest).
+        type: string
+        default: latest
+      app-dir:
+        description: Directory containing the Yoho file, relative to the repository root.
+        type: string
+        default: .
+      ssh-known-hosts:
+        description: Trusted known_hosts entries for the template Server.
+        type: string
+        required: true
+    secrets:
+      SSH_KEY:
+        required: true
+      OP_SERVICE_ACCOUNT_TOKEN:
+        required: false
+permissions:
+  contents: read
+concurrency:
+  group: preview-${{ github.repository }}-${{ github.event.number }}
+  cancel-in-progress: false
+jobs:
+  preview:
+    # Preview code runs with operator SSH and template secrets: trust it first.
+    if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && github.actor != 'dependabot[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          # Use the same PR configuration for update and teardown, even after closing.
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: yoho-build/yoho/.github/actions/setup-yoho@v0.7.0
+        with:
+          version: ${{ inputs.yoho-version }}
+      - uses: 1password/install-cli-action@v2
+        if: github.event.action != 'closed'
+      - name: Configure SSH
+        env:
+          PREVIEW_SSH_KEY: ${{ secrets.SSH_KEY }}
+          PREVIEW_KNOWN_HOSTS: ${{ inputs.ssh-known-hosts }}
+        run: |
+          set -eu
+          case "$PREVIEW_SSH_KEY" in
+            *[![:space:]]*) ;;
+            *) echo "::error::SSH_KEY is required for preview SSH access" >&2; exit 1 ;;
+          esac
+          case "$PREVIEW_KNOWN_HOSTS" in
+            *[![:space:]]*) ;;
+            *) echo "::error::ssh-known-hosts must contain trusted Server host keys" >&2; exit 1 ;;
+          esac
+          umask 077
+          mkdir -p "$HOME/.ssh"
+          printf '%s\n' "$PREVIEW_SSH_KEY" > "$HOME/.ssh/id_ed25519"
+          printf '%s\n' "$PREVIEW_KNOWN_HOSTS" > "$HOME/.ssh/known_hosts"
+      - name: Update preview
+        if: github.event.action != 'closed'
+        working-directory: ${{ inputs.app-dir }}
+        env:
+          PREVIEW_NUMBER: ${{ github.event.number }}
+          OP_SERVICE_ACCOUNT_TOKEN: ${{ secrets.OP_SERVICE_ACCOUNT_TOKEN }}
+        run: yoho preview up --name "pr-$PREVIEW_NUMBER"
+      - name: Remove preview
+        if: github.event.action == 'closed'
+        working-directory: ${{ inputs.app-dir }}
+        env:
+          PREVIEW_NUMBER: ${{ github.event.number }}
+        run: yoho preview down --name "pr-$PREVIEW_NUMBER" --yes

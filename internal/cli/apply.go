@@ -379,6 +379,11 @@ func (a *app) apply(ctx context.Context, o applyOptions) (err error) {
 			}
 		}
 	}()
+	if a.previewName != "" {
+		if err = deploy.MarkPreview(ctx, s.hosts[0].Host, a.previewRecord(s)); err != nil {
+			return err
+		}
+	}
 	// Refuse before building: the runtime checks again.
 	if err = a.refusePendingRotations(ctx, s.hosts, nil); err != nil {
 		return err
@@ -481,6 +486,10 @@ func (a *app) apply(ctx context.Context, o applyOptions) (err error) {
 	if err = a.applySchedules(ctx, s.hosts, s.store); err != nil {
 		u.Step("", "Scheduled Jobs").Fail(err, hintFor(err, "run `yoho schedule status`"))
 		return &silentError{&jobsFailedError{err: err, app: a.cfg.App, dest: a.destName, version: version}}
+	}
+	if a.previewName != "" {
+		p := a.previewRecord(s)
+		u.Event("preview.up", "", map[string]any{"name": p.Name, "hosts": p.Hosts, "version": version})
 	}
 	u.Finished(nil, fmt.Sprintf("Deployed %s@%s to %s in %s%s", a.cfg.App, shortVersion(version), a.destName, time.Since(start).Round(100*time.Millisecond), urls))
 	return nil

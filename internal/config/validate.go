@@ -215,6 +215,7 @@ func Validate(c *Config) []error {
 	if c.RetainReleases < 0 {
 		add("retain_releases must be at least 1")
 	}
+	errs = append(errs, ValidatePreviews(c)...)
 	return errs
 }
 

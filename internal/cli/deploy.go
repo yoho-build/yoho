@@ -687,6 +687,9 @@ func (a *app) proxyConfig() config.ProxyConfig {
 			p.Tunnel = o.Tunnel
 		}
 	}
+	if a.previewName != "" {
+		p.Tunnel = nil
+	}
 	return p
 }
 

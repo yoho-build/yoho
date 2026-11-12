@@ -15,6 +15,15 @@ import (
 // apply run it before the build step, rollback and `schedule install` before
 // they write anything.
 func (a *app) ensureAppDirs(ctx context.Context, hosts []plan.NamedHost) error {
+	// Check every preview path before convergence writes ownership metadata or
+	// moves app_dir links. MarkPreview repeats this after taking the lock.
+	if a.previewName != "" {
+		for _, h := range hosts {
+			if _, err := deploy.CheckPreviewDir(ctx, h.Host, a.cfg.App, a.destName); err != nil {
+				return err
+			}
+		}
+	}
 	for _, h := range hosts {
 		step := a.ui.Step(h.Name, "App directory")
 		res, err := deploy.EnsureAppDir(ctx, h.Host, a.cfg.App, a.destName, a.dest.AppDir)
