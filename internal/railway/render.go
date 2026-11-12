@@ -16,19 +16,8 @@ func render(inv inventory, source string, extra []string) (*Result, error) {
 		return nil, err
 	}
 	d := &Result{Warnings: append([]string{}, extra...)}
-	buckets, err := prepareBuckets(&inv)
-	if err != nil {
-		return nil, err
-	}
-	d.Buckets = buckets
-	seenVol := map[string]string{}
-	var wget bool
 	for i := range inv.Services {
 		s := &inv.Services[i]
-		d.Services = append(d.Services, s.Name)
-		if s.Cron != "" {
-			d.Warnings = append(d.Warnings, s.Name+": Railway cron ("+s.Cron+") is not a Yoho Scheduled Job. Scheduled Jobs are Backups. Run the command as a Service.")
-		}
 		s.Env, s.SecretKeys = dropRailway(d, s.Name, s.Env, s.SecretKeys)
 		if isPostgres(s.Image) {
 			if s.Env == nil {
@@ -46,6 +35,27 @@ func render(inv inventory, source string, extra []string) (*Result, error) {
 			if err := ident("POSTGRES_DB", s.Env["POSTGRES_DB"]); err != nil {
 				return nil, err
 			}
+		}
+	}
+	warnings, composed, err := resolveRefs(&inv)
+	if err != nil {
+		return nil, err
+	}
+	d.Warnings = append(d.Warnings, warnings...)
+	buckets, err := prepareBuckets(&inv)
+	if err != nil {
+		return nil, err
+	}
+	d.Buckets = buckets
+	seenVol := map[string]string{}
+	var wget bool
+	for i := range inv.Services {
+		s := &inv.Services[i]
+		d.Services = append(d.Services, s.Name)
+		if s.Cron != "" {
+			d.Warnings = append(d.Warnings, s.Name+": Railway cron ("+s.Cron+") is not a Yoho Scheduled Job. Scheduled Jobs are Backups. Run the command as a Service.")
+		}
+		if isPostgres(s.Image) {
 			if !contains(s.SecretKeys, "POSTGRES_PASSWORD") {
 				if contains(d.Generated, "POSTGRES_PASSWORD") {
 					return nil, &InputError{Message: "only one Postgres Service can generate POSTGRES_PASSWORD", Hint: "use one database Service, or put POSTGRES_PASSWORD in secret_keys"}
@@ -72,12 +82,12 @@ func render(inv inventory, source string, extra []string) (*Result, error) {
 	if wget {
 		d.Warnings = append([]string{"HTTP healthchecks use wget. The image must include wget; change the test to curl if it does not."}, d.Warnings...)
 	}
-	d.Rotation = rotationChecklist(inv, d.Generated)
+	d.Rotation = rotationChecklist(inv, d.Generated, composed)
 	d.Compose = renderCompose(source, inv, d.Warnings)
 	if err := renderBuckets(d, inv); err != nil {
 		return nil, err
 	}
-	d.Yoho, d.SecretLines, d.SecretKeys = renderYoho(source, inv, d)
+	d.Yoho, d.SecretLines, d.SecretKeys = renderYoho(source, inv, d, composed)
 	return d, nil
 }
 
@@ -181,7 +191,7 @@ func prepare(inv *inventory, allowNoImage bool) error {
 			if !keyPattern.MatchString(k) {
 				return &InputError{Message: s.Name + ": env key " + quote(k) + " is not a shell name", Hint: "use names like POSTGRES_USER"}
 			}
-			if sensitiveKey(strings.ToLower(k)) {
+			if sensitiveKey(strings.ToLower(k)) && !strings.Contains(v, "${{") {
 				return &InputError{Message: s.Name + ": env." + k + " looks like a secret", Hint: "move the name to secret_keys. Do not put the value in the inventory"}
 			}
 			if strings.TrimSpace(v) == "" {
@@ -386,7 +396,7 @@ func writeHealth(b *strings.Builder, s service) {
 	b.WriteString("      retries: 20\n")
 }
 
-func renderYoho(source string, inv inventory, d *Result) (string, []string, []string) {
+func renderYoho(source string, inv inventory, d *Result, composed map[string]string) (string, []string, []string) {
 	var b strings.Builder
 	b.WriteString("# yoho.yml — drafted by `yoho migrate draft` from " + source + ".\n")
 	b.WriteString("# Switch configuration. On the first deploy, delete the migrate block so\n")
@@ -440,6 +450,10 @@ func renderYoho(source string, inv inventory, d *Result) (string, []string, []st
 
 	var lines []string
 	seen := map[string]bool{}
+	if len(composed) > 0 {
+		seen["POSTGRES_PASSWORD"] = true
+		lines = append(lines, "POSTGRES_PASSWORD=$(op read op://Production/"+inv.Project+"/POSTGRES_PASSWORD)")
+	}
 	for _, s := range inv.Services {
 		for _, k := range s.SecretKeys {
 			if isPostgres(s.Image) && k == "POSTGRES_PASSWORD" && contains(d.Generated, "POSTGRES_PASSWORD") {
@@ -449,7 +463,11 @@ func renderYoho(source string, inv inventory, d *Result) (string, []string, []st
 				continue
 			}
 			seen[k] = true
-			lines = append(lines, k+"=$(op read op://Production/"+inv.Project+"/"+k+")")
+			if value, ok := composed[k]; ok {
+				lines = append(lines, k+"="+value)
+			} else {
+				lines = append(lines, k+"=$(op read op://Production/"+inv.Project+"/"+k+")")
+			}
 		}
 	}
 	for _, bk := range d.Buckets {
@@ -476,7 +494,7 @@ func renderYoho(source string, inv inventory, d *Result) (string, []string, []st
 		keys = append(keys, k)
 	}
 	sort.Strings(keys)
-	// SecretLines follow the compose declaration order, not the sorted keys.
+	// SecretLines follow declaration order after the password dependency.
 	if len(lines) > 0 {
 		b.WriteString("\n# Copy into .yoho/secrets. These are references, not values.\n")
 		b.WriteString("# Bitwarden alternative: KEY=$(bw get password item)\n")
@@ -624,10 +642,14 @@ func flow(ss []string) string {
 
 // rotationChecklist lists each secret name of inv (after RAILWAY_* are
 // dropped) and generated key, in declaration order, with its Services.
-func rotationChecklist(inv inventory, generated []string) []RotationItem {
+// Composed keys derive from source secrets and do not need separate rotation.
+func rotationChecklist(inv inventory, generated []string, composed map[string]string) []RotationItem {
 	var out []RotationItem
 	idx := map[string]int{}
 	use := func(k, svc string) {
+		if _, ok := composed[k]; ok {
+			return
+		}
 		i, ok := idx[k]
 		if !ok {
 			it := RotationItem{Key: k, Action: RotateAtProvider}
