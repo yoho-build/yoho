@@ -63,6 +63,8 @@ APP_GREETING=$(bw get password shop-greeting)
 
 ### Reference variables
 
+::: v-pre
+
 Inventory `env` values can use Railway `${{Service.VAR}}` references, with spaces and several references in one value. Service names match without regard to case, with spaces mapped to hyphens; `Postgres` and `PostgreSQL` also select the only Postgres Service.
 
 - `RAILWAY_PRIVATE_DOMAIN` becomes the compose Service name. `PORT` uses its port, or 5432 for Postgres.
@@ -74,6 +76,8 @@ A lone `${{Postgres.POSTGRES_PASSWORD}}` (or `PGPASSWORD`) under `POSTGRES_PASSW
 Shared variables, same-Service references without a Service name, public domains, TCP proxy variables, and unknown references are refused. The error names the reference and tells you to add the consuming key to `secret_keys` and write `KEY=$(op read op://Production/<project>/KEY)` in `.yoho/secrets`. `railway.json`, `railway.toml`, and commands still refuse references.
 
 See `examples/quickstart/railway/inventory-references.json` and its `compose.references.draft.yaml` / `yoho.references.draft.yml` drafts. For example, `${{Postgres.DATABASE_URL}}` becomes `DATABASE_URL=postgres://postgres:${POSTGRES_PASSWORD}@db:5432/postgres`.
+
+:::
 
 `yoho config check --offline` does not run `$(...)`. `yoho secrets list` shows keys and lengths.
 
