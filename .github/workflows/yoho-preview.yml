@@ -27,13 +27,13 @@ concurrency:
 jobs:
   preview:
     # Preview code runs with operator SSH and template secrets: trust it first.
-    if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository
+    if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && github.actor != 'dependabot[bot]'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
         with:
-          # The merge ref can disappear after closing a PR. Teardown uses base config.
-          ref: ${{ github.event.action == 'closed' && github.event.pull_request.base.sha || github.event.pull_request.head.sha }}
+          # Use the same PR configuration for update and teardown, even after closing.
+          ref: ${{ github.event.pull_request.head.sha }}
           fetch-depth: 0
           persist-credentials: false
       - uses: yoho-build/yoho/.github/actions/setup-yoho@v0.7.0
@@ -47,6 +47,14 @@ jobs:
           PREVIEW_KNOWN_HOSTS: ${{ inputs.ssh-known-hosts }}
         run: |
           set -eu
+          case "$PREVIEW_SSH_KEY" in
+            *[![:space:]]*) ;;
+            *) echo "::error::SSH_KEY is required for preview SSH access" >&2; exit 1 ;;
+          esac
+          case "$PREVIEW_KNOWN_HOSTS" in
+            *[![:space:]]*) ;;
+            *) echo "::error::ssh-known-hosts must contain trusted Server host keys" >&2; exit 1 ;;
+          esac
           umask 077
           mkdir -p "$HOME/.ssh"
           printf '%s\n' "$PREVIEW_SSH_KEY" > "$HOME/.ssh/id_ed25519"

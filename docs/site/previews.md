@@ -21,8 +21,11 @@ Yoho and compose overlays, Servers and secrets selection are reused, including
 Cutover, Backups, Scheduled Jobs and tunnel management are cleared. The template's
 `app_dir` and fixed subnet are also cleared. External volumes, writable bind
 mounts and fixed `container_name` values are refused; named volumes always get
-preview-specific names. Disable staging workers and other unwanted side effects
-in the template's compose overlay.
+preview-specific names. Volumes with a non-default driver or any `driver_opts`
+are refused because renaming cannot isolate bind-backed or network storage.
+Networks with fixed IPAM configuration and Services with static IPv4/IPv6
+addresses are also refused; let Docker allocate them. Disable staging workers
+and other unwanted side effects in the template's compose overlay.
 
 For several proxied Services with hosts, include `{service}` as well:
 
@@ -34,7 +37,9 @@ previews:
 
 The wildcard then covers `web-pr-123.preview.example.com` and
 `api-pr-123.preview.example.com`. Each rendered DNS label must fit in 63
-characters. Names are lowercased, non-alphanumeric runs become dashes, outer
+characters. Generated hosts must differ from every hostname configured on the
+template or any other Destination’s Services, including their compose overlays.
+Names are lowercased, non-alphanumeric runs become dashes, outer
 dashes are trimmed, and the result is truncated to 40 characters. Empty names
 are rejected. Different branch spellings can normalize to the same name; use
 `pr-123` in CI. Configured Destination collisions are refused.
@@ -59,17 +64,24 @@ yoho preview down --name pr-123 --yes
 
 `up` uses the normal build, ship and deploy path and prints the URL(s). Run it
 again to update the same preview. `--skip-build` uses image tags for this preview,
-not the template's tags. `--destination` and `YOHO_DESTINATION` do not change the
-template; set `previews.from` instead. `--lock-wait` works on `up` and `down`.
+not the template's tags. The effective Yoho overlay configuration selects the
+template through `previews.from`; that template’s own overlay is loaded and
+validated as well. `--lock-wait` works on `up` and `down`.
 
 `list` reads markers from the template's Servers and shows name, Server, hosts
-and the last attempted Version. `down` asks for confirmation on a terminal;
+and the last attempted Version. Markers must match the directory they occupy.
+`down` asks for confirmation on a terminal;
 `--yes` is required in CI and with `--json`. It verifies the preview marker
 under the Destination lock and removes the preview's containers (including
 one-offs), Proxy routes, networks, named and anonymous volumes, and App directory
-with Releases and secrets. **Preview data is deleted.** Shared Proxy resources,
+with Releases and secrets. Unused built images are pruned using the same
+retained-Release and container checks as `yoho remove`. **Preview data is deleted.**
+Shared Proxy resources,
 the shared `yoho` network, Backups and other Destinations are kept. An absent
 preview succeeds; unmarked resources and configured Destinations are refused.
+Before any App directory writes, previews refuse symlinked directories and
+unmarked directories containing anything beyond `lock` and `.yoho-app.json`.
+The same checks guard teardown; empty lock-only directories are cleaned up.
 Failed first deploys leave a marker and can be torn down. Interrupted teardowns
 can be retried. JSON output includes `preview.up` / `preview.down` events with
 `name` and `hosts`.
@@ -113,10 +125,11 @@ The workflow uses `preview-<repository>-<PR number>` concurrency with
 `cancel-in-progress: false`, so an update cannot cancel cleanup or strand a
 remote deploy lock. It runs `yoho preview up --name pr-<PR number>` for opened,
 synchronize and reopened events, and `yoho preview down --name pr-<PR number>
---yes` for closed events, using base-branch configuration for teardown.
+--yes` for closed events, using the PR head SHA and its configuration for both update and teardown.
 
 **Do not use `pull_request_target` to check out and execute fork PR code with
-secrets.** The workflow deliberately skips fork PRs. Same-repository PR code
+secrets.** The workflow deliberately skips fork PRs and Dependabot jobs and refuses empty
+SSH keys or trusted-host entries before writing SSH files. Same-repository PR code
 must also be trusted: it runs builds and Hooks with operator SSH access and the
 template's secrets. Review code before granting that access.
 

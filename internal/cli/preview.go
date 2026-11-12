@@ -2,11 +2,9 @@ package cli
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
-	"path"
+	"os"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -14,7 +12,6 @@ import (
 	"github.com/yoho-build/yoho/internal/config"
 	"github.com/yoho-build/yoho/internal/deploy"
 	"github.com/yoho-build/yoho/internal/release"
-	"github.com/yoho-build/yoho/internal/remote"
 )
 
 func init() { extraCommands = append(extraCommands, previewCmd) }
@@ -22,7 +19,6 @@ func init() { extraCommands = append(extraCommands, previewCmd) }
 func previewCmd(g *globals) *cobra.Command {
 	c := &cobra.Command{Use: "preview", Short: "Deploy and tear down ephemeral Destinations"}
 	var name string
-	c.PersistentFlags().StringVar(&name, "name", "", "Preview name (for example pr-123)")
 	var o applyOptions
 	up := &cobra.Command{Use: "up", Short: "Build and deploy a preview from previews.from", Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
@@ -32,16 +28,24 @@ func previewCmd(g *globals) *cobra.Command {
 			}
 			return a.deploy(cmd.Context(), o)
 		}}
+	up.Flags().StringVar(&name, "name", "", "Preview name (for example pr-123)")
 	up.Flags().StringVar(&o.Version, "version", "", "Version to deploy (default: git SHA)")
 	up.Flags().BoolVar(&o.SkipBuild, "skip-build", false, "Use images already built for this preview Version")
 	addLockWaitFlag(up)
 	var yes bool
 	down := &cobra.Command{Use: "down", Short: "Remove a marked preview, including its volumes", Args: cobra.NoArgs,
-		RunE: func(cmd *cobra.Command, _ []string) error {
+		RunE: func(cmd *cobra.Command, _ []string) (err error) {
+			u := g.ui(cmd)
+			defer func() {
+				if err != nil {
+					u.Finished(err, "")
+				}
+			}()
 			a, err := g.loadPreview(cmd, name)
 			if err != nil {
 				return err
 			}
+			u = a.ui
 			if err := checkRemoveConfirm(removeFlags{yes: yes}, a.cfg.App, isTerminal(cmd.InOrStdin()), g.json); err != nil {
 				return a.fail(err)
 			}
@@ -59,6 +63,10 @@ func previewCmd(g *globals) *cobra.Command {
 			defer closeHosts()
 			h := hosts[0]
 			step := a.ui.Step(h.Name, "Remove preview %s and its volumes", a.previewName)
+			if _, err := deploy.CheckPreviewDir(ctx, h.Host, a.cfg.App, a.destName); err != nil {
+				step.Fail(err, "only marked previews or empty preview directories can be removed")
+				return &silentError{err}
+			}
 			unlock, err := a.acquireLock(ctx, h.Host, deploy.LockInfo{Command: "preview down"})
 			if err != nil {
 				step.Fail(err, hintFor(err, ""))
@@ -81,6 +89,7 @@ func previewCmd(g *globals) *cobra.Command {
 			a.ui.Finished(nil, "Preview "+a.previewName+" removed")
 			return nil
 		}}
+	down.Flags().StringVar(&name, "name", "", "Preview name (for example pr-123)")
 	down.Flags().BoolVarP(&yes, "yes", "y", false, "Confirm removal of the preview and its volumes")
 	addLockWaitFlag(down)
 	list := &cobra.Command{Use: "list", Short: "List preview markers on the template's Servers", Args: cobra.NoArgs,
@@ -96,22 +105,11 @@ func previewCmd(g *globals) *cobra.Command {
 			defer closeHosts()
 			var rows [][]string
 			for _, h := range hosts {
-				glob := remote.Quote(path.Join(release.Root, "apps", a.cfg.App)) + "/preview-*/preview.json"
-				out, err := h.Host.Output(cmd.Context(), remote.Cmd{Script: "set -eu\nfor f in " + glob + "; do [ -f \"$f\" ] || continue; [ ! -L \"$f\" ] || exit 1; cat \"$f\"; printf '\\n'; done"})
+				previews, err := deploy.ListPreviews(cmd.Context(), h.Host, a.cfg.App)
 				if err != nil {
 					return err
 				}
-				dec := json.NewDecoder(strings.NewReader(out))
-				for {
-					var p deploy.PreviewRecord
-					if err := dec.Decode(&p); err == io.EOF {
-						break
-					} else if err != nil {
-						return err
-					}
-					if err := p.Validate(a.cfg.App, "preview-"+p.Name); err != nil {
-						return err
-					}
+				for _, p := range previews {
 					if _, configured := a.cfg.Destinations[p.Destination]; configured {
 						continue
 					}
@@ -126,33 +124,42 @@ func previewCmd(g *globals) *cobra.Command {
 }
 
 // Load the template's Yoho overlay before deriving the runtime Destination.
-// --destination and YOHO_DESTINATION never select a preview template.
+// previews.from in the effective configuration selects the template.
 func (g *globals) loadPreviewTemplate(cmd *cobra.Command) (*app, error) {
-	file, err := g.yohoFile()
+	// Start with the same selected Destination overlay as ordinary loading;
+	// the previews block can be supplied or corrected there.
+	selected, err := g.loadApp(cmd)
 	if err != nil {
 		return nil, err
 	}
-	base, err := config.Load(file)
-	if err != nil {
-		return nil, err
-	}
-	if base.Previews == nil {
+	settings := selected.cfg.Previews
+	if settings == nil {
 		return nil, errors.New("previews is required; configure previews.from and previews.host")
 	}
-	if errs := config.ValidatePreviews(base); len(errs) > 0 {
-		return nil, errors.Join(errs...)
-	}
-	local := *g
-	local.destination = base.Previews.From
-	a, err := local.load(cmd)
+	cfg, name, overlay, err := config.LoadForDestination(selected.path, settings.From)
 	if err != nil {
 		return nil, err
 	}
-	if a.scoped {
-		return nil, errors.New("previews require operator access")
+	// Preserve the selected overlay's preview settings while applying the
+	// template overlay to its Servers, compose inputs and Destination settings.
+	cfg.Previews = settings
+	if errs := config.Validate(cfg); len(errs) != 0 {
+		return nil, fmt.Errorf("invalid preview template: %w", errors.Join(errs...))
 	}
-	a.g = g
-	return a, nil
+	dest, err := cfg.Dest(name)
+	if err != nil {
+		return nil, err
+	}
+	a := *selected
+	a.cfg, a.destName, a.dest, a.overlay = cfg, name, dest, overlay
+	if a.scoped, err = scopedAccess(dest, os.Getenv); err != nil {
+		return nil, err
+	}
+	if a.scoped && !scopedCommand(cmd) {
+		return nil, a.fail(errors.New("preview commands require operator access"))
+	}
+	release.Root = a.root()
+	return &a, nil
 }
 
 func (g *globals) loadPreview(cmd *cobra.Command, raw string) (*app, error) {
@@ -176,6 +183,62 @@ func (a *app) derivePreview(n string) {
 	a.templateName, a.previewName = a.destName, n
 	a.destName, a.dest = "preview-"+n, config.PreviewDestination(a.dest)
 	a.cfg.Backups = config.BackupsConfig{}
+}
+
+// Refuse host reuse before rewriting the template extensions. Read every
+// Destination's effective compose configuration, including its own overlays.
+func (a *app) checkPreviewHostCollisions(ctx context.Context, template *composefile.Result) error {
+	configured := map[string]string{}
+	collect := func(dest string, r *composefile.Result) error {
+		for name, svc := range r.Project.AllServices() {
+			ext, err := config.DecodeServiceExt(svc.Extensions["x-yoho"])
+			if err != nil {
+				return fmt.Errorf("check configured hosts for %s/%s: %w", dest, name, err)
+			}
+			if ext.Proxy != nil {
+				for _, host := range ext.Proxy.Hosts {
+					configured[strings.ToLower(strings.TrimSuffix(host, "."))] = dest + "/" + name
+				}
+			}
+		}
+		return nil
+	}
+	if err := collect(a.templateName, template); err != nil {
+		return err
+	}
+	for _, dest := range sortedKeys(a.cfg.Destinations) {
+		if dest == a.templateName {
+			continue
+		}
+		cfg, _, _, err := config.LoadForDestination(a.path, dest)
+		if err != nil {
+			return fmt.Errorf("check configured hosts for Destination %s: %w", dest, err)
+		}
+		d, err := cfg.Dest(dest)
+		if err != nil {
+			return err
+		}
+		r, err := composefile.Load(ctx, a.dir, cfg.Compose, d.Env, release.ProjectName(cfg.App, dest), dest)
+		if err != nil {
+			return fmt.Errorf("check configured hosts for Destination %s: %w", dest, err)
+		}
+		if err := collect(dest, r); err != nil {
+			return err
+		}
+	}
+	for name, ext := range template.Ext {
+		if ext.Proxy == nil {
+			continue
+		}
+		host, err := a.cfg.Previews.RenderHost(a.previewName, name)
+		if err != nil {
+			return err
+		}
+		if owner, exists := configured[host]; exists {
+			return fmt.Errorf("preview hostname %s is already configured on %s; change previews.host or the preview name", host, owner)
+		}
+	}
+	return nil
 }
 
 func (a *app) preparePreviewCompose(r *composefile.Result) error {
@@ -208,6 +271,9 @@ func (a *app) preparePreviewCompose(r *composefile.Result) error {
 	// A preview must have independent named volumes and networks. Compose-go
 	// already derives ordinary resource names using the preview project name.
 	for name, v := range r.Project.Volumes {
+		if v.Driver != "" && v.Driver != "local" || len(v.DriverOpts) != 0 {
+			return fmt.Errorf("preview volume %s uses a non-default driver or driver_opts; shared storage is not supported", name)
+		}
 		if v.External {
 			return fmt.Errorf("preview volume %s is external; use a project-owned volume in the template", name)
 		}
@@ -215,12 +281,20 @@ func (a *app) preparePreviewCompose(r *composefile.Result) error {
 		r.Project.Volumes[name] = v
 	}
 	for name, n := range r.Project.Networks {
+		if len(n.Ipam.Config) != 0 {
+			return fmt.Errorf("preview network %s has fixed IPAM config; use automatic allocation", name)
+		}
 		if !n.External {
 			n.Name = a.project() + "_" + name
 			r.Project.Networks[name] = n
 		}
 	}
 	for name, svc := range r.Project.Services {
+		for network, attachment := range svc.Networks {
+			if attachment != nil && (attachment.Ipv4Address != "" || attachment.Ipv6Address != "") {
+				return fmt.Errorf("preview Service %s network %s has a static IP address; use automatic allocation", name, network)
+			}
+		}
 		if svc.ContainerName != "" {
 			return fmt.Errorf("preview Service %s has container_name; remove it in the template overlay", name)
 		}

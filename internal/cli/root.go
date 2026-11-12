@@ -232,6 +232,9 @@ func (a *app) compose(ctx context.Context) (*composefile.Result, error) {
 		return nil, err
 	}
 	if a.previewName != "" {
+		if err := a.checkPreviewHostCollisions(ctx, r); err != nil {
+			return nil, err
+		}
 		if err := a.preparePreviewCompose(r); err != nil {
 			return nil, err
 		}
