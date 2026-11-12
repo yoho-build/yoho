@@ -446,3 +446,56 @@ func TestPreviewCollisionUsesTemplateProjectInterpolation(t *testing.T) {
 		t.Fatalf("template's interpolated hostname collision accepted: %v", err)
 	}
 }
+
+func TestPreviewDownAbsentSummary(t *testing.T) {
+	for _, jsonOut := range []bool{false, true} {
+		mode := "human"
+		if jsonOut {
+			mode = "json"
+		}
+		t.Run(mode, func(t *testing.T) {
+			g := previewFixture(t, "")
+			g.json = jsonOut
+			bin := t.TempDir()
+			// Answer SSH requests for a reachable Server with no preview resources.
+			// Never execute the remote scripts or contact a real Server.
+			script := `#!/bin/sh
+script=$(cat)
+case "$* $script" in
+  *"docker version"*) printf '29.0.0' ;;
+  *"printf missing"*) printf missing ;;
+  *"echo acquired"*) printf acquired ;;
+esac
+`
+			if err := os.WriteFile(filepath.Join(bin, "ssh"), []byte(script), 0700); err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+			c := previewCmd(g)
+			var out strings.Builder
+			c.SetOut(&out)
+			c.SetErr(&out)
+			c.SilenceErrors, c.SilenceUsage = true, true
+			c.SetArgs([]string{"down", "--name", "staging", "--yes"})
+			if err := c.ExecuteContext(context.Background()); err != nil {
+				t.Fatalf("absent preview: %v\n%s", err, out.String())
+			}
+			want := "Preview staging not found; nothing removed"
+			if jsonOut {
+				lines := strings.Split(strings.TrimSpace(out.String()), "\n")
+				var last map[string]any
+				if err := json.Unmarshal([]byte(lines[len(lines)-1]), &last); err != nil {
+					t.Fatal(err)
+				}
+				if last["event"] != "finished" || last["summary"] != want {
+					t.Fatalf("incorrect absent summary: %s", out.String())
+				}
+			} else if !strings.Contains(out.String(), want) {
+				t.Fatalf("incorrect absent summary: %s", out.String())
+			}
+			if strings.Contains(out.String(), "Preview staging removed") {
+				t.Fatal("absent preview reported as removed")
+			}
+		})
+	}
+}

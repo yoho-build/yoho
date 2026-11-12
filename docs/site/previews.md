@@ -62,6 +62,12 @@ yoho preview list
 yoho preview down --name pr-123 --yes
 ```
 
+A preview named `N` uses Destination `preview-N`, App directory
+`<root>/apps/<app>/preview-N`, and compose project `yoho-<app>-preview-N`.
+This namespace keeps configured Destinations untouched: `--name staging` targets
+`preview-staging`, never the configured `staging` Destination. A configured
+Destination literally named `preview-N` is refused as a collision.
+
 `up` uses the normal build, ship and deploy path and prints the URL(s). Run it
 again to update the same preview. `--skip-build` uses image tags for this preview,
 not the template's tags. The effective Yoho overlay configuration selects the
@@ -78,7 +84,8 @@ with Releases and secrets. Unused built images are pruned using the same
 retained-Release and container checks as `yoho remove`. **Preview data is deleted.**
 Shared Proxy resources,
 the shared `yoho` network, Backups and other Destinations are kept. An absent
-preview succeeds; unmarked resources and configured Destinations are refused.
+preview succeeds with “not found; nothing removed” in human and JSON summaries;
+unmarked resources and configured Destination namespace collisions are refused.
 Before any App directory writes, previews refuse symlinked directories and
 unmarked directories containing anything beyond `lock` and `.yoho-app.json`.
 The same checks guard teardown; empty lock-only directories are cleaned up.

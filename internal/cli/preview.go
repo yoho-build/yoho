@@ -79,14 +79,16 @@ func previewCmd(g *globals) *cobra.Command {
 				return &silentError{err}
 			}
 			hostsOut := []string{}
+			summary := "Preview " + a.previewName + " removed"
 			if p == nil {
+				summary = "Preview " + a.previewName + " not found; nothing removed"
 				step.Done("preview is already absent")
 			} else {
 				hostsOut = p.Hosts
 				step.Done()
 			}
 			a.ui.Event("preview.down", "", map[string]any{"name": a.previewName, "hosts": hostsOut})
-			a.ui.Finished(nil, "Preview "+a.previewName+" removed")
+			a.ui.Finished(nil, summary)
 			return nil
 		}}
 	down.Flags().StringVar(&name, "name", "", "Preview name (for example pr-123)")
