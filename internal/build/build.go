@@ -57,6 +57,7 @@ type Exec func(ctx context.Context, c Command) error
 
 // Options configures Images.
 type Options struct {
+	Refresh bool // Pull base images and build without layer cache.
 	// Dir is the directory of the Yoho file; relative build contexts resolve
 	// against Project.WorkingDir, falling back to Dir.
 	Dir string
@@ -364,10 +365,10 @@ func buildArgs(o Options, service string, b *types.BuildConfig, s spec, ref stri
 	if b.Network != "" {
 		a = append(a, "--network", b.Network)
 	}
-	if b.NoCache {
+	if b.NoCache || o.Refresh {
 		a = append(a, "--no-cache")
 	}
-	if b.Pull {
+	if b.Pull || o.Refresh {
 		a = append(a, "--pull")
 	}
 	for _, c := range b.CacheFrom {

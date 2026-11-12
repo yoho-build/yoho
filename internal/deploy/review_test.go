@@ -54,6 +54,7 @@ func TestRedeploySameVersionFailureKeepsRelease(t *testing.T) {
 
 	h.respond = respond(errors.New("target failed to become healthy"))
 	d := testDeploy(t, h, nil)
+	d.Refreshed = true
 	d.ServiceSecrets["web"]["SECRET_KEY_BASE"] = "rotated-secret-VALUE"
 	d.Project.Services["web"] = withEnv(d.Project.Services["web"], "NEW_SETTING", "1")
 	if _, err := (Compose{}).Deploy(ctx, d); err == nil {
@@ -76,6 +77,10 @@ func TestRedeploySameVersionFailureKeepsRelease(t *testing.T) {
 	}
 	if b, _ := os.ReadFile(filepath.Join(relDir, "compose.yaml")); bytes.Equal(b, before["compose.yaml"]) || !bytes.Contains(b, []byte("NEW_SETTING")) {
 		t.Error("successful redeploy did not write the new compose file")
+	}
+
+	if rel := readRel(t, filepath.Join(relDir, "release.json")); !rel.Refreshed {
+		t.Error("successful refresh was not recorded")
 	}
 
 	// A post-deploy Hook failure happens after the Release is committed.
@@ -411,5 +416,39 @@ func TestProxiedServiceScaledToZero(t *testing.T) {
 	}
 	if _, ok := m["route shop-production-web"]; !ok || m["route shop-production-web"].Action != plan.ActionDelete {
 		t.Errorf("route %+v", m["route shop-production-web"])
+	}
+}
+
+func TestRefreshSkipsOnlyUnchangedImageOnlyServices(t *testing.T) {
+	changes := []plan.Change{
+		{Kind: "service", Name: "web", Action: plan.ActionNoop},
+		{Kind: "service", Name: "image-proxy", Action: plan.ActionNoop},
+		{Kind: "service", Name: "db", Action: plan.ActionNoop},
+		{Kind: "service", Name: "tag-bumped", Action: plan.ActionUpdate},
+		{Kind: "service", Name: "new", Action: plan.ActionCreate},
+		{Kind: "service", Name: "repair", Action: plan.ActionNoop},
+		{Kind: "route", Name: RouteName("shop", "production", "repair"), Action: plan.ActionUpdate},
+	}
+	skip := refreshSkippedServices(changes, []string{"web"}, "shop", "production")
+	for _, name := range []string{"web", "tag-bumped", "new", "repair"} {
+		if skip[name] {
+			t.Fatalf("skipped changed or built Service %s", name)
+		}
+	}
+	for _, name := range []string{"image-proxy", "db"} {
+		if !skip[name] {
+			t.Fatalf("did not skip unchanged image-only Service %s", name)
+		}
+	}
+	h := &dockerHost{local: &remote.Local{}, respond: respond(nil)}
+	r := &runner{h: h, out: io.Discard, skip: skip, cc: composeCLI{project: "yoho-shop-production", dir: "/tmp", file: "/tmp/compose.yaml"}}
+	plans := []servicePlan{{Name: "image-proxy", Replicas: 1, Proxy: proxyWithDefaults(&config.ServiceProxy{})}, {Name: "db", Replicas: 1}}
+	if err := r.cutover(context.Background(), plans); err != nil {
+		t.Fatal(err)
+	}
+	for _, script := range h.scripts {
+		if strings.Contains(script, "'up'") {
+			t.Fatalf("refresh started an unchanged image-only Service: %s", script)
+		}
 	}
 }

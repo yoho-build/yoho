@@ -119,6 +119,9 @@ func deployCmd(g *globals) *cobra.Command {
 				return err
 			}
 			if a.scoped {
+				if o.Refresh || o.Scan {
+					return a.fail(&hintError{"--refresh and --scan require operator access", "deploy with operator access"})
+				}
 				if a.dest.Migrate != nil {
 					return a.fail(&hintError{"destinations." + a.destName + ".migrate needs operator access: the cutover stops containers outside the App", "deploy with operator access, or remove the migrate block once `yoho migrate status` shows done"})
 				}
@@ -129,6 +132,7 @@ func deployCmd(g *globals) *cobra.Command {
 	}
 	c.Flags().StringVar(&o.Version, "version", "", "Version to deploy (default: git SHA)")
 	c.Flags().BoolVar(&o.SkipBuild, "skip-build", false, "Use images already built for this version")
+	addBuildFlags(c, &o)
 	addCutoverFlags(c, &o)
 	addLockWaitFlag(c)
 	return c
@@ -176,13 +180,24 @@ func (a *app) resolveDeployVersion(ver string) (string, error) {
 
 // openSession loads compose, resolves secrets and connects. readOnly skips
 // the pre-connect Hook (plan must not run user scripts that deploy).
-func (a *app) openSession(ctx context.Context, ver string, readOnly bool) (_ *session, err error) {
+func (a *app) openSession(ctx context.Context, ver string, readOnly, refresh bool) (_ *session, err error) {
 	u := a.ui
 	step := u.Step("", "Load compose")
 	r, err := a.compose(ctx)
 	if err != nil {
 		step.Fail(err, "run `yoho config check`")
 		return nil, &silentError{err}
+	}
+	if refresh {
+		hasBuild := false
+		for _, svc := range r.Project.Services {
+			hasBuild = hasBuild || svc.Build != nil
+		}
+		if !hasBuild {
+			err = errors.New("nothing to refresh: no Service has build:")
+			step.Fail(err, "add build: to a Service, or deploy without --refresh")
+			return nil, &silentError{err}
+		}
 	}
 	keys, _ := a.secretKeys(r)
 	findings := composefile.Check(r, a.dest.Runtime, keys)
@@ -227,10 +242,10 @@ func (a *app) openSession(ctx context.Context, ver string, readOnly bool) (_ *se
 
 // buildAndShip builds (unless skipBuild) and ships images, returning
 // Service -> image reference for Services with a build section.
-func (a *app) buildAndShip(ctx context.Context, s *session, skipBuild bool) (map[string]string, error) {
+func (a *app) buildAndShip(ctx context.Context, s *session, o applyOptions) (map[string]string, error) {
 	u := a.ui
 	images := map[string]string{}
-	if skipBuild {
+	if o.SkipBuild {
 		for name, svc := range s.r.Project.Services {
 			if svc.Build != nil {
 				images[name] = build.ImageName(a.cfg.Registry, a.cfg.App, a.destName, name, s.ver)
@@ -252,6 +267,10 @@ func (a *app) buildAndShip(ctx context.Context, s *session, skipBuild bool) (map
 	bargs, benv, berr := store.BuildxArgs(a.cfg.Builder.Secrets)
 	if berr != nil {
 		return nil, berr
+	}
+	if o.Refresh {
+		u.Info("Refreshing base images (pull, no cache)")
+		u.Event("deploy.refresh", "", map[string]any{"refresh": true})
 	}
 	step := u.Step("", "Build images for %s", platform)
 	if eng, why := build.ResolveEngine(a.cfg.Builder, runtime.GOOS, runtime.GOARCH, exec.LookPath, nil); a.cfg.Builder.Location == "" || a.cfg.Builder.Location == "local" {
@@ -290,7 +309,7 @@ func (a *app) buildAndShip(ctx context.Context, s *session, skipBuild bool) (map
 		progress = live.progress
 	}
 	imgs, berr := build.Images(ctx, build.Options{
-		Dir: a.dir, App: a.cfg.App, Destination: a.destName, Version: ver,
+		Refresh: o.Refresh, Dir: a.dir, App: a.cfg.App, Destination: a.destName, Version: ver,
 		Project: r.Project, Builder: a.cfg.Builder, Registry: a.cfg.Registry, Direct: builder != nil,
 		Platforms: platforms, BuildEnv: benv, BuildSecretArgs: bargs,
 		Out: store.Redactor(step.Output()), Host: hosts[0].Host,
@@ -314,6 +333,16 @@ func (a *app) buildAndShip(ctx context.Context, s *session, skipBuild bool) (map
 	}
 	sort.Strings(built)
 	step.Done(strings.Join(built, ", "))
+	if o.Scan && len(built) > 0 {
+		switch {
+		case a.cfg.Builder.Location == "server":
+			u.Info("scan skipped: images are built on the Server")
+		case builder != nil:
+			u.Info("scan skipped: images remain on the remote Builder")
+		default:
+			build.ScanImages(ctx, built, engine, platform, u, nil)
+		}
+	}
 
 	if len(built) > 0 && a.cfg.Builder.Location == "server" && len(hosts) > 1 {
 		// The image exists only on hosts[0]; the other Servers (Swarm workers,
@@ -933,7 +962,11 @@ func releasesCmd(g *globals) *cobra.Command {
 				if i == 0 && r.Status == "deployed" {
 					cur = "*"
 				}
-				row := []string{cur, shortVersion(r.Version), r.Status, r.DeployedAt.Local().Format("2006-01-02 15:04:05"), r.Performer, r.SecretsGeneration}
+				status := r.Status
+				if r.Refreshed {
+					status += " refreshed"
+				}
+				row := []string{cur, shortVersion(r.Version), status, r.DeployedAt.Local().Format("2006-01-02 15:04:05"), r.Performer, r.SecretsGeneration}
 				if cutover {
 					row = append(row, r.Cutover)
 				}

@@ -184,6 +184,17 @@ func (c Compose) Deploy(ctx context.Context, d *plan.Deploy) (_ *release.Release
 		return nil, err
 	}
 
+	// Refresh must not replace unchanged image-only Proxy candidates. A
+	// normal deploy stages every proxied Service, even with the same tag.
+	// Keep normal convergence for explicitly changed or missing Services.
+	if d.Refreshed {
+		changes, err := c.Diff(ctx, d)
+		if err != nil {
+			return nil, err
+		}
+		r.skip = refreshSkippedServices(changes, d.Built, d.App, d.Destination)
+	}
+
 	j, err := migrate.ReadJournal(ctx, h, d.App, d.Destination)
 	if err != nil {
 		return nil, err
@@ -256,7 +267,7 @@ func (c Compose) Deploy(ctx context.Context, d *plan.Deploy) (_ *release.Release
 		Runtime: "compose", Role: "all", DeployedAt: start, Performer: d.Performer,
 		Images: map[string]string{}, SecretsGeneration: generation, Files: appFileHashes,
 		Secrets:       secretAudit(d, svcSecrets, generated, key),
-		ComposeSHA256: sha256Hex(composeYAML), Status: "failed", Cutover: d.Cutover,
+		ComposeSHA256: sha256Hex(composeYAML), Status: "failed", Cutover: d.Cutover, Refreshed: d.Refreshed,
 	}
 	for _, sp := range plans {
 		if sp.Image != "" {
@@ -780,4 +791,24 @@ func prune(ctx context.Context, r *runner, d *plan.Deploy, current string) error
 	}
 	r.logf("pruning %d old release/secrets/files director(ies)", len(drop))
 	return r.h.Run(ctx, remote.Cmd{Script: "rm -rf " + remote.QuoteArgs(drop...)})
+}
+
+func refreshSkippedServices(changes []plan.Change, built []string, app, destination string) map[string]bool {
+	skip := map[string]bool{}
+	for _, change := range changes {
+		if change.Kind == "service" && change.Action == plan.ActionNoop && !slices.Contains(built, change.Name) {
+			skip[change.Name] = true
+		}
+	}
+	// A route repair still needs candidates even if its Service is unchanged.
+	for _, change := range changes {
+		if change.Kind == "route" && change.Action != plan.ActionNoop {
+			for name := range skip {
+				if change.Name == RouteName(app, destination, name) {
+					delete(skip, name)
+				}
+			}
+		}
+	}
+	return skip
 }

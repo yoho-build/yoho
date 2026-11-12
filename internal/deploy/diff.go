@@ -346,6 +346,9 @@ func (c Compose) Diff(ctx context.Context, d *plan.Deploy) ([]plan.Change, error
 				}
 			}
 		}
+		if d.Refreshed && slices.Contains(d.Built, sp.Name) {
+			reasons = append(reasons, "refresh base images (pull, no cache)")
+		}
 		secretsChanged := false
 		for _, ct := range cs {
 			if ct.Config.Labels[LabelSecrets] != wantFP[sp.Name] {

@@ -66,6 +66,8 @@ type runner struct {
 	// restart, when non-empty, limits cutover starts to these Services.
 	// removeOrphans and route cleanup still see every Service.
 	restart []string
+	// skip leaves unchanged image-only Services alone during a refresh.
+	skip map[string]bool
 }
 
 // redact masks secret values in s.
@@ -355,7 +357,7 @@ func (r *runner) cutover(ctx context.Context, plans []servicePlan) (err error) {
 		start := time.Now()
 		var batch []servicePlan
 		for _, sp := range level {
-			if !sp.proxied() && restartSelected(r.restart, sp.Name) {
+			if !sp.proxied() && !r.skip[sp.Name] && restartSelected(r.restart, sp.Name) {
 				batch = append(batch, sp)
 			}
 		}
@@ -369,7 +371,7 @@ func (r *runner) cutover(ctx context.Context, plans []servicePlan) (err error) {
 			}
 		}
 		for _, sp := range level {
-			if !sp.proxied() || !restartSelected(r.restart, sp.Name) {
+			if !sp.proxied() || r.skip[sp.Name] || !restartSelected(r.restart, sp.Name) {
 				continue
 			}
 			failedService = sp.Name

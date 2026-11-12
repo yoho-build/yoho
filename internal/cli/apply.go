@@ -34,6 +34,8 @@ var (
 type applyOptions struct {
 	Version     string
 	SkipBuild   bool
+	Refresh     bool
+	Scan        bool
 	AutoApprove bool
 	// ShowPlan prints the plan first and skips work when nothing changes
 	// (`yoho apply`). `yoho deploy` leaves it false.
@@ -93,6 +95,7 @@ from the configuration.`,
 	c.Flags().StringVar(&o.Version, "version", "", "Version to deploy (default: git SHA)")
 	c.Flags().BoolVar(&o.SkipBuild, "skip-build", false, "Use images already built for this version")
 	c.Flags().BoolVar(&o.AutoApprove, "auto-approve", false, "Apply without asking for confirmation")
+	addBuildFlags(c, &o)
 	addCutoverFlags(c, &o)
 	addLockWaitFlag(c)
 	return c
@@ -110,12 +113,12 @@ func (a *app) plan(ctx context.Context, ver string) (changes []plan.Change, err 
 		return nil, err
 	}
 	u.Title("Planning %s@%s on %s", a.cfg.App, shortVersion(ver), a.destName)
-	s, err := a.openSession(ctx, ver, true)
+	s, err := a.openSession(ctx, ver, true, false)
 	if err != nil {
 		return nil, err
 	}
 	defer s.close()
-	changes, _, err = a.collectChanges(ctx, s)
+	changes, _, err = a.collectChanges(ctx, s, false)
 	if err != nil {
 		return nil, err
 	}
@@ -126,7 +129,7 @@ func (a *app) plan(ctx context.Context, ver string) (changes []plan.Change, err 
 // collectChanges gathers changes from the runtime, Tunnel and Scheduled
 // Jobs. deployNeeded reports whether the runtime has anything to roll out
 // (always true when the runtime cannot plan).
-func (a *app) collectChanges(ctx context.Context, s *session) (changes []plan.Change, deployNeeded bool, err error) {
+func (a *app) collectChanges(ctx context.Context, s *session, refresh bool) (changes []plan.Change, deployNeeded bool, err error) {
 	// Image references the Version would produce, without building.
 	images := map[string]string{}
 	for _, name := range sortedKeys(s.r.Project.Services) {
@@ -138,6 +141,7 @@ func (a *app) collectChanges(ctx context.Context, s *session) (changes []plan.Ch
 	if err != nil {
 		return nil, false, err
 	}
+	d.Refreshed = refresh
 	step := a.ui.Step("", "Read state of %s", s.hosts[0].Name)
 	ac, err := a.planAppDirs(ctx, s.hosts)
 	if err != nil {
@@ -303,6 +307,12 @@ func (a *app) apply(ctx context.Context, o applyOptions) (err error) {
 			u.Finished(err, "")
 		}
 	}()
+	if err = o.validate(); err != nil {
+		return err
+	}
+	if o.Refresh && a.dest.Runtime == "swarm" {
+		return a.fail(&hintError{"cannot refresh a Swarm Destination", "--refresh supports compose Destinations; on Swarm, change the Version"})
+	}
 	// Fail before any work when we could not ask.
 	if o.ShowPlan {
 		if err = a.confirmPrecheck(o); err != nil {
@@ -321,7 +331,7 @@ func (a *app) apply(ctx context.Context, o applyOptions) (err error) {
 	} else {
 		u.Title("Deploying %s@%s to %s", a.cfg.App, shortVersion(ver), a.destName)
 	}
-	s, err := a.openSession(ctx, ver, false)
+	s, err := a.openSession(ctx, ver, false, o.Refresh)
 	if err != nil {
 		return err
 	}
@@ -337,7 +347,7 @@ func (a *app) apply(ctx context.Context, o applyOptions) (err error) {
 	deployNeeded := true
 	if o.ShowPlan {
 		var changes []plan.Change
-		if changes, deployNeeded, err = a.collectChanges(ctx, s); err != nil {
+		if changes, deployNeeded, err = a.collectChanges(ctx, s, o.Refresh); err != nil {
 			return err
 		}
 		u.Plan(changes)
@@ -406,8 +416,8 @@ func (a *app) apply(ctx context.Context, o applyOptions) (err error) {
 			drops = append(drops, deploy.HoldVersionImages(ctx, h.Host, os.Stdout, h.Name, a.cfg.App, a.destName, ver))
 		}
 	}
-	if deployNeeded && !co.deployed(ver) {
-		if images, err = a.buildAndShip(ctx, s, o.SkipBuild); err != nil {
+	if deployNeeded && (o.Refresh || !co.deployed(ver)) {
+		if images, err = a.buildAndShip(ctx, s, o); err != nil {
 			return err
 		}
 	}
@@ -424,11 +434,12 @@ func (a *app) apply(ctx context.Context, o applyOptions) (err error) {
 		}
 	}
 	var rel *release.Release
-	if deployNeeded && !co.deployed(ver) {
+	if deployNeeded && (o.Refresh || !co.deployed(ver)) {
 		d, derr := a.newDeploy(s, images, false)
 		if derr != nil {
 			return co.failed(ctx, derr)
 		}
+		d.Refreshed = o.Refresh
 		if co != nil {
 			d.Cutover = co.j.ID
 		}
@@ -535,4 +546,17 @@ func (e *jobsFailedError) fields() map[string]any {
 		"rollout": "ok", "jobs": "failed", "app": e.app, "destination": e.dest,
 		"version": e.version, "error": e.reason(),
 	}
+}
+
+func (o applyOptions) validate() error {
+	if o.Refresh && o.SkipBuild {
+		return errors.New("--refresh cannot be used with --skip-build")
+	}
+	return nil
+}
+
+func addBuildFlags(c *cobra.Command, o *applyOptions) {
+	c.Flags().BoolVar(&o.Refresh, "refresh", false, "Pull base images and rebuild without cache (build Services only; bump image-only Service tags explicitly)")
+	c.Flags().BoolVar(&o.Scan, "scan", false, "Scan locally built images with Trivy or Grype before rollout (warnings only)")
+	c.MarkFlagsMutuallyExclusive("refresh", "skip-build")
 }

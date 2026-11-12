@@ -472,3 +472,37 @@ func TestRemoteBuilderDirect(t *testing.T) {
 		}
 	}
 }
+
+func TestRefreshBuildFlags(t *testing.T) {
+	for _, composeFlags := range []bool{false, true} {
+		for _, refresh := range []bool{false, true} {
+			b := &types.BuildConfig{NoCache: composeFlags, Pull: composeFlags}
+			o := Options{Refresh: refresh}
+			docker, err := buildArgs(o, "web", b, spec{context: "."}, "app:v1", func(p string) (string, error) { return p, nil })
+			if err != nil {
+				t.Fatal(err)
+			}
+			container, err := ContainerBuildArgv(o, "web", b, spec{context: "."}, "app:v1", func(string) string { return "" })
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, argv := range [][]string{docker, container} {
+				for _, flag := range []string{"--pull", "--no-cache"} {
+					count := 0
+					for _, arg := range argv {
+						if arg == flag {
+							count++
+						}
+					}
+					want := 0
+					if composeFlags || refresh {
+						want = 1
+					}
+					if count != want {
+						t.Fatalf("%s count %d want %d: %v", flag, count, want, argv)
+					}
+				}
+			}
+		}
+	}
+}

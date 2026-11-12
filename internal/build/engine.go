@@ -111,10 +111,10 @@ func ContainerBuildArgv(o Options, service string, b *types.BuildConfig, s spec,
 	if b.Target != "" {
 		a = append(a, "--target", b.Target)
 	}
-	if b.NoCache {
+	if b.NoCache || o.Refresh {
 		a = append(a, "--no-cache")
 	}
-	if b.Pull {
+	if b.Pull || o.Refresh {
 		a = append(a, "--pull")
 	}
 	if len(b.SSH) > 0 {

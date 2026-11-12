@@ -5,14 +5,16 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"github.com/yoho-build/yoho/internal/composefile"
-	"github.com/yoho-build/yoho/internal/config"
-	"github.com/yoho-build/yoho/internal/release"
-	"github.com/yoho-build/yoho/internal/secrets"
 	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/spf13/cobra"
+
+	"github.com/yoho-build/yoho/internal/composefile"
+	"github.com/yoho-build/yoho/internal/config"
+	"github.com/yoho-build/yoho/internal/release"
+	"github.com/yoho-build/yoho/internal/secrets"
 	"github.com/yoho-build/yoho/internal/ui"
 )
 
@@ -131,6 +133,54 @@ func TestNewDeployPreservesProxyHealthProbeForPlan(t *testing.T) {
 		p := d.Ext["web"].Proxy
 		if p.Port != 3000 || p.HealthPort == nil || *p.HealthPort != 9090 || p.HealthTimeout == nil || *p.HealthTimeout != "750ms" || p.DeployTimeout != 47 || p.DrainTimeout != 19 {
 			t.Fatalf("mapped Proxy %+v", p)
+		}
+	}
+}
+
+func TestRefreshSkipBuildRefusedBeforeLoad(t *testing.T) {
+	for _, command := range []func(*globals) *cobra.Command{deployCmd, applyCmd} {
+		c := command(&globals{configPath: "does-not-exist.yml"})
+		c.SilenceErrors, c.SilenceUsage = true, true
+		c.SetArgs([]string{"--refresh", "--skip-build"})
+		err := c.ExecuteContext(context.Background())
+		if err == nil || !strings.Contains(err.Error(), "refresh") || !strings.Contains(err.Error(), "skip-build") {
+			t.Fatalf("got %v", err)
+		}
+	}
+}
+
+func TestRefreshSkipBuildDirectCallerRejected(t *testing.T) {
+	a := &app{ui: ui.Discard()}
+	if err := a.apply(context.Background(), applyOptions{Refresh: true, SkipBuild: true}); err == nil || !strings.Contains(err.Error(), "--skip-build") {
+		t.Fatalf("error=%v", err)
+	}
+}
+
+func TestRefreshRejectsUnsupportedAppsBeforeConnect(t *testing.T) {
+	t.Setenv("PATH", t.TempDir()) // Any regression must fail locally instead of reaching SSH.
+	for _, tc := range []struct{ name, runtime, source, want string }{
+		{"swarm", "swarm", "services:\n  web: {build: .}\n", "--refresh supports compose Destinations; on Swarm, change the Version"},
+		{"no-build", "compose", "services:\n  web: {image: nginx}\n", "nothing to refresh: no Service has build:"},
+	} {
+		for _, command := range []func(*globals) *cobra.Command{deployCmd, applyCmd} {
+			t.Run(tc.name, func(t *testing.T) {
+				oldRoot := release.Root
+				t.Cleanup(func() { release.Root = oldRoot })
+				c := command(&globals{configPath: appDir(t, tc.runtime, tc.source)})
+				var out bytes.Buffer
+				c.SetOut(&out)
+				c.SetErr(&out)
+				args := []string{"--version", "v1", "--refresh"}
+				if c.Name() == "apply" {
+					args = append(args, "--auto-approve")
+				}
+				c.SetArgs(args)
+				c.SilenceErrors, c.SilenceUsage = true, true
+				err := c.ExecuteContext(context.Background())
+				if err == nil || !strings.Contains(err.Error()+out.String(), tc.want) || strings.Contains(out.String(), "Connect") {
+					t.Fatalf("error=%v output=%s", err, out.String())
+				}
+			})
 		}
 	}
 }

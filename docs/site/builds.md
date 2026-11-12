@@ -126,6 +126,30 @@ YOHO_E2E=1 go test ./internal/build -run '^TestE2EContainerAMD64Build$' -v -coun
 
 This builds an AMD64 image with a build secret, checks its architecture, runs it under Rosetta, and removes the test image. For build + SSH transport verification, run `YOHO_E2E=1 YOHO_E2E_SSH=user@amd64-server go test ./internal/transport -run '^TestE2EContainerPush$' -v -count=1`.
 
+## Refreshing base images
+
+```sh
+yoho deploy --refresh --scan
+# Or review and confirm the plan first:
+yoho apply --refresh --scan
+```
+
+`--refresh` pulls newer base images and rebuilds without layer cache, even when the git SHA (Version) is unchanged. It supports compose Destinations with local, remote and Server Builders and both build engines. On Swarm, change the Version instead; `--refresh` is refused. Compose `build.pull` and `build.no_cache` still apply without this flag. `--refresh` cannot be combined with `--skip-build`.
+
+Only Services with `build:` are refreshed; an App with none is an error. Image-only Services, including Stateful Services such as `postgres:17`, are not pulled or recreated by refresh alone; bump their image tags explicitly to upgrade them. A Stateful or non-proxied Service with its own `build:` is rebuilt and replaced stop-first; `apply` shows that downtime in the plan.
+
+The Release records `refreshed: true`, and `yoho releases` shows a short `refreshed` marker. A same-Version refresh replaces that Version's Release record and image IDs. Failed attempts retain the previous record and restore its image tags; after a successful refresh, rollback goes to a prior Version, not the image that previously used the refreshed Version's tag. Use a distinct `--version` when you need to retain both builds as rollback targets.
+
+`--scan` optionally runs Trivy (preferred) or Grype after building and before rollout. It reports fixed High and Critical vulnerabilities per built image. Findings, a missing scanner (install `trivy` or `grype`), and scanner failures warn but never block deployment. Docker images are scanned from the local Docker store; Apple container images are exported to a temporary OCI archive for scanning. Exports and scans select the Server platform, including cross-builds. Server builds print `scan skipped: images are built on the Server`. Direct remote builds also skip scanning because their images remain on the Builder; use `builder.direct: false` to load them locally and scan. Scanning does not run when `--skip-build` skips the build or `apply` has no changes to apply.
+
+For a weekly refresh, run from CI or an operator machine that has the App checkout, Yoho, SSH access and secret providers configured. For example, on that machine (replace the paths):
+
+```text
+0 4 * * 0 cd /srv/checkouts/shop && /usr/local/bin/yoho deploy --refresh --scan >> /var/log/shop-refresh.log 2>&1
+```
+
+Give the job the same PATH and noninteractive provider access as your normal deploys. Monitor its output and deploy failures. Yoho Scheduled Jobs currently run Backups only ([ADR 0003](https://github.com/yoho-build/yoho/blob/main/docs/adr/0003-no-resident-daemon-by-default.md)); this refresh recipe runs from CI or your machine, not as a Scheduled Job on the Server.
+
 ## Build secrets
 
 `builder.secrets: [NPM_TOKEN]` passes `--secret id=NPM_TOKEN,env=NPM_TOKEN`; use `RUN --mount=type=secret,id=NPM_TOKEN` in the Dockerfile.

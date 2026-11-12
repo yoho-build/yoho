@@ -55,6 +55,9 @@ type Deploy struct {
 	RetainReleases int
 	Hook           HookFunc
 
+	// Refreshed records a rebuild with newer base images and no layer cache.
+	Refreshed bool
+
 	// Cutover is the id of the migration cutover this deploy performs, or
 	// "". Recorded in the Release.
 	Cutover string
