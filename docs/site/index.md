@@ -45,7 +45,7 @@ import { agentPrompt, installCommands } from './.vitepress/theme/prompt.js'
 <span class="t">▸</span> Start web, wait for health check
 <span class="t">▸</span> Switch traffic to the new web
 <span class="ok">✓</span> Deployed shop to production <span class="c">15.9s</span></pre>
-    <p class="yh-note">Traffic moves only when the new version is healthy, so visitors never see downtime.<br>Free · MIT · No platform, no agent on your server · <a href="/migrating-from-kamal/">Coming from Kamal</a>, <a href="/migrating-from-coolify/">Coolify</a> or <a href="/migrating-from-railway/">Railway</a>?</p>
+    <p class="yh-note">Traffic moves only when the new version is healthy, so visitors never see downtime.<br>Free · MIT · No platform, no agent on your server · <a href="/deploy-path/">See the deploy path</a> · <a href="/migrating-from-kamal/">Coming from Kamal</a>, <a href="/migrating-from-coolify/">Coolify</a> or <a href="/migrating-from-railway/">Railway</a>?</p>
   </section>
 </main>
 </div>
