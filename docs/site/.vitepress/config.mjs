@@ -19,6 +19,7 @@ const guide = [
   ['Scheduled jobs', 'scheduled-jobs'],
   ['Object storage', 'object-storage'],
   ['Server setup', 'setup'],
+  ['How big a Server?', 'sizing'],
   ['Swarm', 'swarm'],
   ['High availability & recovery', 'high-availability'],
   ['Dashboards (tui / ui)', 'dashboards'],
