@@ -19,34 +19,36 @@ with Redis added for the four-Service trials.
 | Go worker Service | 2.6 MiB |
 | `postgres:17-alpine`, defaults | 28.7 MiB |
 | `redis:7-alpine` | 3.6 MiB |
-| One App, all four containers | 41.0 MiB |
-| Five Apps, all twenty containers | 191.7 MiB |
+| One App, all four containers plus Proxy | 41.0 MiB |
+| Five Apps, all twenty containers plus Proxy | 191.7 MiB |
 | Postgres tuning trial: default → tuned | 28.4 → 14.3 MiB |
 | Server baseline: OS + Docker + Proxy | about 743 MiB used |
 | Server with one → five Apps (`free -m` used) | 771 → 1017 MiB |
 
 All five Apps answered HTTP 200. Idle CPU was about 0–0.06% per container,
 with brief 3–5% healthcheck blips. These are idle observations, not load tests.
-The four added Apps averaged about 38 MiB of container memory and 61 MiB
-of Server memory each. The Server figure includes kernel, page-cache and
-shared memory that `docker stats` does not show; use it for rough packing.
+The four added Apps averaged about 38 MiB of container memory and about 62 MiB
+of Server memory each (246 / 4 = 61.5 MiB). `free`'s used memory excludes
+reclaimable cache; the gap is per-container runtime overhead (containerd shims,
+kernel memory) that `docker stats` does not attribute to containers.
 
 ## A memory estimate, then a planning budget
 
 Reserve about **750 MiB for the OS, Docker and Proxy**, then roughly
-**40 MiB in containers / 60 MiB on the Server per tiny idle App** of this
-shape, including Redis. Using the measured 61 MiB increment:
+**38 MiB in containers / about 62 MiB on the Server per tiny idle App** of this
+shape, including Redis. Using the measured 61.5 MiB increment:
 
 | Server RAM (binary units) | Idle-only arithmetic | Whole Apps, rounded down |
 |---|---|---|
-| 2 GiB | (2048 − 750) / 61 | 21 |
-| 4 GiB | (4096 − 750) / 61 | 54 |
-| 8 GiB | (8192 − 750) / 61 | 122 |
+| 2 GiB | (2048 − 750) / 61.5 | 21 |
+| 4 GiB | (4096 − 750) / 61.5 | 54 |
+| 8 GiB | (8192 − 750) / 61.5 | 121 |
 
 **Plan far lower.** Only five Apps were tested. Memory grows under load;
 `builder.location: server` needs RAM for Go/npm builds; zero-downtime deploys
 run old and new proxied containers side by side; Postgres caches grow with
 data; Backups need resources too. CPU, disk and traffic can limit you first.
+Building off-Server with a local or CI Builder avoids build memory on the Server.
 
 Budget each App at the sum of its Services' `mem_limit` values, reserve the
 baseline and build/deploy/Backup peaks, and keep **25–30% of Server RAM free**
@@ -56,7 +58,8 @@ repeat during builds, deploys, Backups and busy periods.
 
 ## Swap and Service limits
 
-On 1–4 GiB Servers, enable swap in the Yoho file, then run `yoho setup`:
+On 2–4 GiB Servers, enable swap in the Yoho file, then run `yoho setup`.
+A 1 GiB Server is too small for the baseline plus the headroom rule above.
 
 ```yaml
 setup:
@@ -91,7 +94,8 @@ the 300-certificate cold run grew Proxy memory from 9.7 to 18.3 MiB.
 [Railway plans](https://docs.railway.com/pricing/plans) and
 [pricing](https://railway.com/pricing), retrieved **2026-11-12 at 11:29 UTC**:
 RAM $10/GB-month, CPU $20/vCPU-month, volume $0.15/GB-month, egress $0.05/GB.
-For always-on web + worker + Postgres (no Redis), measured idle RAM totals
+For always-on web + worker + Postgres (no Redis), idle RAM measured on Docker
+(above), not on Railway, totals
 33.7 MiB (about 0.033 GB for this estimate). **Assume 0.02 vCPU per container**
 and a 1 GB volume, with no egress: RAM $0.33 + CPU (3 × 0.02 × $20) $1.20
 + volume $0.15 = **$1.68 usage/month**. CPU dominates; that CPU input is an
