@@ -307,9 +307,11 @@ func TestVetRollback(t *testing.T) {
 	tunnel := good
 	tunnel.Compose = "services:\n  web: {image: yoho/shop-production-web:v1}\n  cloudflared: {image: cloudflare/cloudflared, networks: [default, yoho]}\nnetworks: {yoho: {external: true}}\n"
 	record(tunnel)
+	s.Routes = []string{"other.example.com"}
 	if err := c.vetRollback(ctx, s, "v1", compiled, rel); err != nil {
 		t.Fatalf("cloudflared on yoho: %v", err)
 	}
+	s.Routes = nil
 	record(good)
 	// The Release on the Server was replaced after the Gate deployed it.
 	if err := c.vetRollback(ctx, s, "v1", []byte("services: {web: {image: x, privileged: true}}"), rel); err == nil {
@@ -557,7 +559,7 @@ func atoi(s string) int {
 // `yoho: {external: true}`) and keeps refusing other external networks.
 func TestVetYohoNetwork(t *testing.T) {
 	setup(t, "")
-	s := &Settings{Limits: Limits{}.WithDefaults()}
+	s := &Settings{Limits: Limits{}.WithDefaults(), Routes: []string{"shop.example.com"}}
 	c := &call{req: &remote.GateRequest{App: "shop", Destination: "production"}}
 	ctx := context.Background()
 	tunnel := "services:\n  db: {image: postgres:17}\n  cloudflared:\n    image: cloudflare/cloudflared:latest\n    networks: [default, yoho]\nnetworks:\n  yoho: {external: true}\n"
