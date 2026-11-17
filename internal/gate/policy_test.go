@@ -103,6 +103,7 @@ func TestPolicyRefuses(t *testing.T) {
 		{"yoho address", "services: {a: {image: x, networks: {yoho: {ipv4_address: 172.18.0.9}}}}\nnetworks: {yoho: {external: true}}", "networks.yoho: only the bare form"},
 		{"yoho priority", "services: {a: {image: x, networks: {yoho: {priority: 10}}}}\nnetworks: {yoho: {external: true}}", "networks.yoho: only the bare form"},
 		{"proxied yoho alias", "services: {a: {image: x, networks: {yoho: {aliases: [acme.example.com]}}, x-yoho: {proxy: {hosts: [shop.example.com]}}}}\nnetworks: {yoho: {external: true}}", "networks.yoho: only the bare form"},
+		{"pre_start yoho alias", "services: {a: {image: x, networks: [default, yoho], pre_start: [{image: y, networks: {yoho: {aliases: [acme.example.com]}}}]}}\nnetworks: {yoho: {external: true}}", "pre_start[0]: networks.yoho: only the bare form"},
 		{"yoho name, other key", "services: {a: {image: x, networks: [default, p]}}\nnetworks: {p: {external: true, name: yoho}}", `external network "yoho"`},
 		{"other app local image", "services: {a: {image: \"yoho/otherapp-production-web:leak\"}}", "Yoho-built image"},
 		{"other app registry image", "services: {a: {image: ghcr.io/acme/other-production-web:v1}}", "Yoho-built image"},

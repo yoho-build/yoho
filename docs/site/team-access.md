@@ -46,7 +46,7 @@ Images reach the Server in one of two ways. The CLI can stream a `docker save` a
 
 ### Other Apps on the Server
 
-A scoped App does not join the shared `yoho` network. Its proxied Services join a network of their own, `yoho-<app>-<destination>-proxy`, and Yoho connects the Proxy to it (again after a Proxy upgrade). A Service that lists `yoho` itself, such as an in-App `cloudflared` with `networks: [default, yoho]` and `networks: {yoho: {external: true}}`, joins that same network, so one compose file works for the operator and for Members. A Member's containers reach their own App and the Proxy, which serves only public routes, as from the internet. They cannot reach other Apps' containers by name or address. Logs, stats and the dashboards show only containers labeled with this App Destination.
+A scoped App does not join the shared `yoho` network. Its proxied Services join a network of their own, `yoho-<app>-<destination>-proxy`, and Yoho connects the Proxy to it (again after a Proxy upgrade). A Service that lists `yoho` itself, such as an in-App `cloudflared` with `networks: [default, yoho]` and `networks: {yoho: {external: true}}`, joins that same network, so one compose file works for the operator and for Members. A Member's containers reach their own App. Those on the App's Proxy network (proxied Services and Services that list `yoho`) also reach the shared Proxy listener, which serves every App's routes on this Server directly, without what sits in front of them (for example Cloudflare Access); that is why `yoho` needs an operator-allowed Proxy hostname. They cannot reach other Apps' containers by name or address. Logs, stats and the dashboards show only containers labeled with this App Destination.
 
 ### Secrets
 
