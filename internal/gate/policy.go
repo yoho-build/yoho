@@ -77,11 +77,6 @@ func (pol Policy) Check(p *types.Project, ext map[string]config.ServiceExt) erro
 	for _, name := range sortedKeys(p.Services) {
 		s := p.Services[name]
 		svc := func(f string, a ...any) { add("service %s: "+f, append([]any{name}, a...)...) }
-		if !bareNetwork(s.Networks[proxy.Network]) {
-			// The Proxy resolves names on this network: aliases would
-			// plant DNS names (another App's container, the ACME host).
-			svc("networks.%s: only the bare form is allowed (no aliases, addresses, priorities or driver_opts on the Proxy network)", proxy.Network)
-		}
 		pol.checkContainer(p, s.ContainerSpec, svc)
 		for i, h := range s.PreStart {
 			pol.checkContainer(p, h.ContainerSpec, func(f string, a ...any) {
@@ -217,6 +212,11 @@ func (pol Policy) checkContainer(p *types.Project, c types.ContainerSpec, add fu
 		}
 	}
 	pol.checkResources(c, add)
+	if !bareNetwork(c.Networks[proxy.Network]) {
+		// The Proxy resolves names on this network: aliases would plant
+		// DNS names (another App's container, the ACME host).
+		add("networks.%s: only the bare form is allowed (no aliases, addresses, priorities or driver_opts on the Proxy network)", proxy.Network)
+	}
 	if c.Privileged {
 		add("privileged is not allowed")
 	}
