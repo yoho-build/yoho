@@ -327,11 +327,17 @@ func compile(d *plan.Deploy, server, generationDir string, svcSecrets map[string
 	if err := validateReadinessPlans(plans); err != nil {
 		return nil, nil, err
 	}
+	netName := proxyNetworkName(d)
+	// A scoped App's `yoho: {external: true}` (the same compose as in
+	// operator mode) is its own network to the Proxy, never the shared one.
+	if n, ok := p.Networks[proxy.Network]; ok && d.Scoped != nil && bool(n.External) && n.Name == proxy.Network {
+		n.Name = netName
+		p.Networks[proxy.Network] = n
+	}
 	if needNet {
 		if p.Networks == nil {
 			p.Networks = types.Networks{}
 		}
-		netName := proxyNetworkName(d)
 		if n, ok := p.Networks[proxy.Network]; ok {
 			if !n.External {
 				return nil, nil, fmt.Errorf("network %q must be external (shared with the Server's proxy)", proxy.Network)

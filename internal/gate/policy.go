@@ -12,6 +12,7 @@ import (
 	"go.yaml.in/yaml/v3"
 
 	"github.com/yoho-build/yoho/internal/config"
+	"github.com/yoho-build/yoho/internal/proxy"
 )
 
 // Policy is what a scoped deploy may contain. A compose project is root on
@@ -149,8 +150,11 @@ func (pol Policy) Check(p *types.Project, ext map[string]config.ServiceExt) erro
 	for _, k := range sortedKeys(p.Networks) {
 		n := p.Networks[k]
 		switch {
+		case k == proxy.Network && bool(n.External) && n.Name == proxy.Network && n.Driver == "" && len(n.DriverOpts) == 0:
+			// The Proxy network: the runtime renames it to the App's own
+			// network to the Proxy, never the shared one.
 		case bool(n.External):
-			add("network %s: external network %q is not allowed (scoped Apps get their own network to the Proxy; shared networks reach other Apps)", k, n.Name)
+			add("network %s: external network %q is not allowed (scoped Apps get their own network to the Proxy; only `yoho: {external: true}` is allowed, and it becomes that network; shared networks reach other Apps)", k, n.Name)
 		case n.Driver != "" && n.Driver != "bridge":
 			add("network %s: driver %q is not allowed (bridge only)", k, n.Driver)
 		case len(n.DriverOpts) > 0:
