@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"reflect"
 	"slices"
 	"strconv"
 	"strings"
@@ -76,6 +77,11 @@ func (pol Policy) Check(p *types.Project, ext map[string]config.ServiceExt) erro
 	for _, name := range sortedKeys(p.Services) {
 		s := p.Services[name]
 		svc := func(f string, a ...any) { add("service %s: "+f, append([]any{name}, a...)...) }
+		if !bareNetwork(s.Networks[proxy.Network]) {
+			// The Proxy resolves names on this network: aliases would
+			// plant DNS names (another App's container, the ACME host).
+			svc("networks.%s: only the bare form is allowed (no aliases, addresses, priorities or driver_opts on the Proxy network)", proxy.Network)
+		}
 		pol.checkContainer(p, s.ContainerSpec, svc)
 		for i, h := range s.PreStart {
 			pol.checkContainer(p, h.ContainerSpec, func(f string, a ...any) {
@@ -152,7 +158,11 @@ func (pol Policy) Check(p *types.Project, ext map[string]config.ServiceExt) erro
 		switch {
 		case k == proxy.Network && bool(n.External) && n.Name == proxy.Network && n.Driver == "" && len(n.DriverOpts) == 0:
 			// The Proxy network: the runtime renames it to the App's own
-			// network to the Proxy, never the shared one.
+			// network to the Proxy, never the shared one. The Proxy serves
+			// every App's routes, so only an App with routes may join it.
+			if len(pol.Routes) == 0 {
+				add("network %s: the operator allowed no Proxy hostname for this App, so it may not join the Proxy network; ask the operator to give a Service a Proxy host and run `yoho access secrets push`", k)
+			}
 		case bool(n.External):
 			add("network %s: external network %q is not allowed (scoped Apps get their own network to the Proxy; only `yoho: {external: true}` is allowed, and it becomes that network; shared networks reach other Apps)", k, n.Name)
 		case n.Driver != "" && n.Driver != "bridge":
@@ -176,6 +186,19 @@ func (pol Policy) Check(p *types.Project, ext map[string]config.ServiceExt) erro
 		add("models are not allowed")
 	}
 	return errors.Join(errs...)
+}
+
+// bareNetwork reports whether a Service's network entry sets nothing
+// (`networks: [yoho]`, `yoho:` or `yoho: {}`).
+func bareNetwork(c *types.ServiceNetworkConfig) bool {
+	if c == nil {
+		return true
+	}
+	v := *c
+	if len(v.Extensions) == 0 {
+		v.Extensions = nil
+	}
+	return reflect.ValueOf(v).IsZero()
 }
 
 // allowedSecurityOpt are the only security_opt entries a scoped deploy may
