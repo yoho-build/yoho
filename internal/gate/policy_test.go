@@ -96,7 +96,15 @@ func TestPolicyRefuses(t *testing.T) {
 		{"privileged hook", "services: {a: {image: x, post_start: [{command: [id], privileged: true}]}}", "privileged lifecycle hooks"},
 		{"privileged pre_start", "services: {a: {image: x, pre_start: [{image: y, privileged: true}]}}", "pre_start[0]: privileged"},
 		{"route host", "services: {a: {image: x, x-yoho: {proxy: {hosts: [bank.example.com]}}}}", "Proxy host bank.example.com is not allowed"},
-		{"shared yoho network", "services: {a: {image: x, networks: [default, yoho]}}\nnetworks: {yoho: {external: true}}", `external network "yoho"`},
+		{"yoho key, other name", "services: {a: {image: x, networks: [default, yoho]}}\nnetworks: {yoho: {external: true, name: yoho-other-production-proxy}}", `external network "yoho-other-production-proxy"`},
+		{"yoho key, driver", "services: {a: {image: x, networks: [default, yoho]}}\nnetworks: {yoho: {external: true, driver: macvlan}}", "network yoho"},
+		{"yoho key, driver_opts", "services: {a: {image: x, networks: [default, yoho]}}\nnetworks: {yoho: {external: true, driver_opts: {parent: eth0}}}", "network yoho"},
+		{"yoho alias", "services: {a: {image: x, networks: {default: {}, yoho: {aliases: [yoho-other-production-web-1]}}}}\nnetworks: {yoho: {external: true}}", "networks.yoho: only the bare form"},
+		{"yoho address", "services: {a: {image: x, networks: {yoho: {ipv4_address: 172.18.0.9}}}}\nnetworks: {yoho: {external: true}}", "networks.yoho: only the bare form"},
+		{"yoho priority", "services: {a: {image: x, networks: {yoho: {priority: 10}}}}\nnetworks: {yoho: {external: true}}", "networks.yoho: only the bare form"},
+		{"proxied yoho alias", "services: {a: {image: x, networks: {yoho: {aliases: [acme.example.com]}}, x-yoho: {proxy: {hosts: [shop.example.com]}}}}\nnetworks: {yoho: {external: true}}", "networks.yoho: only the bare form"},
+		{"pre_start yoho alias", "services: {a: {image: x, networks: [default, yoho], pre_start: [{image: y, networks: {yoho: {aliases: [acme.example.com]}}}]}}\nnetworks: {yoho: {external: true}}", "pre_start[0]: networks.yoho: only the bare form"},
+		{"yoho name, other key", "services: {a: {image: x, networks: [default, p]}}\nnetworks: {p: {external: true, name: yoho}}", `external network "yoho"`},
 		{"other app local image", "services: {a: {image: \"yoho/otherapp-production-web:leak\"}}", "Yoho-built image"},
 		{"other app registry image", "services: {a: {image: ghcr.io/acme/other-production-web:v1}}", "Yoho-built image"},
 		{"own old local image", "services: {a: {image: yoho/shop-production-web:old}}", "Yoho-built image"},
@@ -140,6 +148,29 @@ func TestPolicyRefuses(t *testing.T) {
 				t.Fatalf("want error containing %q, got %v", c.want, err)
 			}
 		})
+	}
+}
+
+// The documented in-App cloudflared Service lists `yoho` itself; the same
+// compose works in scoped mode, where the runtime makes it the App's own
+// network to the Proxy.
+func TestPolicyAllowsYohoNetwork(t *testing.T) {
+	for _, yml := range []string{
+		"services: {a: {image: x, networks: [default, yoho]}}\nnetworks: {yoho: {external: true}}",
+		"services: {a: {image: x, networks: [default, yoho]}}\nnetworks: {yoho: {external: true, name: yoho}}",
+		"services: {a: {image: x, networks: {default: , yoho: }}}\nnetworks: {yoho: {external: true}}",
+		"services: {a: {image: x, networks: {default: {}, yoho: {}}}}\nnetworks: {yoho: {external: true}}",
+	} {
+		r := load(t, yml)
+		if err := (Policy{Project: project, Routes: []string{"shop.example.com"}}).Check(r.Project, r.Ext); err != nil {
+			t.Errorf("%s: %v", yml, err)
+		}
+	}
+	// The Proxy serves every App's routes: an App without one of its own
+	// may not join it.
+	r := load(t, "services: {a: {image: x, networks: [default, yoho]}}\nnetworks: {yoho: {external: true}}")
+	if err := (Policy{Project: project}).Check(r.Project, r.Ext); err == nil || !strings.Contains(err.Error(), "allowed no Proxy hostname") {
+		t.Errorf("no routes: %v", err)
 	}
 }
 

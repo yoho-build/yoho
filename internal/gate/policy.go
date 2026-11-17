@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"reflect"
 	"slices"
 	"strconv"
 	"strings"
@@ -12,6 +13,7 @@ import (
 	"go.yaml.in/yaml/v3"
 
 	"github.com/yoho-build/yoho/internal/config"
+	"github.com/yoho-build/yoho/internal/proxy"
 )
 
 // Policy is what a scoped deploy may contain. A compose project is root on
@@ -149,8 +151,15 @@ func (pol Policy) Check(p *types.Project, ext map[string]config.ServiceExt) erro
 	for _, k := range sortedKeys(p.Networks) {
 		n := p.Networks[k]
 		switch {
+		case k == proxy.Network && bool(n.External) && n.Name == proxy.Network && n.Driver == "" && len(n.DriverOpts) == 0:
+			// The Proxy network: the runtime renames it to the App's own
+			// network to the Proxy, never the shared one. The Proxy serves
+			// every App's routes, so only an App with routes may join it.
+			if len(pol.Routes) == 0 {
+				add("network %s: the operator allowed no Proxy hostname for this App, so it may not join the Proxy network; ask the operator to give a Service a Proxy host and run `yoho access secrets push`", k)
+			}
 		case bool(n.External):
-			add("network %s: external network %q is not allowed (scoped Apps get their own network to the Proxy; shared networks reach other Apps)", k, n.Name)
+			add("network %s: external network %q is not allowed (scoped Apps get their own network to the Proxy; only `yoho: {external: true}` is allowed, and it becomes that network; shared networks reach other Apps)", k, n.Name)
 		case n.Driver != "" && n.Driver != "bridge":
 			add("network %s: driver %q is not allowed (bridge only)", k, n.Driver)
 		case len(n.DriverOpts) > 0:
@@ -174,6 +183,19 @@ func (pol Policy) Check(p *types.Project, ext map[string]config.ServiceExt) erro
 	return errors.Join(errs...)
 }
 
+// bareNetwork reports whether a Service's network entry sets nothing
+// (`networks: [yoho]`, `yoho:` or `yoho: {}`).
+func bareNetwork(c *types.ServiceNetworkConfig) bool {
+	if c == nil {
+		return true
+	}
+	v := *c
+	if len(v.Extensions) == 0 {
+		v.Extensions = nil
+	}
+	return reflect.ValueOf(v).IsZero()
+}
+
 // allowedSecurityOpt are the only security_opt entries a scoped deploy may
 // set: seccomp=FILE reads the Server, unconfined and label=disable drop
 // isolation.
@@ -190,6 +212,11 @@ func (pol Policy) checkContainer(p *types.Project, c types.ContainerSpec, add fu
 		}
 	}
 	pol.checkResources(c, add)
+	if !bareNetwork(c.Networks[proxy.Network]) {
+		// The Proxy resolves names on this network: aliases would plant
+		// DNS names (another App's container, the ACME host).
+		add("networks.%s: only the bare form is allowed (no aliases, addresses, priorities or driver_opts on the Proxy network)", proxy.Network)
+	}
 	if c.Privileged {
 		add("privileged is not allowed")
 	}

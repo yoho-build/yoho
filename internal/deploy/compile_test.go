@@ -401,3 +401,45 @@ configs:
 		t.Fatalf("command changed:\n%s", b)
 	}
 }
+
+// The documented in-App cloudflared: a non-proxied Service that lists
+// `yoho: {external: true}` itself. Operator mode keeps the shared network;
+// scoped mode joins the App's own network to the Proxy instead.
+func TestCompileYohoNetworkScoped(t *testing.T) {
+	const src = "services:\n  db: {image: postgres:17}\n  cloudflared:\n    image: cloudflare/cloudflared:latest\n    networks: [default, yoho]\nnetworks:\n  yoho: {external: true}\n"
+	for _, c := range []struct {
+		name   string
+		scoped *plan.Scoped
+		want   string
+	}{
+		{"operator", nil, "yoho"},
+		{"scoped", &plan.Scoped{ProxyNetwork: "yoho-shop-production-proxy"}, "yoho-shop-production-proxy"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			d := testDeploy(t, nil, nil)
+			d.Project = loadProject(t, src)
+			d.Ext = map[string]config.ServiceExt{}
+			d.ServiceSecrets = nil
+			d.Scoped = c.scoped
+			out, plans, _ := compileTest(t, d)
+			var doc compiledDoc
+			if err := yaml.Unmarshal(out, &doc); err != nil {
+				t.Fatal(err)
+			}
+			if n := doc.Networks["yoho"]; !n.External || n.Name != c.want {
+				t.Errorf("networks %+v\n%s", doc.Networks, out)
+			}
+			for k, n := range doc.Networks {
+				if c.scoped != nil && n.Name == "yoho" {
+					t.Errorf("scoped network %s joins the shared yoho network", k)
+				}
+			}
+			if _, ok := doc.Services["cloudflared"].Networks["yoho"]; !ok {
+				t.Errorf("cloudflared networks %+v", doc.Services["cloudflared"].Networks)
+			}
+			if !needsProxy(plans) {
+				t.Error("a Service on the yoho network must bring up the Proxy and its network")
+			}
+		})
+	}
+}

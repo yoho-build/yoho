@@ -302,6 +302,17 @@ func TestVetRollback(t *testing.T) {
 	if err := c.vetRollback(ctx, s, "v1", compiled, rel); err != nil {
 		t.Fatalf("Gate Release: %v", err)
 	}
+	// An in-App cloudflared on `yoho`: the compiled file has the App's own
+	// network under that key.
+	tunnel := good
+	tunnel.Compose = "services:\n  web: {image: yoho/shop-production-web:v1}\n  cloudflared: {image: cloudflare/cloudflared, networks: [default, yoho]}\nnetworks: {yoho: {external: true}}\n"
+	record(tunnel)
+	s.Routes = []string{"other.example.com"}
+	if err := c.vetRollback(ctx, s, "v1", compiled, rel); err != nil {
+		t.Fatalf("cloudflared on yoho: %v", err)
+	}
+	s.Routes = nil
+	record(good)
 	// The Release on the Server was replaced after the Gate deployed it.
 	if err := c.vetRollback(ctx, s, "v1", []byte("services: {web: {image: x, privileged: true}}"), rel); err == nil {
 		t.Fatal("want refusal for a changed compose.yaml")
@@ -542,4 +553,21 @@ func procAlive(pid string) bool {
 func atoi(s string) int {
 	n, _ := strconv.Atoi(s)
 	return n
+}
+
+// The Gate vets the documented in-App cloudflared (a Service that lists
+// `yoho: {external: true}`) and keeps refusing other external networks.
+func TestVetYohoNetwork(t *testing.T) {
+	setup(t, "")
+	s := &Settings{Limits: Limits{}.WithDefaults(), Routes: []string{"shop.example.com"}}
+	c := &call{req: &remote.GateRequest{App: "shop", Destination: "production"}}
+	ctx := context.Background()
+	tunnel := "services:\n  db: {image: postgres:17}\n  cloudflared:\n    image: cloudflare/cloudflared:latest\n    networks: [default, yoho]\nnetworks:\n  yoho: {external: true}\n"
+	if _, _, err := c.vet(ctx, s, []byte(tunnel), "v1", nil); err != nil {
+		t.Fatalf("cloudflared on yoho: %v", err)
+	}
+	other := strings.Replace(tunnel, "{external: true}", "{external: true, name: yoho-other-production-proxy}", 1)
+	if _, _, err := c.vet(ctx, s, []byte(other), "v1", nil); err == nil || !strings.Contains(err.Error(), "yoho-other-production-proxy") {
+		t.Fatalf("other App's network: %v", err)
+	}
 }

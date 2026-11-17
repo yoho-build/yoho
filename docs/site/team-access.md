@@ -22,7 +22,7 @@ A compose file can mount `/var/run/docker.sock` or `/`, or ask for `privileged`,
 - any `network_mode` except `none` (`bridge` and `default` join Docker's shared bridge; leave it out to use the App's own networks), or any `pid`, `uts`, `userns_mode`, `cgroup: host`, `cgroup_parent` or `runtime`
 - a `security_opt` other than `no-new-privileges`
 - `volumes_from`, `external_links`, or a bind mount (named volumes and tmpfs are fine)
-- external volumes or networks, including the shared `yoho` network (Yoho attaches proxied Services to the Proxy itself), volume `driver_opts`, or a volume or network name outside `yoho-<app>-<destination>_`
+- external volumes or networks (only `yoho: {external: true}` is allowed, for an App that the operator gave a Proxy hostname, with no aliases, addresses or other options on a Service's `yoho` entry; it becomes the App's own Proxy network, see below), volume `driver_opts`, or a volume or network name outside `yoho-<app>-<destination>_`
 - a `container_name` outside `yoho-<app>-<destination>-`, or a label that starts with `com.docker.` or `yoho.`
 - top-level `secrets`, or `configs` from a file or the environment (inline `content` is fine)
 - `include`, `extends`, `env_file` or `label_file` that reads Server files (the CLI already inlines `env_file`)
@@ -46,7 +46,7 @@ Images reach the Server in one of two ways. The CLI can stream a `docker save` a
 
 ### Other Apps on the Server
 
-A scoped App does not join the shared `yoho` network. Its proxied Services join a network of their own, `yoho-<app>-<destination>-proxy`, and Yoho connects the Proxy to it (again after a Proxy upgrade). A Member's containers reach their own App and the Proxy, which serves only public routes, as from the internet. They cannot reach other Apps' containers by name or address. Logs, stats and the dashboards show only containers labeled with this App Destination.
+A scoped App does not join the shared `yoho` network. Its proxied Services join a network of their own, `yoho-<app>-<destination>-proxy`, and Yoho connects the Proxy to it (again after a Proxy upgrade). A Service that lists `yoho` itself, such as an in-App `cloudflared` with `networks: [default, yoho]` and `networks: {yoho: {external: true}}`, joins that same network, so one compose file works for the operator and for Members. A Member's containers reach their own App. Those on the App's Proxy network (proxied Services and Services that list `yoho`) also reach the shared Proxy listener, which serves every App's routes on this Server directly, without what sits in front of them (for example Cloudflare Access); that is why `yoho` needs an operator-allowed Proxy hostname. They cannot reach other Apps' containers by name or address. Logs, stats and the dashboards show only containers labeled with this App Destination.
 
 ### Secrets
 
