@@ -77,3 +77,31 @@ func offShared(d *plan.Deploy) {
 		d.Project.Services[name] = s
 	}
 }
+
+// A scoped App whose only Service on `yoho` is not proxied (an in-App
+// cloudflared) still gets its own Proxy network, created and connected
+// before compose up, and never the shared one.
+func TestScopedDeployNonProxiedServiceOnYoho(t *testing.T) {
+	root := withRoot(t)
+	ctx := context.Background()
+	h := &dockerHost{local: &remote.Local{}, respond: respond(nil)}
+	d := testDeploy(t, h, nil)
+	web := d.Ext["web"]
+	web.Proxy = nil
+	d.Ext["web"] = web
+	d.Scoped = &plan.Scoped{ProxyNetwork: "yoho-shop-production-proxy"}
+	if _, err := (Compose{}).Deploy(ctx, d); err != nil {
+		t.Fatal(err)
+	}
+	compose, err := os.ReadFile(filepath.Join(root, "apps", "shop", "production", "releases", "v1", "compose.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(compose), "name: yoho-shop-production-proxy") || strings.Contains(string(compose), "name: yoho\n") {
+		t.Fatalf("compiled networks:\n%s", compose)
+	}
+	connect := indexOf(t, h.scripts, "docker network connect 'yoho-shop-production-proxy' yoho-proxy")
+	if up := indexOf(t, h.scripts, "'up'"); up < connect {
+		t.Fatalf("compose up before the App's Proxy network exists")
+	}
+}
