@@ -184,6 +184,9 @@ func validate(d *plan.Deploy) error {
 	for _, name := range sortedKeys(d.Project.Services) {
 		s := d.Project.Services[name]
 		ext := d.Ext[name]
+		if ext.Check != nil {
+			errs = append(errs, fmt.Errorf("service %s: x-yoho.check is not supported with runtime swarm yet", name))
+		}
 		if ext.Stateful {
 			if s.GetScale() > 1 {
 				errs = append(errs, fmt.Errorf("service %s: stateful services run exactly one replica", name))

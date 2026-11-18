@@ -16,7 +16,7 @@ The Yoho file (`yoho.yml`, `.yaml`, `.toml`, `.json`, `.jsonc`; format detected 
 | `secrets.providers.<n>` | `type` (`op`, `bw`, `bws`, `command`), `command` (argv; ref appended), `account`. |
 | `secrets.values.<KEY>` | `provider`, `ref`, optional `destinations`. |
 | `proxy` | `image` (pinned kamal-proxy), `http_port`, `https_port` (0 disables publishing), `bind`, `tunnel`. |
-| `proxy.tunnel` | `token_secret` (empty or `tunnel: {}` = Quick Tunnel; leave `x-yoho.proxy.hosts` empty with it, one replica only), `image`, `replicas` (default 1). |
+| `proxy.tunnel` | `token_secret` (empty or `tunnel: {}` = Quick Tunnel; leave `x-yoho.proxy.hosts` empty with it, one replica only), `image`, `replicas` (default 1), `api_token_secret` (Cloudflare API token key for `yoho tunnel route`; requires `token_secret`; default `migrate.tunnel.api_token_secret`). |
 | `backups.targets.<n>` | `type` (`restic` default, `archive`), `repository`, `format` (`tar.gz`, `zip`, `7z`; archive only), `password_secret`, `env_secrets`, `rclone_config_secret` (persistent rclone.conf for OAuth remotes such as OneDrive; rclone repositories only), `keep_last`, `keep_within` (e.g. `30d`, restic `--keep-within`; relative to the newest Backup). |
 | `backups.jobs.<n>` | `destination`, `services`, `target`, `schedule` (systemd OnCalendar; empty = on demand), `retries` (Scheduled Backups only, 0–5 extra attempts, default 0), `retry_delay_sec` (0/unset = 30s, max 300s). Retries require volume-only selected Services without dump/pre_backup commands. No retry after storage starts or unsafe cleanup; one whole-run timeout/cancellation budget. Reinstall/apply changes. |
 | `setup` | `user` (default `yoho`), `authorized_keys`, `packages`, `firewall`, `allow_ports`, `auto_updates`, `swap`, `timezone`. |
@@ -39,7 +39,7 @@ An optional overlay next to the Yoho file, `yoho.<destination>.<ext>` (`yml`, `y
 
 Compose files follow the same idea. After the base files are resolved, Yoho also loads `name.<destination>.ext` when it exists (`compose.yaml` and `compose.staging.yaml` for `-d staging`) and appends those overlays so they override.
 
-Scoped access (sharing one App Destination with teammates or CI, see https://yohobuild.com/team-access/): `access: scoped` routes `deploy`, `rollback`, `releases`, `app ps/logs/stats`, `tui`, `ui` through the Gate as `gate_user` (default `yoho-gate`); every other connecting command fails fast. `YOHO_ACCESS=operator|scoped` overrides it. `ssh: {via: cloudflare, hostname: ssh.example.com}` reaches the Destination's only Server through a Cloudflare Tunnel with `cloudflared access ssh` as ProxyCommand (CI: `TUNNEL_SERVICE_TOKEN_ID`/`TUNNEL_SERVICE_TOKEN_SECRET`). `yoho config check` and `yoho plan` warn when that hostname would be routed by a `cloudflared` Service in the same App.
+Scoped access (sharing one App Destination with teammates or CI, see https://yohobuild.com/team-access/): `access: scoped` routes `deploy`, `plan`, `rollback`, `releases`, `app ps/logs/stats`, `tui`, `ui` through the Gate as `gate_user` (default `yoho-gate`); every other connecting command fails fast. `YOHO_ACCESS=operator|scoped` overrides it. `ssh: {via: cloudflare, hostname: ssh.example.com}` reaches the Destination's only Server through a Cloudflare Tunnel with `cloudflared access ssh` as ProxyCommand (CI: `TUNNEL_SERVICE_TOKEN_ID`/`TUNNEL_SERVICE_TOKEN_SECRET`). `yoho config check` and `yoho plan` warn when that hostname would be routed by a `cloudflared` Service in the same App.
 
 ## x-yoho (per compose Service)
 
@@ -53,6 +53,7 @@ Scoped access (sharing one App Destination with teammates or CI, see https://yoh
 | `generate` | `{NAME: kind}`; kinds `password32`, `password64`, `hex32`, `hex64`, `base64_32`, `base64_64`. Created once on the Server; replace with `yoho secrets rotate --generated NAME`. |
 | `rotate` | `{NAME: {strategy, user, command}}` for `secrets rotate --generated`, on the Service that generates NAME. `strategy`: `postgres` (ALTER ROLE `user`), `mysql` (ALTER USER), `command` (`docker exec -i` argv; stdin is the current value, then the new one; must be idempotent), `none` (nothing to apply). Detected for `POSTGRES_PASSWORD`, `MYSQL_*`/`MARIADB_*` passwords; required for other keys of a Stateful or database Service. |
 | `release_command` | One-off container from the new image before cutover (migrations); failure aborts. |
+| `check` | Post-deploy check of a non-Proxy Service, run from the Server: `{type: tcp\|http\|websocket, port, path: /, host: localhost, timeout: 30s}`; failure fails the deploy. Not with `proxy` (use `health_path`) or swarm. Shown in `app ps` (CHECK) and `tui`. |
 | `backup` | `volumes`, `dump` (stdout is the dump), `pre_backup`, `post_restore`, `restore_dump` (dump on stdin), `verify` (run by `backup drill`). Without `pre_backup`, the container is paused while volumes are copied. |
 | `strict_drain` | Swarm only: proxy targets tasks. |
 | `endpoint` | Reserved for Roles. |

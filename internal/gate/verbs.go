@@ -26,6 +26,7 @@ import (
 	"github.com/yoho-build/yoho/internal/release"
 	"github.com/yoho-build/yoho/internal/remote"
 	"github.com/yoho-build/yoho/internal/secrets"
+	"github.com/yoho-build/yoho/internal/servicecheck"
 	"github.com/yoho-build/yoho/internal/transport"
 	"github.com/yoho-build/yoho/internal/version"
 )
@@ -70,6 +71,8 @@ type HelloResult struct {
 	// Rollouts: deploy and rollback accept Rollout and Attach, so a client
 	// can reconnect after its SSH session drops.
 	Rollouts bool `json:"rollouts,omitempty"`
+	// Plan: the Gate serves the plan verb; older Gates leave it false.
+	Plan bool `json:"plan,omitempty"`
 }
 
 func hello(ctx context.Context, c *call) (any, error) {
@@ -80,7 +83,7 @@ func hello(ctx context.Context, c *call) (any, error) {
 	res := HelloResult{
 		Protocol: remote.GateProtocol, Version: c.o.Version, Member: c.o.Member,
 		App: c.req.App, Destination: c.req.Destination, Verbs: members.Members[c.o.Member].Verbs,
-		Apps: grantsOf(c.o.Member), Rollouts: true,
+		Apps: grantsOf(c.o.Member), Rollouts: true, Plan: true,
 	}
 	if p, err := build.ServerPlatform(ctx, c.host); err == nil {
 		res.Platform = p
@@ -93,6 +96,15 @@ func ps(ctx context.Context, c *call) (any, error) {
 		return nil, err
 	}
 	script := "docker compose -p " + remote.Quote(c.project()) + " ps -a --format 'table {{.Service}}\\t{{.Name}}\\t{{.Status}}\\t{{.Image}}'"
+	// x-yoho.check results as a CHECK column (best effort, bounded).
+	if st, _ := servicecheck.Probe(ctx, c.host, c.req.App, c.req.Destination); st != nil {
+		out, err := c.host.Output(ctx, remote.Cmd{Script: script})
+		if err != nil {
+			return nil, err
+		}
+		_, err = io.WriteString(c.fw, servicecheck.AppendColumn(out, st))
+		return nil, err
+	}
 	return nil, c.host.Run(ctx, remote.Cmd{Script: script, Stdout: c.fw})
 }
 

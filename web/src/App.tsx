@@ -225,13 +225,13 @@ function Summary({ snap }: { snap: Snapshot }) {
   const all = snap.servers.flatMap((s) => s.containers)
   const active = all.filter((c) => !c.completed)
   const running = active.filter((c) => c.state === "running").length
-  const unhealthy = active.filter((c) => c.health === "unhealthy" || c.state !== "running").length
+  const unhealthy = active.filter((c) => c.health === "unhealthy" || checkFailed(c) || c.state !== "running").length
   const failing = snap.servers.filter((s) => s.error).length
   const current = snap.servers.map((s) => s.releases.find((r) => r.current)).find(Boolean)
   const stats = [
     { label: "Servers", value: `${snap.servers.length - failing}/${snap.servers.length}`, sub: failing ? `${failing} unreachable` : "reachable", bad: failing > 0, icon: ServerIcon },
     { label: "Containers", value: `${running}/${active.length}`, sub: all.length > active.length ? `running · ${all.length - active.length} completed` : "running", bad: running < active.length, icon: BoxIcon },
-    { label: "Attention", value: String(unhealthy), sub: unhealthy ? "unhealthy or stopped" : "all healthy", bad: unhealthy > 0, icon: ActivityIcon },
+    { label: "Attention", value: String(unhealthy), sub: unhealthy ? "unhealthy, stopped or failing a check" : "all healthy", bad: unhealthy > 0, icon: ActivityIcon },
     { label: "Current Release", value: current ? shortVersion(current.version) : "—", sub: current ? `by ${current.performer || "?"}` : "no Release yet", bad: false, icon: HistoryIcon },
   ]
   return (
@@ -346,6 +346,14 @@ function ServerView({ server, now, disk, onLogs }: { server: Server; now: number
                       <div className="mt-1 max-w-48 truncate text-xs text-muted-foreground" title={c.status}>
                         {c.status}
                       </div>
+                      {c.check && (
+                        <div
+                          className={`mt-1 max-w-48 truncate text-xs ${c.check.startsWith("ok") ? "text-muted-foreground" : "text-destructive"}`}
+                          title={c.check}
+                        >
+                          Check: {c.check}
+                        </div>
+                      )}
                     </TableCell>
                     <TableCell className="text-right font-mono">{c.state === "running" ? `${c.cpu_percent.toFixed(1)}%` : "—"}</TableCell>
                     <TableCell className="font-mono text-xs">{c.mem_usage || "—"}</TableCell>
@@ -375,12 +383,17 @@ function ServerView({ server, now, disk, onLogs }: { server: Server; now: number
   )
 }
 
+// checkFailed: the container's x-yoho.check did not pass.
+function checkFailed(c: Container) {
+  return c.check?.startsWith("failed") ?? false
+}
+
 function StateBadge({ c }: { c: Container }) {
   if (c.completed) return <Badge variant="secondary">completed</Badge>
   if (c.state !== "running") return <Badge variant="destructive">{c.state || "unknown"}</Badge>
-  if (c.health === "unhealthy") return <Badge variant="destructive">unhealthy</Badge>
+  if (c.health === "unhealthy" || checkFailed(c)) return <Badge variant="destructive">unhealthy</Badge>
   if (c.health === "starting") return <Badge variant="warning">starting</Badge>
-  if (c.health === "healthy") return <Badge variant="success">healthy</Badge>
+  if (c.health === "healthy" || c.check === "ok") return <Badge variant="success">healthy</Badge>
   return <Badge variant="success">running</Badge>
 }
 

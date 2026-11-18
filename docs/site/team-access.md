@@ -40,7 +40,7 @@ On every container the Gate drops `NET_RAW`, sets `pull_policy: never`, sets `pi
 
 The Gate pulls every image the deploy did not build before compose runs. Images under a registry in `limits.registries` are pulled with the Server's `docker login` when they are missing. All other images are pulled anonymously on every deploy, even when a copy is already on the Server, so a Member cannot use the Server's credentials to fetch a private image, and cannot run another App's local image by name or ID.
 
-`release_command` runs in a one-off container with its Service's configuration, so these rules cover it too. Hooks run on the Member's machine, around the Gate call: `pre-connect`, `pre-build`, `pre-deploy` and `post-deploy`.
+`release_command` runs in a one-off container with its Service's configuration, so these rules cover it too. An [`x-yoho.check`](configuration.md#service-checks) is run by the Gate itself, after compose starts the Service: it connects only to the address of this App's own container (taken from `docker inspect` after checking the compose project label) on the declared port, and never follows redirects, so a Member cannot point it at another host. A Gate of v0.7.1 or older refuses a compose with `x-yoho.check` (`unknown key "check"`); the operator updates it with `yoho access install`. Hooks run on the Member's machine, around the Gate call: `pre-connect`, `pre-build`, `pre-deploy` and `post-deploy`.
 
 Images reach the Server in one of two ways. The CLI can stream a `docker save` archive with the deploy request. The Gate accepts one upload per App Destination at a time, up to `limits.max_upload_bytes` (compressed and unpacked) within `limits.upload_timeout_seconds`. It accepts only regular files and directories under plain relative names, so links and `..` cannot redirect `docker load`, checks that every tag in the archive belongs to this deploy, then loads it. With `transport.mode: registry`, the CLI pushes the images and the Gate pulls them with the Server's `docker login`. Builds run on the Member's machine only (`builder.location: local`).
 
@@ -129,6 +129,7 @@ destinations:
 ```
 
 ```sh
+yoho plan -d production                  # what a deploy would change; needs the deploy verb
 yoho deploy -d production
 yoho releases -d production
 yoho rollback 3f2a1c -d production       # needs only the rollback verb
@@ -140,7 +141,11 @@ yoho ui -d production                     # or yoho tui
 
 `app logs --grep` runs `grep` on the Server under `nice`. A Member's search without `-f` reads at most the last 100000 lines and stops after 60 seconds (`--grep search took longer than 60s`), and any logs read stops when the Member's client exits or the connection drops. `-E` patterns may not use back-references (`\1` to `\9`), which can make `grep` run for hours. The audit log records only that a read used `--grep` or `-E`, never the pattern.
 
-With scoped access, the CLI connects as `yoho-gate@<host from servers.*.ssh>` with your own key. Commands that the Gate does not serve fail before they connect and tell you to ask the operator. These include `setup`, `apply`, `plan`, `proxy`, `tunnel`, `backup`, `schedule`, `app exec` and `secrets`.
+With scoped access, the CLI connects as `yoho-gate@<host from servers.*.ssh>` with your own key. Commands that the Gate does not serve fail before they connect and tell you to ask the operator. These include `setup`, `apply`, `proxy`, `tunnel`, `backup`, `schedule`, `app exec` and `secrets`.
+
+`yoho plan` with scoped access asks the Gate. The CLI loads and checks the compose but builds, ships and resolves nothing; the Gate vets the compose, adds its limits (`cap_drop: [NET_RAW]`, `pids_limit`, `pull_policy: never`, and memory and CPU limits where the compose sets none) exactly as a deploy does, and compares the result with what runs. So right after a Gate deploy the plan shows no changes, and it lists only the Services and routes that a scoped deploy would touch (the Tunnel and Scheduled Jobs belong to the operator). The `plan` verb needs the `deploy` grant and pulls, locks and writes nothing. A Gate older than the CLI answers `the Server's Gate cannot plan`; the operator updates it with `yoho access install`.
+
+An operator `yoho plan` against a Release that the Gate deployed shows the non-proxied Services as `replace` with the reason `Gate hardening removed by an operator deploy: cap_drop, cpus, …` and a warning. That is the truth for an operator deploy: it compiles without the Gate's limits and recreates those Services. Run `YOHO_ACCESS=scoped yoho plan` to see what a Gate deploy would change.
 
 `rollback` returns only to Releases that the Gate deployed. The Gate checks them again with today's rules before it redeploys, including the limits it wrote into the Release's compiled compose file. A Release that the operator deployed can do anything the operator can, so the Gate refuses it: ask the operator to roll back, or deploy that version again.
 

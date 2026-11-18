@@ -26,7 +26,7 @@ jobs:
           - name: Build yoho
             run: go build -o "$RUNNER_TEMP/bin/yoho" ./cmd/yoho
           - name: Pre-pull images
-            run: docker pull basecamp/kamal-proxy:v0.10.2 && docker pull alpine:3.22 && docker pull golang:1.26-alpine
+            run: docker pull basecamp/kamal-proxy:v0.10.2 && docker pull alpine:3.22 && docker pull golang:1.26-alpine && docker pull busybox:1.37
           - name: Start sshd for localhost
             run: . ./test/integration/run.sh && setup_localhost_ssh
       - name: Prepare app
@@ -183,7 +183,12 @@ jobs:
         working-directory: ${{ runner.temp }}/app
         run: |
           set -eu
-          yoho -d staging deploy
+          # -v streams the runtime lines, including the x-yoho.check results.
+          if ! yoho -v -d staging deploy > "$RUNNER_TEMP/staging-deploy.txt" 2>&1; then
+            cat "$RUNNER_TEMP/staging-deploy.txt"
+            exit 1
+          fi
+          cat "$RUNNER_TEMP/staging-deploy.txt"
           sha1=$(cat "$RUNNER_TEMP/sha1.txt")
           sha2=$(cat "$RUNNER_TEMP/sha2.txt")
           i=0
@@ -200,6 +205,64 @@ jobs:
       - name: Releases JSON
         working-directory: ${{ runner.temp }}/app
         run: yoho releases --json | jq -e 'select(.event=="row")' >/dev/null
+      - name: Service checks pass
+        working-directory: ${{ runner.temp }}/app
+        run: |
+          set -eu
+          # compose.staging.yaml gives check-ws, check-http and check-tcp an
+          # x-yoho.check (websocket /ws, http /, tcp). The staging deploy ran
+          # each one and logged it.
+          for svc in check-ws check-http check-tcp; do
+            if ! grep -F "Service $svc check passed" "$RUNNER_TEMP/staging-deploy.txt" >/dev/null; then
+              echo "staging deploy did not report: Service $svc check passed" >&2
+              grep -F "check" "$RUNNER_TEMP/staging-deploy.txt" >&2 || true
+              exit 1
+            fi
+          done
+          grep -F "checking Service check-ws: websocket" "$RUNNER_TEMP/staging-deploy.txt"
+          yoho -d staging app ps > "$RUNNER_TEMP/staging-app-ps.txt" 2>&1 || { cat "$RUNNER_TEMP/staging-app-ps.txt"; exit 1; }
+          cat "$RUNNER_TEMP/staging-app-ps.txt"
+          grep -Eq '^SERVICE +NAME .*CHECK *$' "$RUNNER_TEMP/staging-app-ps.txt"
+          for svc in check-ws check-http check-tcp; do
+            if ! awk -v s="$svc" '$1 == s && $NF == "ok" { found = 1 } END { exit !found }' "$RUNNER_TEMP/staging-app-ps.txt"; then
+              echo "yoho app ps: CHECK of $svc is not ok" >&2
+              exit 1
+            fi
+          done
+          # Services without a check show "-".
+          awk '$1 == "web" && $NF == "-" { found = 1 } END { exit !found }' "$RUNNER_TEMP/staging-app-ps.txt"
+          set +e
+          yoho -d staging plan --detailed-exitcode
+          code=$?
+          set -e
+          if [ "$code" -ne 0 ]; then
+            echo "staging plan exit $code, want 0 (a deploy with checks must converge)" >&2
+            exit 1
+          fi
+      - name: Failing service check fails the deploy
+        working-directory: ${{ runner.temp }}/app
+        run: |
+          set -eu
+          # Point check-tcp at a port nothing listens on (timeout 20s).
+          sed -i 's/port: 8082/port: 8089/' compose.staging.yaml
+          grep -F "port: 8089" compose.staging.yaml
+          git add compose.staging.yaml
+          git commit -m "check a closed port"
+          set +e
+          yoho -d staging deploy > "$RUNNER_TEMP/staging-check-fail.txt" 2>&1
+          code=$?
+          set -e
+          cat "$RUNNER_TEMP/staging-check-fail.txt"
+          git reset --hard HEAD~1
+          if [ "$code" -eq 0 ]; then
+            echo "deploy with a failing check exited 0, want non-zero" >&2
+            exit 1
+          fi
+          grep -F "Service check-tcp check failed" "$RUNNER_TEMP/staging-check-fail.txt"
+          grep -F "yoho rollback" "$RUNNER_TEMP/staging-check-fail.txt"
+          # The Proxy route of production is untouched.
+          sha1=$(cat "$RUNNER_TEMP/sha1.txt")
+          curl -fsS --max-time 5 http://127.0.0.1:18080/version | jq -e --arg v "$sha1" '.version == $v' >/dev/null
       - name: Diagnostics
         if: always()
         run: |
@@ -208,6 +271,7 @@ jobs:
             cd "$APP"
             yoho proxy status | tee "$RUNNER_TEMP/proxy-status.txt"
             yoho app ps | tee "$RUNNER_TEMP/app-ps.txt"
+            yoho -d staging app ps | tee "$RUNNER_TEMP/staging-app-ps-final.txt"
           fi
           docker ps -a | tee "$RUNNER_TEMP/docker-ps.txt"
           exit 0

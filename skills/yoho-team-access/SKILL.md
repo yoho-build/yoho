@@ -7,7 +7,7 @@ description: Share one Yoho App Destination on a shared Server with teammates an
 
 Playbook for scoped access. It assumes the `yoho` skill for general commands; `docs/site/team-access.md` (yohobuild.com/team-access) is the full reference, including the policy list and the `limits` table.
 
-Terms: the **operator** has full SSH to the Server. A **Member** is a teammate or CI job with a restricted key for the `yoho-gate` Unix user. The **Gate** (`yoho gate`) is the forced command that serves fixed verbs for one App Destination: `deploy`, `rollback`, `releases`, `ps`, `logs`, `stats`, `dash`. There is no `exec` and no verb that changes access.
+Terms: the **operator** has full SSH to the Server. A **Member** is a teammate or CI job with a restricted key for the `yoho-gate` Unix user. The **Gate** (`yoho gate`) is the forced command that serves fixed verbs for one App Destination: `deploy`, `plan` (read-only, needs the `deploy` grant), `rollback`, `releases`, `ps`, `logs`, `stats`, `dash`. There is no `exec` and no verb that changes access.
 
 Ground rules:
 
@@ -56,7 +56,7 @@ yoho app ps -d production; yoho app stats --no-stream -d production
 yoho ui -d production                     # or yoho tui
 ```
 
-`setup`, `plan`/`apply`, `proxy`, `tunnel`, `backup`, `schedule`, `app exec` and `secrets` are operator-only and fail before connecting.
+`yoho plan` goes through the Gate: it applies the Gate's limits as a scoped deploy does, so it shows no changes right after a Gate deploy (an older Gate answers `the Server's Gate cannot plan`; the operator runs `yoho access install`). `setup`, `apply`, `proxy`, `tunnel`, `backup`, `schedule`, `app exec` and `secrets` are operator-only and fail before connecting.
 
 Builds run on the Member's machine with Docker (`builder.location: local`, `builder.engine: docker` on Macs where Apple `container` is the default).
 

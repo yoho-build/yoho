@@ -501,6 +501,11 @@ func (c Compose) Rollback(ctx context.Context, d *plan.Deploy, version string) (
 				return nil, fmt.Errorf("release %s: service %s: %w", version, sp.Name, err)
 			}
 		}
+		if sp.Check != nil {
+			if err := sp.Check.Validate(); err != nil {
+				return nil, fmt.Errorf("release %s: service %s: %w", version, sp.Name, err)
+			}
+		}
 	}
 	if err := recoverReadinessPlans(plans, composeYAML); err != nil {
 		return nil, fmt.Errorf("release %s: readiness metadata: %w", version, err)

@@ -128,3 +128,28 @@ func TestSchemaHasMigrate(t *testing.T) {
 		t.Errorf("tunnel required: %v", s.Defs["MigrateTunnel"].Required)
 	}
 }
+
+func TestValidateTunnelAPITokenSecret(t *testing.T) {
+	ok := migrateCfg(nil, func(c *Config) { c.Proxy.Tunnel.APITokenSecret = "CF_API_TOKEN" })
+	if errs := Validate(ok); len(errs) != 0 {
+		t.Fatalf("valid config: %v", errs)
+	}
+	for _, tc := range []struct {
+		name   string
+		c      func(*Config)
+		expect string
+	}{
+		{"key", func(c *Config) { c.Proxy.Tunnel.APITokenSecret = "cf-api" }, "proxy.tunnel.api_token_secret must be a secret key"},
+		{"quick tunnel", func(c *Config) { c.Proxy.Tunnel = &TunnelConfig{APITokenSecret: "CF_API_TOKEN"} }, "proxy.tunnel.api_token_secret needs token_secret"},
+		{"destination", func(c *Config) {
+			d := c.Destinations["rehearsal"]
+			d.Proxy = &ProxyConfig{Tunnel: &TunnelConfig{APITokenSecret: "CF_API_TOKEN"}}
+			c.Destinations["rehearsal"] = d
+		}, "destinations.rehearsal.proxy.tunnel.api_token_secret needs token_secret"},
+	} {
+		errs := Validate(migrateCfg(nil, tc.c))
+		if len(errs) != 1 || !strings.Contains(errs[0].Error(), tc.expect) {
+			t.Errorf("%s: %v, want %q", tc.name, errs, tc.expect)
+		}
+	}
+}

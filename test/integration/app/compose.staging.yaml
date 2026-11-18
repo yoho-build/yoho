@@ -9,3 +9,36 @@ services:
       secrets:
         - APP_TOKEN
       release_command: ["/app", "migrate"]
+
+  # x-yoho.check proof: Services the Proxy does not route, one per check
+  # type. Staging only, because runtime swarm (the swarm job's production)
+  # refuses x-yoho.check.
+  check-ws:
+    build: .
+    restart: unless-stopped
+    x-yoho:
+      check:
+        type: websocket
+        port: 8080
+        path: /ws
+
+  check-http:
+    image: busybox:1.37
+    command: ["sh", "-c", "mkdir -p /www && echo ok > /www/index.html && exec httpd -f -p 8081 -h /www"]
+    restart: unless-stopped
+    stop_grace_period: 1s
+    x-yoho:
+      check:
+        type: http
+        port: 8081
+
+  check-tcp:
+    image: busybox:1.37
+    command: ["sh", "-c", "mkdir -p /www && exec httpd -f -p 8082 -h /www"]
+    restart: unless-stopped
+    stop_grace_period: 1s
+    x-yoho:
+      check:
+        type: tcp
+        port: 8082
+        timeout: 20s

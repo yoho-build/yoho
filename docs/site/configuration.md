@@ -40,7 +40,7 @@ Validate with `yoho config check`; print the resolved file with `yoho config sho
 | `proxy.image` | kamal-proxy image, pinned by default (`basecamp/kamal-proxy:v0.10.2`). Set a tag to adopt another version; `yoho plan` shows `upgrade vX -> vY` and `yoho proxy upgrade` / `yoho deploy` apply it. See [Upgrading the Proxy](zero-downtime.md#upgrading-the-proxy). |
 | `proxy.http_port`, `https_port` | Published host ports; default 80/443; `0` disables publishing. |
 | `proxy.bind` | Bind address, e.g. `127.0.0.1`. |
-| `proxy.tunnel` | Managed Cloudflare Tunnel: `token_secret` (empty or `tunnel: {}` = Quick Tunnel), `image`, `replicas` (default 1). See [Cloudflare Tunnel](cloudflare-tunnel.md). |
+| `proxy.tunnel` | Managed Cloudflare Tunnel: `token_secret` (empty or `tunnel: {}` = Quick Tunnel), `image`, `replicas` (default 1), `api_token_secret` (a Cloudflare API token with Account > Cloudflare Tunnel > Edit for `yoho tunnel route` and the `yoho rollback` ingress warning; requires `token_secret`; default `migrate.tunnel.api_token_secret`). See [Cloudflare Tunnel](cloudflare-tunnel.md). |
 | `backups.targets.<n>` | `type` (`restic` default, `archive`), `repository`, `format` (`tar.gz`, `zip`, `7z`), `password_secret`, `env_secrets`, `rclone_config_secret` (persistent rclone.conf for OAuth remotes such as OneDrive; rclone repositories only), `keep_last`, `keep_within` (e.g. `30d`; see [Retention](backups.md#retention)). |
 | `backups.jobs.<n>` | `destination`, `services`, `target`, `schedule` (systemd `OnCalendar`; empty = on demand). |
 | `setup` | `user` (default `yoho`), `authorized_keys` (unset: your `~/.ssh/*.pub`; `[]`: none), `packages`, `firewall`, `allow_ports`, `auto_updates`, `swap`, `timezone`. |
@@ -126,7 +126,7 @@ destinations:
     ssh: {via: cloudflare, hostname: ssh.example.com}
 ```
 
-- `access: scoped` sends `deploy`, `rollback`, `releases`, `app ps/logs/stats`, `tui` and `ui` through the Gate as the `gate_user`, and makes every other command that connects fail fast. `YOHO_ACCESS=operator|scoped` overrides it per shell. This option needs the compose runtime. See [Sharing one App with a team](team-access.md).
+- `access: scoped` sends `deploy`, `plan`, `rollback`, `releases`, `app ps/logs/stats`, `tui` and `ui` through the Gate as the `gate_user`, and makes every other command that connects fail fast. `YOHO_ACCESS=operator|scoped` overrides it per shell. This option needs the compose runtime. See [Sharing one App with a team](team-access.md).
 - `ssh.via: cloudflare` reaches the Destination's only Server through a Cloudflare Tunnel `ssh://` ingress (`cloudflared access ssh --hostname …` as ssh's ProxyCommand), on the operator path and the scoped path. `hostname` must be a plain DNS name. `yoho config check` and `yoho plan` warn when that hostname would be routed by a `cloudflared` Service in the same App (a deploy that restarts the connector drops the SSH session). Gate rollouts still finish on the Server; see [Sharing one App with a team](team-access.md).
 
 ### Migration cutover (`migrate`)
@@ -191,6 +191,7 @@ The Cloudflare API token needs Account > Cloudflare Tunnel > Edit. It is resolve
 | `generate` | `{NAME: kind}`: `password32`, `password64`, `hex32`, `hex64`, `base64_32`, `base64_64`. Created once on the Server. |
 | `rotate` | `{NAME: {strategy, user, command}}` for a `generate` key of this Service: how `yoho secrets rotate --generated NAME` applies a new value. `strategy`: `postgres`, `mysql`, `command` (run `command` in this Service's container, current and new value on stdin) or `none`. Default: detected; see [Secrets](secrets.md#rotating-generated-secrets). |
 | `release_command` | One-off container from the new image before cutover (migrations). Failure aborts the deploy. |
+| `check` | Post-deploy check for a Service the Proxy does not route: `{type, port, path, host, timeout}`. See [Service checks](#service-checks). |
 | `backup.volumes` | Named compose volumes to archive. |
 | `backup.dump` | Command run in the container; stdout is the dump. |
 | `backup.pre_backup` | Run before copying volumes. Without it, the container is paused during the copy. |
@@ -220,6 +221,36 @@ services:
     x-yoho:
       proxy: { hosts: [shop.example.com], port: 3000 }
 ```
+
+## Service checks
+
+A proxied Service is checked by the Proxy (`proxy.health_path`). For a Service the Proxy does not route, such as a WebSocket sync server or an MQTT broker that a Cloudflare Tunnel reaches directly, `x-yoho.check` tells Yoho how to check that it serves after a deploy:
+
+```yaml
+services:
+  sync:
+    image: sync
+    x-yoho:
+      check: { type: websocket, port: 8080, path: /sync }
+  mqtt:
+    image: eclipse-mosquitto:2
+    x-yoho:
+      check: { type: tcp, port: 1883, timeout: 1m }
+```
+
+| Field | Meaning |
+|---|---|
+| `type` | Required. `tcp`: the port accepts a connection. `http`: `GET path` answers 200–399 (redirects are not followed). `websocket`: the upgrade handshake to `path` answers `101 Switching Protocols` with a valid `Sec-WebSocket-Accept`; Yoho closes the connection right after the headers. |
+| `port` | Required. Container port, 1–65535. |
+| `path` | `http` and `websocket`: request path, with an optional query. Default `/`. |
+| `host` | `http` and `websocket`: the `Host` header. Default `localhost`. |
+| `timeout` | Go duration the deploy retries the check, e.g. `30s` or `2m`. Default `30s`, at most `10m`. |
+
+After the Service's containers are running (and healthy, when they have a Docker healthcheck), Yoho runs the check from the Server against each container's address on the App's compose network, once a second until it passes or `timeout` ends. Nothing is installed on the Server or needed in the image: from your machine the connection opens through the SSH connection (`ssh -W`, so the Server's sshd must allow TCP forwarding, `AllowTcpForwarding yes` or `local`); a scoped deploy's Gate connects directly. A failing check fails the deploy with `Service sync check failed: …`. The new containers stay running (non-Proxy Services are replaced stop-first), so the hint names `yoho rollback <previous version>` when there is a previous Release; a rollback does not revert volumes or migrations. Each Release records its check, so `yoho rollback` runs the check of the Release it goes back to.
+
+`yoho app ps` adds a `CHECK` column (`ok`, `failed: …`, `failed: not running` for a stopped container of a checked Service, or `-` for Services without a check), and `yoho tui` and `yoho ui` show a failed check as `unhealthy` and the result in the container details. They run each check once (2s per container, at most 4 at a time, read-only) for the running containers of the current Release.
+
+A changed check shows in `yoho plan` as `check changed`; the deploy runs it and restarts nothing for it. Yoho refuses a check together with `proxy` (use `proxy.health_path`), on `network_mode: none` or a network shared with another container (`service:` / `container:`; declare the check on that Service), on a one-shot job that another Service waits on with `service_completed_successfully`, and under `runtime: swarm` (not supported yet). With `network_mode: host` Yoho checks `127.0.0.1` on the Server.
 
 ## Files from the App directory
 

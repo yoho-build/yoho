@@ -6,8 +6,9 @@
 - `GET /version` returns JSON `version` (`YOHO_VERSION`) and `hostname`.
 - `GET /notes` lists notes. `POST /notes` appends one line to `/data/notes.txt` on the `data` volume.
 - `/app migrate` (the release command) creates `/data/migrated`.
+- `GET /ws` answers the WebSocket opening handshake (RFC 6455) and closes.
 
-`web` is proxied on port 8080 with a catch-all host. `files` is the stateful service that owns the backup of volume `data`. `compose.staging.yaml` gives staging the host `staging.local`.
+`web` is proxied on port 8080 with a catch-all host. `files` is the stateful service that owns the backup of volume `data`. `compose.staging.yaml` gives staging the host `staging.local` and adds three Services the Proxy does not route, each with an `x-yoho.check`: `check-ws` (this app, websocket `/ws`), `check-http` (busybox httpd, http `/`) and `check-tcp` (busybox httpd, tcp). They live in the staging overlay because runtime swarm refuses `x-yoho.check`.
 
 `yoho.yml.tmpl` uses `__USER__` and `__RUNTIME__` (`compose` or `swarm`). The workflow copies this directory to a fresh git repository so the deploy version is the commit SHA.
 

@@ -148,7 +148,7 @@ func (g *globals) load(cmd *cobra.Command) (*app, error) {
 	if a.scoped && !scopedCommand(cmd) {
 		return nil, a.fail(&hintError{
 			fmt.Sprintf("`%s` is not available with scoped access to %s/%s", cmd.CommandPath(), a.cfg.App, a.destName),
-			"scoped access serves deploy, rollback, releases, app ps/logs/stats, tui and ui; ask the operator for the rest",
+			"scoped access serves deploy, plan, rollback, releases, app ps/logs/stats, tui and ui; ask the operator for the rest",
 		})
 	}
 	return a, nil

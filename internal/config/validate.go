@@ -56,6 +56,18 @@ func Validate(c *Config) []error {
 	if len(c.Destinations) == 0 {
 		add("destinations: at least one Destination is required")
 	}
+	validateTunnel := func(key string, t *TunnelConfig) {
+		if t == nil || t.APITokenSecret == "" {
+			return
+		}
+		if !secretKeyPattern.MatchString(t.APITokenSecret) {
+			add("%s.api_token_secret must be a secret key matching [A-Za-z_][A-Za-z0-9_]*", key)
+		}
+		if t.TokenSecret == "" {
+			add("%s.api_token_secret needs token_secret: the tunnel token names the account and tunnel whose ingress is changed (a Quick Tunnel has none)", key)
+		}
+	}
+	validateTunnel("proxy.tunnel", c.Proxy.Tunnel)
 	for _, n := range sortedKeys(c.Destinations) {
 		d := c.Destinations[n]
 		rt := d.Runtime
@@ -107,6 +119,9 @@ func Validate(c *Config) []error {
 		}
 		if d.Migrate != nil {
 			errs = append(errs, validateMigrate(c, n, d)...)
+		}
+		if d.Proxy != nil {
+			validateTunnel("destinations."+n+".proxy.tunnel", d.Proxy.Tunnel)
 		}
 		if d.SSH != nil {
 			if d.SSH.Via != "cloudflare" {

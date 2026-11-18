@@ -137,6 +137,14 @@ func Check(r *Result, runtime string, secretKeys []string) []Finding {
 		if ext.ReleaseCommand != nil && (len(ext.ReleaseCommand) == 0 || strings.TrimSpace(strings.Join(ext.ReleaseCommand, "")) == "") {
 			svcAdd(LevelError, "x-yoho.release_command must not be empty")
 		}
+		if ext.Check != nil {
+			if swarm {
+				svcAdd(LevelError, "x-yoho.check is not supported with runtime swarm yet")
+			}
+			for _, msg := range ServiceCheckProblems(svc, ext, oneShot[name]) {
+				svcAdd(LevelError, "x-yoho.check: %s", msg)
+			}
+		}
 		if ext.Backup != nil {
 			vols := map[string]bool{}
 			for _, v := range svc.Volumes {
@@ -234,6 +242,37 @@ func Check(r *Result, runtime string, secretKeys []string) []Finding {
 	}
 	return out
 }
+
+// ServiceCheckProblems returns why a Service's x-yoho.check cannot run
+// (nil without a check). oneShot is a job other Services wait to complete
+// (CompletionJobs). The Gate policy uses it too.
+func ServiceCheckProblems(svc types.ServiceConfig, ext config.ServiceExt, oneShot bool) []string {
+	c := ext.Check
+	if c == nil {
+		return nil
+	}
+	var out []string
+	if err := c.Validate(); err != nil {
+		out = append(out, err.Error())
+	}
+	if ext.Proxy != nil {
+		out = append(out, "a proxied Service is already checked by the Proxy; remove check and set x-yoho.proxy.health_path instead")
+	}
+	switch mode := svc.NetworkMode; {
+	case mode == "none":
+		out = append(out, "network_mode: none has no address to check")
+	case strings.HasPrefix(mode, "service:") || strings.HasPrefix(mode, "container:"):
+		out = append(out, "network_mode: "+mode+" shares another container's network; declare the check on that Service")
+	}
+	if oneShot {
+		out = append(out, "a one-shot job (another Service waits for it to complete) exits and cannot be checked")
+	}
+	return out
+}
+
+// CompletionJobs returns the Services another Service waits on with
+// condition service_completed_successfully (see completionJobs).
+func CompletionJobs(p *types.Project) map[string]bool { return completionJobs(p) }
 
 // completionJobs returns the Services another Service waits on with
 // condition service_completed_successfully: one-shot jobs that are meant to

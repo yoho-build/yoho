@@ -23,6 +23,7 @@ import (
 	"github.com/yoho-build/yoho/internal/proxy"
 	"github.com/yoho-build/yoho/internal/release"
 	"github.com/yoho-build/yoho/internal/remote"
+	"github.com/yoho-build/yoho/internal/servicecheck"
 )
 
 // Target is one Server of the Destination.
@@ -129,8 +130,11 @@ type Container struct {
 	State   string `json:"state"` // running | exited | ...
 	// Completed is an exited container that finished with code 0 (a
 	// one-off job or release command), not a failure.
-	Completed  bool    `json:"completed"`
-	Health     string  `json:"health"` // healthy | unhealthy | starting | ""
+	Completed bool   `json:"completed"`
+	Health    string `json:"health"` // healthy | unhealthy | starting | ""
+	// Check is the Service's x-yoho.check result for a running container:
+	// "ok", "failed: <reason>" or "unknown: <reason>"; "" without a check.
+	Check      string  `json:"check,omitempty"`
 	Status     string  `json:"status"`
 	Ports      string  `json:"ports"`
 	RunningFor string  `json:"running_for"`
@@ -207,6 +211,9 @@ func collectServer(ctx context.Context, src *Source, t Target, releases bool) (s
 	}
 	parsed := Parse(out)
 	s.Host, s.Proxy, s.Containers = parsed.Host, parsed.Proxy, parsed.Containers
+	if src.Runtime != "swarm" {
+		applyChecks(ctx, src, t.Host, s.Containers)
+	}
 	switch {
 	case len(src.Routes) == 0:
 	case src.Metrics:
@@ -222,6 +229,21 @@ func collectServer(ctx context.Context, src *Source, t Target, releases bool) (s
 		s.Releases = summarize(rels)
 	}
 	return s
+}
+
+// applyChecks runs the current Release's x-yoho.check once against the
+// running containers (bounded, read-only) and records each result. A
+// failure to run the pass leaves Check empty.
+func applyChecks(ctx context.Context, src *Source, h remote.Host, cs []Container) {
+	st, err := servicecheck.Probe(ctx, h, src.App, src.Destination)
+	if err != nil || len(st) == 0 {
+		return
+	}
+	for i := range cs {
+		if r, ok := st[cs[i].Name]; ok {
+			cs[i].Check = r.String()
+		}
+	}
 }
 
 // summarize drops secret fingerprints and marks the current Release the way

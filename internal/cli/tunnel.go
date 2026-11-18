@@ -76,7 +76,7 @@ func tunnelCmd(g *globals) *cobra.Command {
 				a.ui.Info("  → %s", u)
 			}
 			if token != "" {
-				a.ui.Info("  In the Cloudflare dashboard, set the tunnel's public hostname service to %s", proxy.TunnelOrigin)
+				a.ui.Info("  Point each public hostname of the tunnel at %s: `yoho tunnel route --hostname HOST --to proxy` (checks first, undoes on failure; needs proxy.tunnel.api_token_secret), or set it in the Cloudflare dashboard", proxy.TunnelOrigin)
 			} else {
 				a.ui.Info("  Quick Tunnel URLs are random and change when the connector is recreated; use token_secret for a stable hostname")
 			}
@@ -141,5 +141,6 @@ func tunnelCmd(g *globals) *cobra.Command {
 			return nil
 		},
 	})
+	c.AddCommand(tunnelRouteCmd(g))
 	return c
 }

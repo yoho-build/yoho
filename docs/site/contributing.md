@@ -6,7 +6,7 @@ Three jobs run in parallel on `ubuntu-24.04`:
 
 | Job | What it checks |
 |---|---|
-| `compose` | `config check`, plan exit 2 then 0, deploy, zero-downtime apply, rollback, archive backup and restore, staging host route, `releases --json` |
+| `compose` | `config check`, plan exit 2 then 0, deploy, zero-downtime apply, rollback, archive backup and restore, staging host route, `x-yoho.check` (websocket, http, tcp: deploy, `app ps` CHECK, clean plan, a failing check fails the deploy with a `yoho rollback` hint), `releases --json` |
 | `swarm` | `docker swarm init`, two deploys with a request loop, rollback |
 | `e2e-go` | `YOHO_E2E=1 YOHO_E2E_SSH=runner@127.0.0.1 go test -race ./...` |
 
@@ -52,6 +52,19 @@ To reproduce from a clean checkout of the repository root with the latest Go 1.2
   "$GOBIN/govulncheck" -mode=source -scan=symbol -format=text -db=https://vuln.go.dev -show=version ./...
 )
 ```
+
+## Releases
+
+Each release has notes in [`docs/releases/<tag>.md`](https://github.com/yoho-build/yoho/tree/main/docs/releases) with an `## Upgrade notes` section: does the Gate need `yoho access install`, does `yoho access secrets push` need to run again, does an older Gate refuse what this release lets Members send, do running containers restart, does the Proxy change. A pull request that changes behavior adds its notes to `docs/releases/next.md`. To release, rename it and tag:
+
+```sh
+git mv docs/releases/next.md docs/releases/vX.Y.Z.md   # then edit the title
+git commit -m "Prepare vX.Y.Z"
+git tag -a vX.Y.Z -m "vX.Y.Z: ..."
+git push origin main vX.Y.Z
+```
+
+`sh scripts/check-release-notes.sh` checks every notes file; CI runs it. The [release workflow](https://github.com/yoho-build/yoho/blob/main/.github/workflows/release.yml) runs it with `--tag` before it builds, refuses a stable tag (no `-`) without notes, and publishes the file above the generated changelog. A prerelease may go without notes. The template is in [`docs/releases/README.md`](https://github.com/yoho-build/yoho/blob/main/docs/releases/README.md).
 
 ## Run the fixture checks locally
 

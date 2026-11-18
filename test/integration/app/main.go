@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"crypto/sha1"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"io"
@@ -115,6 +117,8 @@ func serve() error {
 		}
 	})
 
+	mux.HandleFunc("/ws", websocket)
+
 	srv := &http.Server{
 		Addr:              ":8080",
 		Handler:           mux,
@@ -130,6 +134,29 @@ func serve() error {
 	}()
 	log.Printf("listen :8080 %s", marker)
 	return srv.ListenAndServe()
+}
+
+// websocket answers the RFC 6455 opening handshake and waits briefly for
+// the client to close: enough for an x-yoho.check of type websocket.
+func websocket(w http.ResponseWriter, r *http.Request) {
+	key := r.Header.Get("Sec-WebSocket-Key")
+	if r.Method != http.MethodGet || !strings.EqualFold(r.Header.Get("Upgrade"), "websocket") || key == "" {
+		http.Error(w, "websocket upgrade required", http.StatusBadRequest)
+		return
+	}
+	sum := sha1.Sum([]byte(key + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"))
+	conn, buf, err := http.NewResponseController(w).Hijack()
+	if err != nil {
+		return
+	}
+	defer conn.Close()
+	_, _ = buf.WriteString("HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: " +
+		base64.StdEncoding.EncodeToString(sum[:]) + "\r\n\r\n")
+	if err := buf.Flush(); err != nil {
+		return
+	}
+	_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+	_, _ = io.Copy(io.Discard, conn)
 }
 
 func writable(dir string) bool {

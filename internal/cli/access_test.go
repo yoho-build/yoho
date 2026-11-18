@@ -125,7 +125,7 @@ func TestScopedRefusesOperatorCommands(t *testing.T) {
 			t.Errorf("%v: err %v out %q", args, err, out.String())
 		}
 	}
-	for _, c := range [][]string{{"deploy"}, {"app", "logs"}, {"tui"}, {"releases"}} {
+	for _, c := range [][]string{{"deploy"}, {"plan"}, {"app", "logs"}, {"tui"}, {"releases"}} {
 		cmd := &cobra.Command{Use: c[len(c)-1]}
 		parent := root
 		if len(c) == 2 {
