@@ -107,6 +107,7 @@ yoho migrate draft --from FILE [--out DIR] [--service NAME] [--project NAME]
 yoho app ps | logs [SERVICE...] [--all] [-f] [-n N] | stats [SERVICE...] [--no-stream] | exec SERVICE -- CMD...
 yoho proxy boot | status | logs
 yoho tunnel up | status | down    # Cloudflare Tunnel (Quick Tunnel when no token)
+yoho tunnel route --hostname H --to proxy   # point one ingress rule at the Proxy (checks, auto-undo)
 yoho access install | secrets push | add MEMBER --verbs all|read|deploy,... | rm MEMBER | ls | audit   # operator: share one App via the Gate
 yoho access key add MEMBER KEY.pub | key rm MEMBER   # restricted Gate keys (forced command `yoho gate`)
 yoho backup run [JOB] | list [JOB] | restore ID [--job JOB] [-y]   # ID may be "latest"

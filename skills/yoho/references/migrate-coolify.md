@@ -9,7 +9,7 @@ In short:
 3. Secrets: copy Coolify's `.env` on the Server to a root-only file (or move values into a password manager); after checking every line is `KEY='single-line value'` or `KEY=plain-word` (a count, never the lines), read it once in `.yoho/secrets` (`_SERVER_ENV=$(ssh host 'cat file')`) and `eval` it per key with `${KEY?missing}`; build args become `builder.secrets`. Compare `yoho secrets list` lengths with the originals.
 4. On a Server shared with Coolify: `proxy.http_port: 0`/`https_port: 0` with a tunnel (Traefik keeps 80/443), `setup.firewall: false`, `setup.user: root` + `authorized_keys: []` when connecting as root; read `yoho setup --plan` before changing anything.
 5. Cut over: dump databases, have the user turn off Coolify auto-deploy (never edit Coolify's database), add a `migrate` block (`stop`, `claim`, optional `tunnel`) to the production Destination, run `yoho migrate plan`, then `yoho deploy`. It stops (not removes) the Coolify containers after build and ship, so the build is not downtime, and refuses if any other container still mounts the claimed data. Never run both stacks on one volume. Roll back with `yoho rollback --cutover`, and restore the dump if the new version migrated. A one-time `pre-deploy` Hook is the fallback for cutovers the block can't express.
-6. Point tunnel hostnames at `http://yoho-proxy:80`; delete the Coolify app later without deleting volumes.
+6. Point tunnel hostnames at `http://yoho-proxy:80` (`yoho tunnel route --hostname H --to proxy` for one not in `migrate.tunnel`); delete the Coolify app later without deleting volumes.
 
 ## Rehearse on a second Destination first
 

@@ -165,7 +165,7 @@ Get the user's OK on a downtime window. The old and new stacks must never run on
 
 ## 7. Cloudflare Tunnel
 
-`proxy.tunnel` runs `yoho-tunnel` with the same token. Its public hostnames must point at `http://yoho-proxy:80`, so deploys are zero-downtime.
+`proxy.tunnel` runs `yoho-tunnel` with the same token. Its public hostnames must point at `http://yoho-proxy:80`, so deploys are zero-downtime; switch one that `migrate.tunnel` does not cover with `yoho tunnel route --hostname H --to proxy` (checks first, undoes on failure).
 
 - Until then, old routes such as `http://web:3000` may keep working, because proxied Services join the `yoho` network under their service name. Do not rely on it: another app on that network with the same service name makes it ambiguous.
 - Change the routes in the Cloudflare dashboard, or with the API for remotely managed tunnels. `wrangler tunnel` cannot edit routes.
