@@ -450,6 +450,10 @@ jobs:
             run: docker pull -q nginx:alpine && docker pull -q busybox:latest
       - name: E2E tests
         timeout-minutes: 20
+        env:
+          # TestDownloadLiveProvenance calls the GitHub API; unauthenticated
+          # requests share the runner IP's 60/hour limit and get 403.
+          GITHUB_TOKEN: ${{ github.token }}
         run: |
           set -eu
           start=$(date +%s)
