@@ -287,6 +287,11 @@ type TunnelConfig struct {
 	Image string `json:"image,omitempty"`
 	// Connector replicas for zero-downtime cloudflared upgrades. Default 1 (Quick Tunnels support 1).
 	Replicas int `json:"replicas,omitempty" jsonschema:"minimum=1"`
+	// Secret key holding a Cloudflare API token with Account > Cloudflare
+	// Tunnel > Edit, for `yoho tunnel route` and the rollback ingress
+	// warning. Resolved locally, sent only to the Cloudflare API. Requires
+	// token_secret. Empty: the Destination's migrate.tunnel.api_token_secret.
+	APITokenSecret string `json:"api_token_secret,omitempty" jsonschema:"description=Secret key holding a Cloudflare API token (Account > Cloudflare Tunnel > Edit) for yoho tunnel route and the rollback ingress warning; requires token_secret; default migrate.tunnel.api_token_secret"`
 }
 
 // BackupsConfig defines Backup Targets and Backup jobs.

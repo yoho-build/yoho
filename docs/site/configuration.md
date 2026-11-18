@@ -40,7 +40,7 @@ Validate with `yoho config check`; print the resolved file with `yoho config sho
 | `proxy.image` | kamal-proxy image, pinned by default (`basecamp/kamal-proxy:v0.10.2`). Set a tag to adopt another version; `yoho plan` shows `upgrade vX -> vY` and `yoho proxy upgrade` / `yoho deploy` apply it. See [Upgrading the Proxy](zero-downtime.md#upgrading-the-proxy). |
 | `proxy.http_port`, `https_port` | Published host ports; default 80/443; `0` disables publishing. |
 | `proxy.bind` | Bind address, e.g. `127.0.0.1`. |
-| `proxy.tunnel` | Managed Cloudflare Tunnel: `token_secret` (empty or `tunnel: {}` = Quick Tunnel), `image`, `replicas` (default 1). See [Cloudflare Tunnel](cloudflare-tunnel.md). |
+| `proxy.tunnel` | Managed Cloudflare Tunnel: `token_secret` (empty or `tunnel: {}` = Quick Tunnel), `image`, `replicas` (default 1), `api_token_secret` (a Cloudflare API token with Account > Cloudflare Tunnel > Edit for `yoho tunnel route` and the `yoho rollback` ingress warning; requires `token_secret`; default `migrate.tunnel.api_token_secret`). See [Cloudflare Tunnel](cloudflare-tunnel.md). |
 | `backups.targets.<n>` | `type` (`restic` default, `archive`), `repository`, `format` (`tar.gz`, `zip`, `7z`), `password_secret`, `env_secrets`, `rclone_config_secret` (persistent rclone.conf for OAuth remotes such as OneDrive; rclone repositories only), `keep_last`, `keep_within` (e.g. `30d`; see [Retention](backups.md#retention)). |
 | `backups.jobs.<n>` | `destination`, `services`, `target`, `schedule` (systemd `OnCalendar`; empty = on demand). |
 | `setup` | `user` (default `yoho`), `authorized_keys` (unset: your `~/.ssh/*.pub`; `[]`: none), `packages`, `firewall`, `allow_ports`, `auto_updates`, `swap`, `timezone`. |

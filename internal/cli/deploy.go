@@ -862,6 +862,7 @@ func (a *app) rollback(ctx context.Context, v string, releaseSecrets bool) (err 
 	for _, w := range deploy.RollbackWarnings(ctx, hosts[0].Host, a.cfg.App, a.destName, target, releaseSecrets) {
 		a.ui.Warn("%s", w)
 	}
+	a.warnTunnelBypass(ctx, hosts[0].Host, target)
 	step = a.ui.Step(hosts[0].Name, "Redeploy %s", shortVersion(target))
 	rel, err := a.lockedRuntime().Rollback(ctx, d, target)
 	if err != nil {

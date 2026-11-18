@@ -123,3 +123,91 @@ func Hash(cfg json.RawMessage) string {
 	sum := sha256.Sum256(canon)
 	return hex.EncodeToString(sum[:16])
 }
+
+// FindRule returns the one ingress rule of cfg for hostname (compared
+// without case) and path (compared exactly; "" is a rule without a path),
+// and that rule's raw JSON. No match, or more than one, is an error that
+// names the paths the hostname does have.
+func FindRule(cfg json.RawMessage, hostname, path string) (IngressRule, json.RawMessage, error) {
+	_, rules, err := parseConfig(cfg)
+	if err != nil {
+		return IngressRule{}, nil, err
+	}
+	i, err := findRule(rules, hostname, path)
+	if err != nil {
+		return IngressRule{}, nil, err
+	}
+	raw, err := json.Marshal(rules[i])
+	if err != nil {
+		return IngressRule{}, nil, err
+	}
+	r := rules[i]
+	return IngressRule{Hostname: ruleString(r, "hostname"), Path: ruleString(r, "path"), Service: ruleString(r, "service")}, raw, nil
+}
+
+func findRule(rules []map[string]json.RawMessage, hostname, path string) (int, error) {
+	match := -1
+	n := 0
+	var others []string
+	for i, r := range rules {
+		if !strings.EqualFold(ruleString(r, "hostname"), hostname) {
+			continue
+		}
+		if p := ruleString(r, "path"); p != path {
+			if p == "" {
+				p = "(no path)"
+			}
+			others = append(others, p)
+			continue
+		}
+		if match < 0 {
+			match = i
+		}
+		n++
+	}
+	where := hostname
+	if path != "" {
+		where += " path " + path
+	}
+	switch {
+	case n > 1:
+		return -1, fmt.Errorf("the tunnel has %d ingress rules for %s; Cloudflare uses only the first\nhint: remove the duplicates in the Cloudflare dashboard, then run this again", n, where)
+	case n == 0 && len(others) > 0:
+		return -1, fmt.Errorf("the tunnel has no ingress rule for %s; its rules for %s have the paths %s\nhint: pick one with --path (use the path exactly as the rule has it; \"(no path)\" is the default)", where, hostname, strings.Join(others, ", "))
+	case n == 0:
+		return -1, fmt.Errorf("the tunnel has no ingress rule for %s\nhint: add a public hostname for it to the tunnel in Cloudflare Zero Trust > Networks > Tunnels (that also creates the DNS record), then run this again", where)
+	}
+	return match, nil
+}
+
+// RewriteRule sets service on the one ingress rule of cfg for hostname and
+// path (see FindRule) and returns the new configuration and the rule as it
+// was. Every other rule, the rule order, the catch-all and every other key
+// of the rule (originRequest, ...) stay as they were.
+func RewriteRule(cfg json.RawMessage, hostname, path, service string) (json.RawMessage, IngressRule, error) {
+	top, rules, err := parseConfig(cfg)
+	if err != nil {
+		return nil, IngressRule{}, err
+	}
+	i, err := findRule(rules, hostname, path)
+	if err != nil {
+		return nil, IngressRule{}, err
+	}
+	r := rules[i]
+	old := IngressRule{Hostname: ruleString(r, "hostname"), Path: ruleString(r, "path"), Service: ruleString(r, "service")}
+	svc, err := json.Marshal(service)
+	if err != nil {
+		return nil, IngressRule{}, err
+	}
+	r["service"] = svc
+	raw, err := json.Marshal(rules)
+	if err != nil {
+		return nil, IngressRule{}, err
+	}
+	top["ingress"] = raw
+	out, err := json.Marshal(top)
+	if err != nil {
+		return nil, IngressRule{}, err
+	}
+	return out, old, nil
+}
