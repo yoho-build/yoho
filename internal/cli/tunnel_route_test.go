@@ -585,6 +585,30 @@ func TestTunnelRouteSwitchesTheLiveConfiguration(t *testing.T) {
 	}
 }
 
+func TestTunnelRouteRefusesAConcurrentEditOfOtherRuleKeys(t *testing.T) {
+	f := newRouteFixture(t, routeIngress)
+	r := f.router(t, tunnelRouteOptions{hostname: "app.example.com", to: "proxy"})
+	r.cf = &editAfterRead{CloudflareAPI: r.cf, edit: func() {
+		f.cf.SetConfig(strings.Replace(string(f.cf.Config()), `"noTLSVerify":true`,
+			`"noTLSVerify":true,"httpHostHeader":"other.example.com"`, 1))
+	}}
+	err := r.run(context.Background())
+	if err == nil || !strings.Contains(f.out.String(), "changed meanwhile") || f.cf.Puts != 0 {
+		t.Fatalf("err %v puts %d\n%s", err, f.cf.Puts, f.out)
+	}
+}
+
+func TestTunnelRouteMatchesRulePathsOnTheDecodedCheckPath(t *testing.T) {
+	// cloudflared decodes /api%2Fup to /api/up, which ^/api/ serves.
+	f := newRouteFixture(t, `{"ingress":[{"hostname":"app.example.com","path":"^/api/","service":"http://api:80"},`+
+		`{"hostname":"app.example.com","service":"http://web:3000"},{"service":"http_status:404"}]}`)
+	tunnelPublicCheck = func(context.Context, string, int) error { t.Error("public check ran"); return nil }
+	err := f.router(t, tunnelRouteOptions{hostname: "app.example.com", to: "proxy", checkPath: "/api%2Fup"}).run(context.Background())
+	if err == nil || f.cf.Puts != 0 || !strings.Contains(f.out.String(), "path ^/api/ → http://api:80") || !strings.Contains(f.out.String(), "--check-path") {
+		t.Fatalf("err %v puts %d\n%s", err, f.cf.Puts, f.out)
+	}
+}
+
 func TestTunnelRouteRefusesACheckPathAnotherRuleServes(t *testing.T) {
 	apiRule := `{"ingress":[{"hostname":"app.example.com","path":"^/api","service":"http://api:80"},` +
 		`{"hostname":"app.example.com","service":"http://web:3000"},{"service":"http_status:404"}]}`

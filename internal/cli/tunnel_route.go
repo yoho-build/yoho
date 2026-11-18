@@ -459,12 +459,12 @@ func (r *tunnelRouter) run(ctx context.Context) error {
 	if err != nil {
 		return r.fail(step, fmt.Errorf("nothing was changed: %w", err))
 	}
-	cur, curRaw, err := migrate.FindRule(live, o.hostname, o.path)
+	_, curRaw, err := migrate.FindRule(live, o.hostname, o.path)
 	if err != nil {
 		return r.fail(step, fmt.Errorf("nothing was changed: %w", err))
 	}
-	if cur.Service != old.Service || cur.Path != old.Path {
-		return r.fail(step, fmt.Errorf("nothing was changed: the rule for %s changed meanwhile: it now points at %s, not %s\nhint: check the rule, then run this again", where, cur.Service, old.Service))
+	if !sameRule(curRaw, oldRaw) {
+		return r.fail(step, fmt.Errorf("nothing was changed: the rule for %s changed meanwhile: it is now %s, not %s\nhint: check the rule, then run this again", where, string(curRaw), string(oldRaw)))
 	}
 	if want, _, err = migrate.RewriteRule(live, o.hostname, o.path, r.target); err != nil {
 		return r.fail(step, fmt.Errorf("nothing was changed: %w", err))
@@ -503,7 +503,7 @@ func (r *tunnelRouter) run(ctx context.Context) error {
 
 	if checked {
 		start = time.Now()
-		u := "https://" + o.hostname + checkPath
+		u := publicCheckURL(o.hostname, checkPath)
 		step = a.ui.Step("", "Check %s answers %s", u, wantDesc(expect))
 		if err := r.publicCheck(ctx, u, expect); err != nil {
 			step.Fail(err, "")
@@ -531,8 +531,13 @@ func (r *tunnelRouter) checkServes(cfg json.RawMessage, checkPath string) error 
 	if err != nil {
 		return err
 	}
-	reqPath, _, _ := strings.Cut(checkPath, "?")
-	u := "https://" + r.o.hostname + checkPath
+	u := publicCheckURL(r.o.hostname, checkPath)
+	pu, err := url.Parse(u)
+	if err != nil {
+		return fmt.Errorf("check URL %s: %w", u, err)
+	}
+	// cloudflared matches rule paths against the decoded request path.
+	reqPath := pu.Path
 	hint := "pass --check-path with a path the rule serves"
 	if r.o.path != "" {
 		hint += fmt.Sprintf(" (one that %s matches)", r.o.path)
@@ -566,6 +571,23 @@ func (r *tunnelRouter) checkServes(cfg json.RawMessage, checkPath string) error 
 		return fmt.Errorf("Cloudflare serves %s with the rule %s → %s, not the rule being switched, so the check would not test it\nhint: %s", u, desc, x.Service, hint)
 	}
 	return fmt.Errorf("no ingress rule serves %s\nhint: %s", u, hint)
+}
+
+// publicCheckURL is the URL the public check requests.
+func publicCheckURL(hostname, checkPath string) string {
+	return "https://" + hostname + checkPath
+}
+
+// sameRule reports whether two raw ingress rules are equal as JSON, key
+// order aside.
+func sameRule(a, b json.RawMessage) bool {
+	var x, y any
+	if json.Unmarshal(a, &x) != nil || json.Unmarshal(b, &y) != nil {
+		return false
+	}
+	cx, _ := json.Marshal(x)
+	cy, _ := json.Marshal(y)
+	return string(cx) == string(cy)
 }
 
 // ingressHostMatch matches a request hostname to an ingress rule hostname
