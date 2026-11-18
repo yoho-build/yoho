@@ -13,6 +13,12 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
+      # Before building: a stable tag needs docs/releases/$TAG.md with
+      # "## Upgrade notes" (docs/releases/README.md).
+      - name: Check release notes
+        env:
+          TAG: ${{ github.ref_name }}
+        run: sh scripts/check-release-notes.sh --tag "$TAG"
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           # Follow security fixes within the supported Go minor, not go.mod's
@@ -31,9 +37,14 @@ jobs:
       - name: Publish GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
         run: |
           set -eu
-          case "$GITHUB_REF_NAME" in
-            *-*) gh release create "$GITHUB_REF_NAME" dist/* --generate-notes --prerelease ;;
-            *) gh release create "$GITHUB_REF_NAME" dist/* --generate-notes ;;
+          # The notes file goes above the generated changelog.
+          notes=$(sh scripts/check-release-notes.sh --tag "$TAG")
+          set -- dist/* --generate-notes
+          if [ -n "$notes" ]; then set -- "$@" --notes-file "$notes"; fi
+          case "$TAG" in
+            *-*) set -- "$@" --prerelease ;;
           esac
+          gh release create "$TAG" "$@"

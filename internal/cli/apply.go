@@ -54,13 +54,23 @@ func planCmd(g *globals) *cobra.Command {
 		Short: "Show what apply would change on the Servers (read-only)",
 		Long: `Compare the Yoho file and compose files with what runs on the Servers
 (containers, Proxy routes, Tunnel, Scheduled Jobs) and show what 'yoho apply'
-would create, update, replace or delete. Nothing is built or changed.`,
+would create, update, replace or delete. Nothing is built or changed.
+
+With scoped access the Gate plans: it vets and hardens the compose as a
+scoped deploy does and shows the Services and routes that deploy would
+change (Tunnel and Scheduled Jobs are the operator's). It needs the deploy
+grant.`,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			a, err := g.load(cmd)
 			if err != nil {
 				return err
 			}
-			changes, err := a.plan(cmd.Context(), ver)
+			var changes []plan.Change
+			if a.scoped {
+				changes, err = a.scopedPlan(cmd.Context(), ver)
+			} else {
+				changes, err = a.plan(cmd.Context(), ver)
+			}
 			if err != nil {
 				return err
 			}
@@ -195,6 +205,9 @@ func (a *app) collectChanges(ctx context.Context, s *session, refresh bool) (cha
 	step.Done()
 	if len(pending) > 0 {
 		a.ui.Warn("%s", deploy.PendingRotationWarning(pending))
+	}
+	if w := deploy.GateHardeningWarning(changes); w != "" {
+		a.ui.Warn("%s", w)
 	}
 	return changes, deployNeeded, nil
 }

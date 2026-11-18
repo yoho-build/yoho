@@ -38,6 +38,9 @@ const (
 	VerbRollback = "rollback"
 	// verbImages is the image check before a deploy; it needs deploy.
 	verbImages = "images"
+	// VerbPlan shows what a deploy would change (read-only); it needs
+	// deploy, so existing grants keep working.
+	VerbPlan = "plan"
 )
 
 // GrantableVerbs is every verb `yoho access add --verbs` accepts.
@@ -48,7 +51,7 @@ var ReadVerbs = []string{VerbReleases, VerbPS, VerbLogs, VerbStats, VerbDash}
 
 // grant is the verb a request needs.
 func grant(verb string) string {
-	if verb == verbImages {
+	if verb == verbImages || verb == VerbPlan {
 		return VerbDeploy
 	}
 	return verb

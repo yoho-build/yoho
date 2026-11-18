@@ -81,6 +81,7 @@ func init() {
 		VerbReleases: releasesVerb,
 		verbImages:   imagesVerb,
 		VerbDeploy:   deployVerb,
+		VerbPlan:     planVerb,
 		VerbRollback: rollbackVerb,
 	}
 }

@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/compose-spec/compose-go/v2/types"
 	"github.com/spf13/cobra"
 
 	"github.com/yoho-build/yoho/internal/build"
@@ -32,7 +33,7 @@ const DefaultGateUser = "yoho-gate"
 
 // scopedCommands run through the Gate, or never connect at all.
 var scopedCommands = []string{
-	"deploy", "rollback", "releases",
+	"deploy", "plan", "rollback", "releases",
 	"app ps", "app logs", "app stats",
 	"tui", "ui",
 	"config check", "config show",
@@ -89,12 +90,20 @@ func (a *app) openGate() (*remote.Gate, string, error) {
 	if err != nil {
 		return nil, "", err
 	}
-	s, err := remote.NewSSH(name, target, false, a.sshOptions())
+	o := a.sshOptions()
+	if gateSSHOptions != nil {
+		o = gateSSHOptions(o)
+	}
+	s, err := remote.NewSSH(name, target, false, o)
 	if err != nil {
 		return nil, "", err
 	}
 	return remote.NewGate(s, a.cfg.App, a.destName), target, nil
 }
+
+// gateSSHOptions, when set, adjusts the Gate's ssh options; tests run a
+// Gate in-process through it.
+var gateSSHOptions func(remote.SSHOptions) remote.SSHOptions
 
 // gateCall runs one verb, reporting Gate refusals with their hints.
 func (a *app) gateCall(ctx context.Context, verb string, args any, payload io.Reader, out io.Writer, result any) error {
@@ -126,13 +135,15 @@ const olderGateHint = "the Server's Gate is older than this CLI; ask the operato
 
 // refusalHint adds a hint to a Gate error that has none: olderGateHint
 // when the Gate refuses an argument it does not know (it decodes them
-// strictly), e.g. a logs filter sent to a Gate of v0.5.9 or older, and
+// strictly), e.g. a logs filter sent to a Gate of v0.5.9 or older, or a
+// verb it does not serve (plan before it existed), and
 // badPatternHint when the Server's grep refuses a --grep -E pattern.
 func refusalHint(ge *remote.GateError) *remote.GateError {
 	hint := ""
 	switch {
 	case ge.Hint != "":
-	case ge.Code == "invalid" && strings.Contains(ge.Message, ": bad arguments: json: unknown field "):
+	case ge.Code == "invalid" && strings.Contains(ge.Message, ": bad arguments: json: unknown field "),
+		ge.Code == "invalid" && strings.HasPrefix(ge.Message, "unknown verb "):
 		hint = olderGateHint
 	case strings.Contains(ge.Message, "invalid --grep pattern"):
 		hint = badPatternHint
@@ -273,33 +284,10 @@ func (a *app) scopedDeploy(ctx context.Context, ver string, skipBuild bool) (err
 	}
 	u.Title("Deploying %s@%s to %s (scoped)", a.cfg.App, shortVersion(ver), a.destName)
 
-	step := u.Step("", "Load compose")
-	r, err := a.compose(ctx)
+	r, err := a.scopedLoad(ctx)
 	if err != nil {
-		step.Fail(err, "run `yoho config check`")
-		return &silentError{err}
+		return err
 	}
-	// Secret values live on the Server; every referenced key is "known".
-	var keys []string
-	for _, e := range r.Ext {
-		for _, ref := range e.Secrets {
-			keys = append(keys, ref.Key)
-		}
-		for k := range e.Generate {
-			keys = append(keys, k)
-		}
-	}
-	findings := composefile.Check(r, "compose", keys)
-	findings = append(findings, composefile.CheckCloudflareSSH(a.destName, a.dest, r.Project)...)
-	for _, f := range findings {
-		u.Finding(f.Level, f.Service, f.Message)
-	}
-	if composefile.HasErrors(findings) {
-		err = errors.New("compose check failed")
-		step.Fail(err, "fix the errors above, then `yoho config check`")
-		return &silentError{err}
-	}
-	step.Done(fmt.Sprintf("%d services", len(r.Project.Services)))
 
 	hook := a.hookFunc(ver, "deploy", nil)
 	if err = hook(ctx, "pre-connect", nil); err != nil {
@@ -312,13 +300,8 @@ func (a *app) scopedDeploy(ctx context.Context, ver string, skipBuild bool) (err
 	defer g.Close()
 	hook = a.hookFunc(ver, "deploy", []plan.NamedHost{{Name: g.Name(), Server: config.Server{SSH: g.Target()}}})
 
-	images := map[string]string{}
+	images := a.scopedImages(r.Project, ver)
 	var built []string
-	for _, name := range sortedKeys(r.Project.Services) {
-		if r.Project.Services[name].Build != nil {
-			images[name] = build.ImageName(a.cfg.Registry, a.cfg.App, a.destName, name, ver)
-		}
-	}
 	if !skipBuild && len(images) > 0 {
 		if built, err = a.scopedBuild(ctx, r, ver, hello.Platform, hook); err != nil {
 			return err
@@ -341,19 +324,14 @@ func (a *app) scopedDeploy(ctx context.Context, ver string, skipBuild bool) (err
 			defer c.Close() // stops docker save if the Gate refused early
 		}
 	}
-	proj := r.Project
-	args.Built = builtServices(proj, images)
-	composefile.StripBuild(proj, images)
-	compose, err := composefile.Resolved(proj)
-	if err != nil {
+	if args.Built, args.Compose, err = scopedResolve(r.Project, images); err != nil {
 		return err
 	}
-	args.Compose = string(compose)
 
 	if err = hook(ctx, "pre-deploy", nil); err != nil {
 		return err
 	}
-	step = u.Step(g.Name(), "Deploy %s through the Gate", shortVersion(ver))
+	step := u.Step(g.Name(), "Deploy %s through the Gate", shortVersion(ver))
 	var rel release.Release
 	if err := a.gateCallOrAttach(ctx, g, hello, gate.VerbDeploy, args, payload, step.Output(), &rel); err != nil {
 		var ge *remote.GateError
@@ -370,6 +348,113 @@ func (a *app) scopedDeploy(ctx context.Context, ver string, skipBuild bool) (err
 	}
 	u.Finished(nil, fmt.Sprintf("Deployed %s@%s to %s in %s", a.cfg.App, shortVersion(rel.Version), a.destName, time.Since(start).Round(100*time.Millisecond)))
 	return nil
+}
+
+// scopedLoad loads and checks the compose project for a scoped deploy or
+// plan. Secret values live on the Server, so every referenced key is known.
+func (a *app) scopedLoad(ctx context.Context) (*composefile.Result, error) {
+	u := a.ui
+	step := u.Step("", "Load compose")
+	r, err := a.compose(ctx)
+	if err != nil {
+		step.Fail(err, "run `yoho config check`")
+		return nil, &silentError{err}
+	}
+	var keys []string
+	for _, e := range r.Ext {
+		for _, ref := range e.Secrets {
+			keys = append(keys, ref.Key)
+		}
+		for k := range e.Generate {
+			keys = append(keys, k)
+		}
+	}
+	findings := composefile.Check(r, "compose", keys)
+	findings = append(findings, composefile.CheckCloudflareSSH(a.destName, a.dest, r.Project)...)
+	for _, f := range findings {
+		u.Finding(f.Level, f.Service, f.Message)
+	}
+	if composefile.HasErrors(findings) {
+		err = errors.New("compose check failed")
+		step.Fail(err, "fix the errors above, then `yoho config check`")
+		return nil, &silentError{err}
+	}
+	step.Done(fmt.Sprintf("%d services", len(r.Project.Services)))
+	return r, nil
+}
+
+// scopedImages is the image each built Service gets for ver.
+func (a *app) scopedImages(p *types.Project, ver string) map[string]string {
+	images := map[string]string{}
+	for _, name := range sortedKeys(p.Services) {
+		if p.Services[name].Build != nil {
+			images[name] = build.ImageName(a.cfg.Registry, a.cfg.App, a.destName, name, ver)
+		}
+	}
+	return images
+}
+
+// scopedResolve is what a scoped deploy or plan sends: the built Services
+// and the resolved compose, with build sections replaced by images.
+func scopedResolve(p *types.Project, images map[string]string) ([]string, string, error) {
+	built := builtServices(p, images)
+	composefile.StripBuild(p, images)
+	compose, err := composefile.Resolved(p)
+	if err != nil {
+		return nil, "", err
+	}
+	return built, string(compose), nil
+}
+
+// scopedPlan is `yoho plan` through the Gate: the compose a deploy of ver
+// would send, compared on the Server with what runs. Nothing is built,
+// shipped or pulled, and no secrets are loaded here. The Gate vets and
+// hardens the compose as it does for a deploy, so the plan shows what a
+// scoped deploy would change. It needs the deploy grant.
+func (a *app) scopedPlan(ctx context.Context, ver string) (changes []plan.Change, err error) {
+	u := a.ui
+	defer func() {
+		if err != nil {
+			u.Finished(err, "")
+		}
+	}()
+	if ver, err = a.resolveDeployVersion(ver); err != nil {
+		return nil, err
+	}
+	u.Title("Planning %s@%s on %s (scoped)", a.cfg.App, shortVersion(ver), a.destName)
+	r, err := a.scopedLoad(ctx)
+	if err != nil {
+		return nil, err
+	}
+	built, compose, err := scopedResolve(r.Project, a.scopedImages(r.Project, ver))
+	if err != nil {
+		return nil, err
+	}
+	g, h, err := a.hello(ctx, gate.VerbDeploy)
+	if err != nil {
+		return nil, err
+	}
+	defer g.Close()
+	step := u.Step(g.Name(), "Plan %s through the Gate", shortVersion(ver))
+	if !h.Plan {
+		err := errors.New("the Server's Gate cannot plan")
+		step.Fail(err, olderGateHint)
+		return nil, &silentError{err}
+	}
+	if err := g.Call(ctx, gate.VerbPlan, gate.PlanArgs{Version: ver, Compose: compose, Built: built}, nil, step.Output(), &changes); err != nil {
+		hint := "see `yoho releases` and `yoho app ps`"
+		var ge *remote.GateError
+		if errors.As(err, &ge) {
+			if ge = refusalHint(ge); ge.Hint != "" {
+				hint = ge.Hint
+			}
+		}
+		step.Fail(err, hint)
+		return nil, &silentError{err}
+	}
+	step.Done()
+	u.Plan(changes)
+	return changes, nil
 }
 
 // scopedBuild builds the App's images on this machine for the Server's

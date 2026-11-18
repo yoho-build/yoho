@@ -367,9 +367,19 @@ func (c Compose) Diff(ctx context.Context, d *plan.Deploy) ([]plan.Change, error
 		}
 		if cur != nil {
 			if old, ok := cur.services[sp.Name]; ok {
-				if keys := changedKeys(old, want[sp.Name]); len(keys) > 0 {
+				keys := changedKeys(old, want[sp.Name])
+				var hardened []string
+				if d.Scoped == nil && gateDeployed(cur.rel) {
+					// The Gate hardened the current Release; an operator
+					// deploy drops that, which is worth its own reason.
+					hardened, keys = splitHardening(keys, old, want[sp.Name])
+				}
+				if len(keys) > 0 {
 					keys = AnnotateLoggingKeys(keys, want[sp.Name]["logging"])
 					reasons = append(reasons, "config changed: "+strings.Join(keys, ", "))
+				}
+				if len(hardened) > 0 {
+					reasons = append(reasons, GateHardeningReason+strings.Join(hardened, ", "))
 				}
 			} else {
 				reasons = append(reasons, "config changed: service is new in the current Release")

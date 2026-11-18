@@ -76,7 +76,7 @@ type Destination struct {
 	AppDir string `json:"app_dir,omitempty"`
 	// Access: operator (default) runs every command over full SSH. scoped
 	// reaches this one App through the Gate on the Server (`yoho access`):
-	// deploy, rollback, releases, app ps/logs/stats, tui and ui only, no
+	// deploy, plan, rollback, releases, app ps/logs/stats, tui and ui only, no
 	// shell, no Docker, no secret values. YOHO_ACCESS overrides it.
 	Access string `json:"access,omitempty" jsonschema:"enum=operator,enum=scoped"`
 	// Unix user of the Gate on the Server for access: scoped. Default yoho-gate.

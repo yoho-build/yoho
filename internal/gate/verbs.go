@@ -70,6 +70,8 @@ type HelloResult struct {
 	// Rollouts: deploy and rollback accept Rollout and Attach, so a client
 	// can reconnect after its SSH session drops.
 	Rollouts bool `json:"rollouts,omitempty"`
+	// Plan: the Gate serves the plan verb; older Gates leave it false.
+	Plan bool `json:"plan,omitempty"`
 }
 
 func hello(ctx context.Context, c *call) (any, error) {
@@ -80,7 +82,7 @@ func hello(ctx context.Context, c *call) (any, error) {
 	res := HelloResult{
 		Protocol: remote.GateProtocol, Version: c.o.Version, Member: c.o.Member,
 		App: c.req.App, Destination: c.req.Destination, Verbs: members.Members[c.o.Member].Verbs,
-		Apps: grantsOf(c.o.Member), Rollouts: true,
+		Apps: grantsOf(c.o.Member), Rollouts: true, Plan: true,
 	}
 	if p, err := build.ServerPlatform(ctx, c.host); err == nil {
 		res.Platform = p

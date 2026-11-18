@@ -125,6 +125,10 @@ func TestOlderGateHint(t *testing.T) {
 	if !strings.Contains(ge.Hint, "older than this CLI") || !strings.Contains(ge.Hint, "yoho access install") {
 		t.Errorf("hint: %+v", ge)
 	}
+	// A Gate that predates the plan verb (#65) refuses it as unknown.
+	if ge := refusalHint(&remote.GateError{Message: `unknown verb "plan"`, Code: "invalid"}); !strings.Contains(ge.Hint, "yoho access install") {
+		t.Errorf("unknown verb hint: %+v", ge)
+	}
 	if ge := refusalHint(&remote.GateError{Message: "invalid Service name", Code: "invalid"}); ge.Hint != "" {
 		t.Errorf("other refusals keep their hint: %+v", ge)
 	}
