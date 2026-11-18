@@ -4,11 +4,13 @@ import (
 	"context"
 	"io"
 	"regexp"
+	"slices"
 	"strings"
 	"testing"
 
 	"github.com/compose-spec/compose-go/v2/types"
 
+	"github.com/yoho-build/yoho/internal/config"
 	"github.com/yoho-build/yoho/internal/plan"
 	"github.com/yoho-build/yoho/internal/remote"
 )
@@ -93,6 +95,54 @@ func TestDiffOperatorAgainstGateHardenedRelease(t *testing.T) {
 	}
 	if GateHardeningWarning(cs) != "" {
 		t.Error("no warning without hardening reasons")
+	}
+}
+
+// Issues #65 and #68: a Service that only adds an x-yoho.check against a
+// Gate-deployed Release. Hardened like the Gate (the plan verb) it is an
+// update; from an operator it keeps exactly the hardening reason plus
+// "check changed", and the check never shows as a hardened or config key.
+func TestDiffCheckAgainstGateRelease(t *testing.T) {
+	h, _ := gateDeployedState(t)
+	withCheck := func(d *plan.Deploy) {
+		cf := d.Ext["cloudflared"]
+		cf.Check = &config.ServiceCheck{Type: "tcp", Port: 8080}
+		d.Ext["cloudflared"] = cf
+	}
+
+	d := testDeploy(t, h, io.Discard)
+	d.Performer = "alice (gate)"
+	hardenLikeGate(d.Project)
+	withCheck(d)
+	cs, err := Compose{}.Diff(context.Background(), d)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := byKey(cs)
+	if c := m["service cloudflared"]; c.Action != plan.ActionUpdate || c.Downtime || len(c.Reasons) != 1 || c.Reasons[0] != "check changed" {
+		t.Errorf("Gate plan: cloudflared %+v", c)
+	}
+	for k, c := range m {
+		if k != "service cloudflared" && c.Action != plan.ActionNoop {
+			t.Errorf("Gate plan: unexpected change %+v", c)
+		}
+	}
+	if w := GateHardeningWarning(cs); w != "" {
+		t.Errorf("Gate plan: warning %q", w)
+	}
+
+	d = testDeploy(t, h, io.Discard)
+	withCheck(d)
+	cs, err = Compose{}.Diff(context.Background(), d)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{GateHardeningReason + "cap_drop, cpus, mem_limit, pids_limit, pull_policy", "check changed"}
+	if c := byKey(cs)["service cloudflared"]; c.Action != plan.ActionReplace || !slices.Equal(c.Reasons, want) {
+		t.Errorf("operator plan: cloudflared %+v, want reasons %q", c, want)
+	}
+	if GateHardeningWarning(cs) == "" {
+		t.Error("operator plan: no Gate warning")
 	}
 }
 

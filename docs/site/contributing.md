@@ -6,7 +6,7 @@ Three jobs run in parallel on `ubuntu-24.04`:
 
 | Job | What it checks |
 |---|---|
-| `compose` | `config check`, plan exit 2 then 0, deploy, zero-downtime apply, rollback, archive backup and restore, staging host route, `releases --json` |
+| `compose` | `config check`, plan exit 2 then 0, deploy, zero-downtime apply, rollback, archive backup and restore, staging host route, `x-yoho.check` (websocket, http, tcp: deploy, `app ps` CHECK, clean plan, a failing check fails the deploy with a `yoho rollback` hint), `releases --json` |
 | `swarm` | `docker swarm init`, two deploys with a request loop, rollback |
 | `e2e-go` | `YOHO_E2E=1 YOHO_E2E_SSH=runner@127.0.0.1 go test -race ./...` |
 

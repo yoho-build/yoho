@@ -18,6 +18,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/compose-spec/compose-go/v2/types"
+
 	"github.com/yoho-build/yoho/internal/config"
 	"github.com/yoho-build/yoho/internal/plan"
 	"github.com/yoho-build/yoho/internal/remote"
@@ -325,6 +327,27 @@ func TestDiffCheckOnlyChange(t *testing.T) {
 	}
 	if !samePlanProxy(servicePlan{Name: "x", Check: &config.ServiceCheck{Type: "tcp", Port: 1}}, servicePlan{Name: "x"}) {
 		t.Fatal("samePlanProxy compares checks")
+	}
+}
+
+// The compose loader keeps x-yoho in the project, so it reaches the
+// compiled file. Docker leaves extensions out of its config hash, and the
+// plan must too: a check added there is still only "check changed".
+func TestDiffIgnoresXYohoInCompiledCompose(t *testing.T) {
+	h, _, _ := deployed(t)
+	d := testDeploy(t, h, io.Discard)
+	cf := d.Ext["cloudflared"]
+	cf.Check = &config.ServiceCheck{Type: "tcp", Port: 8080}
+	d.Ext["cloudflared"] = cf
+	s := d.Project.Services["cloudflared"]
+	s.Extensions = types.Extensions{"x-yoho": map[string]any{"check": map[string]any{"type": "tcp", "port": 8080}}}
+	d.Project.Services["cloudflared"] = s
+	cs, err := Compose{}.Diff(context.Background(), d)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ch := byKey(cs)["service cloudflared"]; ch.Action != plan.ActionUpdate || ch.Downtime || !slices.Equal(ch.Reasons, []string{"check changed"}) {
+		t.Fatalf("check in x-yoho: %+v", ch)
 	}
 }
 

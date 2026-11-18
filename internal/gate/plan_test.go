@@ -237,6 +237,28 @@ func TestPlanVerbShowsExplicitLimitChange(t *testing.T) {
 	}
 }
 
+// Issues #65 and #68: adding an x-yoho.check after a Gate deploy is a
+// no-downtime update ("check changed"), not a replace, and leaves the
+// other Services alone.
+func TestPlanVerbCheckOnlyChangeIsUpdate(t *testing.T) {
+	h := gateDeployed(t)
+	checked := strings.Replace(planCompose, "    command: [sleep, infinity]\n", "    command: [sleep, infinity]\n    x-yoho:\n      check: {type: tcp, port: 8080}\n", 1)
+	if checked == planCompose {
+		t.Fatal("fixture: worker not found")
+	}
+	cs := gatePlan(t, h, checked)
+	m := map[string]plan.Change{}
+	for _, c := range cs {
+		m[c.Name] = c
+	}
+	if c := m["worker"]; c.Action != plan.ActionUpdate || c.Downtime || strings.Join(c.Reasons, "|") != "check changed" {
+		t.Errorf("worker %+v", c)
+	}
+	if c := m["db"]; c.Action != plan.ActionNoop {
+		t.Errorf("db %+v", c)
+	}
+}
+
 // plan needs the deploy grant, not a grant of its own.
 func TestPlanVerbNeedsDeployGrant(t *testing.T) {
 	setup(t, "members:\n  bob: {verbs: [logs]}\n  carol: {verbs: [deploy]}\n")

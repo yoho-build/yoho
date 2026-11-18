@@ -151,7 +151,11 @@ func loadCurrent(ctx context.Context, h remote.Host, app, dest string) (*current
 
 // serviceEntries parses a compiled compose file into per-Service maps with
 // the fields that change on every Version or are compared separately
-// (image, yoho.version, yoho.secrets, YOHO_VERSION) removed.
+// (image, yoho.version, yoho.secrets, YOHO_VERSION) removed. Extension keys
+// (x-yoho and other x-*) are removed too: Docker Compose leaves them out of
+// the container config hash, so they never recreate a container, and Diff
+// compares the x-yoho parts that matter (proxy, release_command, check)
+// through the Release's plan.json.
 func serviceEntries(raw []byte) (map[string]map[string]any, error) {
 	var doc struct {
 		Services map[string]map[string]any `yaml:"services"`
@@ -160,6 +164,11 @@ func serviceEntries(raw []byte) (map[string]map[string]any, error) {
 		return nil, err
 	}
 	for _, s := range doc.Services {
+		for k := range s {
+			if strings.HasPrefix(k, "x-") {
+				delete(s, k)
+			}
+		}
 		delete(s, "image")
 		if l, ok := s["labels"].(map[string]any); ok {
 			delete(l, LabelVersion)
@@ -392,8 +401,8 @@ func (c Compose) Diff(ctx context.Context, d *plan.Deploy) ([]plan.Change, error
 			if op, ok := cur.plans[sp.Name]; ok && !samePlanProxy(op, sp) {
 				reasons = append(reasons, "proxy settings changed")
 			}
-			// x-yoho is stripped from the compiled file, so a changed
-			// release_command shows only in the plan. It restarts nothing,
+			// serviceEntries leaves x-yoho out of the compared keys, so a
+			// changed release_command shows only in plan.json. It restarts nothing,
 			// but the deploy must run so the command does.
 			if op, ok := cur.plans[sp.Name]; ok && !slices.Equal(op.ReleaseCommand, sp.ReleaseCommand) {
 				relChanged = true
