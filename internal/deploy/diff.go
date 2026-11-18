@@ -138,6 +138,11 @@ func loadCurrent(ctx context.Context, h remote.Host, app, dest string) (*current
 					return nil, fmt.Errorf("parse %s/plan.json: service %s: %w", relDir, p.Name, err)
 				}
 			}
+			if p.Check != nil {
+				if err := p.Check.Validate(); err != nil {
+					return nil, fmt.Errorf("parse %s/plan.json: service %s: %w", relDir, p.Name, err)
+				}
+			}
 			st.plans[p.Name] = p
 		}
 	}
@@ -331,7 +336,7 @@ func (c Compose) Diff(ctx context.Context, d *plan.Deploy) ([]plan.Change, error
 			continue
 		}
 		var reasons []string
-		relChanged := false
+		relChanged, checkChanged := false, false
 		running := 0
 		for _, ct := range cs {
 			if ct.State.Running {
@@ -383,16 +388,31 @@ func (c Compose) Diff(ctx context.Context, d *plan.Deploy) ([]plan.Change, error
 			if op, ok := cur.plans[sp.Name]; ok && !slices.Equal(op.ReleaseCommand, sp.ReleaseCommand) {
 				relChanged = true
 			}
+			// x-yoho.check, too: the deploy runs the new check against
+			// the running containers and restarts nothing for it.
+			if op, ok := cur.plans[sp.Name]; ok && !sameCheck(op.Check, sp.Check) {
+				checkChanged = true
+			}
 		}
 		if running > 0 && running != sp.Replicas {
 			reasons = append(reasons, fmt.Sprintf("replicas %d → %d", running, sp.Replicas))
 		}
-		if relChanged && len(reasons) == 0 && running > 0 {
-			add("service", sp.Name, plan.ActionUpdate, false, "release_command changed")
+		if (relChanged || checkChanged) && len(reasons) == 0 && running > 0 {
+			var why []string
+			if relChanged {
+				why = append(why, "release_command changed")
+			}
+			if checkChanged {
+				why = append(why, "check changed")
+			}
+			add("service", sp.Name, plan.ActionUpdate, false, why...)
 			continue
 		}
 		if relChanged && running > 0 {
 			reasons = append(reasons, "release_command changed")
+		}
+		if checkChanged && running > 0 {
+			reasons = append(reasons, "check changed")
 		}
 		if len(reasons) == 0 && running == 0 {
 			if code, oneShot := oneShotExit(cs); oneShot {
@@ -487,10 +507,19 @@ func servicePending(d *plan.Deploy, svc string, pending map[string]bool) bool {
 func samePlanProxy(a, b servicePlan) bool {
 	a.Image, b.Image = "", ""
 	a.ReleaseCommand, b.ReleaseCommand = nil, nil
+	a.Check, b.Check = nil, nil
 	a.DependsOn, b.DependsOn = nil, nil
 	x, _ := json.Marshal(a)
 	y, _ := json.Marshal(b)
 	return bytes.Equal(x, y)
+}
+
+// sameCheck compares two recorded checks (defaults filled).
+func sameCheck(a, b *config.ServiceCheck) bool {
+	if a == nil || b == nil {
+		return a == b
+	}
+	return *a == *b
 }
 
 func normHosts(hs []string) []string {

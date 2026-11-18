@@ -125,14 +125,19 @@ func (a *app) gateFail(err error) error {
 const olderGateHint = "the Server's Gate is older than this CLI; ask the operator to update it: `yoho access install -d DESTINATION`, run from the App's repository, installs their yoho version as the Gate"
 
 // refusalHint adds a hint to a Gate error that has none: olderGateHint
-// when the Gate refuses an argument it does not know (it decodes them
-// strictly), e.g. a logs filter sent to a Gate of v0.5.9 or older, and
+// when the Gate refuses an argument or x-yoho key it does not know (it
+// decodes them strictly), e.g. a logs filter sent to a Gate of v0.5.9 or
+// older or x-yoho.check to one of v0.7.1 or older, and
 // badPatternHint when the Server's grep refuses a --grep -E pattern.
 func refusalHint(ge *remote.GateError) *remote.GateError {
 	hint := ""
 	switch {
 	case ge.Hint != "":
 	case ge.Code == "invalid" && strings.Contains(ge.Message, ": bad arguments: json: unknown field "):
+		hint = olderGateHint
+	case ge.Code == "invalid" && strings.Contains(ge.Message, "x-yoho: unknown key "):
+		// The CLI checked the compose before sending it, so an x-yoho key
+		// the Gate does not know (check, on Gates of v0.7.1 or older) is newer.
 		hint = olderGateHint
 	case strings.Contains(ge.Message, "invalid --grep pattern"):
 		hint = badPatternHint

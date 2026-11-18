@@ -15,6 +15,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/yoho-build/yoho/internal/deploy"
 	"github.com/yoho-build/yoho/internal/release"
 	"github.com/yoho-build/yoho/internal/remote"
 )
@@ -301,6 +302,11 @@ func gateError(err error) *remote.GateError {
 	var ge *remote.GateError
 	if errors.As(err, &ge) {
 		return ge
+	}
+	// A failed x-yoho.check names the Release to roll back to.
+	var ce *deploy.CheckError
+	if errors.As(err, &ce) {
+		return &remote.GateError{Message: err.Error(), Hint: ce.Hint(), Code: "failed"}
 	}
 	return &remote.GateError{Message: err.Error(), Code: "failed"}
 }

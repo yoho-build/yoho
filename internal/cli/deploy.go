@@ -27,6 +27,7 @@ import (
 	"github.com/yoho-build/yoho/internal/release"
 	"github.com/yoho-build/yoho/internal/remote"
 	"github.com/yoho-build/yoho/internal/secrets"
+	"github.com/yoho-build/yoho/internal/servicecheck"
 	"github.com/yoho-build/yoho/internal/transport"
 	"github.com/yoho-build/yoho/internal/ui"
 	"github.com/yoho-build/yoho/internal/version"
@@ -1054,7 +1055,7 @@ func appCmds(g *globals) *cobra.Command {
 			if a.dest.Runtime == "swarm" {
 				return a.remoteRun(cmd, "docker stack ps --no-trunc --format 'table {{.Name}}\\t{{.Node}}\\t{{.CurrentState}}\\t{{.Image}}\\t{{.Error}}' "+remote.Quote(a.project()))
 			}
-			return a.remoteRun(cmd, "docker compose -p "+remote.Quote(a.project())+" ps --format 'table {{.Service}}\\t{{.Name}}\\t{{.Status}}\\t{{.Image}}'")
+			return a.appPS(cmd)
 		},
 	})
 	c.AddCommand(logsCmd(g), statsCmd(g))
@@ -1159,6 +1160,33 @@ func (a *app) remoteRun(cmd *cobra.Command, script string) error {
 	}
 	defer h.Close()
 	return h.Run(cmd.Context(), remote.Cmd{Script: script, Stdout: cmd.OutOrStdout(), Stderr: cmd.ErrOrStderr()})
+}
+
+// appPS lists the App's compose containers. When a Service of the current
+// Release has an x-yoho.check, it runs the checks once (read-only, bounded)
+// and adds a CHECK column.
+func (a *app) appPS(cmd *cobra.Command) error {
+	ctx := cmd.Context()
+	script := "docker compose -p " + remote.Quote(a.project()) + " ps --format 'table {{.Service}}\\t{{.Name}}\\t{{.Status}}\\t{{.Image}}'"
+	srv := a.cfg.Servers[a.dest.Servers[0]]
+	h, err := remote.NewSSH(a.dest.Servers[0], srv.SSH, srv.Sudo, a.sshOptions())
+	if err != nil {
+		return err
+	}
+	defer h.Close()
+	st, err := servicecheck.Probe(ctx, h, a.cfg.App, a.destName)
+	if err != nil {
+		a.ui.Warn("cannot run the Service checks: %v", err)
+	}
+	if len(st) == 0 {
+		return h.Run(ctx, remote.Cmd{Script: script, Stdout: cmd.OutOrStdout(), Stderr: cmd.ErrOrStderr()})
+	}
+	out, err := h.Output(ctx, remote.Cmd{Script: script, Stderr: cmd.ErrOrStderr()})
+	if err != nil {
+		return err
+	}
+	_, err = io.WriteString(cmd.OutOrStdout(), servicecheck.AppendColumn(out, st))
+	return err
 }
 
 var _ = release.ProjectName

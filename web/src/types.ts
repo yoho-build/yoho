@@ -81,6 +81,8 @@ export interface Container {
   state: string
   completed: boolean
   health: string
+  /** x-yoho.check result: "ok", "failed: …" or "unknown: …"; absent without a check. */
+  check?: string
   status: string
   ports: string
   running_for: string

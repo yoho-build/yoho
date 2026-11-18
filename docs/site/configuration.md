@@ -191,6 +191,7 @@ The Cloudflare API token needs Account > Cloudflare Tunnel > Edit. It is resolve
 | `generate` | `{NAME: kind}`: `password32`, `password64`, `hex32`, `hex64`, `base64_32`, `base64_64`. Created once on the Server. |
 | `rotate` | `{NAME: {strategy, user, command}}` for a `generate` key of this Service: how `yoho secrets rotate --generated NAME` applies a new value. `strategy`: `postgres`, `mysql`, `command` (run `command` in this Service's container, current and new value on stdin) or `none`. Default: detected; see [Secrets](secrets.md#rotating-generated-secrets). |
 | `release_command` | One-off container from the new image before cutover (migrations). Failure aborts the deploy. |
+| `check` | Post-deploy check for a Service the Proxy does not route: `{type, port, path, host, timeout}`. See [Service checks](#service-checks). |
 | `backup.volumes` | Named compose volumes to archive. |
 | `backup.dump` | Command run in the container; stdout is the dump. |
 | `backup.pre_backup` | Run before copying volumes. Without it, the container is paused during the copy. |
@@ -220,6 +221,36 @@ services:
     x-yoho:
       proxy: { hosts: [shop.example.com], port: 3000 }
 ```
+
+## Service checks
+
+A proxied Service is checked by the Proxy (`proxy.health_path`). For a Service the Proxy does not route, such as a WebSocket sync server or an MQTT broker that a Cloudflare Tunnel reaches directly, `x-yoho.check` tells Yoho how to check that it serves after a deploy:
+
+```yaml
+services:
+  sync:
+    image: sync
+    x-yoho:
+      check: { type: websocket, port: 8080, path: /sync }
+  mqtt:
+    image: eclipse-mosquitto:2
+    x-yoho:
+      check: { type: tcp, port: 1883, timeout: 1m }
+```
+
+| Field | Meaning |
+|---|---|
+| `type` | Required. `tcp`: the port accepts a connection. `http`: `GET path` answers 200–399 (redirects are not followed). `websocket`: the upgrade handshake to `path` answers `101 Switching Protocols` with a valid `Sec-WebSocket-Accept`; Yoho closes the connection right after the headers. |
+| `port` | Required. Container port, 1–65535. |
+| `path` | `http` and `websocket`: request path, with an optional query. Default `/`. |
+| `host` | `http` and `websocket`: the `Host` header. Default `localhost`. |
+| `timeout` | Go duration the deploy retries the check, e.g. `30s` or `2m`. Default `30s`, at most `10m`. |
+
+After the Service's containers are running (and healthy, when they have a Docker healthcheck), Yoho runs the check from the Server against each container's address on the App's compose network, once a second until it passes or `timeout` ends. Nothing is installed on the Server or needed in the image: from your machine the connection opens through the SSH connection (`ssh -W`, so the Server's sshd must allow TCP forwarding, `AllowTcpForwarding yes` or `local`); a scoped deploy's Gate connects directly. A failing check fails the deploy with `Service sync check failed: …`. The new containers stay running (non-Proxy Services are replaced stop-first), so the hint names `yoho rollback <previous version>` when there is a previous Release; a rollback does not revert volumes or migrations. Each Release records its check, so `yoho rollback` runs the check of the Release it goes back to.
+
+`yoho app ps` adds a `CHECK` column (`ok`, `failed: …`, or `-` for Services without a check), and `yoho tui` shows a failed check as `unhealthy` and the result in the container details. Both run each check once (2s per container, at once, read-only) for the running containers of the current Release.
+
+A changed check shows in `yoho plan` as `check changed`; the deploy runs it and restarts nothing for it. Yoho refuses a check together with `proxy` (use `proxy.health_path`), on `network_mode: none` or a network shared with another container (`service:` / `container:`; declare the check on that Service), on a one-shot job that another Service waits on with `service_completed_successfully`, and under `runtime: swarm` (not supported yet). With `network_mode: host` Yoho checks `127.0.0.1` on the Server.
 
 ## Files from the App directory
 

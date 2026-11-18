@@ -163,3 +163,12 @@ func TestPoolHintForNonDefaultNetworks(t *testing.T) {
 		t.Error("subnet change needs its own hint")
 	}
 }
+
+func TestHintForServiceCheck(t *testing.T) {
+	ce := &deploy.CheckError{Service: "sync", Check: "websocket /sync on port 8080", Err: fmt.Errorf("got 200 OK, want 101"), Previous: "v41"}
+	err := &deploy.Failure{Cause: ce, Message: ce.Error(), Phase: "plain-readiness"}
+	got := hintFor(fmt.Errorf("wrapped: %w", err), "default")
+	if !strings.Contains(got, "`yoho rollback v41` (volumes and migrations are not reverted)") || !strings.Contains(got, "`yoho app logs sync`") {
+		t.Errorf("hint %q", got)
+	}
+}

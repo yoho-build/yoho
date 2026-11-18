@@ -26,6 +26,7 @@ import (
 	"github.com/yoho-build/yoho/internal/release"
 	"github.com/yoho-build/yoho/internal/remote"
 	"github.com/yoho-build/yoho/internal/secrets"
+	"github.com/yoho-build/yoho/internal/servicecheck"
 	"github.com/yoho-build/yoho/internal/transport"
 	"github.com/yoho-build/yoho/internal/version"
 )
@@ -93,6 +94,15 @@ func ps(ctx context.Context, c *call) (any, error) {
 		return nil, err
 	}
 	script := "docker compose -p " + remote.Quote(c.project()) + " ps -a --format 'table {{.Service}}\\t{{.Name}}\\t{{.Status}}\\t{{.Image}}'"
+	// x-yoho.check results as a CHECK column (best effort, bounded).
+	if st, _ := servicecheck.Probe(ctx, c.host, c.req.App, c.req.Destination); len(st) > 0 {
+		out, err := c.host.Output(ctx, remote.Cmd{Script: script})
+		if err != nil {
+			return nil, err
+		}
+		_, err = io.WriteString(c.fw, servicecheck.AppendColumn(out, st))
+		return nil, err
+	}
 	return nil, c.host.Run(ctx, remote.Cmd{Script: script, Stdout: c.fw})
 }
 

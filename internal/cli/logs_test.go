@@ -125,6 +125,11 @@ func TestOlderGateHint(t *testing.T) {
 	if !strings.Contains(ge.Hint, "older than this CLI") || !strings.Contains(ge.Hint, "yoho access install") {
 		t.Errorf("hint: %+v", ge)
 	}
+	// A Gate of v0.7.1 or older decodes x-yoho strictly and refuses check.
+	ge = refusalHint(&remote.GateError{Message: `compose: service "sync": x-yoho: unknown key "check"`, Code: "invalid"})
+	if !strings.Contains(ge.Hint, "older than this CLI") {
+		t.Errorf("x-yoho key hint: %+v", ge)
+	}
 	if ge := refusalHint(&remote.GateError{Message: "invalid Service name", Code: "invalid"}); ge.Hint != "" {
 		t.Errorf("other refusals keep their hint: %+v", ge)
 	}
