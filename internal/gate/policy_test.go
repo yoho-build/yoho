@@ -2,11 +2,14 @@ package gate
 
 import (
 	"context"
+	"errors"
 	"slices"
 	"strings"
 	"testing"
 
 	"github.com/yoho-build/yoho/internal/composefile"
+	"github.com/yoho-build/yoho/internal/deploy"
+	"github.com/yoho-build/yoho/internal/secrets"
 )
 
 const project = "yoho-shop-production"
@@ -303,5 +306,55 @@ func TestPolicyCustomDomainsCatchAll(t *testing.T) {
 	allow := Policy{Project: project, Routes: []string{"shop.example.com", CustomDomainsRoute("/allow")}}
 	if err := allow.Check(r.Project, r.Ext); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// The Gate accepts x-yoho.check (it checks only the App's own containers)
+// and refuses one that cannot run.
+func TestPolicyServiceCheck(t *testing.T) {
+	r := load(t, `
+services:
+  sync:
+    image: sync:v1
+    x-yoho: {check: {type: websocket, port: 8080, path: /sync, timeout: 45s}}
+  mqtt:
+    image: eclipse-mosquitto:2
+    x-yoho: {check: {type: tcp, port: 1883}}
+`)
+	pol := Policy{Project: project, Reserved: []string{"yoho/"}}
+	if err := pol.Check(r.Project, r.Ext); err != nil {
+		t.Fatal(err)
+	}
+	r = load(t, `
+services:
+  web:
+    image: web:v1
+    x-yoho: {proxy: {hosts: [shop.example.com]}, check: {type: http, port: 80}}
+  mqtt:
+    image: eclipse-mosquitto:2
+    x-yoho: {check: {type: tcp, port: 0}}
+  off:
+    image: a:1
+    network_mode: none
+    x-yoho: {check: {type: tcp, port: 1}}
+`)
+	pol.Routes = []string{"shop.example.com"}
+	err := pol.Check(r.Project, r.Ext)
+	for _, want := range []string{
+		"service web: x-yoho.check: a proxied Service is already checked by the Proxy",
+		"service mqtt: x-yoho.check: check port 0 is not between 1 and 65535",
+		"service off: x-yoho.check: network_mode: none has no address to check",
+	} {
+		if err == nil || !strings.Contains(err.Error(), want) {
+			t.Errorf("missing %q in %v", want, err)
+		}
+	}
+}
+
+func TestGateErrorCarriesCheckHint(t *testing.T) {
+	ce := &deploy.CheckError{Service: "sync", Check: "tcp on port 1883", Err: errors.New("connection refused"), Previous: "v1"}
+	ge := gateError(secrets.RedactError(&deploy.Failure{Cause: ce, Message: ce.Error(), Phase: "plain-readiness"}))
+	if ge.Code != "failed" || !strings.Contains(ge.Message, "Service sync check failed: connection refused") || !strings.Contains(ge.Hint, "`yoho rollback v1`") {
+		t.Fatalf("%+v", ge)
 	}
 }

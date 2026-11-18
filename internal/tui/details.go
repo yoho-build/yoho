@@ -33,7 +33,7 @@ func (m *Model) detailLines(width, height int) []line {
 		body = append(body, detailField("Target", "No container selected", width, dim)...)
 	} else {
 		s, c := m.detailContainer()
-		service, image, state, health, status, uptimeText, ports := "—", "—", "—", "—", "—", "—", "—"
+		service, image, state, health, check, status, uptimeText, ports := "—", "—", "—", "—", "—", "—", "—", "—"
 		stateStyle := ""
 		if c != nil {
 			service, image = detailOrDash(c.Service), detailOrDash(c.Image)
@@ -43,6 +43,7 @@ func (m *Model) detailLines(width, height int) []line {
 			}
 			_, stateStyle = stateText(*c)
 			health = detailOrDash(c.Health)
+			check = detailOrDash(c.Check)
 			status = detailOrDash(c.Status)
 			uptimeText = detailUptime(*c)
 			ports = detailOrDash(c.Ports)
@@ -54,6 +55,13 @@ func (m *Model) detailLines(width, height int) []line {
 		body = append(body, detailField("Image", image, width, "")...)
 		body = append(body, detailField("State", state, width, stateStyle)...)
 		body = append(body, detailField("Health", health, width, "")...)
+		if check != "—" {
+			checkStyle := ""
+			if !strings.HasPrefix(check, "ok") {
+				checkStyle = red
+			}
+			body = append(body, detailField("Check", check, width, checkStyle)...)
+		}
 		body = append(body, detailField("Status", status, width, "")...)
 		body = append(body, detailField("Uptime", uptimeText, width, "")...)
 		body = append(body, detailField("Ports", ports, width, "")...)

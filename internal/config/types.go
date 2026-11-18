@@ -389,12 +389,36 @@ type ServiceExt struct {
 	Rotate map[string]GeneratedRotate `json:"rotate,omitempty" jsonschema:"description=How yoho secrets rotate --generated NAME applies a new value of a secret this Service generates before its consumers restart; keyed by generated secret NAME. Default: postgres for POSTGRES_PASSWORD; mysql for MYSQL_/MARIADB_ (ROOT_)PASSWORD; none for other keys of non-database non-stateful Services"`
 	// Command run in a one-off container from the new image before cutover
 	// (e.g. migrations). Failure aborts the deploy.
-	ReleaseCommand []string       `json:"release_command,omitempty"`
-	Backup         *ServiceBackup `json:"backup,omitempty"`
+	ReleaseCommand []string `json:"release_command,omitempty"`
+	// Check run from the Server against each container after a deploy, for
+	// Services the Proxy does not route (WebSocket, raw TCP, internal HTTP).
+	// A failing check fails the deploy.
+	Check  *ServiceCheck  `json:"check,omitempty"`
+	Backup *ServiceBackup `json:"backup,omitempty"`
 	// Swarm only: route the Proxy to individual tasks (dnsrr) for strict draining.
 	StrictDrain bool `json:"strict_drain,omitempty"`
 	// Reserved for Roles: address other Servers use to reach this Service.
 	Endpoint string `json:"endpoint,omitempty"`
+}
+
+// ServiceCheck is a post-deploy readiness check of a Service the Proxy does
+// not route. Yoho runs it from the Server against each container's address
+// on a compose network, after the container is running (and healthy, when
+// it has a Docker healthcheck), and retries until Timeout. `yoho app ps`
+// and the dashboards run it once to show each container's check result.
+type ServiceCheck struct {
+	// tcp: the port accepts a connection. http: GET path answers 200-399
+	// (redirects are not followed). websocket: the upgrade to path answers
+	// 101 with a valid Sec-WebSocket-Accept.
+	Type string `json:"type" jsonschema:"required,enum=tcp,enum=http,enum=websocket,description=tcp: the port accepts a connection; http: GET path answers 200-399 (redirects are not followed); websocket: the upgrade handshake to path answers 101"`
+	// Container port.
+	Port int `json:"port" jsonschema:"required,minimum=1,maximum=65535,description=Container port the check connects to"`
+	// Request path for http and websocket. Default /.
+	Path string `json:"path,omitempty" jsonschema:"pattern=^/,description=Request path (and query) for http and websocket checks. Default /"`
+	// Host header for http and websocket. Default localhost.
+	Host string `json:"host,omitempty" jsonschema:"description=Host header for http and websocket checks. Default localhost"`
+	// How long a deploy retries the check (Go duration). Default 30s, at most 10m.
+	Timeout string `json:"timeout,omitempty" jsonschema:"minLength=1,description=How long a deploy retries the check before it fails (Go duration such as 30s or 2m). Default 30s; at most 10m"`
 }
 
 // GeneratedRotate says how a new value of a generated secret reaches the

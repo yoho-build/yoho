@@ -3,8 +3,10 @@ package deploy
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
+	"path"
 	"slices"
 	"strconv"
 	"strings"
@@ -15,6 +17,7 @@ import (
 	"github.com/yoho-build/yoho/internal/proxy"
 	"github.com/yoho-build/yoho/internal/remote"
 	"github.com/yoho-build/yoho/internal/secrets"
+	"github.com/yoho-build/yoho/internal/servicecheck"
 )
 
 // composeCLI builds `docker compose` invocations for one compiled file.
@@ -224,6 +227,17 @@ func validateReadinessPlans(plans []servicePlan) error {
 		byName[sp.Name] = sp
 	}
 	for _, sp := range plans {
+		if sp.Check != nil {
+			if err := sp.Check.Validate(); err != nil {
+				return fmt.Errorf("Service %s: x-yoho.check: %w", sp.Name, err)
+			}
+			if sp.Proxy != nil {
+				return fmt.Errorf("Service %s: x-yoho.check cannot be combined with x-yoho.proxy", sp.Name)
+			}
+			if sp.CompletedSuccessfully != nil && *sp.CompletedSuccessfully {
+				return fmt.Errorf("Service %s: x-yoho.check on a one-shot job that exits", sp.Name)
+			}
+		}
 		if sp.Replicas == 0 {
 			continue
 		}
@@ -714,24 +728,93 @@ func (r *runner) readiness(ctx context.Context, sp servicePlan, out io.Writer) e
 	script := "set -eu\nids=$(" + r.cc.containerIDs(sp.Name, true) + ")\nset -- $ids\n" +
 		"if [ \"$#\" -ne " + strconv.Itoa(sp.Replicas) + " ]; then echo " +
 		remote.Quote("Service "+sp.Name+": expected "+strconv.Itoa(sp.Replicas)+" container(s)") + " >&2; exit 1; fi\n" +
-		waitReadyBody(defaultDeployTimeout, completed, true)
+		waitReadyBody(defaultDeployTimeout, completed, true, sp.Check != nil)
 	if err := r.h.Run(ctx, remote.Cmd{Script: script, Stdout: out}); err != nil {
 		return fmt.Errorf("Service %s did not become ready: %w", sp.Name, err)
 	}
+	if sp.Check != nil && !completed {
+		return r.serviceCheck(ctx, sp, out)
+	}
 	return nil
+}
+
+// serviceCheck runs sp's x-yoho.check against each running container of
+// the Service until it passes or the check's timeout ends.
+func (r *runner) serviceCheck(ctx context.Context, sp servicePlan, out io.Writer) error {
+	c := *sp.Check
+	ids, err := r.h.Output(ctx, remote.Cmd{Script: r.cc.containerIDs(sp.Name, false)})
+	if err != nil {
+		return fmt.Errorf("Service %s check: list containers: %w", sp.Name, err)
+	}
+	r.logTo(out, "checking Service %s: %s (up to %s)", sp.Name, c, c.TimeoutDuration())
+	start := time.Now()
+	if err := servicecheck.Wait(ctx, r.h, r.cc.project, lines(ids), c); err != nil {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		return &CheckError{Service: sp.Name, Check: c.String(), Err: err, Previous: r.previousRelease(ctx)}
+	}
+	r.logTo(out, "Service %s check passed in %s", sp.Name, time.Since(start).Round(100*time.Millisecond))
+	return nil
+}
+
+// previousRelease is the Release `current` points at while a deploy or
+// rollback runs (it moves only after cutover), unless that is the Version
+// being deployed. "" when there is none or it cannot be read.
+func (r *runner) previousRelease(ctx context.Context) string {
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+	defer cancel()
+	cur := path.Join(r.cc.dir, "current")
+	link, err := r.h.Output(ctx, remote.Cmd{Script: "readlink " + remote.Quote(cur) + " 2>/dev/null || true"})
+	prev := path.Base(strings.TrimSpace(link))
+	if err != nil || strings.TrimSpace(link) == "" || prev == path.Base(path.Dir(r.cc.file)) {
+		return ""
+	}
+	return prev
+}
+
+// CheckError is a Service whose x-yoho.check did not pass after a deploy or
+// rollback. Its new containers stay running; Previous is the Release that
+// was current before, when there is one.
+type CheckError struct {
+	Service  string
+	Check    string
+	Err      error
+	Previous string
+}
+
+func (e *CheckError) Error() string {
+	return "Service " + e.Service + " check failed: " + e.Err.Error()
+}
+
+func (e *CheckError) Unwrap() error { return e.Err }
+
+// Hint is the next step after a failed check.
+func (e *CheckError) Hint() string {
+	h := "the new " + e.Service + " containers are running but do not pass " + e.Check + "; see `yoho app logs " + e.Service + "`"
+	var fe *remote.ForwardError
+	if errors.As(e.Err, &fe) && fe.Hint != "" {
+		h += "; " + fe.Hint
+	}
+	if e.Previous != "" {
+		h += "; to go back run `yoho rollback " + e.Previous + "` (volumes and migrations are not reverted)"
+	}
+	return h
 }
 
 // waitHealthyScript shares state handling with plain Services and release
 // prerequisites. Proxy deploy_timeout remains the explicit Proxy deadline.
 func waitHealthyScript(ids []string, timeoutSec int) string {
-	return "set -eu\nset -- " + remote.QuoteArgs(ids...) + "\n" + waitReadyBody(timeoutSec, false, false)
+	return "set -eu\nset -- " + remote.QuoteArgs(ids...) + "\n" + waitReadyBody(timeoutSec, false, false, false)
 }
 
 // waitReadyBody expects container IDs in positional parameters. Inspect the
 // effective container healthcheck, including inherited image settings. Plain
 // Services have a finite 30s minimum budget, extended for startup grace plus
 // retries+1 complete probes (interval + timeout). No new configuration knob.
-func waitReadyBody(timeoutSec int, completed, healthBudget bool) string {
+// checked: an x-yoho.check follows, so a missing Docker healthcheck is not
+// worth a note.
+func waitReadyBody(timeoutSec int, completed, healthBudget, checked bool) string {
 	if timeoutSec <= 0 {
 		timeoutSec = defaultDeployTimeout
 	}
@@ -792,7 +875,7 @@ done
 `
 	}
 	noHealthLog := ""
-	if !completed {
+	if !completed && !checked {
 		noHealthLog = `for id do
   health=$(docker inspect -f '{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' "$id")
   if [ "$health" = none ]; then echo "container $id: no enabled Docker healthcheck; readiness only guarantees the process is running"; fi

@@ -203,3 +203,27 @@ func TestDetailsStripsTerminalControlsFromContainerValues(t *testing.T) {
 		t.Errorf("sanitized container values missing:\n%s", out)
 	}
 }
+
+func TestServiceCheckInStateAndDetails(t *testing.T) {
+	if s, st := stateText(dash.Container{State: "running", Check: "failed: tcp on 172.18.0.5:1883: connection refused"}); s != "unhealthy" || st != red {
+		t.Errorf("failed check: %s", s)
+	}
+	if s, _ := stateText(dash.Container{State: "running", Check: "ok"}); s != "healthy" {
+		t.Errorf("passing check: %s", s)
+	}
+	if s, _ := stateText(dash.Container{State: "running", Health: "unhealthy", Check: "ok"}); s != "unhealthy" {
+		t.Errorf("Docker unhealthy wins: %s", s)
+	}
+	if s, _ := stateText(dash.Container{State: "running", Check: "unknown: cannot dial"}); s != "running" {
+		t.Errorf("unknown check: %s", s)
+	}
+	m := detailModel()
+	out := Render(m, 110, 32)
+	if strings.Contains(out, "Check:") {
+		t.Errorf("Check shown for a Service without one:\n%s", out)
+	}
+	m.Snap.Servers[0].Containers[0].Check = "failed: websocket /sync on 172.18.0.5:8080: got 200 OK, want 101"
+	if out := Render(m, 140, 32); !strings.Contains(out, "Check: failed: websocket /sync") {
+		t.Errorf("missing check in details:\n%s", out)
+	}
+}

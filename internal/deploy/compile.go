@@ -14,6 +14,7 @@ import (
 	"github.com/compose-spec/compose-go/v2/types"
 	"go.yaml.in/yaml/v3"
 
+	"github.com/yoho-build/yoho/internal/composefile"
 	"github.com/yoho-build/yoho/internal/config"
 	"github.com/yoho-build/yoho/internal/plan"
 	"github.com/yoho-build/yoho/internal/proxy"
@@ -57,6 +58,9 @@ type servicePlan struct {
 	ProxyNetwork   bool                 `json:"proxy_network,omitempty"` // joins the yoho network
 	DependsOn      []string             `json:"depends_on,omitempty"`
 	ReleaseCommand []string             `json:"release_command,omitempty"`
+	// Check is x-yoho.check with defaults filled; readiness runs it after
+	// the containers are running (and healthy).
+	Check *config.ServiceCheck `json:"check,omitempty"`
 	// nil identifies older Releases; rollback recovers this from saved Compose.
 	CompletedSuccessfully *bool    `json:"completed_successfully,omitempty"`
 	CompletedDependencies []string `json:"completed_dependencies,omitempty"`
@@ -90,9 +94,13 @@ func validate(d *plan.Deploy) error {
 			errs = append(errs, fmt.Errorf("x-yoho for unknown service %s", name))
 		}
 	}
+	jobs := composefile.CompletionJobs(d.Project)
 	for _, name := range sortedKeys(d.Project.Services) {
 		s := d.Project.Services[name]
 		ext := d.Ext[name]
+		for _, msg := range composefile.ServiceCheckProblems(s, ext, jobs[name]) {
+			errs = append(errs, fmt.Errorf("service %s: x-yoho.check: %s", name, msg))
+		}
 		if ext.Proxy == nil {
 			continue
 		}
@@ -119,6 +127,15 @@ func validate(d *plan.Deploy) error {
 		errs = append(errs, err)
 	}
 	return errors.Join(errs...)
+}
+
+// checkWithDefaults returns a copy of c with defaults filled.
+func checkWithDefaults(c *config.ServiceCheck) *config.ServiceCheck {
+	if c == nil {
+		return nil
+	}
+	v := c.WithDefaults()
+	return &v
 }
 
 // proxyWithDefaults returns a copy of p with defaults filled.
@@ -321,6 +338,7 @@ func compile(d *plan.Deploy, server, generationDir string, svcSecrets map[string
 			ProxyNetwork:          onNet,
 			DependsOn:             sortedKeys(s.DependsOn),
 			ReleaseCommand:        slices.Clone(ext.ReleaseCommand),
+			Check:                 checkWithDefaults(ext.Check),
 		})
 	}
 

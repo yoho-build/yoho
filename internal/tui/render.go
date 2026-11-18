@@ -336,11 +336,11 @@ func stateText(c dash.Container) (string, string) {
 			s = "unknown"
 		}
 		return s, red
-	case c.Health == "unhealthy":
+	case c.Health == "unhealthy", strings.HasPrefix(c.Check, "failed"):
 		return "unhealthy", red
 	case c.Health == "starting":
 		return "starting", yellow
-	case c.Health == "healthy":
+	case c.Health == "healthy", c.Check == "ok":
 		return "healthy", green
 	}
 	return "running", green

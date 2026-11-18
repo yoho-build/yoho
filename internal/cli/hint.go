@@ -56,6 +56,10 @@ func hintFor(err error, def string) string {
 	if errors.As(err, &sc) {
 		return subnetChangeHint(sc)
 	}
+	var ce *deploy.CheckError
+	if errors.As(err, &ce) {
+		return ce.Hint()
+	}
 	var df *deploy.Failure
 	if errors.As(err, &df) && df.Network != nil {
 		return poolHint(df.Network)

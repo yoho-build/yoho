@@ -12,6 +12,7 @@ import (
 	"github.com/compose-spec/compose-go/v2/types"
 	"go.yaml.in/yaml/v3"
 
+	"github.com/yoho-build/yoho/internal/composefile"
 	"github.com/yoho-build/yoho/internal/config"
 	"github.com/yoho-build/yoho/internal/proxy"
 )
@@ -74,10 +75,16 @@ func (pol Policy) Check(p *types.Project, ext map[string]config.ServiceExt) erro
 	if len(p.Services) == 0 && !pol.Limits.AllowEmpty {
 		add("the project has no Services; deploying it would stop every container of the App (the operator can allow this with limits.allow_empty)")
 	}
+	jobs := composefile.CompletionJobs(p)
 	for _, name := range sortedKeys(p.Services) {
 		s := p.Services[name]
 		svc := func(f string, a ...any) { add("service %s: "+f, append([]any{name}, a...)...) }
 		pol.checkContainer(p, s.ContainerSpec, svc)
+		// The Gate runs a check from the Server against the container's
+		// own address only (never a host or URL the Member names).
+		for _, msg := range composefile.ServiceCheckProblems(s, ext[name], jobs[name]) {
+			svc("x-yoho.check: %s", msg)
+		}
 		for i, h := range s.PreStart {
 			pol.checkContainer(p, h.ContainerSpec, func(f string, a ...any) {
 				svc("pre_start[%d]: "+f, append([]any{i}, a...)...)
