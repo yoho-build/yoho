@@ -211,6 +211,9 @@ func TestHardenedOnly(t *testing.T) {
 		{"deploy", map[string]any{"resources": map[string]any{"limits": map[string]any{"memory": "1g", "cpus": 1.0, "pids": 512}}}, map[string]any{"resources": map[string]any{"limits": map[string]any{"memory": "1g"}}}, true},
 		{"deploy", map[string]any{"resources": map[string]any{"limits": map[string]any{"memory": "1g"}}}, map[string]any{"resources": map[string]any{"limits": map[string]any{"memory": "2g"}}}, false},
 		{"deploy", map[string]any{"replicas": 2, "resources": map[string]any{"limits": map[string]any{"memory": "1g"}}}, map[string]any{"replicas": 3}, false},
+		// Harden adds no deploy limits to a Service without them.
+		{"deploy", map[string]any{"replicas": 2, "resources": map[string]any{"limits": map[string]any{"memory": "1g"}}}, map[string]any{"replicas": 2}, false},
+		{"deploy", map[string]any{"resources": map[string]any{"limits": map[string]any{"memory": "1g"}}}, nil, false},
 	} {
 		if got := hardenedOnly(c.key, c.old, c.want); got != c.ok {
 			t.Errorf("%s %v vs %v: %v, want %v", c.key, c.old, c.want, got, c.ok)

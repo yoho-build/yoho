@@ -47,6 +47,8 @@ type Check struct {
 	Path string `json:"path,omitempty"`
 	// Host is the Host header for HTTP and WebSocket. Default DefaultHost.
 	Host string `json:"host,omitempty"`
+	// Want2xx makes an HTTP check pass only on 200-299, not 200-399.
+	Want2xx bool `json:"-"`
 }
 
 // DialFunc opens a connection, like net.Dialer.DialContext or remote.Dial
@@ -110,8 +112,8 @@ func (c Check) String() string {
 // timeout and the retries (Poll).
 //
 //   - tcp: the connection opens.
-//   - http: GET c.Path answers 200-399. Redirects count as success and are
-//     not followed; only the status line and headers are read.
+//   - http: GET c.Path answers 200-399 (200-299 with Want2xx). Redirects
+//     are not followed; only the status line and headers are read.
 //   - websocket: the upgrade answers 101 with a valid Sec-WebSocket-Accept;
 //     the connection closes right after the headers.
 //
@@ -191,8 +193,12 @@ func Run(ctx context.Context, dial DialFunc, ip string, c Check, header http.Hea
 		return fail(err)
 	}
 	if c.Type == HTTP {
-		if resp.StatusCode < 200 || resp.StatusCode > 399 {
-			return fail(fmt.Errorf("got %s, want 200-399", resp.Status))
+		hi, want := 399, "200-399"
+		if c.Want2xx {
+			hi, want = 299, "2xx"
+		}
+		if resp.StatusCode < 200 || resp.StatusCode > hi {
+			return fail(fmt.Errorf("got %s, want %s", resp.Status, want))
 		}
 		return nil
 	}

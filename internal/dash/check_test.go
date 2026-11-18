@@ -19,10 +19,10 @@ type checkHost struct {
 
 func (h *checkHost) Output(_ context.Context, c remote.Cmd) (string, error) {
 	switch {
-	case strings.HasPrefix(c.Script, "docker ps --no-trunc"):
-		return "aaa web \n", nil
+	case strings.HasPrefix(c.Script, "docker ps -a --no-trunc"):
+		return "aaa|yoho-shop-production-web-1|web||running\n", nil
 	case strings.HasPrefix(c.Script, "docker inspect "):
-		return "aaa /yoho-shop-production-web-1 yoho-shop-production yoho-shop-production_default yoho-shop-production_default=172.18.0.5\n", nil
+		return "aaa|/yoho-shop-production-web-1|yoho-shop-production|yoho-shop-production_default|yoho-shop-production_default=172.18.0.5\n", nil
 	}
 	return fixture, nil
 }

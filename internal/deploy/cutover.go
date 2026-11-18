@@ -174,6 +174,10 @@ func (r *runner) startDependencies(ctx context.Context, plans []servicePlan) err
 		var batch []servicePlan
 		for _, sp := range level {
 			if slices.Contains(deps, sp.Name) {
+				// --no-recreate may have kept the previous Release's
+				// container: its x-yoho.check runs in the cutover
+				// readiness, after the Service converges.
+				sp.Check = nil
 				batch = append(batch, sp)
 			}
 		}
@@ -745,6 +749,9 @@ func (r *runner) serviceCheck(ctx context.Context, sp servicePlan, out io.Writer
 	ids, err := r.h.Output(ctx, remote.Cmd{Script: r.cc.containerIDs(sp.Name, false)})
 	if err != nil {
 		return fmt.Errorf("Service %s check: list containers: %w", sp.Name, err)
+	}
+	if n := len(lines(ids)); n < sp.Replicas {
+		return fmt.Errorf("Service %s check: %d of %d container(s) running", sp.Name, n, sp.Replicas)
 	}
 	r.logTo(out, "checking Service %s: %s (up to %s)", sp.Name, c, c.TimeoutDuration())
 	start := time.Now()

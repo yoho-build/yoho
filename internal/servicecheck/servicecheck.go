@@ -41,6 +41,10 @@ var (
 	PassTimeout = 6 * time.Second
 )
 
+// maxProbes bounds the concurrent probes of a Probe pass: each one is an
+// ssh -W session, and sshd allows 10 per connection by default.
+const maxProbes = 4
+
 // Container is one container to check.
 type Container struct {
 	ID string
@@ -61,9 +65,10 @@ func (c Container) label() string {
 	return c.ID
 }
 
-// inspectFormat prints, per container: ID, name, compose project label,
-// network mode, then name=IPv4 for each network.
-const inspectFormat = `{{.Id}} {{.Name}} {{index .Config.Labels "com.docker.compose.project"}} {{.HostConfig.NetworkMode}}{{range $k, $v := .NetworkSettings.Networks}} {{$k}}={{$v.IPAddress}}{{end}}`
+// inspectFormat prints, per container and separated by |: ID, name, compose
+// project label, network mode, then name=IPv4 for each network. Fields can
+// be empty, so they are not separated by spaces.
+const inspectFormat = `{{.Id}}|{{.Name}}|{{index .Config.Labels "com.docker.compose.project"}}|{{.HostConfig.NetworkMode}}{{range $k, $v := .NetworkSettings.Networks}}|{{$k}}={{$v.IPAddress}}{{end}}`
 
 // Addresses inspects ids and returns them, in order, with the address a
 // check connects to. Every container must carry the compose project label
@@ -80,8 +85,8 @@ func Addresses(ctx context.Context, h remote.Host, project string, ids []string)
 	}
 	var res []Container
 	for _, l := range strings.Split(out, "\n") {
-		f := strings.Fields(l)
-		if len(f) < 4 {
+		f := strings.Split(strings.TrimSpace(l), "|")
+		if len(f) < 4 || f[0] == "" {
 			continue
 		}
 		c := Container{ID: f[0], Name: strings.TrimPrefix(f[1], "/")}
@@ -219,10 +224,11 @@ func Current(ctx context.Context, h remote.Host, app, dest string) (map[string]c
 	return out, nil
 }
 
-// Probe runs, once, the current Release's checks against the running
-// containers of app/dest on h, and returns their Status by container name.
-// It returns nil when no Service of the current Release has a check. Each
-// probe has ProbeTimeout and the pass PassTimeout; probes run concurrently.
+// Probe runs, once, the current Release's checks against the containers of
+// app/dest on h, and returns their Status by container name; a container
+// that is not running has failed. It returns nil when no Service of the
+// current Release has a check, and a non-nil map otherwise. Each probe has
+// ProbeTimeout and the pass PassTimeout; up to maxProbes run concurrently.
 func Probe(ctx context.Context, h remote.Host, app, dest string) (map[string]Status, error) {
 	ctx, cancel := context.WithTimeout(ctx, PassTimeout)
 	defer cancel()
@@ -231,33 +237,41 @@ func Probe(ctx context.Context, h remote.Host, app, dest string) (map[string]Sta
 		return nil, err
 	}
 	project := release.ProjectName(app, dest)
-	out, err := h.Output(ctx, remote.Cmd{Script: "docker ps --no-trunc --filter " + remote.Quote("label=com.docker.compose.project="+project) +
-		` --filter status=running --format '{{.ID}} {{.Label "com.docker.compose.service"}} {{.Label "com.docker.compose.oneoff"}}'`})
+	out, err := h.Output(ctx, remote.Cmd{Script: "docker ps -a --no-trunc --filter " + remote.Quote("label=com.docker.compose.project="+project) +
+		` --format '{{.ID}}|{{.Names}}|{{.Label "com.docker.compose.service"}}|{{.Label "com.docker.compose.oneoff"}}|{{.State}}'`})
 	if err != nil {
 		return nil, fmt.Errorf("list containers: %w", err)
 	}
+	st := map[string]Status{}
 	var ids, services []string
 	for _, l := range strings.Split(out, "\n") {
-		f := strings.Fields(l)
-		if len(f) < 2 {
+		f := strings.Split(strings.TrimSpace(l), "|")
+		if len(f) < 5 || f[0] == "" {
 			continue
 		}
-		if len(f) > 2 && strings.EqualFold(f[2], "true") {
+		if strings.EqualFold(f[3], "true") {
 			continue // compose run one-off
 		}
-		if _, ok := checks[f[1]]; ok {
-			ids = append(ids, f[0])
-			services = append(services, f[1])
+		c, ok := checks[f[2]]
+		if !ok {
+			continue
 		}
+		if f[4] != "running" {
+			st[f[1]] = Status{Service: f[2], Check: c.String(), State: Failed, Error: "not running"}
+			continue
+		}
+		ids = append(ids, f[0])
+		services = append(services, f[2])
 	}
 	if len(ids) == 0 {
-		return map[string]Status{}, nil
+		return st, nil
 	}
 	cs, err := Addresses(ctx, h, project, ids)
 	if err != nil {
 		return nil, err
 	}
 	res := make([]Status, len(cs))
+	sem := make(chan struct{}, maxProbes)
 	var wg sync.WaitGroup
 	for i, ct := range cs {
 		c := checks[services[i]]
@@ -271,6 +285,13 @@ func Probe(ctx context.Context, h remote.Host, app, dest string) (map[string]Sta
 			continue
 		}
 		wg.Go(func() {
+			select {
+			case sem <- struct{}{}:
+			case <-ctx.Done():
+				res[i].State, res[i].Error = Unknown, "the check pass ran out of time"
+				return
+			}
+			defer func() { <-sem }()
 			pctx, pcancel := context.WithTimeout(ctx, ProbeTimeout)
 			defer pcancel()
 			dial := func(ctx context.Context, network, addr string) (net.Conn, error) {
@@ -288,7 +309,6 @@ func Probe(ctx context.Context, h remote.Host, app, dest string) (map[string]Sta
 		})
 	}
 	wg.Wait()
-	st := make(map[string]Status, len(cs))
 	for i, ct := range cs {
 		st[ct.Name] = res[i]
 	}

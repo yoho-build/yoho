@@ -101,7 +101,7 @@ func newRouteFixture(t *testing.T, ingress string) *routeFixture {
 	tunnelPrecheckTimeout = 300 * time.Millisecond
 	savedCheck := tunnelPublicCheck
 	t.Cleanup(func() { tunnelPublicCheck = savedCheck })
-	tunnelPublicCheck = func(context.Context, string) error { return nil }
+	tunnelPublicCheck = func(context.Context, string, int) error { return nil }
 
 	f := &routeFixture{status: http.StatusOK}
 	origin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -204,7 +204,7 @@ func phases(evs []map[string]any) string {
 func TestTunnelRouteSwitchesOneRule(t *testing.T) {
 	f := newRouteFixture(t, routeIngress)
 	var checked []string
-	tunnelPublicCheck = func(_ context.Context, u string) error { checked = append(checked, u); return nil }
+	tunnelPublicCheck = func(_ context.Context, u string, _ int) error { checked = append(checked, u); return nil }
 	if err := f.router(t, tunnelRouteOptions{hostname: "app.example.com", to: "proxy"}).run(context.Background()); err != nil {
 		t.Fatalf("%v\n%s", err, f.out)
 	}
@@ -266,6 +266,7 @@ func TestTunnelRoutePrecheckFailureChangesNothing(t *testing.T) {
 		want  string
 	}{
 		{"unhealthy", func(f *routeFixture) { f.status = http.StatusServiceUnavailable }, "got 503"},
+		{"redirect", func(f *routeFixture) { f.status = http.StatusFound }, "got 302 Found, want 2xx"},
 		{"no route", func(f *routeFixture) {
 			f.h.routes = `{"shop-production-api":{"hosts":["api.example.com"],"targets":["c:1"]}}`
 		}, "deploy the App with x-yoho.proxy.hosts"},
@@ -282,7 +283,7 @@ func TestTunnelRoutePrecheckFailureChangesNothing(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			f := newRouteFixture(t, routeIngress)
 			tc.setup(f)
-			tunnelPublicCheck = func(context.Context, string) error { t.Error("public check ran"); return nil }
+			tunnelPublicCheck = func(context.Context, string, int) error { t.Error("public check ran"); return nil }
 			err := f.router(t, tunnelRouteOptions{hostname: "app.example.com", to: "proxy"}).run(context.Background())
 			if err == nil || !strings.Contains(f.out.String(), "nothing was changed") || !strings.Contains(f.out.String(), tc.want) {
 				t.Fatalf("err %v\n%s", err, f.out)
@@ -312,7 +313,7 @@ func TestTunnelRouteInAppConnector(t *testing.T) {
 func TestTunnelRoutePublicCheckFailureUndoesOnlyThatRule(t *testing.T) {
 	f := newRouteFixture(t, routeIngress)
 	edited := false
-	tunnelPublicCheck = func(context.Context, string) error {
+	tunnelPublicCheck = func(context.Context, string, int) error {
 		if !edited {
 			// Someone edits another rule while the check runs.
 			edited = true
@@ -337,7 +338,7 @@ func TestTunnelRoutePublicCheckFailureUndoesOnlyThatRule(t *testing.T) {
 
 func TestTunnelRouteConcurrentEditIsNotOverwritten(t *testing.T) {
 	f := newRouteFixture(t, routeIngress)
-	tunnelPublicCheck = func(context.Context, string) error {
+	tunnelPublicCheck = func(context.Context, string, int) error {
 		f.cf.SetConfig(strings.Replace(string(f.cf.Config()), proxy.TunnelOrigin, "http://someone-else:8080", 1))
 		return errors.New("got 502 Bad Gateway, want 2xx")
 	}
@@ -357,7 +358,7 @@ func TestTunnelRouteInterruptUndoes(t *testing.T) {
 	f := newRouteFixture(t, routeIngress)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	tunnelPublicCheck = func(ctx context.Context, _ string) error {
+	tunnelPublicCheck = func(ctx context.Context, _ string, _ int) error {
 		cancel()
 		<-ctx.Done()
 		return ctx.Err()
@@ -373,7 +374,7 @@ func TestTunnelRouteInterruptUndoes(t *testing.T) {
 
 func TestTunnelRouteDryRun(t *testing.T) {
 	f := newRouteFixture(t, routeIngress)
-	tunnelPublicCheck = func(context.Context, string) error { t.Error("public check ran"); return nil }
+	tunnelPublicCheck = func(context.Context, string, int) error { t.Error("public check ran"); return nil }
 	if err := f.router(t, tunnelRouteOptions{hostname: "app.example.com", to: "proxy", dryRun: true}).run(context.Background()); err != nil {
 		t.Fatal(err)
 	}
@@ -532,5 +533,143 @@ func TestTunnelRoutePutFailureLeavesRule(t *testing.T) {
 	}
 	if f.cf.Puts != 0 || f.record(t).Status != "undone" {
 		t.Errorf("puts %d record %+v", f.cf.Puts, f.record(t))
+	}
+}
+
+// editAfterRead edits the tunnel configuration right after the first read,
+// before the switch, as someone in the dashboard would.
+type editAfterRead struct {
+	migrate.CloudflareAPI
+	reads int
+	edit  func()
+}
+
+func (e *editAfterRead) GetConfig(ctx context.Context) (json.RawMessage, error) {
+	cfg, err := e.CloudflareAPI.GetConfig(ctx)
+	if e.reads++; e.reads == 1 {
+		e.edit()
+	}
+	return cfg, err
+}
+
+func TestTunnelRouteSwitchesTheLiveConfiguration(t *testing.T) {
+	// Another rule edited after the first read is kept.
+	f := newRouteFixture(t, routeIngress)
+	r := f.router(t, tunnelRouteOptions{hostname: "app.example.com", to: "proxy"})
+	r.cf = &editAfterRead{CloudflareAPI: r.cf, edit: func() {
+		f.cf.SetConfig(strings.Replace(string(f.cf.Config()), "http://other:80", "http://other:81", 1))
+	}}
+	if err := r.run(context.Background()); err != nil {
+		t.Fatalf("%v\n%s", err, f.out)
+	}
+	if f.service(t, "other.example.com", "") != "http://other:81" || f.service(t, "app.example.com", "") != proxy.TunnelOrigin {
+		t.Fatalf("concurrent edit overwritten: %s", f.cf.Config())
+	}
+	before := strings.Replace(routeIngress, "http://other:80", "http://other:81", 1)
+	if rec := f.record(t); rec.BeforeHash != migrate.Hash(json.RawMessage(before)) {
+		t.Errorf("record before_hash %s is not the live configuration's", rec.BeforeHash)
+	}
+
+	// The selected rule edited after the first read: nothing is changed.
+	f = newRouteFixture(t, routeIngress)
+	r = f.router(t, tunnelRouteOptions{hostname: "app.example.com", to: "proxy"})
+	r.cf = &editAfterRead{CloudflareAPI: r.cf, edit: func() {
+		f.cf.SetConfig(strings.Replace(string(f.cf.Config()), "http://web:3000", "http://web:4000", 1))
+	}}
+	err := r.run(context.Background())
+	if err == nil || !strings.Contains(f.out.String(), "changed meanwhile") || f.cf.Puts != 0 {
+		t.Fatalf("err %v puts %d\n%s", err, f.cf.Puts, f.out)
+	}
+	if _, err := os.Stat(tunnelRoutePath("shop", "production")); !os.IsNotExist(err) {
+		t.Errorf("undo record written: %v", err)
+	}
+}
+
+func TestTunnelRouteRefusesACheckPathAnotherRuleServes(t *testing.T) {
+	apiRule := `{"ingress":[{"hostname":"app.example.com","path":"^/api","service":"http://api:80"},` +
+		`{"hostname":"app.example.com","service":"http://web:3000"},{"service":"http_status:404"}]}`
+	// --path /api with the default check path (/healthz): the no-path rule
+	// serves it, so the check would pass whatever /api does.
+	f := newRouteFixture(t, apiRule)
+	tunnelPublicCheck = func(context.Context, string, int) error { t.Error("public check ran"); return nil }
+	err := f.router(t, tunnelRouteOptions{hostname: "app.example.com", path: "^/api", to: "proxy"}).run(context.Background())
+	if err == nil || f.cf.Puts != 0 || !strings.Contains(f.out.String(), "app.example.com → http://web:3000, not the rule being switched") || !strings.Contains(f.out.String(), "--check-path") {
+		t.Fatalf("err %v puts %d\n%s", err, f.cf.Puts, f.out)
+	}
+
+	// A check path the rule serves.
+	f = newRouteFixture(t, apiRule)
+	if err := f.router(t, tunnelRouteOptions{hostname: "app.example.com", path: "^/api", to: "proxy", checkPath: "/api/up?x=1"}).run(context.Background()); err != nil {
+		t.Fatalf("%v\n%s", err, f.out)
+	}
+
+	// Rule paths match anywhere in the request path: "health" takes
+	// /healthz before the no-path rule.
+	f = newRouteFixture(t, `{"ingress":[{"hostname":"app.example.com","path":"health","service":"http://h:80"},`+
+		`{"hostname":"app.example.com","service":"http://web:3000"},{"service":"http_status:404"}]}`)
+	tunnelPublicCheck = func(context.Context, string, int) error { t.Error("public check ran"); return nil }
+	if err := f.router(t, tunnelRouteOptions{hostname: "app.example.com", to: "proxy"}).run(context.Background()); err == nil || f.cf.Puts != 0 || !strings.Contains(f.out.String(), "path health → http://h:80") {
+		t.Fatalf("err %v puts %d\n%s", err, f.cf.Puts, f.out)
+	}
+}
+
+func TestTunnelRoutePublicCheckFollowsTheTarget(t *testing.T) {
+	// http_status:NNN wants exactly NNN.
+	f := newRouteFixture(t, routeIngress)
+	var wants []int
+	tunnelPublicCheck = func(_ context.Context, _ string, want int) error { wants = append(wants, want); return nil }
+	if err := f.router(t, tunnelRouteOptions{hostname: "app.example.com", to: "http_status:404"}).run(context.Background()); err != nil {
+		t.Fatalf("%v\n%s", err, f.out)
+	}
+	if len(wants) != 1 || wants[0] != 404 {
+		t.Errorf("public check wants %v, want [404]", wants)
+	}
+
+	// Targets Yoho cannot request: no check, never an undo.
+	for _, to := range []string{"hello_world", "tcp://db:5432", "unix:/tmp/s.sock"} {
+		f := newRouteFixture(t, routeIngress)
+		tunnelPublicCheck = func(context.Context, string, int) error { return errors.New("got 502 Bad Gateway, want 2xx") }
+		if err := f.router(t, tunnelRouteOptions{hostname: "app.example.com", to: to}).run(context.Background()); err != nil {
+			t.Fatalf("%s: %v\n%s", to, err, f.out)
+		}
+		if f.cf.Puts != 1 || f.service(t, "app.example.com", "") != to || f.record(t).Status != "done" {
+			t.Errorf("%s: puts %d record %+v", to, f.cf.Puts, f.record(t))
+		}
+		if got := phases(routeEvents(t, f.out.String())); got != "old_rule,switched,not_checked" {
+			t.Errorf("%s: phases %s", to, got)
+		}
+	}
+
+	// The real check: exact status, no redirects followed.
+	status := http.StatusNotFound
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(status) }))
+	defer srv.Close()
+	if err := publicCheck(context.Background(), srv.URL, 404); err != nil {
+		t.Errorf("404 for http_status:404: %v", err)
+	}
+	if err := publicCheck(context.Background(), srv.URL, 0); err == nil || !strings.Contains(err.Error(), "want 2xx") {
+		t.Errorf("404 passed a 2xx check: %v", err)
+	}
+	status = http.StatusOK
+	if err := publicCheck(context.Background(), srv.URL, 404); err == nil || !strings.Contains(err.Error(), "want 404") {
+		t.Errorf("200 passed http_status:404: %v", err)
+	}
+}
+
+func TestProxyRouteForPrefersExactHosts(t *testing.T) {
+	routes := []proxy.Route{
+		{Service: "shop-production-web", Hosts: []string{"*.example.com"}},
+		{Service: "blog-production-web", Hosts: []string{"app.example.com"}},
+	}
+	// The exact host of another App wins over this App's wildcard.
+	if rt, err := proxyRouteFor(routes, "shop-production-", "app.example.com"); err == nil || !strings.Contains(err.Error(), "blog-production-web") {
+		t.Errorf("app.example.com: %v %v", rt, err)
+	}
+	if rt, err := proxyRouteFor(routes, "shop-production-", "x.example.com"); err != nil || rt.Service != "shop-production-web" {
+		t.Errorf("x.example.com: %v %v", rt, err)
+	}
+	// A wildcard matches one label only.
+	if rt, err := proxyRouteFor(routes, "shop-production-", "a.b.example.com"); !errors.Is(err, errNoRoute) {
+		t.Errorf("a.b.example.com: %v %v", rt, err)
 	}
 }

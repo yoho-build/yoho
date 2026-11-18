@@ -81,10 +81,11 @@ func withRelease(t *testing.T, plan string) {
 func docker(script string) string {
 	switch {
 	case strings.HasPrefix(script, "docker ps "):
-		return "aaa web \nbbb sync \nccc mqtt \nddd sync True\n"
+		return "aaa|yoho-shop-production-web-1|web||running\nbbb|yoho-shop-production-sync-1|sync||running\n" +
+			"ccc|yoho-shop-production-mqtt-1|mqtt||running\nddd|yoho-shop-production-sync-run-1|sync|True|running\n"
 	case strings.HasPrefix(script, "docker inspect "):
-		return "bbbfull /yoho-shop-production-sync-1 yoho-shop-production yoho-shop-production_default yoho-shop-production-proxy=172.30.0.4 yoho-shop-production_default=172.18.0.5\n" +
-			"cccfull /yoho-shop-production-mqtt-1 yoho-shop-production yoho-shop-production_default yoho-shop-production_default=172.18.0.6\n"
+		return "bbbfull|/yoho-shop-production-sync-1|yoho-shop-production|yoho-shop-production_default|yoho-shop-production-proxy=172.30.0.4|yoho-shop-production_default=172.18.0.5\n" +
+			"cccfull|/yoho-shop-production-mqtt-1|yoho-shop-production|yoho-shop-production_default|yoho-shop-production_default=172.18.0.6\n"
 	}
 	return ""
 }
@@ -220,5 +221,95 @@ func TestAppendColumn(t *testing.T) {
 		"web       yoho-shop-production-web-1    Up 2 hours (healthy)   web:v3         -\n"
 	if got != want {
 		t.Fatalf("got\n%s\nwant\n%s", got, want)
+	}
+}
+
+func TestProbeReportsStoppedContainers(t *testing.T) {
+	withRelease(t, planJSON)
+	h := &dialHost{fakeHost: &fakeHost{local: &remote.Local{}, respond: func(script string) string {
+		switch {
+		case strings.HasPrefix(script, "docker ps "):
+			all := []string{"aaa|yoho-shop-production-web-1|web||running", "bbb|yoho-shop-production-sync-1|sync||exited", "ccc|yoho-shop-production-mqtt-1|mqtt||restarting"}
+			if strings.Contains(script, "status=running") {
+				all = all[:1]
+			}
+			return strings.Join(all, "\n") + "\n"
+		case strings.HasPrefix(script, "docker inspect "):
+			t.Errorf("inspected stopped containers: %s", script)
+		}
+		return ""
+	}}}
+	h.dial = func(context.Context, string, string) (net.Conn, error) {
+		t.Error("dialed a stopped container")
+		return nil, syscall.ECONNREFUSED
+	}
+	st, err := Probe(context.Background(), h, "shop", "production")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"yoho-shop-production-sync-1", "yoho-shop-production-mqtt-1"} {
+		if got := st[name]; got.String() != "failed: not running" {
+			t.Errorf("%s: %+v", name, got)
+		}
+	}
+	if len(st) != 2 {
+		t.Errorf("statuses %+v", st)
+	}
+
+	// Checks but no containers: an empty, non-nil result keeps the column.
+	h.respond = func(string) string { return "" }
+	if st, err := Probe(context.Background(), h, "shop", "production"); err != nil || st == nil {
+		t.Errorf("no containers: %v %v", st, err)
+	}
+}
+
+func TestAddressesWithEmptyFields(t *testing.T) {
+	h := &fakeHost{local: &remote.Local{}, respond: func(string) string {
+		// An empty network mode does not shift the networks.
+		return "aaa|/p-web-1|p||p_default=172.18.0.5\n"
+	}}
+	cs, err := Addresses(context.Background(), h, "p", []string{"aaa"})
+	if err != nil || len(cs) != 1 || cs[0].Addr != "172.18.0.5" || cs[0].Name != "p-web-1" {
+		t.Fatalf("%+v %v", cs, err)
+	}
+	h.respond = func(string) string { return "aaa|/x-web-1||default|default=172.18.0.5\n" }
+	if _, err := Addresses(context.Background(), h, "p", []string{"aaa"}); err == nil || !strings.Contains(err.Error(), "does not belong to compose project p") {
+		t.Fatalf("no project label: %v", err)
+	}
+}
+
+func TestProbeBoundsConcurrentProbes(t *testing.T) {
+	withRelease(t, `[{"name":"mqtt","replicas":8,"check":{"type":"tcp","port":1883,"timeout":"30s"}}]`)
+	var ps, inspect []string
+	for i := range 8 {
+		id := string(rune('a'+i)) + "id"
+		ps = append(ps, id+"|yoho-shop-production-mqtt-"+id+"|mqtt||running")
+		inspect = append(inspect, id+"|/yoho-shop-production-mqtt-"+id+"|yoho-shop-production|yoho-shop-production_default|yoho-shop-production_default=172.18.0.6")
+	}
+	h := &dialHost{fakeHost: &fakeHost{local: &remote.Local{}, respond: func(script string) string {
+		if strings.HasPrefix(script, "docker ps ") {
+			return strings.Join(ps, "\n")
+		}
+		return strings.Join(inspect, "\n")
+	}}}
+	var mu sync.Mutex
+	open, most := 0, 0
+	h.dial = func(context.Context, string, string) (net.Conn, error) {
+		mu.Lock()
+		open++
+		most = max(most, open)
+		mu.Unlock()
+		time.Sleep(30 * time.Millisecond)
+		mu.Lock()
+		open--
+		mu.Unlock()
+		return nil, syscall.ECONNREFUSED
+	}
+	st, err := Probe(context.Background(), h, "shop", "production")
+	if err != nil || len(st) != 8 {
+		t.Fatalf("%v %v", st, err)
+	}
+	if most > maxProbes {
+		t.Fatalf("%d probes at once, want at most %d", most, maxProbes)
 	}
 }

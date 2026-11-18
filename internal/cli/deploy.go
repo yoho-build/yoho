@@ -1179,7 +1179,7 @@ func (a *app) appPS(cmd *cobra.Command) error {
 	if err != nil {
 		a.ui.Warn("cannot run the Service checks: %v", err)
 	}
-	if len(st) == 0 {
+	if st == nil {
 		return h.Run(ctx, remote.Cmd{Script: script, Stdout: cmd.OutOrStdout(), Stderr: cmd.ErrOrStderr()})
 	}
 	out, err := h.Output(ctx, remote.Cmd{Script: script, Stderr: cmd.ErrOrStderr()})

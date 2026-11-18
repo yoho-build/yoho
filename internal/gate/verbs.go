@@ -97,7 +97,7 @@ func ps(ctx context.Context, c *call) (any, error) {
 	}
 	script := "docker compose -p " + remote.Quote(c.project()) + " ps -a --format 'table {{.Service}}\\t{{.Name}}\\t{{.Status}}\\t{{.Image}}'"
 	// x-yoho.check results as a CHECK column (best effort, bounded).
-	if st, _ := servicecheck.Probe(ctx, c.host, c.req.App, c.req.Destination); len(st) > 0 {
+	if st, _ := servicecheck.Probe(ctx, c.host, c.req.App, c.req.Destination); st != nil {
 		out, err := c.host.Output(ctx, remote.Cmd{Script: script})
 		if err != nil {
 			return nil, err

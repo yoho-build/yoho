@@ -14,6 +14,7 @@ import (
 	"regexp"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -80,12 +81,17 @@ Proxy has this App Destination's route for the hostname and that the route
 answers its health path (Host: HOST, X-Forwarded-Proto: https) from a Docker
 network the cloudflared connector shares with yoho-proxy.
 
-Before the change Yoho prints the old rule and the command that puts it
-back, and saves both in <app dir>/tunnel-route.json on the Server. After
-the change it requests https://HOST<health path> from this machine until it
-answers 2xx or --timeout passes. When that fails, or the command is
-interrupted, it puts the old service back on that one rule, unless someone
-changed the rule since; then it leaves the rule alone and says so.
+Before the change Yoho checks that the rule is the first one Cloudflare
+matches for https://HOST<check path> (rule paths are regular expressions),
+prints the old rule and the command that puts it back, and saves both in
+<app dir>/tunnel-route.json on the Server. Right before the change it reads
+the configuration again and stops when the rule changed meanwhile. After the
+change it requests https://HOST<check path> from this machine until it
+answers 2xx (with --to http_status:NNN: NNN) or --timeout passes; other
+targets (hello_world, unix:, tcp://, ...) are not checked. When the check
+fails, or the command is interrupted, it puts the old service back on that
+one rule, unless someone changed the rule since; then it leaves the rule
+alone and says so.
 
 Wildcard hostnames are refused. --path selects a rule by its path, exactly
 as the rule has it, when the hostname has several.`,
@@ -104,7 +110,7 @@ as the rule has it, when the hostname has several.`,
 	f.StringVar(&o.path, "path", "", "Path of the rule, exactly as the rule has it, when the hostname has several rules")
 	f.StringVar(&o.checkPath, "check-path", "", "Path the checks request (default: the route's health path, /up; / for other origins)")
 	f.BoolVar(&o.dryRun, "dry-run", false, "Run the checks and show the change and the undo command; change nothing")
-	f.DurationVar(&o.timeout, "timeout", 60*time.Second, "How long the public check waits for a 2xx after the change")
+	f.DurationVar(&o.timeout, "timeout", 60*time.Second, "How long the public check waits for a 2xx (or the http_status) after the change")
 	_ = c.MarkFlagRequired("hostname")
 	_ = c.MarkFlagRequired("to")
 	addLockWaitFlag(c)
@@ -165,6 +171,30 @@ func tunnelTarget(to string) (string, error) {
 		return "", bad
 	}
 	return to, nil
+}
+
+// publicExpect is what the public check wants from target: a 2xx (want 0)
+// for the Proxy and http(s) origins, the status of http_status:NNN, and no
+// check (checked false) for other targets (hello_world, unix:, tcp://, ...).
+func publicExpect(target string) (want int, checked bool) {
+	if httpStatusRe.MatchString(target) {
+		n, _ := strconv.Atoi(strings.TrimPrefix(target, "http_status:"))
+		return n, true
+	}
+	if u, err := url.Parse(target); err == nil && u.Host != "" {
+		switch strings.ToLower(u.Scheme) {
+		case "http", "https":
+			return 0, true
+		}
+	}
+	return 0, false
+}
+
+func wantDesc(want int) string {
+	if want == 0 {
+		return "2xx"
+	}
+	return strconv.Itoa(want)
 }
 
 // sameOrigin compares two ingress services, so http://yoho-proxy and
@@ -388,6 +418,14 @@ func (r *tunnelRouter) run(ctx context.Context) error {
 	if checkPath == "" {
 		checkPath = "/"
 	}
+	expect, checked := publicExpect(r.target)
+	if checked {
+		step := a.ui.Step("", "Check that %s serves https://%s%s", where, o.hostname, checkPath)
+		if err := r.checkServes(want, checkPath); err != nil {
+			return r.fail(step, fmt.Errorf("nothing was changed: %w", err))
+		}
+		step.Done()
+	}
 
 	undo := r.undoCommand(old.Service, checkPath)
 	var oldRule any
@@ -414,8 +452,32 @@ func (r *tunnelRouter) run(ctx context.Context) error {
 		}
 	}()
 
+	// The configuration shown above may be stale: switch the rule in the
+	// configuration as it is now, and only when the rule is still the same.
+	step = a.ui.Step("", "Read tunnel ingress again")
+	live, err = r.cf.GetConfig(ctx)
+	if err != nil {
+		return r.fail(step, fmt.Errorf("nothing was changed: %w", err))
+	}
+	cur, curRaw, err := migrate.FindRule(live, o.hostname, o.path)
+	if err != nil {
+		return r.fail(step, fmt.Errorf("nothing was changed: %w", err))
+	}
+	if cur.Service != old.Service || cur.Path != old.Path {
+		return r.fail(step, fmt.Errorf("nothing was changed: the rule for %s changed meanwhile: it now points at %s, not %s\nhint: check the rule, then run this again", where, cur.Service, old.Service))
+	}
+	if want, _, err = migrate.RewriteRule(live, o.hostname, o.path, r.target); err != nil {
+		return r.fail(step, fmt.Errorf("nothing was changed: %w", err))
+	}
+	if checked {
+		if err := r.checkServes(want, checkPath); err != nil {
+			return r.fail(step, fmt.Errorf("nothing was changed: %w", err))
+		}
+	}
+	step.Done()
+
 	rec := &tunnelRouteRecord{
-		Hostname: o.hostname, Path: o.path, OldRule: oldRaw, OldService: old.Service, NewService: r.target,
+		Hostname: o.hostname, Path: o.path, OldRule: curRaw, OldService: old.Service, NewService: r.target,
 		BeforeHash: migrate.Hash(live), AfterHash: migrate.Hash(want), Undo: undo, Performer: performer(),
 		Time: time.Now().UTC(), Status: "switching",
 	}
@@ -439,19 +501,82 @@ func (r *tunnelRouter) run(ctx context.Context) error {
 	step.Done()
 	r.event("switched", "", map[string]any{"old_service": old.Service, "new_service": r.target, "duration_ms": time.Since(start).Milliseconds()})
 
-	start = time.Now()
-	u := "https://" + o.hostname + checkPath
-	step = a.ui.Step("", "Check %s", u)
-	if err := r.publicCheck(ctx, u); err != nil {
-		step.Fail(err, "")
-		return r.undo(ctx, rec, err)
+	if checked {
+		start = time.Now()
+		u := "https://" + o.hostname + checkPath
+		step = a.ui.Step("", "Check %s answers %s", u, wantDesc(expect))
+		if err := r.publicCheck(ctx, u, expect); err != nil {
+			step.Fail(err, "")
+			return r.undo(ctx, rec, err)
+		}
+		step.Done()
+		r.event("checked", "", map[string]any{"url": u, "duration_ms": time.Since(start).Milliseconds()})
+	} else {
+		r.event("not_checked", fmt.Sprintf("  %s is not an HTTP origin: not checked after the change; check %s yourself", r.target, o.hostname), map[string]any{"new_service": r.target})
 	}
-	step.Done()
-	r.event("checked", "", map[string]any{"url": u, "duration_ms": time.Since(start).Milliseconds()})
 	rec.Status = "done"
 	r.saveRecord(ctx, rec)
 	a.ui.Finished(nil, fmt.Sprintf("%s now routes to %s (undo: %s)", where, r.target, undo))
 	return nil
+}
+
+// checkServes refuses when the rule being switched is not the one
+// Cloudflare uses for https://<hostname><checkPath> in cfg: the first rule
+// whose hostname matches (exactly, or *.suffix, or any for a rule without
+// one) and whose path, a regular expression, matches anywhere in the
+// request path (as cloudflared does). Otherwise the public check would test
+// another rule.
+func (r *tunnelRouter) checkServes(cfg json.RawMessage, checkPath string) error {
+	rules, err := migrate.Rules(cfg)
+	if err != nil {
+		return err
+	}
+	reqPath, _, _ := strings.Cut(checkPath, "?")
+	u := "https://" + r.o.hostname + checkPath
+	hint := "pass --check-path with a path the rule serves"
+	if r.o.path != "" {
+		hint += fmt.Sprintf(" (one that %s matches)", r.o.path)
+	}
+	for _, x := range rules {
+		if !ingressHostMatch(x.Hostname, r.o.hostname) {
+			continue
+		}
+		if x.Path != "" {
+			re, err := regexp.Compile(x.Path)
+			if err != nil {
+				return fmt.Errorf("ingress rule path %q is not a regular expression: %w", x.Path, err)
+			}
+			if !re.MatchString(reqPath) {
+				continue
+			}
+		}
+		if strings.EqualFold(x.Hostname, r.o.hostname) && x.Path == r.o.path {
+			return nil
+		}
+		desc := x.Hostname
+		switch {
+		case desc == "" && x.Path == "":
+			desc = "the catch-all"
+		case desc == "":
+			desc = "(any hostname)"
+		}
+		if x.Path != "" {
+			desc += " path " + x.Path
+		}
+		return fmt.Errorf("Cloudflare serves %s with the rule %s → %s, not the rule being switched, so the check would not test it\nhint: %s", u, desc, x.Service, hint)
+	}
+	return fmt.Errorf("no ingress rule serves %s\nhint: %s", u, hint)
+}
+
+// ingressHostMatch matches a request hostname to an ingress rule hostname
+// the way cloudflared does.
+func ingressHostMatch(rule, host string) bool {
+	rule, host = strings.ToLower(rule), strings.ToLower(host)
+	if rule == "" || rule == "*" || rule == host {
+		return true
+	}
+	suffix, ok := strings.CutPrefix(rule, "*")
+	return ok && strings.HasPrefix(suffix, ".") && strings.HasSuffix(host, suffix)
 }
 
 // verifySwitched reads the configuration back.
@@ -565,8 +690,8 @@ func (r *tunnelRouter) currentService(ctx context.Context) string {
 var errAccessRedirect = errors.New("Cloudflare Access redirected to its login page")
 
 // publicCheck makes one GET of u from this machine without following
-// redirects; 2xx is success.
-func publicCheck(ctx context.Context, u string) error {
+// redirects; a 2xx is success, or exactly want when want is not 0.
+func publicCheck(ctx context.Context, u string, want int) error {
 	client := &http.Client{
 		Timeout:       10 * time.Second,
 		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
@@ -583,27 +708,27 @@ func publicCheck(ctx context.Context, u string) error {
 	}
 	defer resp.Body.Close()
 	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 64<<10))
-	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+	if want == 0 && resp.StatusCode >= 200 && resp.StatusCode < 300 || want != 0 && resp.StatusCode == want {
 		return nil
 	}
 	if loc := resp.Header.Get("Location"); loc != "" {
 		if lu, err := url.Parse(loc); err == nil && (strings.HasSuffix(strings.ToLower(lu.Hostname()), ".cloudflareaccess.com")) {
 			return errAccessRedirect
 		}
-		return fmt.Errorf("got %s (Location: %s), want 2xx", resp.Status, loc)
+		return fmt.Errorf("got %s (Location: %s), want %s", resp.Status, loc, wantDesc(want))
 	}
-	return fmt.Errorf("got %s, want 2xx", resp.Status)
+	return fmt.Errorf("got %s, want %s", resp.Status, wantDesc(want))
 }
 
 // publicCheck polls tunnelPublicCheck until it succeeds or --timeout ends
 // (edge configuration takes a few seconds to reach the connectors).
-func (r *tunnelRouter) publicCheck(ctx context.Context, u string) error {
+func (r *tunnelRouter) publicCheck(ctx context.Context, u string, want int) error {
 	pctx, cancel := context.WithTimeout(ctx, r.o.timeout)
 	defer cancel()
 	tries := 0
 	err := probe.Poll(pctx, tunnelPublicInterval, func(ctx context.Context) error {
 		tries++
-		err := tunnelPublicCheck(ctx, u)
+		err := tunnelPublicCheck(ctx, u, want)
 		if errors.Is(err, errAccessRedirect) {
 			cancel()
 		}
@@ -617,7 +742,7 @@ func (r *tunnelRouter) publicCheck(ctx context.Context, u string) error {
 	case ctx.Err() != nil:
 		return fmt.Errorf("%s: %w", u, ctx.Err())
 	}
-	return fmt.Errorf("%s: no 2xx in %s (%s): %w", u, r.o.timeout, plural(tries, "attempt", "attempts"), err)
+	return fmt.Errorf("%s: no %s in %s (%s): %w", u, wantDesc(want), r.o.timeout, plural(tries, "attempt", "attempts"), err)
 }
 
 // precheckResult is what the pre-check found on one Server.
@@ -658,7 +783,7 @@ func (r *tunnelRouter) precheck(ctx context.Context, h plan.NamedHost, host, che
 		return remote.Dial(ctx, h.Host, network, addr)
 	}
 	// cloudflared reaches the Proxy at TunnelOrigin, port 80.
-	c := probe.Check{Type: probe.HTTP, Port: 80, Path: res.path, Host: host}
+	c := probe.Check{Type: probe.HTTP, Port: 80, Path: res.path, Host: host, Want2xx: true}
 	hdr := http.Header{"X-Forwarded-Proto": {"https"}}
 	err = probe.Poll(ctx, time.Second, func(ctx context.Context) error {
 		actx, acancel := context.WithTimeout(ctx, 5*time.Second)
@@ -679,7 +804,7 @@ func precheckHint(err error) string {
 	if errors.Is(err, errNoRoute) {
 		return "deploy the App with x-yoho.proxy.hosts listing the hostname first"
 	}
-	return "fix the route (see `yoho proxy status` and `yoho app logs`), or pass --check-path for a path that answers 200-399"
+	return "fix the route (see `yoho proxy status` and `yoho app logs`), or pass --check-path for a path that answers 2xx"
 }
 
 var errNoRoute = errors.New("no Proxy route")
@@ -689,7 +814,19 @@ func routeHasHost(rt proxy.Route, host string) bool {
 		if strings.EqualFold(h, host) {
 			return true
 		}
-		if suffix, ok := strings.CutPrefix(h, "*."); ok && strings.HasSuffix(strings.ToLower(host), "."+strings.ToLower(suffix)) {
+	}
+	return false
+}
+
+// routeHasWildcard: a *.suffix host of rt matches host, one label deep.
+func routeHasWildcard(rt proxy.Route, host string) bool {
+	for _, h := range rt.Hosts {
+		suffix, ok := strings.CutPrefix(h, "*.")
+		if !ok {
+			continue
+		}
+		label, ok := strings.CutSuffix(strings.ToLower(host), "."+strings.ToLower(suffix))
+		if ok && label != "" && !strings.Contains(label, ".") {
 			return true
 		}
 	}
@@ -706,11 +843,12 @@ func catchAll(rt proxy.Route) bool {
 }
 
 // proxyRouteFor picks the Proxy route that serves host: a route naming the
-// host, else a catch-all. It must belong to this App Destination (owner is
+// host, else one whose wildcard matches it, else a catch-all. It must belong to this App Destination (owner is
 // the route name prefix).
 func proxyRouteFor(routes []proxy.Route, owner, host string) (proxy.Route, error) {
 	for _, pick := range []func(proxy.Route) bool{
 		func(rt proxy.Route) bool { return routeHasHost(rt, host) },
+		func(rt proxy.Route) bool { return routeHasWildcard(rt, host) },
 		catchAll,
 	} {
 		var ours, theirs []proxy.Route

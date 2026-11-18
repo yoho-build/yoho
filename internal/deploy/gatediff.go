@@ -140,8 +140,8 @@ func hardenedTmpfsVolume(o, w any) bool {
 	return reflect.DeepEqual(without(om, "tmpfs", "size"), without(wm, "tmpfs", "size"))
 }
 
-// hardenedDeploy: the deploy sections differ only in resources.limits, and
-// every limit want sets has the same value in old.
+// hardenedDeploy: the deploy sections differ only in resources.limits, want
+// has limits, and every limit want sets has the same value in old.
 func hardenedDeploy(old, want any) bool {
 	om, ok := old.(map[string]any)
 	if !ok {
@@ -151,11 +151,12 @@ func hardenedDeploy(old, want any) bool {
 	if !reflect.DeepEqual(without(om, "resources", "limits"), without(wm, "resources", "limits")) {
 		return false
 	}
-	ol := limitsOf(om)
-	if ol == nil {
+	ol, wl := limitsOf(om), limitsOf(wm)
+	// Harden only fills in limits the Service already has (it adds none).
+	if ol == nil || wl == nil {
 		return false
 	}
-	for k, v := range limitsOf(wm) {
+	for k, v := range wl {
 		if !reflect.DeepEqual(ol[k], v) {
 			return false
 		}

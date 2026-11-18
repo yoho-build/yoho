@@ -46,7 +46,7 @@ func (h *checkHost) Output(_ context.Context, c remote.Cmd) (string, error) {
 	case strings.HasPrefix(c.Script, "readlink "):
 		return h.current, nil
 	case strings.Contains(c.Script, "docker inspect --format"):
-		return "0123456789abcdef /test-ws-1 test test_default test_default=172.18.0.5 yoho=172.19.0.9", nil
+		return "0123456789abcdef|/test-ws-1|test|test_default|test_default=172.18.0.5|yoho=172.19.0.9", nil
 	case strings.Contains(c.Script, "'ps' '-q' 'ws'"):
 		return "0123456789abcdef\n", nil
 	}
@@ -202,7 +202,7 @@ type foreignHost struct{ checkHost }
 
 func (h *foreignHost) Output(ctx context.Context, c remote.Cmd) (string, error) {
 	if strings.Contains(c.Script, "docker inspect --format") {
-		return "0123456789abcdef /other-ws-1 other other_default other_default=172.20.0.5", nil
+		return "0123456789abcdef|/other-ws-1|other|other_default|other_default=172.20.0.5", nil
 	}
 	return h.checkHost.Output(ctx, c)
 }
@@ -386,7 +386,7 @@ func TestDeployAndRollbackRunRecordedCheck(t *testing.T) {
 		case strings.Contains(s, "'ps' '-q' 'cloudflared'"):
 			return "cf1", nil
 		case strings.Contains(s, "docker inspect --format '{{.Id}}"):
-			return "cf1full /yoho-shop-production-cloudflared-1 yoho-shop-production yoho-shop-production_default yoho-shop-production_default=172.18.0.7", nil
+			return "cf1full|/yoho-shop-production-cloudflared-1|yoho-shop-production|yoho-shop-production_default|yoho-shop-production_default=172.18.0.7", nil
 		}
 		return base(s)
 	}
@@ -417,5 +417,41 @@ func TestDeployAndRollbackRunRecordedCheck(t *testing.T) {
 	}
 	if len(dialed) == 0 || dialed[0] != "172.18.0.7:2000" {
 		t.Fatalf("rollback dialed %v", dialed)
+	}
+}
+
+// Release prerequisites start with --no-recreate, so their containers may
+// still be the previous Release's: their check waits for the cutover.
+func TestPrerequisiteReadinessSkipsServiceCheck(t *testing.T) {
+	fastChecks(t)
+	h := &checkHost{dial: func(context.Context, string, string) (net.Conn, error) {
+		t.Error("checked a prerequisite before cutover")
+		return nil, errors.New("no")
+	}}
+	plans := []servicePlan{
+		{Name: "ws", Replicas: 1, Stateful: true, Check: checkWithDefaults(&config.ServiceCheck{Type: "tcp", Port: 8080, Timeout: "200ms"})},
+		{Name: "web", Replicas: 1, ReleaseCommand: []string{"migrate"}},
+	}
+	var out bytes.Buffer
+	if err := checkRunner(h, &out).startDependencies(context.Background(), plans); err != nil {
+		t.Fatalf("%v\n%s", err, out.String())
+	}
+	if strings.Contains(out.String(), "checking Service ws") {
+		t.Fatalf("output:\n%s", out.String())
+	}
+}
+
+func TestServiceCheckNeedsEveryReplica(t *testing.T) {
+	fastChecks(t)
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	h := &checkHost{dial: to(t, ln.Addr().String())}
+	sp := servicePlan{Name: "ws", Replicas: 2, Check: checkWithDefaults(&config.ServiceCheck{Type: "tcp", Port: 8080, Timeout: "200ms"})}
+	err = checkRunner(h, io.Discard).serviceCheck(context.Background(), sp, io.Discard)
+	if err == nil || !strings.Contains(err.Error(), "1 of 2 container(s) running") {
+		t.Fatalf("err = %v", err)
 	}
 }
