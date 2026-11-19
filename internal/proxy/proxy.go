@@ -184,9 +184,8 @@ func BootWith(ctx context.Context, host remote.Host, cfg config.ProxyConfig, out
 	// Pull before the pre-proxy-reboot Hook and the swap: a failed pull must
 	// leave the running Proxy and the Server's load balancer state alone, and
 	// an existing Proxy is only down for the swap itself.
-	pull := "set -eu\ndocker image inspect " + remote.Quote(image) + " >/dev/null 2>&1 || docker pull -q " + remote.Quote(image) + " >/dev/null\n"
-	if err := host.Run(ctx, remote.Cmd{Script: pull}); err != nil {
-		return fmt.Errorf("pull %s (the running Proxy was not touched): %w", image, err)
+	if err := Pull(ctx, host, image); err != nil {
+		return err
 	}
 
 	reboot := exists && opts.OnReboot != nil
@@ -246,6 +245,16 @@ func BootWith(ctx context.Context, host remote.Host, cfg config.ProxyConfig, out
 	}
 	if reboot {
 		return opts.OnReboot(ctx, "post-proxy-reboot")
+	}
+	return nil
+}
+
+// Pull makes sure image is on the Server, pulling it when absent. Callers run
+// it before the pre-proxy-reboot Hook, so a failed pull changes nothing.
+func Pull(ctx context.Context, host remote.Host, image string) error {
+	pull := "set -eu\ndocker image inspect " + remote.Quote(image) + " >/dev/null 2>&1 || docker pull -q " + remote.Quote(image) + " >/dev/null\n"
+	if err := host.Run(ctx, remote.Cmd{Script: pull}); err != nil {
+		return fmt.Errorf("pull %s (the running Proxy was not touched): %w", image, err)
 	}
 	return nil
 }

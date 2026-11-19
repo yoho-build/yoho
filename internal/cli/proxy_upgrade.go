@@ -153,8 +153,9 @@ func proxyStatusCmd(g *globals) *cobra.Command {
 // version summary. A stopped or missing Proxy has no routes to list but still
 // gets the summary.
 func printProxyStatus(ctx context.Context, h remote.Host, cfg config.ProxyConfig, stdout, stderr io.Writer) error {
-	script := "docker ps -a --filter name=^/" + proxy.ContainerName + "$ --format '{{.Names}}\\t{{.Status}}\\t{{.Ports}}'\n" +
-		"if [ -n \"$(docker ps -q --filter name=^/" + proxy.ContainerName + "$)\" ]; then docker exec " + proxy.ContainerName + " kamal-proxy list; fi"
+	script := "set -eu\ndocker ps -a --filter name=^/" + proxy.ContainerName + "$ --format '{{.Names}}\\t{{.Status}}\\t{{.Ports}}'\n" +
+		"up=$(docker ps -q --filter name=^/" + proxy.ContainerName + "$ --filter status=running)\n" +
+		"if [ -n \"$up\" ]; then docker exec " + proxy.ContainerName + " kamal-proxy list; fi"
 	if err := h.Run(ctx, remote.Cmd{Script: script, Stdout: stdout, Stderr: stderr}); err != nil {
 		return err
 	}

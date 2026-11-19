@@ -33,6 +33,9 @@ esac
 	if err := printProxyStatus(context.Background(), &remote.Local{}, config.ProxyConfig{}, &out, &errOut); err != nil {
 		t.Fatalf("err=%v stderr=%s", err, errOut.String())
 	}
+	if errOut.Len() != 0 {
+		t.Fatalf("stderr=%q", errOut.String())
+	}
 	if !strings.Contains(out.String(), "Exited") || !strings.Contains(out.String(), "proxy version: v0.10.2") {
 		t.Fatalf("out=%q", out.String())
 	}
