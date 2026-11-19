@@ -24,7 +24,7 @@ import (
 
 const (
 	// DefaultImage is the pinned kamal-proxy image (latest tag on 2026-10-08).
-	DefaultImage = "basecamp/kamal-proxy:v0.10.2"
+	DefaultImage = "basecamp/kamal-proxy:v0.10.3"
 	// Network is the external docker network shared by the Proxy and Apps.
 	Network = "yoho"
 	// ContainerName is the Proxy container on each Server.

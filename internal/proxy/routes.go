@@ -34,7 +34,7 @@ func (e *RouteConflictError) Error() string {
 const RouteConflictHint = "keep the existing Service name, or phase the rename using a different hostname first; to reuse the hostname, verify ownership and manually remove only your obsolete route on every affected Server with `docker exec yoho-proxy kamal-proxy remove <verified-owned-old-route>` during a maintenance window (traffic is interrupted until the replacement is healthy); never remove another App's route"
 
 // DesiredRoute models the actual --host StringSlice flags in kamal-proxy
-// v0.10.2: each flag is CSV, and only an empty resulting list is normalized to
+// v0.10.3: each flag is CSV, and only an empty resulting list is normalized to
 // the catch-all host. Hosts are NOT lowercased, trimmed, or stripped of ports.
 func DesiredRoute(name string, hosts []string) (Route, error) {
 	r := Route{Service: name, PathPrefixes: []string{"/"}}
@@ -106,7 +106,7 @@ func routeBindings(rt Route) []routeBinding {
 }
 
 // CheckRouteConflicts mirrors ServiceMap.CheckAvailability and Normalize*
-// from basecamp/kamal-proxy v0.10.2, commit 3b4ad579bcf5db316a86d27bd896c1e30874f192
+// from basecamp/kamal-proxy v0.10.3, commit d28ff16b1addfda26a2d822c2c0a624d39e6360f
 // (internal/server/service_map.go). Only equal literal host + equal normalized
 // path-prefix conflict. Catch-all/specific and wildcard/specific coexist;
 // request host port stripping is NOT reservation normalization. Yoho deploys

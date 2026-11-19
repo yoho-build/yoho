@@ -4,9 +4,9 @@ A SaaS App can serve many customer hostnames that are not known at deploy time. 
 
 Cloudflare Tunnel / Cloudflare for SaaS is the alternative when TLS should terminate at Cloudflare instead of on the Server. Yoho documents that path; it does not create Cloudflare custom hostnames yet.
 
-## What kamal-proxy v0.10.2 does
+## What kamal-proxy v0.10.3 does
 
-Pinned `basecamp/kamal-proxy:v0.10.2` (commit `3b4ad579bcf5db316a86d27bd896c1e30874f192`) supports on-demand TLS:
+Pinned `basecamp/kamal-proxy:v0.10.3` (commit `d28ff16b1addfda26a2d822c2c0a624d39e6360f`) supports on-demand TLS:
 
 ```sh
 kamal-proxy deploy <service> --target host:port --tls --tls-on-demand-url=/custom-domains/allow

@@ -26,7 +26,7 @@ jobs:
           - name: Build yoho
             run: go build -o "$RUNNER_TEMP/bin/yoho" ./cmd/yoho
           - name: Pre-pull images
-            run: docker pull basecamp/kamal-proxy:v0.10.2 && docker pull alpine:3.22 && docker pull golang:1.26-alpine && docker pull busybox:1.37
+            run: docker pull basecamp/kamal-proxy:v0.10.3 && docker pull alpine:3.22 && docker pull golang:1.26-alpine && docker pull busybox:1.37
           - name: Start sshd for localhost
             run: . ./test/integration/run.sh && setup_localhost_ssh
       - name: Prepare app
@@ -310,7 +310,7 @@ jobs:
           - name: Build yoho
             run: go build -o "$RUNNER_TEMP/bin/yoho" ./cmd/yoho
           - name: Pre-pull images
-            run: docker pull basecamp/kamal-proxy:v0.10.2 && docker pull alpine:3.22 && docker pull golang:1.26-alpine
+            run: docker pull basecamp/kamal-proxy:v0.10.3 && docker pull alpine:3.22 && docker pull golang:1.26-alpine
           - name: Start sshd for localhost
             run: . ./test/integration/run.sh && setup_localhost_ssh
       - name: Init swarm and prepare app

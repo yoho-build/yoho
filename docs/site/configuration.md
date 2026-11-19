@@ -37,7 +37,7 @@ Validate with `yoho config check`; print the resolved file with `yoho config sho
 | `secrets.providers.<n>` | `type`: `op`, `bw`, `bws`, `command`; `command` (argv, reference appended); `account`. |
 | `secrets.nonempty` | Opt-in list of locally resolved source keys that must exist and not equal `""`; duplicates/invalid names fail. Whitespace is valid; Server-generated keys are unsupported. See [Secrets](secrets.md#requiring-nonempty-values-opt-in). |
 | `secrets.values.<KEY>` | `provider`, `ref`, optional `destinations`. |
-| `proxy.image` | kamal-proxy image, pinned by default (`basecamp/kamal-proxy:v0.10.2`). Set a tag to adopt another version; `yoho plan` shows `upgrade vX -> vY` and `yoho proxy upgrade` / `yoho deploy` apply it. See [Upgrading the Proxy](zero-downtime.md#upgrading-the-proxy). |
+| `proxy.image` | kamal-proxy image, pinned by default (`basecamp/kamal-proxy:v0.10.3`). Set a tag to adopt another version; `yoho plan` shows `upgrade vX -> vY` and `yoho proxy upgrade` / `yoho deploy` apply it. See [Upgrading the Proxy](zero-downtime.md#upgrading-the-proxy). |
 | `proxy.http_port`, `https_port` | Published host ports; default 80/443; `0` disables publishing. |
 | `proxy.bind` | Bind address, e.g. `127.0.0.1`. |
 | `proxy.tunnel` | Managed Cloudflare Tunnel: `token_secret` (empty or `tunnel: {}` = Quick Tunnel), `image`, `replicas` (default 1), `api_token_secret` (a Cloudflare API token with Account > Cloudflare Tunnel > Edit for `yoho tunnel route` and the `yoho rollback` ingress warning; requires `token_secret`; default `migrate.tunnel.api_token_secret`). See [Cloudflare Tunnel](cloudflare-tunnel.md). |

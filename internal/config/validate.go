@@ -331,7 +331,7 @@ func (p ServiceProxy) ValidateHealthCheck() error {
 }
 
 // Validate checks Proxy HTTP probes and custom-domain / TLS routing against
-// pinned kamal-proxy v0.10.2: --tls-on-demand-url requires --tls, forbids
+// pinned kamal-proxy v0.10.3: --tls-on-demand-url requires --tls, forbids
 // --host, and accepts a path or an absolute http(s) URL.
 func (p ServiceProxy) Validate() error {
 	if err := p.ValidateHealthCheck(); err != nil {
@@ -374,7 +374,7 @@ func (p ServiceProxy) ValidateRouting() error {
 	return nil
 }
 
-// validateTLSOnDemandAllow mirrors kamal-proxy v0.10.2 parseTLSOnDemandURL
+// validateTLSOnDemandAllow mirrors kamal-proxy v0.10.3 parseTLSOnDemandURL
 // (internal/server/tls_on_demand.go): a path or an absolute http(s) URL.
 func validateTLSOnDemandAllow(allow string) error {
 	if strings.HasPrefix(allow, "//") {

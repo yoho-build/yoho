@@ -35,7 +35,7 @@ func TestCompareVersions(t *testing.T) {
 	if CompareImages("basecamp/kamal-proxy:v0.10.2", "reg:5000/kamal-proxy:v0.9.0") <= 0 {
 		t.Error("image tags not compared")
 	}
-	if VersionLabel("reg:5000/kamal-proxy") != "reg:5000/kamal-proxy" || VersionLabel(DefaultImage) != "v0.10.2" {
+	if VersionLabel("reg:5000/kamal-proxy") != "reg:5000/kamal-proxy" || VersionLabel(DefaultImage) != "v0.10.3" {
 		t.Error("VersionLabel")
 	}
 }
@@ -51,7 +51,7 @@ func TestImageInFingerprintAndPlanReason(t *testing.T) {
 		return configHash(runArgs(old)) + "|true|basecamp/kamal-proxy:v0.9.0"
 	}}
 	need, why, err := NeedsBoot(context.Background(), h, config.ProxyConfig{})
-	if err != nil || !need || !strings.HasPrefix(why, "upgrade v0.9.0 -> v0.10.2") {
+	if err != nil || !need || !strings.HasPrefix(why, "upgrade v0.9.0 -> v0.10.3") {
 		t.Fatalf("need=%v why=%q err=%v", need, why, err)
 	}
 	h.output = func(string) string {
@@ -59,7 +59,7 @@ func TestImageInFingerprintAndPlanReason(t *testing.T) {
 	}
 	if need, _, _ := NeedsBoot(context.Background(), h, old); !need {
 		t.Fatal("downgrade not detected")
-	} else if _, why, _ := NeedsBoot(context.Background(), h, old); !strings.HasPrefix(why, "downgrade v0.10.2 -> v0.9.0") {
+	} else if _, why, _ := NeedsBoot(context.Background(), h, old); !strings.HasPrefix(why, "downgrade v0.10.3 -> v0.9.0") {
 		t.Fatalf("why=%q", why)
 	}
 }
@@ -271,7 +271,7 @@ func TestStatusSummary(t *testing.T) {
 		want string
 	}{
 		{StatusInfo{Exists: true, Image: DefaultImage, Want: DefaultImage}, "up to date"},
-		{StatusInfo{Exists: true, Image: "basecamp/kamal-proxy:v0.9.0", Want: DefaultImage}, "upgrade available: v0.10.2"},
+		{StatusInfo{Exists: true, Image: "basecamp/kamal-proxy:v0.9.0", Want: DefaultImage}, "upgrade available: v0.10.3"},
 		{StatusInfo{Exists: true, Image: DefaultImage, Want: "basecamp/kamal-proxy:v0.9.0"}, "--allow-downgrade"},
 		{StatusInfo{Want: DefaultImage}, "not running"},
 	} {
