@@ -1019,10 +1019,16 @@ after pre-connect.`,
 			defer closeHosts()
 			for _, h := range hosts {
 				hook := a.proxyHook(a.serverVersion(ctx, h.Host), []plan.NamedHost{h})
+				step := a.ui.Step(h.Name, "Boot %s", proxy.ContainerName)
+				// Pull before the Hook: a failed pull must not leave the
+				// Server drained.
+				if err := proxy.Pull(ctx, h.Host, proxy.Image(a.proxyConfig())); err != nil {
+					step.Fail(err, "check that the Server can pull the Proxy image")
+					return &silentError{err}
+				}
 				if err := hook(ctx, "pre-proxy-reboot"); err != nil {
 					return err
 				}
-				step := a.ui.Step(h.Name, "Boot %s", proxy.ContainerName)
 				if err := proxy.Boot(ctx, h.Host, a.proxyConfig(), step.Output()); err != nil {
 					step.Fail(err, "check that the Proxy ports are free on the Server")
 					return &silentError{err}

@@ -3,11 +3,13 @@ package cli
 import (
 	"context"
 	"fmt"
+	"io"
 	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
 
+	"github.com/yoho-build/yoho/internal/config"
 	"github.com/yoho-build/yoho/internal/plan"
 	"github.com/yoho-build/yoho/internal/proxy"
 	"github.com/yoho-build/yoho/internal/remote"
@@ -104,7 +106,7 @@ the routes were verified.`,
 				}
 				verified := fmt.Sprintf("%d route(s) verified", res.Routes)
 				if res.Blind {
-					verified = "routes not compared (old Proxy cannot list as JSON)"
+					verified = "routes not compared (the old Proxy could not list them)"
 				}
 				step.Done(fmt.Sprintf("%s -> %s, %s, recreate took %s", proxy.VersionLabel(res.From), proxy.VersionLabel(res.To), verified, res.Swap.Round(100*time.Millisecond)))
 				if len(res.Unverified) > 0 {
@@ -128,23 +130,39 @@ func proxyStatusCmd(g *globals) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			srv := a.cfg.Servers[a.dest.Servers[0]]
-			h, err := remote.NewSSH(a.dest.Servers[0], srv.SSH, srv.Sudo, a.sshOptions())
-			if err != nil {
-				return err
-			}
-			defer h.Close()
 			ctx := cmd.Context()
-			script := "docker ps --filter name=^/" + proxy.ContainerName + "$ --format '{{.Names}}\\t{{.Status}}\\t{{.Ports}}'; docker exec " + proxy.ContainerName + " kamal-proxy list"
-			if err := h.Run(ctx, remote.Cmd{Script: script, Stdout: cmd.OutOrStdout(), Stderr: cmd.ErrOrStderr()}); err != nil {
-				return err
-			}
-			st, err := proxy.Status(ctx, h, a.proxyConfig())
+			hosts, closeHosts, err := a.connect(ctx)
 			if err != nil {
 				return err
 			}
-			fmt.Fprintln(cmd.OutOrStdout(), st.Summary())
+			defer closeHosts()
+			for _, h := range hosts {
+				if len(hosts) > 1 {
+					fmt.Fprintf(cmd.OutOrStdout(), "[%s]\n", h.Name)
+				}
+				if err := printProxyStatus(ctx, h.Host, a.proxyConfig(), cmd.OutOrStdout(), cmd.ErrOrStderr()); err != nil {
+					return err
+				}
+			}
 			return nil
 		},
 	}
+}
+
+// printProxyStatus prints one Server's Proxy container, its routes and its
+// version summary. A stopped or missing Proxy has no routes to list but still
+// gets the summary.
+func printProxyStatus(ctx context.Context, h remote.Host, cfg config.ProxyConfig, stdout, stderr io.Writer) error {
+	script := "set -eu\ndocker ps -a --filter name=^/" + proxy.ContainerName + "$ --format '{{.Names}}\\t{{.Status}}\\t{{.Ports}}'\n" +
+		"up=$(docker ps -q --filter name=^/" + proxy.ContainerName + "$ --filter status=running)\n" +
+		"if [ -n \"$up\" ]; then docker exec " + proxy.ContainerName + " kamal-proxy list; fi"
+	if err := h.Run(ctx, remote.Cmd{Script: script, Stdout: stdout, Stderr: stderr}); err != nil {
+		return err
+	}
+	st, err := proxy.Status(ctx, h, cfg)
+	if err != nil {
+		return err
+	}
+	fmt.Fprintln(stdout, st.Summary())
+	return nil
 }

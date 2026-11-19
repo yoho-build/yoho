@@ -3,9 +3,9 @@ on:
   workflow_call:
     inputs:
       yoho-version:
-        description: Yoho release with preview support (tag or latest).
+        description: Yoho release with preview support (a tag such as v0.8.2, or latest).
         type: string
-        default: latest
+        default: v0.8.2
       app-dir:
         description: Directory containing the Yoho file, relative to the repository root.
         type: string
@@ -36,7 +36,7 @@ jobs:
           ref: ${{ github.event.pull_request.head.sha }}
           fetch-depth: 0
           persist-credentials: false
-      - uses: yoho-build/yoho/.github/actions/setup-yoho@v0.8.1
+      - uses: yoho-build/yoho/.github/actions/setup-yoho@v0.8.2
         with:
           version: ${{ inputs.yoho-version }}
       - uses: 1password/install-cli-action@v2
