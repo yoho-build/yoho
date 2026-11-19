@@ -66,9 +66,9 @@ proxy:
 
 ## Upgrading the Proxy
 
-Yoho pins one kamal-proxy version (`basecamp/kamal-proxy:v0.10.2`, the newest release when this was written). A newer Yoho may pin a newer one; `proxy.image` pins any tag yourself. The image is part of the Proxy's configuration fingerprint, so when the running `yoho-proxy` differs from the configured one:
+Yoho pins one kamal-proxy version (`basecamp/kamal-proxy:v0.10.3`, the newest release when this was written). A newer Yoho may pin a newer one; `proxy.image` pins any tag yourself. The image is part of the Proxy's configuration fingerprint, so when the running `yoho-proxy` differs from the configured one:
 
-- `yoho plan` shows `proxy yoho-proxy: upgrade v0.10.0 -> v0.10.2 (recreated, brief proxy downtime; routes are kept)` (or `downgrade`), and `yoho deploy` performs it as part of the deploy.
+- `yoho plan` shows `proxy yoho-proxy: upgrade v0.10.2 -> v0.10.3 (recreated, brief proxy downtime; routes are kept)` (or `downgrade`), and `yoho deploy` performs it as part of the deploy.
 - `yoho proxy status` shows the running version and `upgrade available: vY` against the pinned one (no network call).
 - `yoho proxy upgrade [-y]` does only the upgrade, on every Server of the Destination, one at a time. Use it in a maintenance window, outside a deploy.
 
