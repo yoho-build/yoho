@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"os"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -70,6 +71,7 @@ type upgradeHost struct {
 	image    string
 	cfg      config.ProxyConfig
 	pullErr  error
+	stopped  bool
 	listJSON func() string
 	probe    func() string
 	order    []string
@@ -89,10 +91,13 @@ func (u *upgradeHost) Run(ctx context.Context, c remote.Cmd) error {
 func (u *upgradeHost) Output(_ context.Context, c remote.Cmd) (string, error) {
 	switch {
 	case strings.Contains(c.Script, "container inspect"):
-		return configHash(runArgs(config.ProxyConfig{Image: u.image})) + "|true|" + u.image, nil
+		return configHash(runArgs(config.ProxyConfig{Image: u.image})) + "|" + strconv.FormatBool(!u.stopped) + "|" + u.image, nil
 	case strings.Contains(c.Script, "LoggingDriver"):
 		return "json-file", nil
 	case strings.Contains(c.Script, "kamal-proxy list"):
+		if u.stopped && !u.swapped() {
+			return "", errors.New("container yoho-proxy is not running")
+		}
 		return u.listJSON(), nil
 	case strings.Contains(c.Script, "curl"):
 		return u.probe(), nil
@@ -102,6 +107,15 @@ func (u *upgradeHost) Output(_ context.Context, c remote.Cmd) (string, error) {
 
 const listTwo = `{"a-production-web":{"hosts":["a.test"],"path_prefixes":["/"],"targets":["a-web-1:80"],"state":"running"},` +
 	`"b-production-web":{"hosts":[],"path_prefixes":["/"],"targets":["b-web-1:80"],"state":"running"}}`
+
+func (u *upgradeHost) swapped() bool {
+	for _, s := range u.scripts {
+		if strings.Contains(s, "docker run") {
+			return true
+		}
+	}
+	return false
+}
 
 func newUpgradeHost(image string) *upgradeHost {
 	return &upgradeHost{image: image, listJSON: func() string { return listTwo }, probe: func() string { return "a-production-web 200\nb-production-web 404\n" }}
@@ -116,7 +130,7 @@ func TestUpgradePullsBeforeStopping(t *testing.T) {
 	if !res.Changed || res.Routes != 2 {
 		t.Fatalf("result %+v", res)
 	}
-	if len(u.order) < 2 || u.order[0] != "pull" || u.order[1] != "stop" {
+	if len(u.order) < 2 || u.order[0] != "pull" || u.order[len(u.order)-1] != "stop" {
 		t.Fatalf("order %v: pull must come before stop", u.order)
 	}
 }
@@ -282,3 +296,37 @@ func TestStatusSummary(t *testing.T) {
 }
 
 var _ = os.ErrNotExist
+
+// A deploy that recreates the Proxy for a new image must not drain the
+// Server (pre-proxy-reboot) when the image cannot be pulled.
+func TestBootPullFailureRunsNoHook(t *testing.T) {
+	u := newUpgradeHost("basecamp/kamal-proxy:v0.9.0")
+	u.pullErr = errors.New("registry unreachable")
+	var hooks []string
+	err := BootWith(context.Background(), u, config.ProxyConfig{}, nil, BootOptions{OnReboot: func(_ context.Context, h string) error { hooks = append(hooks, h); return nil }})
+	if err == nil || !strings.Contains(err.Error(), "not touched") {
+		t.Fatalf("err=%v", err)
+	}
+	if len(hooks) != 0 {
+		t.Fatalf("hooks %v ran before the pull succeeded", hooks)
+	}
+	for _, s := range u.scripts {
+		if strings.Contains(s, "docker stop") || strings.Contains(s, "docker run") {
+			t.Fatalf("Proxy was changed after a failed pull: %s", s)
+		}
+	}
+}
+
+// A stopped Proxy cannot list its routes before the upgrade: compare
+// nothing instead of calling every restored route unexpected.
+func TestUpgradeStoppedProxyIsBlind(t *testing.T) {
+	u := newUpgradeHost("basecamp/kamal-proxy:v0.10.2")
+	u.stopped = true
+	res, err := Upgrade(context.Background(), u, config.ProxyConfig{}, nil, UpgradeOptions{Interval: time.Millisecond, Timeout: 50 * time.Millisecond})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !res.Changed || !res.Blind {
+		t.Fatalf("result %+v", res)
+	}
+}

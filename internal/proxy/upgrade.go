@@ -221,7 +221,13 @@ func Upgrade(ctx context.Context, host remote.Host, cfg config.ProxyConfig, out 
 
 	before, err := List(ctx, host)
 	blind := false
-	if err != nil && running {
+	if err != nil && !running {
+		// A stopped Proxy cannot list its routes: they can only be seen to
+		// load again, not compared.
+		blind, before = true, nil
+		res.Blind = true
+		fmt.Fprintf(out, "[%s] warning: %s is stopped; routes cannot be compared before and after the upgrade\n", name, ContainerName)
+	} else if err != nil {
 		// kamal-proxy before v0.10.0 has no `list --json`: the routes cannot
 		// be compared, only seen to load again.
 		if c, ok := CompareVersions(imageTag(current), "v0.10.0"); !ok || c >= 0 {
