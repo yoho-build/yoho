@@ -1,6 +1,6 @@
 # Yoho vision
 
-**Deploy Docker Compose apps to your own servers the way Kamal deploys one container: one command, zero downtime, no platform to run.**
+**Deploy Docker Compose apps to your own servers the way Kamal deploys one container: one command, zero downtime for proxied Services on normal deploys, no platform to run.**
 
 ## Why
 
@@ -17,8 +17,8 @@ Yoho is one static Go binary that covers all of that for people who already desc
 
 1. **Compose is the source of truth.** Yoho reads your compose file and adds only an `x-yoho` block per Service. `docker compose up` still works locally.
 2. **CLI first, agentless by default.** Nothing runs on the Server except Docker (and kamal-proxy for proxied Services). Local read-only dashboards (`yoho tui` / `yoho ui`) run on your machine over SSH; Scheduled Jobs, the Cloudflare Tunnel connector, and a future per-Server alerting API are opt-in per Server.
-3. **Zero downtime is the default experience.** Proxied Services are health-gated and drained through kamal-proxy, including behind Cloudflare Tunnel.
-4. **Secrets never touch the repo, the image, or `docker inspect`.** They're resolved on your machine from 1Password or Bitwarden, delivered as files, and audited by fingerprint.
+3. **Zero downtime for proxied Services on normal deploys.** Proxied Services are health-gated and drained through kamal-proxy, including behind Cloudflare Tunnel. Workers restart stop-first on the compose runtime; Swarm defaults stateless Services to start-first rolling updates. Stateful Services restart stop-first on both runtimes. Upgrading the shared Proxy causes a brief (~1 s) interruption.
+4. **File-based secrets by default.** They're resolved on your machine from 1Password or Bitwarden, delivered as files, and audited by fingerprint. Values stay out of the repo, image, and `docker inspect` in this mode. Opt-in `secrets_as_env: true` delivers environment variables, which `docker inspect` can expose.
 5. **Data is protected by design.** Stateful Services are pinned, never duplicated, never `down -v`. Backups follow ONCE's contract and go to restic, S3, B2, SFTP, or any rclone remote.
 6. **No registry required.** Build locally (Apple `container` on Apple silicon, Docker elsewhere), cross-build for x86 servers, ship over SSH.
 7. **Feels like Kamal, does more.** Familiar commands, hook names, and secrets files; clearer output, actionable hints, `--json` for agents.

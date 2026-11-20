@@ -3,18 +3,25 @@ package cli
 import (
 	"bytes"
 	"context"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 
 	"github.com/spf13/cobra"
+
+	"github.com/yoho-build/yoho/internal/config"
 )
 
 // TestSupportMatrixCLIRefusals asserts that every CLI-enforced "No" cell in
 // docs/site/support-matrix.md fails with the documented error string.
 func TestSupportMatrixCLIRefusals(t *testing.T) {
 	t.Setenv("YOHO_ACCESS", "")
+	t.Setenv("YOHO_DESTINATION", "")
 
 	writeApp := func(t *testing.T, yohoYAML string) string {
 		t.Helper()
@@ -55,9 +62,10 @@ previews:
 `
 
 	t.Run("secrets rotate --generated on swarm", func(t *testing.T) {
+		const want = "--generated supports the compose runtime only"
 		_, err := checkGeneratedFlags([]string{"POSTGRES_PASSWORD"}, nil, "swarm")
-		if err == nil || !strings.Contains(err.Error(), "--generated supports the compose runtime only") {
-			t.Fatalf("got %v, want --generated supports the compose runtime only", err)
+		if err == nil || !strings.Contains(err.Error(), want) {
+			t.Fatalf("got %v, want %s", err, want)
 		}
 	})
 
@@ -143,5 +151,63 @@ previews:
 				t.Errorf("got output+err:\n%s\nwant substring %q", combined, tc.want)
 			}
 		})
+	}
+}
+
+// TestSupportMatrixDocumentsRefusals checks the actual expectations in all
+// three refusal suites, so changing an expectation requires updating the page.
+func TestSupportMatrixDocumentsRefusals(t *testing.T) {
+	page, err := os.ReadFile(filepath.Join("..", "..", "docs", "site", "support-matrix.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, pkg := range []string{"cli", "config", "composefile"} {
+		path := filepath.Join("..", pkg, "support_matrix_test.go")
+		fset := token.NewFileSet()
+		file, err := parser.ParseFile(fset, path, nil, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		count := 0
+		ast.Inspect(file, func(n ast.Node) bool {
+			var value ast.Expr
+			switch n := n.(type) {
+			case *ast.KeyValueExpr:
+				if key, ok := n.Key.(*ast.Ident); ok && key.Name == "want" {
+					value = n.Value
+				}
+			case *ast.ValueSpec:
+				if len(n.Names) == 1 && n.Names[0].Name == "want" && len(n.Values) == 1 {
+					value = n.Values[0]
+				}
+			}
+			if value == nil {
+				return true
+			}
+			count++
+			var want string
+			switch value := value.(type) {
+			case *ast.BasicLit:
+				var err error
+				want, err = strconv.Unquote(value.Value)
+				if err != nil {
+					t.Fatal(err)
+				}
+			case *ast.Ident:
+				if pkg != "config" || value.Name != "RolesMessage" {
+					t.Fatalf("unsupported want at %s", fset.Position(value.Pos()))
+				}
+				want = config.RolesMessage
+			default:
+				t.Fatalf("unsupported want at %s", fset.Position(value.Pos()))
+			}
+			if !strings.Contains(string(page), want) {
+				t.Errorf("support-matrix.md is missing %q (%s)", want, fset.Position(value.Pos()))
+			}
+			return true
+		})
+		if count == 0 {
+			t.Errorf("no refusal expectations found in %s", path)
+		}
 	}
 }
