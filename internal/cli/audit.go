@@ -33,7 +33,7 @@ var auditedCommands = []string{
 	"lock acquire", "lock release",
 	"proxy boot", "proxy upgrade",
 	"schedule install", "schedule remove", "tunnel up", "tunnel down", "tunnel route",
-	"app start", "app stop", "app restart", "setup", "access secrets push", "access add", "access rm", "access key add", "access key rm", "access install", "swarm init", "swarm join", "preview up", "preview down",
+	"app start", "app stop", "app restart", "setup", "access secrets push", "access add", "access rm", "access key add", "access key rm", "access install", "swarm init", "swarm join", "preview up", "preview down", "preview prune",
 }
 
 // auditSkipFlags are global flags that say nothing about the invocation.
@@ -168,7 +168,7 @@ func (g *globals) auditStart(cmd *cobra.Command, args []string) *auditRun {
 	}
 	name := a.dest.Servers[0]
 	srv := a.cfg.Servers[name]
-	h, err := remote.NewSSH(name, srv.SSH, srv.Sudo, a.sshOptions())
+	h, err := connectServer(name, srv.SSH, srv.Sudo, a.sshOptions())
 	if err != nil {
 		return nil
 	}

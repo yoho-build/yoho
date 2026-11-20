@@ -84,7 +84,7 @@ Supports Debian and Ubuntu.`,
 				srv := a.cfg.Servers[name]
 				// No docker check here: setup is what installs Docker.
 				step := u.Step(name, "Connect %s", srv.SSH)
-				h, cerr := remote.NewSSH(name, srv.SSH, srv.Sudo, a.sshOptions())
+				h, cerr := connectServer(name, srv.SSH, srv.Sudo, a.sshOptions())
 				if cerr == nil {
 					_, cerr = h.Output(ctx, remote.Cmd{Script: "true"})
 				}
@@ -125,6 +125,9 @@ Supports Debian and Ubuntu.`,
 					applyMesh = ans == "y" || ans == "yes"
 				}
 				if applyMesh {
+					if err = beginOperation(ctx); err != nil {
+						return err
+					}
 					if err = a.runMesh(ctx, "up"); err != nil {
 						return err
 					}

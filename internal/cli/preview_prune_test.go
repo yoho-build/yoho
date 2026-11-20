@@ -202,7 +202,10 @@ func TestPreviewPruneRevalidatesUnderLock(t *testing.T) {
 			oldRoot := release.Root
 			release.Root = t.TempDir()
 			t.Cleanup(func() { release.Root = oldRoot })
-			ctx := context.Background()
+			ctx := context.WithValue(context.Background(), auditRunKey{}, &auditRun{loader: func() *auditRun {
+				t.Fatal("operation started for a preview changed under the lock")
+				return nil
+			}})
 			local := &remote.Local{}
 			record := deploy.PreviewRecord{App: "shop", Name: "pr-1", Destination: "preview-pr-1", Project: release.ProjectName("shop", "preview-pr-1"), CreatedAt: time.Now().UTC().Add(-time.Hour)}
 			marker := filepath.Join(release.AppDir(record.App, record.Destination), "preview.json")

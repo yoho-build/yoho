@@ -168,6 +168,12 @@ are required with `--json`. `up`, `down`, and `prune` emit `preview.up`,
 [Previews](previews.md) for configuration (`previews.max_active`), safety limits,
 secrets layering and GitHub Actions.
 
+`prune` records one operation under the template Destination (`previews.from`),
+starting when the first marked preview is revalidated under its Destination lock.
+The record survives preview deletion; query it with
+`yoho status -d TEMPLATE --operation ID`. No Server operation record is created
+until a marked preview passes that revalidation.
+
 Transport choices appear as `transport` events with `host`, `mode`, `reason` and `hint` under `--json`. Plans report the expected transport; apply/deploy can report further fallbacks if a transfer fails. See [Builds & image transport](builds.md#transport).
 
 ## Mesh

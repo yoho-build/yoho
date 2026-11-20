@@ -45,7 +45,7 @@ func (a *app) meshHosts(ctx context.Context) ([]plan.NamedHost, func(), error) {
 			done()
 			return nil, nil, e
 		}
-		h, e := remote.NewSSH(n, s.SSH, s.Sudo, opts)
+		h, e := connectServer(n, s.SSH, s.Sudo, opts)
 		if e != nil {
 			done()
 			return nil, nil, e
