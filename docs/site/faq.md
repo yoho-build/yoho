@@ -22,4 +22,4 @@
 
 **Which OS for `yoho setup`?** Debian and Ubuntu.
 
-**Status?** Alpha. Pin the version you use.
+**Status?** Beta. Pin the version you use.

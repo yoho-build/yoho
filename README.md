@@ -4,7 +4,7 @@
 
 [English](README.md) · [繁體中文](README-ZH-Hant.md) · [Français](README-FR.md) · [Deutsch](README-DE.md) · [Español](README-ES.md)
 
-**Deploy Docker Compose apps to your own servers the way Kamal deploys one container: one command, zero downtime, no platform to run.**
+**Deploy Docker Compose apps to your own servers over SSH: one binary, health-gated cutovers for proxied Services, file-delivered secrets, verified restore drills, no platform to run.**
 
 Yoho is one static Go binary. Your `compose.yaml` stays the source of truth; Yoho adds an `x-yoho` block per Service and a small `yoho.yml`. It builds images on your machine, ships them over SSH (no registry needed), switches traffic through kamal-proxy, keeps secrets in your password manager, and backs up volumes.
 
@@ -60,22 +60,23 @@ $EDITOR yoho.yml compose.yaml
 yoho config check         # validate config, compose and secret refs
 yoho setup                # interactive: Docker, deploy user, firewall (Debian/Ubuntu)
 yoho plan                 # show what would change on the Server (read-only)
-yoho apply                # confirm, then build, ship, health-gated zero-downtime cutover
+yoho apply                # confirm, then build, ship, health-gated cutover for proxied Services
 ```
 
 Then `yoho app logs web -f`, `yoho app stats`, `yoho releases`, `yoho rollback <version>`.
 
 ## Features
 
-- Compose-native: `docker compose up` still works locally; Yoho reads `x-yoho` and ignores nothing else.
-- Zero downtime: health-gated, drained cutover via kamal-proxy, also behind Cloudflare Tunnel.
-- Registry-less: local build (Apple `container` on Apple silicon, Docker elsewhere), amd64 cross-builds, layer push over SSH.
+- Compose-native: `docker compose up` still works locally, and plain `docker compose` keeps working on the Server if you stop using Yoho.
+- Health-gated cutover: proxied Services switch without downtime through kamal-proxy (including behind Cloudflare Tunnel); workers restart stop-first on the compose runtime (Swarm defaults stateless Services to start-first rolling updates), Stateful Services restart stop-first on both runtimes, and upgrading the shared Proxy causes a brief (~1 s) interruption. See the [support matrix](docs/site/support-matrix.md).
+- Registry-less SSH shipping: local build (Apple `container` on Apple silicon, Docker elsewhere), remote or on-Server builds, amd64 cross-builds. Default `transport.mode: auto` uses layer-diff push (`docker pussh`) when both the `docker pussh` plugin and the Server's containerd image store are present, and otherwise falls back to a full `docker save` / `docker load` archive (`builder.direct` and Apple `container` images always ship full archives).
 - File-based secrets by default: resolved locally from 1Password, Bitwarden, or any command; delivered as files; generated secrets on the Server, rotatable with `yoho secrets rotate --generated` (Postgres, MySQL/MariaDB or your own command). Values stay out of the repo, image, and `docker inspect` in this mode. Opt-in `secrets_as_env: true` delivers environment variables, which `docker inspect` can expose.
 - Stateful Services are pinned and never `down -v`.
 - Backups (restic, S3, B2, SFTP, rclone, or encrypted archives) and restore; `yoho backup drill` restores into a throwaway project and reports a recovery time estimate; opt-in scheduled jobs via systemd timers.
 - Service templates: `yoho init --template postgres,redis,clickhouse,rustfs` adds ready-to-deploy Stateful Services with generated secrets and Backups.
 - Cloudflare Tunnel, including account-less Quick Tunnels.
-- Compose (default) or Swarm runtime.
+- Compose (default) or Swarm runtime. See the [support matrix](docs/site/support-matrix.md) for what each mode supports and refuses.
+- Scoped team access through the Gate (`access: scoped`): scoped authorization per App Destination (fixed verbs, no shell, no Docker socket, audit log). The Gate is not mandatory human approval (`yoho deploy` / `apply --auto-approve` skip prompts, and code a Member deploys runs with that App's secrets).
 - Kamal-compatible hooks and secrets-file style.
 - `yoho setup` provisions a Debian/Ubuntu Server.
 - Read-only dashboards: `yoho tui` in the terminal, `yoho ui` in a local browser; nothing runs on the Servers.
@@ -83,17 +84,19 @@ Then `yoho app logs web -f`, `yoho app stats`, `yoho releases`, `yoho rollback <
 
 ## Compared
 
-| | Kamal | ONCE | Coolify | Yoho |
-|---|---|---|---|---|
-| Unit of deploy | container per role | single app | compose / apps | compose project |
-| Runs where | CLI (Ruby) over SSH | on the host | web platform + DB | CLI (Go) over SSH |
-| Zero downtime | kamal-proxy | kamal-proxy | partial | kamal-proxy |
-| Registry required | no (since 2.8) | n/a | yes | no |
-| Secrets | `.kamal/secrets` | env | UI, injected into every container | `.yoho/secrets`, per-Service files |
-| Backups | no | yes | DB to S3 | volumes + dumps, restic/S3/B2/rclone |
-| Server provisioning | Docker only | installer | installer | `yoho setup` |
-| Multi-server | yes (roles) | no | yes | Swarm runtime; Roles later |
-| Platform to run | no | service | yes | no |
+Full comparison (sourced and dated as of 2026-11): [docs/site/compare.md](docs/site/compare.md).
+
+| | Yoho | Uncloud | Kamal | Coolify | Dokploy |
+|---|---|---|---|---|---|
+| Unit of deploy | Compose project | Compose project | container per role | apps / Compose | apps / Compose |
+| Runs where | CLI (Go) over SSH | CLI + `uncloudd` / Corrosion per machine | CLI (Ruby) over SSH | web platform + DB | web platform + DB |
+| Ingress / TLS | kamal-proxy + Tunnel | Caddy (cluster-shared certs, `*.uncld.dev`) | kamal-proxy | Traefik / Caddy | Traefik |
+| Registry required | no (SSH `pussh` or archive) | no (Unregistry layer push) | no (since 2.8) | server build or registry | server build or registry |
+| Secrets | `.yoho/secrets`, per-Service files | env vars only | `.kamal/secrets` (env) | UI (env) | UI (env) |
+| Backups & drills | volumes + dumps, `backup drill` | no | no | DB to S3 | DB to S3 |
+| Multi-server | Swarm runtime (Roles planned) | WireGuard mesh | yes (roles) | yes | yes (Swarm / remote) |
+| Platform to run | no | daemon per machine | no | yes | yes |
+| License | MIT | Apache-2.0 | MIT | Apache-2.0 | Apache-2.0 |
 
 ## Config example
 
