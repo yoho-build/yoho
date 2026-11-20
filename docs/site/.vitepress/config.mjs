@@ -23,6 +23,8 @@ const guide = [
   ['How big a Server?', 'sizing'],
   ['Swarm', 'swarm'],
   ['High availability & recovery', 'high-availability'],
+  ['Support matrix', 'support-matrix'],
+  ['Compare', 'compare'],
   ['Dashboards (tui / ui)', 'dashboards'],
   ['Sharing one App with a team', 'team-access'],
   ['Hooks & env vars', 'hooks'],
@@ -31,7 +33,7 @@ const guide = [
 
 export default defineConfig({
   title: 'Yoho',
-  description: 'Deploy Docker Compose apps to your own servers with zero downtime.',
+  description: 'Deploy Docker Compose apps to your own servers over SSH.',
   lang: 'en-US',
   // Rewrites emit directories, not extensionless .html aliases or SPA fallbacks.
   cleanUrls: true,
@@ -75,7 +77,7 @@ export default defineConfig({
   transformPageData(page) {
     const url = `${site}/` + page.relativePath.replace(/index\.md$/, '').replace(/\.md$/, '.html')
     const title = page.relativePath === 'index.md' ? 'Yoho: deploy Docker Compose apps to your own servers' : `${page.title} | Yoho`
-    const description = page.description || page.frontmatter.hero?.tagline || 'Deploy Docker Compose apps to your own servers with zero downtime.'
+    const description = page.description || page.frontmatter.hero?.tagline || 'Deploy Docker Compose apps to your own servers over SSH.'
     page.frontmatter.head ??= []
     page.frontmatter.head.push(
       ['link', { rel: 'canonical', href: url }],
@@ -90,6 +92,7 @@ export default defineConfig({
     logo: { src: '/assets/logo.svg', alt: 'Yoho' },
     nav: [
       { text: 'Guide', link: '/getting-started/' },
+      { text: 'Compare', link: '/compare/' },
       { text: 'CLI reference', link: '/cli/' },
       { text: 'GitHub', link: 'https://github.com/yoho-build/yoho' }
     ],
