@@ -110,8 +110,8 @@ func Push(ctx context.Context, o PushOptions) ([]Result, error) {
 	if len(o.Images) == 0 {
 		return nil, nil
 	}
-	if o.Engine == EngineContainer && (o.Mode == MethodPussh || o.Mode == MethodRegistry) {
-		return nil, fmt.Errorf("transport mode %s needs images in the local Docker; images built with Apple container ship via load (set transport.mode: auto or load, or builder.engine: docker)", o.Mode)
+	if err := ValidateEngineMode(o.Engine, o.Mode); err != nil {
+		return nil, err
 	}
 	p := &pusher{o: o, out: &syncWriter{w: o.Out}}
 	ids, err := p.localIDs(ctx)
@@ -143,6 +143,29 @@ func Push(ctx context.Context, o PushOptions) ([]Result, error) {
 	}
 	wg.Wait()
 	return results, errors.Join(errs...)
+}
+
+// ValidateEngineMode checks that the transport can read the build engine's store.
+func ValidateEngineMode(engine, mode string) error {
+	if engine == EngineContainer && (mode == MethodPussh || mode == MethodRegistry) {
+		return fmt.Errorf("transport mode %s needs images in the local Docker; images built with Apple container ship via load (set transport.mode: auto or load, or builder.engine: docker)", mode)
+	}
+	return nil
+}
+
+// PusshTarget checks that h provides the SSH target needed by docker pussh.
+func PusshTarget(h remote.Host) error {
+	if sshTarget(h) == "" {
+		return errors.New("no ssh target")
+	}
+	return nil
+}
+
+func sshTarget(h remote.Host) string {
+	if s, ok := h.(interface{ Target() string }); ok {
+		return s.Target()
+	}
+	return ""
 }
 
 type pusher struct {
@@ -230,10 +253,7 @@ func (p *pusher) target(h remote.Host) string {
 	if t := p.o.Targets[h.Name()]; t != "" {
 		return t
 	}
-	if s, ok := h.(*remote.SSH); ok {
-		return s.Target()
-	}
-	return ""
+	return sshTarget(h)
 }
 
 func (p *pusher) pushHost(ctx context.Context, h remote.Host) (string, int64, error) {
@@ -275,24 +295,43 @@ func (p *pusher) pushHost(ctx context.Context, h remote.Host) (string, int64, er
 	return MethodRegistry, 0, nil
 }
 
+// LocalPusshAvailable reports whether the local `docker pussh` CLI plugin is
+// installed.
+func LocalPusshAvailable(ctx context.Context, execFn Exec) bool {
+	if execFn == nil {
+		execFn = osExec
+	}
+	return execFn(ctx, Command{Argv: []string{"docker", "pussh", "--help"}, Stdout: io.Discard, Stderr: io.Discard}) == nil
+}
+
+// ServerContainerdImageStore reports whether Docker on h uses the containerd
+// image store (required by pussh / unregistry).
+func ServerContainerdImageStore(ctx context.Context, h remote.Host) (bool, error) {
+	ds, err := h.Output(ctx, remote.Cmd{Script: "docker info --format '{{json .DriverStatus}}'"})
+	if err != nil {
+		return false, fmt.Errorf("docker info: %w", err)
+	}
+	return strings.Contains(ds, "io.containerd.snapshotter"), nil
+}
+
 // pussh needs the local plugin, an ssh target and the containerd image store
 // on the Server (unregistry stores blobs in containerd).
 func (p *pusher) pussh(ctx context.Context, h remote.Host, imgs []string) error {
 	p.pusshOnce.Do(func() {
-		p.pusshOK = p.o.Exec(ctx, Command{Argv: []string{"docker", "pussh", "--help"}, Stdout: io.Discard, Stderr: io.Discard}) == nil
+		p.pusshOK = LocalPusshAvailable(ctx, p.o.Exec)
 	})
 	if !p.pusshOK {
 		return errors.New("docker pussh plugin not installed")
 	}
 	t := p.target(h)
 	if t == "" {
-		return errors.New("no ssh target")
+		return PusshTarget(h)
 	}
-	ds, err := h.Output(ctx, remote.Cmd{Script: "docker info --format '{{json .DriverStatus}}'"})
+	ok, err := ServerContainerdImageStore(ctx, h)
 	if err != nil {
-		return fmt.Errorf("docker info: %w", err)
+		return err
 	}
-	if !strings.Contains(ds, "io.containerd.snapshotter") {
+	if !ok {
 		return errors.New("Server Docker does not use the containerd image store")
 	}
 	for _, img := range imgs {

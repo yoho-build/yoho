@@ -10,6 +10,7 @@ Global flags (every command): `-c, --config FILE`, `-d, --destination NAME` (def
 | `init [--template NAME[,NAME...]] [--list-templates]` | Create `yoho.yml`, `.yoho/secrets`, sample hooks. `--template` also writes ready-to-deploy Services (`postgres`, `redis`, `clickhouse`, `rustfs`) into the compose file, appending to an existing one and refusing name conflicts, and a commented-out `backups:` example into a new `yoho.yml` (printed when `yoho.yml` exists); see [Service templates](getting-started.md#service-templates). |
 | `config check [--offline]` | Validate Yoho file, compose files, `x-yoho` and secret names; resolves local secrets only when `secrets.nonempty` is nonempty. `--offline` (or `YOHO_OFFLINE=1`) never resolves secrets. Exit 0 ok, 1 findings, 2 files could not be loaded. Warns when `ssh.via: cloudflare` would go through a `cloudflared` Service in the same App, and (like `plan` and `deploy`, once per run) when a Stateful Service has no Backup job of the Destination covering it. See [CI check](#ci-check). |
 | `config show` | Print the resolved Yoho file with defaults as JSON. |
+| `doctor [--max-age D]` | Read-only production-readiness check for a Destination: config and Backup coverage (Stateful Services first), Scheduled Backup freshness and last successful restore drill, firewall and public `0.0.0.0` ports outside the Proxy, free disk on Docker data root and Backup cache, Proxy state and version, pending secret-rotation generations, and image transport path. Exit 0 no errors, 1 any error. See [Doctor](#doctor). |
 | `schema [--ext]` | JSON Schema of the Yoho file, or of `x-yoho` with `--ext`. |
 | `setup [--plan] [-y] [--containerd-image-store]` | Provision the Destination's Servers (interactive). `--plan` only shows the checklist, `-y` applies every needed step. See [Server setup](setup.md). |
 | `plan [--version V] [--detailed-exitcode]` | Read-only diff of the configuration against the Server: containers, Proxy routes, Proxy, Tunnel, Scheduled Jobs. Nothing is built or changed. With `--detailed-exitcode`: exit 0 no changes, 1 error, 2 changes. With scoped access the Gate plans (Services, routes and the Proxy only) with its limits applied, as a scoped deploy would; it needs the `deploy` grant. See [Team access](team-access.md). |
@@ -129,6 +130,24 @@ jobs:
 ```
 
 Compose interpolation reads only the App's `.env` and the Destination's `env`, never the job's process environment. Commit those values (non-secret ones only) or put them in `destinations.<name>.env`, as for a deploy.
+
+## Doctor
+
+`yoho doctor [-d DEST] [--max-age DURATION]` is a read-only command that aggregates Yoho's production-readiness checks in one place without resolving secrets from a password manager or modifying the Server. It is safe to run interactively, in CI, or from a Scheduled Job or external monitor.
+
+Checks performed:
+
+- **Config and Backup coverage** (`config`, `backup`): runs the offline `yoho config check` validations and reports Services with no Backup job covering them (Stateful Services first).
+- **Backup freshness and restore drill** (`backup`, `drill`): compares each installed Scheduled Job's newest successful Backup against its `OnCalendar` schedule (or `--max-age` if passed) using the Server's clock, flags inactive timers, uninstalled scheduled jobs and unscheduled jobs, and reports the date of the last successful `yoho backup drill` from the audit log (warns when missing or older than 90 days).
+- **Firewall and exposed ports** (`firewall`, `ports`): inspects `ufw` state and required ports, and flags any compose Service or running container publishing ports on `0.0.0.0` or `::` outside `yoho-proxy` (which bypasses `ufw`).
+- **Disk space** (`disk`): reports free disk on the Docker data root and the Backup cache (`<backup dir>/.restic-cache`), warning at ≥85% used (or <5 GiB free on disks ≥10 GiB) and erroring at ≥95% used (or <1 GiB free on disks ≥2 GiB).
+- **Proxy** (`proxy`): verifies `yoho-proxy` is running when the App has proxied Services (or a Tunnel) and compares its image version against the pinned or configured `proxy.image`.
+- **Pending secret rotations** (`secrets`): checks for interrupted `yoho secrets rotate --generated` runs (`generated/<KEY>.next`), which block deploys until finished.
+- **Image transport** (`transport`): reports the transport path in use (`pussh`, full archive `docker save | docker load`, `registry`, or Server/remote build) and why, checking local `docker pussh` availability and whether the Server's Docker uses the containerd image store.
+
+Each finding has a `severity` (`error`, `warning`, or `info`) and a one-line fix hint when action is needed. With `--json`, `yoho doctor` emits one `finding` event per check result (`check`, `severity`, `level`, `subject`, `message`, optional `hint`) followed by a closing `doctor` summary event (`{"event":"doctor","ok":true,"errors":0,"warnings":1,"info":5,"destination":"production","time":...}`).
+
+Exit codes: `0` when there are no `error` findings (warnings and info exit `0`), `1` when one or more findings have severity `error` (or when configuration or Server connection fails).
 
 ## `preview up`, `preview down`, `preview list`
 

@@ -286,6 +286,71 @@ func (u *UI) Check(ok bool, errors int, offline bool, services, secretKeys int) 
 	}
 }
 
+// DoctorFinding prints a `yoho doctor` check result (severity: error, warning,
+// or info) with an optional one-line fix hint.
+func (u *UI) DoctorFinding(check, severity, subject, msg, hint string) {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	if severity == "warning" {
+		u.warnings++
+	}
+	if u.mode == JSON {
+		f := map[string]any{
+			"check":    check,
+			"level":    severity,
+			"severity": severity,
+			"subject":  subject,
+			"message":  msg,
+		}
+		if hint != "" {
+			f["hint"] = hint
+		}
+		u.event("finding", f)
+		return
+	}
+	where := ""
+	if subject != "" {
+		where = u.paint(cyan, "["+subject+"]") + " "
+	}
+	var mark string
+	switch severity {
+	case "error":
+		mark = u.paint(red, "✗ ")
+	case "warning":
+		mark = u.paint(yellow, "! ")
+	default:
+		mark = u.paint(dim, "· ")
+	}
+	fmt.Fprintln(u.w, u.indent()+"  "+mark+where+msg)
+	if hint != "" {
+		fmt.Fprintln(u.w, u.indent()+"    "+u.paint(yellow, "hint: ")+hint)
+	}
+	u.stamp()
+}
+
+// DoctorSummary emits the closing summary of `yoho doctor`.
+func (u *UI) DoctorSummary(ok bool, errCount, warnCount, infoCount int, destination string) {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	if u.mode == JSON {
+		u.event("doctor", map[string]any{
+			"ok":          ok,
+			"errors":      errCount,
+			"warnings":    warnCount,
+			"info":        infoCount,
+			"destination": destination,
+		})
+		return
+	}
+	summary := fmt.Sprintf("Doctor (%s): %s, %s, %d info", destination, Count(errCount, "error", ""), Count(warnCount, "warning", ""), infoCount)
+	style := bold
+	if !ok {
+		style = red + bold
+	}
+	fmt.Fprintln(u.w, u.paint(style, summary))
+	u.stamp()
+}
+
 // Step is a timed unit of work.
 type Step struct {
 	u     *UI

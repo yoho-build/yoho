@@ -1,0 +1,6 @@
+  Original form: Mon *-*-01..07 03:00:00
+Normalized form: Mon *-*-01..07 03:00:00
+    Next elapse: Mon 2026-11-02 03:00:00 UTC
+       From now: 2 weeks 2 days left
+       Iter. #2: Mon 2026-12-07 03:00:00 UTC
+       From now: 1 month 14 days left

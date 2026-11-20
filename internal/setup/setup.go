@@ -506,6 +506,24 @@ const ufwStatusScript = "ufw status 2>/dev/null || /usr/sbin/ufw status 2>/dev/n
 // needs root, and a normal user's PATH omits the sbin directories.
 const ufwLocateScript = `if command -v ufw >/dev/null 2>&1 || [ -x /usr/sbin/ufw ] || [ -x /sbin/ufw ]; then echo found; else echo missing; fi`
 
+// CheckFirewall inspects ufw on h without modifying anything. When root or
+// sudo is available it checks `ufw status` against the SSH, Proxy and extra
+// allow ports; otherwise it reads /etc/ufw/ufw.conf.
+func CheckFirewall(ctx context.Context, h remote.Host, sudo bool, proxyPorts, allowPorts []int) (needed bool, detail string, err error) {
+	priv, _, err := privilege(ctx, h, sudo)
+	if err != nil {
+		return false, "", fmt.Errorf("probe privileges: %w", err)
+	}
+	ports := append([]int(nil), proxyPorts...)
+	ports = append(ports, allowPorts...)
+	ports = append(ports, sshPorts(ctx, h, priv)...)
+	ch := h
+	if !priv {
+		ch = noSudo{h}
+	}
+	return firewallStep(ports, priv).Check(ctx, ch)
+}
+
 func firewallStep(ports []int, priv bool) *Step {
 	ports = uniqueSorted(ports)
 	var allow []string
