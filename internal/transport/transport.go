@@ -275,11 +275,30 @@ func (p *pusher) pushHost(ctx context.Context, h remote.Host) (string, int64, er
 	return MethodRegistry, 0, nil
 }
 
+// LocalPusshAvailable reports whether the local `docker pussh` CLI plugin is
+// installed.
+func LocalPusshAvailable(ctx context.Context, execFn Exec) bool {
+	if execFn == nil {
+		execFn = osExec
+	}
+	return execFn(ctx, Command{Argv: []string{"docker", "pussh", "--help"}, Stdout: io.Discard, Stderr: io.Discard}) == nil
+}
+
+// ServerContainerdImageStore reports whether Docker on h uses the containerd
+// image store (required by pussh / unregistry).
+func ServerContainerdImageStore(ctx context.Context, h remote.Host) (bool, error) {
+	ds, err := h.Output(ctx, remote.Cmd{Script: "docker info --format '{{json .DriverStatus}}'"})
+	if err != nil {
+		return false, fmt.Errorf("docker info: %w", err)
+	}
+	return strings.Contains(ds, "io.containerd.snapshotter"), nil
+}
+
 // pussh needs the local plugin, an ssh target and the containerd image store
 // on the Server (unregistry stores blobs in containerd).
 func (p *pusher) pussh(ctx context.Context, h remote.Host, imgs []string) error {
 	p.pusshOnce.Do(func() {
-		p.pusshOK = p.o.Exec(ctx, Command{Argv: []string{"docker", "pussh", "--help"}, Stdout: io.Discard, Stderr: io.Discard}) == nil
+		p.pusshOK = LocalPusshAvailable(ctx, p.o.Exec)
 	})
 	if !p.pusshOK {
 		return errors.New("docker pussh plugin not installed")
@@ -288,11 +307,11 @@ func (p *pusher) pussh(ctx context.Context, h remote.Host, imgs []string) error 
 	if t == "" {
 		return errors.New("no ssh target")
 	}
-	ds, err := h.Output(ctx, remote.Cmd{Script: "docker info --format '{{json .DriverStatus}}'"})
+	ok, err := ServerContainerdImageStore(ctx, h)
 	if err != nil {
-		return fmt.Errorf("docker info: %w", err)
+		return err
 	}
-	if !strings.Contains(ds, "io.containerd.snapshotter") {
+	if !ok {
 		return errors.New("Server Docker does not use the containerd image store")
 	}
 	for _, img := range imgs {

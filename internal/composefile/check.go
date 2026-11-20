@@ -384,6 +384,13 @@ func stateDescription(svc types.ServiceConfig, appDir string) string {
 	return ""
 }
 
+// PublicPorts lists the ports svc publishes on every host interface (no
+// host_ip, 0.0.0.0 or ::) as published:target, or target when the host port
+// is ephemeral. Loopback and other specific binds are not listed.
+func PublicPorts(svc types.ServiceConfig) []string {
+	return publicPorts(svc)
+}
+
 // publicPorts lists the ports svc publishes on every host interface (no
 // host_ip, 0.0.0.0 or ::) as published:target, or target when the host port
 // is ephemeral. Loopback and other specific binds are not listed.

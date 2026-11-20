@@ -36,12 +36,13 @@ Use this when the user asks whether there is something new to deploy, or asks to
 
    Add any new secret keys to `.yoho/secrets` and `x-yoho.secrets` before deploying.
 4. Update the work tree with a fast-forward only (`git merge --ff-only`). Keep uncommitted Yoho files as they are.
-5. Let `yoho plan` decide whether anything needs deploying (it builds nothing). Read each action:
+5. Run `yoho doctor` to check the Destination's current health (config, Backups, firewall, disk, Proxy, pending secret rotations, transport). Let `yoho plan` decide whether anything needs deploying (it builds nothing). Read each action:
    - A changed proxied Service is `update in-place (zero downtime)`.
    - Any other changed Service is normally `replace`, with a short restart of that Service, workers included. A change to only its `release_command` or `check` is an `update` without a restart.
    - If a stateful Service would be replaced or destroyed, stop and ask the user.
 6. Before a migration that cannot be undone, run `yoho backup run`. Then run `yoho deploy`.
 7. Verify:
+   - Run `yoho doctor` to confirm the Destination is healthy after the deploy.
    - Each hostname returns 200 on its health path.
    - The new containers are healthy.
    - The proxy logs show no 5xx responses during the switch (`yoho proxy logs`).
@@ -90,6 +91,7 @@ Order for deploy: `pre-connect`, `pre-build`, `pre-deploy`, (`pre-proxy-reboot`/
 ```
 yoho init [--template a,b]        # yoho.yml, .yoho/secrets, hooks; templates append Services
 yoho config check | show          # validate / print resolved config
+yoho doctor [--max-age 48h]       # read-only production-readiness check (exit 1 on error findings)
 yoho schema [--ext]               # JSON Schema
 yoho builder status | setup [-y]  # local Builder (Apple container on Apple silicon)
 yoho secrets list                 # keys, sources, lengths (no values)
@@ -131,7 +133,7 @@ Global flags: `-c/--config`, `-d/--destination` (default `$YOHO_DESTINATION`, th
 - 1Password approvals: Yoho asks at most once per command. If the user is asked again on every command, check `op --version` (2.40+ on macOS shares one approval across an agent's processes) or suggest a service account (`OP_SERVICE_ACCOUNT_TOKEN`); see https://yohobuild.com/secrets#1password-approvals. Never start the agent under `op run`, and never cache secret values.
 - Do not print secret values; use `yoho secrets list`. `secrets print` needs `--reveal` and a terminal. After changing a value in the password manager, `yoho secrets rotate` restarts only the Services that changed (zero downtime through the Proxy; Stateful Services follow their normal rules). Run it from a checkout of the deployed Version; the current Release's old values are not kept. `--dry-run` lists names only. For a Server-generated value (`x-yoho.generate`), use `yoho secrets rotate --generated KEY`: it applies the new value to the database first (Postgres/MySQL detected; other keys need `x-yoho.rotate`), then swaps it in and restarts every Service that uses it. If it fails, follow the hint; while a hint says the database already uses `generated/KEY.next`, re-run the same command and do not `yoho deploy`. Compose runtime only. `yoho rollback VERSION` keeps the current secret and generated values (rotated secrets stay rotated); it refuses when the old Release reads a key the current one lacks. Only `--with-release-secrets` brings the Release's old values back; then rotate again. A held Destination lock refuses deploy/rollback/rotate/backup: `yoho lock status` shows the holder; pass `--lock-wait` to wait; `yoho lock release --force` only when that run was killed.
 - Rollback does not revert volumes or migrations. Take a `yoho backup run` before risky releases.
-- Run `yoho config check` and `yoho plan` before `yoho deploy`; deploy to staging first when a Destination exists.
+- Run `yoho config check`, `yoho doctor` and `yoho plan` before `yoho deploy`, and run `yoho doctor` again afterwards; deploy to staging first when a Destination exists.
 - `yoho audit [-n 50] [--since 7d] [--json]` shows who ran which mutating command on the Destination (deploy, apply, rollback, remove, app exec/run, backup, secrets rotate, lock, proxy), with Version, result and duration, from `<root>/apps/<app>/<dest>/audit.log` (started and finished records; `unfinished` means the command was killed). `app exec`/`app run` argv is recorded after redaction; secret values are never recorded, so keep them out of argv anyway. Gate Members are in `yoho access audit`.
 - `backup check` is read-only to the target/App data and never initializes or restores. Restic checks repository structure (`--read-data` adds all packs); archive checks one owned Backup (`--id`, default latest), its manifest/files and nested volume archives in private staging. It does not prove dump loading or App recovery. Coordinate external/shared-repository writers: only this Destination's Yoho lock is held, restic uses `--no-lock --no-cache`.
 - `schedule status --max-age 48h` explicitly checks last-success freshness against the Server clock (queried after state with nanosecond precision; query/parse failure never falls back locally) and exits nonzero for stale, never-success, future-success or no installed jobs. Pick the threshold for the user's real policy; never infer arbitrary `OnCalendar` periods (weekly jobs need a longer threshold). Default status stays informational. Parse `success_health`/`last_success` NDJSON rows; no automatic external notifications.

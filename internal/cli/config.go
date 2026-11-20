@@ -545,6 +545,32 @@ func runConfigCheck(cmd *cobra.Command, g *globals, offline bool) error {
 		return fail(exitLoad, err, "")
 	}
 	keyCount = len(keys)
+	findings := a.configFindings(r, keys)
+	for _, f := range findings {
+		if f.Level == composefile.LevelError {
+			errCount++
+		}
+		a.ui.Finding(f.Level, f.Service, f.Message)
+	}
+	if errCount > 0 {
+		return fail(exitFindings, fmt.Errorf("%d error(s)", errCount), "")
+	}
+	if len(a.cfg.Secrets.Nonempty) > 0 {
+		if offline {
+			a.ui.Warn("secrets.nonempty not verified (--offline)")
+		} else if _, err := a.loadSecrets(cmd.Context(), step); err != nil {
+			errCount = 1
+			return fail(exitFindings, err, secretsHint(err, "check the declared source keys in .yoho/secrets and secrets.values"))
+		}
+	}
+	step.Done(fmt.Sprintf("%s, %s, runtime %s", ui.Count(services, "service", ""), ui.Count(keyCount, "secret key", ""), a.dest.Runtime))
+	a.ui.Check(true, 0, offline, services, keyCount)
+	return nil
+}
+
+// configFindings runs all offline config and compose checks for a Destination.
+// Shared by `yoho config check` and `yoho doctor`.
+func (a *app) configFindings(r *composefile.Result, keys []string) []composefile.Finding {
 	findings := composefile.Check(r, a.dest.Runtime, keys)
 	findings = append(findings, composefile.CheckCloudflareSSH(a.destName, a.dest, r.Project)...)
 	findings = append(findings, composefile.CheckBackupCoverage(a.destName, a.cfg.Backups, r)...)
@@ -576,26 +602,7 @@ func runConfigCheck(cmd *cobra.Command, g *globals, offline bool) error {
 				Message: "custom_domains needs a published Proxy port for ACME (HTTP-01 on 80 or TLS-ALPN on 443); http_port and https_port are both 0"})
 		}
 	}
-	for _, f := range findings {
-		if f.Level == composefile.LevelError {
-			errCount++
-		}
-		a.ui.Finding(f.Level, f.Service, f.Message)
-	}
-	if errCount > 0 {
-		return fail(exitFindings, fmt.Errorf("%d error(s)", errCount), "")
-	}
-	if len(a.cfg.Secrets.Nonempty) > 0 {
-		if offline {
-			a.ui.Warn("secrets.nonempty not verified (--offline)")
-		} else if _, err := a.loadSecrets(cmd.Context(), step); err != nil {
-			errCount = 1
-			return fail(exitFindings, err, secretsHint(err, "check the declared source keys in .yoho/secrets and secrets.values"))
-		}
-	}
-	step.Done(fmt.Sprintf("%s, %s, runtime %s", ui.Count(services, "service", ""), ui.Count(keyCount, "secret key", ""), a.dest.Runtime))
-	a.ui.Check(true, 0, offline, services, keyCount)
-	return nil
+	return findings
 }
 
 func portDisabled(p *int) bool {
