@@ -180,6 +180,12 @@ func (a *app) collectChanges(ctx context.Context, s *session, refresh bool) (cha
 		return nil, false, &silentError{err}
 	}
 	changes = append(changes, ac...)
+	mc, meshErr := a.meshChanges(ctx)
+	if meshErr != nil {
+		step.Fail(meshErr, "check mesh Servers are reachable")
+		return nil, false, &silentError{meshErr}
+	}
+	changes = append(changes, mc...)
 	deployNeeded = true
 	if p, ok := a.runtime().(plan.Planner); ok {
 		rc, perr := p.Diff(ctx, d)
@@ -417,6 +423,9 @@ func (a *app) apply(ctx context.Context, o applyOptions) (err error) {
 		if err = a.admitPreview(ctx, s.hosts[0].Host, a.previewRecord(s)); err != nil {
 			return err
 		}
+	}
+	if err = a.reconcileMesh(ctx); err != nil {
+		return err
 	}
 	// Refuse before building: the runtime checks again.
 	if err = a.refusePendingRotations(ctx, s.hosts, nil); err != nil {

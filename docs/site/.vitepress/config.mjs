@@ -22,6 +22,7 @@ const guide = [
   ['Server setup', 'setup'],
   ['How big a Server?', 'sizing'],
   ['Swarm', 'swarm'],
+  ['WireGuard mesh', 'mesh'],
   ['High availability & recovery', 'high-availability'],
   ['Support matrix', 'support-matrix'],
   ['Compare', 'compare'],

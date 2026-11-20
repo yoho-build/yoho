@@ -75,6 +75,16 @@ func DecodeServiceExt(raw any) (ServiceExt, error) {
 }
 
 func (c *Config) applyDefaults() {
+	if c.Network.Mesh == "" {
+		c.Network.Mesh = "none"
+	}
+	if c.Network.Subnet == "" {
+		c.Network.Subnet = "10.210.0.0/24"
+	}
+	if c.Network.Port == 0 {
+		c.Network.Port = 51820
+	}
+
 	if c.Builder.Location == "" {
 		c.Builder.Location = "local"
 	}

@@ -39,6 +39,7 @@ func Validate(c *Config) []error {
 	var errs []error
 	add := func(f string, a ...any) { errs = append(errs, fmt.Errorf(f, a...)) }
 
+	errs = append(errs, validateNetwork(c)...)
 	if !appPattern.MatchString(c.App) {
 		add("app %q must match %s", c.App, appPattern)
 	}

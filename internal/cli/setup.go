@@ -104,6 +104,24 @@ Supports Debian and Ubuntu.`,
 					return err
 				}
 			}
+			if !planOnly && a.cfg.Network.Mesh == "wireguard" {
+				applyMesh := yes
+				if !yes {
+					ans, e := promptLine(cmd.OutOrStdout(), "Apply WireGuard mesh across all configured Servers? [y/N] ")
+					if e != nil {
+						return e
+					}
+					applyMesh = ans == "y" || ans == "yes"
+				}
+				if applyMesh {
+					if err = a.runMesh(ctx, "up"); err != nil {
+						return err
+					}
+				}
+			}
+			if planOnly && a.cfg.Network.Mesh == "wireguard" {
+				u.Info("WireGuard mesh: reconcile all configured Servers (yoho mesh up)")
+			}
 			if planOnly {
 				u.Finished(nil, "Plan only; nothing was changed")
 			} else {
