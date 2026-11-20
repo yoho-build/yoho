@@ -611,7 +611,7 @@ remotes are not files on the Server and are refused.
 
 func backupRestoreCmd(g *globals) *cobra.Command {
 	var jobName, from string
-	var yes, copyGenerated, cleanup bool
+	var yes, copyGenerated, cleanup, report bool
 	c := &cobra.Command{
 		Use:   "restore ID",
 		Short: "Restore a Backup, replacing the Services' volume data",
@@ -652,8 +652,8 @@ Services that an interrupted restore stopped are not resumed afterwards.`,
 		},
 		RunE: func(cmd *cobra.Command, args []string) (err error) {
 			if cleanup {
-				if from != "" || copyGenerated || yes {
-					return errors.New("--cleanup cannot be combined with --from, --copy-generated-secrets or --yes")
+				if from != "" || copyGenerated || yes || report {
+					return errors.New("--cleanup cannot be combined with --from, --copy-generated-secrets, --yes or --report")
 				}
 				return restoreCleanup(cmd, g, jobName)
 			}
@@ -801,6 +801,9 @@ Services that an interrupted restore stopped are not resumed afterwards.`,
 			if cross {
 				what = found.ID + " of " + source
 			}
+			if report {
+				reportRecovery(u, found, time.Since(start))
+			}
 			u.Finished(nil, fmt.Sprintf("Restored %s (%s) from %s in %s", a.cfg.App, a.destName, what, time.Since(start).Round(100*time.Millisecond)))
 			return nil
 		},
@@ -809,6 +812,7 @@ Services that an interrupted restore stopped are not resumed afterwards.`,
 	c.Flags().BoolVarP(&yes, "yes", "y", false, "Skip the confirmation prompt")
 	c.Flags().StringVar(&from, "from", "", "restore a Backup taken by another Destination of this App (e.g. --from production -d staging)")
 	c.Flags().BoolVar(&copyGenerated, "copy-generated-secrets", false, "with --from: also replace this Destination's generated secrets with the source's copies from the Backup")
+	c.Flags().BoolVar(&report, "report", false, "Emit recovery point and restore timing; full recovery and Scheduled Jobs must be verified after apply")
 	c.Flags().BoolVar(&cleanup, "cleanup", false, "remove leftover restore, backup run and check staging (and restore prior-state.json) of this Destination and exit")
 	return c
 }

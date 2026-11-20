@@ -243,3 +243,20 @@ a verified no-op changes nothing. App-file and Hook contents are fingerprinted.
 `plan --out` refuses an unconverged `app_dir` with exit 10. Raw command streams
 and dry-run modes have no operation envelopes. Pre-mutation failures are known;
 unknown/14 is reserved for interruption after mutation or Gate acceptance.
+
+## Recovery after losing a Server
+
+Retain the checkout/build inputs, operator secrets, Backup password and off-Server
+Backup Target. Keep ingress closed while empty data is running. Point SSH at the
+replacement, then run `yoho setup --yes`, `yoho apply --auto-approve`,
+`yoho backup restore latest --yes --report`, `yoho apply --auto-approve`.
+Restore needs deployed volumes and a Release; the final apply converges restored
+generated secrets and reinstalls Scheduled Jobs. Verify HTTP health, known rows,
+a worker job and `yoho schedule status` before reopening ingress.
+
+With `--json`, `recovery` reports the selected Backup's `recovery_point`,
+`data_restore_seconds`, `needs_old_server: false`; `full_recovery_seconds`,
+`image_source`, `scheduled_jobs_reinstalled` are null until independently measured.
+The CI recovery harness measures setup through final validation and prints all
+fields. Registry-less recovery rebuilds from git; old Release images need an
+archive or registry. Writes after the recovery point are lost.
