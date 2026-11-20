@@ -16,7 +16,9 @@ Validate with `yoho config check`; print the resolved file with `yoho config sho
 | `servers.<name>.ssh` | Required. `[user@]host[:port]`; honors `~/.ssh/config`, agent, ProxyJump. |
 | `servers.<name>.sudo` | Use `sudo -n` for privileged steps (setup, schedule install). |
 | `servers.<name>.root` | State directory on the Server. Default `/var/lib/yoho`. |
-| `servers.<name>.private_address`, `labels` | Reserved for Roles / Swarm placement. |
+| `servers.<name>.private_address`, `labels` | Private Swarm address and placement labels; mesh address takes precedence when enabled. |
+| `servers.<name>.endpoint` | Mesh public `host[:port]`, defaults to SSH host and mesh port; `none` for NATed Servers. |
+| `network.mesh`, `network.subnet`, `network.port` | Opt-in [WireGuard mesh](mesh.md): `none` (default) or `wireguard`, `10.210.0.0/24`, UDP `51820`. |
 | `destinations.<name>.servers` | Required. Exactly one for the compose runtime; several for swarm (first is the manager; all share one `root`). |
 | `destinations.<name>.runtime` | `compose` (default) or `swarm`. Switching causes downtime. |
 | `destinations.<name>.env` | Non-secret variables for compose interpolation (image tags, ports). |

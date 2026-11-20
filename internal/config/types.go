@@ -24,6 +24,8 @@ type Config struct {
 	// Destinations by name, e.g. production, staging.
 	Destinations map[string]Destination `json:"destinations" jsonschema:"required"`
 
+	Network NetworkConfig `json:"network,omitempty"`
+
 	Previews *PreviewsConfig `json:"previews,omitempty"`
 
 	Builder   Builder       `json:"builder,omitempty"`
@@ -50,6 +52,8 @@ type Server struct {
 	Root string `json:"root,omitempty"`
 	// Private address reachable from other Servers (Tailscale, VPC). Reserved for Roles.
 	PrivateAddress string `json:"private_address,omitempty"`
+	// Public WireGuard host[:port], or none for outbound-only hub access.
+	Endpoint string `json:"endpoint,omitempty"`
 	// Arbitrary labels, reserved for Roles / Swarm placement.
 	Labels map[string]string `json:"labels,omitempty"`
 }
@@ -511,4 +515,20 @@ type PreviewsConfig struct {
 	From      string `json:"from" jsonschema:"required"`
 	Host      string `json:"host" jsonschema:"required"`
 	MaxActive int    `json:"max_active,omitempty" jsonschema:"minimum=0"`
+}
+
+// NetworkConfig opts Servers into a Yoho-managed private network.
+type NetworkConfig struct {
+	Mesh   string `json:"mesh,omitempty" jsonschema:"enum=none,enum=wireguard"`
+	Subnet string `json:"subnet,omitempty"`
+	Port   int    `json:"port,omitempty" jsonschema:"minimum=1,maximum=65535"`
+}
+
+// EffectivePrivateAddress prefers the assigned mesh address when enabled.
+// Callers must refuse a missing allocation when the mesh is enabled.
+func (s Server) EffectivePrivateAddress(meshAddress string) string {
+	if meshAddress != "" {
+		return meshAddress
+	}
+	return s.PrivateAddress
 }

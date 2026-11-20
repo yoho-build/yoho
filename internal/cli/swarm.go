@@ -144,7 +144,7 @@ func (a *app) swarmInit(cmd *cobra.Command, mgr plan.NamedHost, yes, more bool) 
 	switch {
 	case state == "active" && manager:
 		step.Skip("already a Swarm manager")
-		a.swarmAdvice(mgr.Server.PrivateAddress == "")
+		a.swarmAdvice(mgr.Server.PrivateAddress == "" && a.cfg.Network.Mesh != "wireguard")
 		return nil
 	case state != "inactive":
 		err := fmt.Errorf("node state is %q", state)
@@ -153,7 +153,7 @@ func (a *app) swarmInit(cmd *cobra.Command, mgr plan.NamedHost, yes, more bool) 
 	}
 	step.Done("not in a Swarm")
 
-	addr, err := advertiseAddr(mgr.Name, mgr.Server)
+	addr, err := a.meshAdvertise(ctx, mgr)
 	if err != nil {
 		u.Finished(err, "")
 		return &silentError{err}
@@ -171,7 +171,7 @@ func (a *app) swarmInit(cmd *cobra.Command, mgr plan.NamedHost, yes, more bool) 
 		return &silentError{err}
 	}
 	step.Done()
-	a.swarmAdvice(mgr.Server.PrivateAddress == "")
+	a.swarmAdvice(mgr.Server.PrivateAddress == "" && a.cfg.Network.Mesh != "wireguard")
 	if more {
 		u.Info("next: `yoho swarm join` to add the other Servers")
 	}
@@ -218,7 +218,7 @@ func (a *app) swarmJoin(cmd *cobra.Command, hosts []plan.NamedHost, yes bool) er
 			step.Skip("already in a Swarm")
 			continue
 		}
-		addr, err := advertiseAddr(h.Name, h.Server)
+		addr, err := a.meshAdvertise(ctx, h)
 		if err != nil {
 			step.Fail(err, "set private_address for every Server")
 			return &silentError{err}

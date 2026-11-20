@@ -169,3 +169,16 @@ are required with `--json`. `up`, `down`, and `prune` emit `preview.up`,
 secrets layering and GitHub Actions.
 
 Transport choices appear as `transport` events with `host`, `mode`, `reason` and `hint` under `--json`. Plans report the expected transport; apply/deploy can report further fallbacks if a transfer fails. See [Builds & image transport](builds.md#transport).
+
+## Mesh
+
+All mesh commands operate on every Server in the Yoho file and support global `--json` output.
+
+| Command | Behavior |
+| --- | --- |
+| `mesh up` | Install tools, generate Server-local keys and reconcile peers, addresses and firewall rules. |
+| `mesh status` | Per-peer handshake age, received/transmitted bytes and ping RTT. |
+| `mesh rotate-keys` | Generate new keys on every Server and reconcile peer configs. |
+| `mesh down` | Remove owned interface, keys, config, unit enablement, state and tagged rules. |
+
+See [WireGuard mesh](mesh.md) for public endpoints, NAT routing and prerequisites.

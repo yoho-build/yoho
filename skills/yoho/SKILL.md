@@ -195,3 +195,18 @@ Fetch with `curl -sL <url>` (not a summarizing fetch tool). Relative paths are u
 `yoho setup` validates the local Docker pussh plugin and includes enabling the containerd image store on Servers with no running containers (restarts Docker, still confirmed per step). `--no-containerd-image-store` opts out. Busy or uninspectable Servers require explicit `--containerd-image-store`; plan a maintenance window. Setup prints the hint without restarting Docker automatically there.
 
 Docker auto transport uses pussh when the local plugin, SSH target and Server containerd image store are available; otherwise it sends full gzip archives, then optionally falls back to the configured registry. Apple container and Gate uploads use full archives: their docker load paths cannot safely import omitted blobs. Direct Builders stream full gzip/zstd archives. Unchanged images are skipped. Gate builds currently require Docker. Human fallback messages include a reason and hint; `--json` emits `transport` events with `host`, `mode`, `reason`, `hint`. A plan's choice is provisional until the actual transfer.
+
+## WireGuard mesh
+
+Opt in with top-level `network: {mesh: wireguard, subnet: 10.210.0.0/24, port: 51820}`.
+`servers.<name>.endpoint` is a public `host[:port]` or `none` behind NAT. For
+NATed Servers, the SSH hostname must resolve to the public egress IP for the
+firewall allowlist. All mesh commands affect every Server in the Yoho file,
+across Destinations; serialize them. `yoho setup` and apply/deploy reconcile it;
+`yoho plan` reads mesh state. Use `mesh up`, `mesh status --json`,
+`mesh rotate-keys`, `mesh down`. Run up before `swarm init/join`: the assigned
+mesh IP takes precedence over `private_address`. The first public Server by
+name routes NATed traffic with keepalive 25. Keys stay on their Server; never
+read or print `/etc/wireguard/yoho0.key` or a raw WireGuard dump. Teardown before
+removing a Server from config, then up on the new list. Roles/connections are
+reserved for a later feature.
