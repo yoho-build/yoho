@@ -692,8 +692,14 @@ const daemonJSON = "/etc/docker/daemon.json"
 func containerdStep(explicit bool) *Step {
 	return &Step{
 		Needs: []string{"docker"},
-		ID:    "containerd-image-store", Title: "Docker containerd image store (for pussh image transport)", checkSudo: true,
+		ID:    "containerd-image-store", Title: "Docker containerd image store (for pussh image transport)",
 		check: func(ctx context.Context, h remote.Host) (bool, string, error) {
+			if containerdActive(ctx, h) {
+				return false, "ok", nil
+			}
+			if _, unprivileged := h.(noSudo); unprivileged {
+				return explicit, "needs sudo to enable the containerd image store; connect as root or configure passwordless sudo and run yoho setup --containerd-image-store during a maintenance window", nil
+			}
 			cur, err := readDaemonJSON(ctx, h)
 			if err != nil {
 				return false, "", err
@@ -711,6 +717,9 @@ func containerdStep(explicit bool) *Step {
 				"and images in the previous store are hidden until pulled or pushed again", nil
 		},
 		apply: func(ctx context.Context, h remote.Host) error {
+			if containerdActive(ctx, h) {
+				return nil
+			}
 			cur, err := readDaemonJSON(ctx, h)
 			if err != nil {
 				return err
@@ -739,6 +748,11 @@ func containerdStep(explicit bool) *Step {
 			return run(ctx, h, "systemctl restart docker")
 		},
 	}
+}
+
+func containerdActive(ctx context.Context, h remote.Host) bool {
+	status, err := h.Output(ctx, remote.Cmd{Script: "docker info --format '{{json .DriverStatus}}'"})
+	return err == nil && strings.Contains(status, "io.containerd.snapshotter")
 }
 
 func readDaemonJSON(ctx context.Context, h remote.Host) (map[string]any, error) {

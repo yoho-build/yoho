@@ -1,6 +1,7 @@
 package transport
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"reflect"
@@ -40,7 +41,11 @@ func TestPreview(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			h := &fakeHost{name: "s", containerd: tc.store}
 			f := &fakeLocal{pussh: tc.plugin}
-			got := Preview(context.Background(), PushOptions{Hosts: []remote.Host{h}, Engine: tc.engine, Exec: f.exec, Targets: map[string]string{"s": tc.target}})["s"]
+			choices, err := Preview(context.Background(), PushOptions{Hosts: []remote.Host{h}, Engine: tc.engine, Exec: f.exec, Targets: map[string]string{"s": tc.target}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			got := choices["s"]
 			if tc.reason != "" {
 				if got != Fallback(tc.reason) {
 					t.Fatalf("%+v", got)
@@ -99,7 +104,11 @@ func (h failingProbeHost) Output(context.Context, remote.Cmd) (string, error) {
 func TestPusshProbeFailureDecision(t *testing.T) {
 	h := failingProbeHost{&fakeHost{name: "s"}}
 	f := &fakeLocal{pussh: true}
-	got := Preview(context.Background(), PushOptions{Hosts: []remote.Host{h}, Targets: map[string]string{"s": "u@s"}, Exec: f.exec})["s"]
+	choices, err := Preview(context.Background(), PushOptions{Hosts: []remote.Host{h}, Targets: map[string]string{"s": "u@s"}, Exec: f.exec})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := choices["s"]
 	if got != Fallback("probe") {
 		t.Fatalf("%+v", got)
 	}
@@ -129,5 +138,34 @@ func TestRuntimeFallbackDecisions(t *testing.T) {
 				t.Fatalf("%+v", got)
 			}
 		})
+	}
+}
+
+func TestPreviewExplicitContainerModes(t *testing.T) {
+	for _, mode := range []string{"", "auto", MethodLoad, MethodPussh, MethodRegistry, "invalid"} {
+		t.Run(mode, func(t *testing.T) {
+			h := &fakeHost{name: "s"}
+			o := PushOptions{Hosts: []remote.Host{h}, Images: []string{"x:1"}, Mode: mode, Engine: EngineContainer,
+				Exec: func(context.Context, Command) error { t.Fatal("executed during mode validation"); return nil }}
+			choices, err := Preview(context.Background(), o)
+			invalid := mode == MethodPussh || mode == MethodRegistry || mode == "invalid"
+			if invalid {
+				_, pushErr := Push(context.Background(), o)
+				if err == nil || pushErr == nil || err.Error() != pushErr.Error() {
+					t.Fatalf("preview=%v push=%v", err, pushErr)
+				}
+			} else if err != nil || choices["s"] != Fallback("container") {
+				t.Fatalf("%+v %v", choices, err)
+			}
+		})
+	}
+}
+
+func TestReportWithoutHint(t *testing.T) {
+	var out bytes.Buffer
+	p := &pusher{out: &out}
+	p.report(&fakeHost{name: "s"}, Decision{Mode: MethodLoad, Reason: "explicit transport"})
+	if out.String() != "s: load: explicit transport\n" {
+		t.Fatal(out.String())
 	}
 }

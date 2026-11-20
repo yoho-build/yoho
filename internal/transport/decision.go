@@ -70,17 +70,38 @@ func MissingBlobs(required, present []string) []string {
 	return missing
 }
 
+// Message formats a decision for human output, omitting an absent hint.
+func (d Decision) Message(host string) string {
+	message := fmt.Sprintf("%s: %s: %s", host, d.Mode, d.Reason)
+	if d.Hint != "" {
+		message += "; hint: " + d.Hint
+	}
+	return message
+}
+
+func validateMode(mode, engine string) error {
+	switch mode {
+	case "", "auto", MethodPussh, MethodLoad, MethodRegistry:
+	default:
+		return fmt.Errorf("unknown transport mode %q", mode)
+	}
+	return ValidateEngineMode(engine, mode)
+}
+
 func (p *pusher) report(h remote.Host, d Decision) {
 	if p.o.OnDecision != nil {
 		p.o.OnDecision(h.Name(), d)
 		return
 	}
-	fmt.Fprintf(p.out, "%s: %s: %s; hint: %s\n", h.Name(), d.Mode, d.Reason, d.Hint)
+	fmt.Fprintln(p.out, d.Message(h.Name()))
 }
 
 // Preview reports the transport expected before building. Auto may still fall
 // back if pussh fails at transfer time. It never exports or ships an image.
-func Preview(ctx context.Context, o PushOptions) map[string]Decision {
+func Preview(ctx context.Context, o PushOptions) (map[string]Decision, error) {
+	if err := validateMode(o.Mode, o.Engine); err != nil {
+		return nil, err
+	}
 	if o.Exec == nil {
 		o.Exec = osExec
 	}
@@ -88,16 +109,14 @@ func Preview(ctx context.Context, o PushOptions) map[string]Decision {
 	result := map[string]Decision{}
 	for _, h := range o.Hosts {
 		d := Decision{Mode: o.Mode, Reason: "explicit transport", Hint: ""}
-		if o.Mode == "" || o.Mode == "auto" {
-			if o.Engine == EngineContainer {
-				d = Fallback("container")
-			} else {
-				d = p.pusshDecision(ctx, h)
-			}
+		if o.Engine == EngineContainer {
+			d = Fallback("container")
+		} else if o.Mode == "" || o.Mode == "auto" {
+			d = p.pusshDecision(ctx, h)
 		}
 		result[h.Name()] = d
 	}
-	return result
+	return result, nil
 }
 
 func (p *pusher) pusshDecision(ctx context.Context, h remote.Host) Decision {

@@ -156,12 +156,15 @@ func (a *app) collectChanges(ctx context.Context, s *session, refresh bool) (cha
 		return nil, false, err
 	}
 	if len(images) > 0 && a.cfg.Builder.Location != "server" {
-		engine, _ := build.ResolveEngine(a.cfg.Builder, runtime.GOOS, runtime.GOARCH, exec.LookPath, nil)
+		engine, _ := build.ResolveEngine(a.cfg.Builder, runtime.GOOS, runtime.GOARCH, exec.LookPath, func() error { return exec.CommandContext(ctx, "container", "system", "status").Run() })
 		var hosts []remote.Host
 		for _, h := range s.hosts {
 			hosts = append(hosts, h.Host)
 		}
-		choices := transport.Preview(ctx, transport.PushOptions{Hosts: hosts, Mode: a.cfg.Transport.Mode, Engine: engine})
+		choices, err := transport.Preview(ctx, transport.PushOptions{Hosts: hosts, Mode: a.cfg.Transport.Mode, Engine: engine})
+		if err != nil {
+			return nil, false, err
+		}
 		for _, h := range s.hosts {
 			a.transportDecision(h.Name, choices[h.Name])
 		}

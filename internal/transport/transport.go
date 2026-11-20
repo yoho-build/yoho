@@ -103,18 +103,14 @@ func Push(ctx context.Context, o PushOptions) ([]Result, error) {
 	if o.Out == nil {
 		o.Out = io.Discard
 	}
-	switch o.Mode {
-	case "":
+	if err := validateMode(o.Mode, o.Engine); err != nil {
+		return nil, err
+	}
+	if o.Mode == "" {
 		o.Mode = "auto"
-	case "auto", MethodPussh, MethodLoad, MethodRegistry:
-	default:
-		return nil, fmt.Errorf("unknown transport mode %q", o.Mode)
 	}
 	if len(o.Images) == 0 {
 		return nil, nil
-	}
-	if err := ValidateEngineMode(o.Engine, o.Mode); err != nil {
-		return nil, err
 	}
 	p := &pusher{o: o, out: &syncWriter{w: o.Out}}
 	ids, err := p.localIDs(ctx)

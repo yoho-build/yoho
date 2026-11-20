@@ -56,8 +56,8 @@ for mode in $BENCH_MODES; do
    printf '%s,-,-,-,-,SKIP: zstd missing\n' "$mode" >> "$BENCH_OUTPUT/results.csv"; continue
   fi;;
  container)
-  if ! command -v container >/dev/null 2>&1; then
-   printf '%s,-,-,-,-,SKIP: Apple container missing\n' "$mode" >> "$BENCH_OUTPUT/results.csv"; continue
+  if [ "$(uname -s)" != Darwin ] || ! command -v container >/dev/null 2>&1 || ! container system status >/dev/null 2>&1; then
+   printf '%s,-,-,-,-,SKIP: Apple container unavailable\n' "$mode" >> "$BENCH_OUTPUT/results.csv"; continue
   fi
   engine=container;;
  direct)
@@ -84,7 +84,7 @@ CONFIG
   scope=deploy-including-build
   # Archive baselines prebuild, then time compression + transfer + docker load.
   if [ "$mode" = gzip ] || [ "$mode" = zstd ]; then
-   docker build --platform "$BENCH_PLATFORM" -t "$image" "$work" > "$log" 2>&1
+   docker build --load --platform "$BENCH_PLATFORM" -t "$image" "$work" > "$log" 2>&1
    docker save --platform "$BENCH_PLATFORM" -o "$work/image.tar" "$image" >> "$log" 2>&1
    scope=compress-transfer-load
   fi
@@ -97,7 +97,7 @@ CONFIG
    if ! ssh -o BatchMode=yes "$target" 'set -eu; docker load' < "$work/image.gz" >> "$log" 2>&1; then status=FAIL; fi;;
   zstd)
    zstd -1 -T0 -q -c "$work/image.tar" > "$work/image.zst"
-   if ! ssh -o BatchMode=yes "$target" 'set -eu; docker load' < "$work/image.zst" >> "$log" 2>&1; then status=FAIL; fi;;
+   if ! ssh -o BatchMode=yes "$target" 'set -eu; zstd -dc | docker load' < "$work/image.zst" >> "$log" 2>&1; then status=FAIL; fi;;
   *)
    if ! (cd "$work" && "$YOHO" --json deploy --version "$version") > "$log" 2>&1; then status=FAIL; fi;;
   esac

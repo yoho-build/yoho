@@ -294,6 +294,11 @@ func (a *app) scopedDeploy(ctx context.Context, ver string, skipBuild bool) (err
 		return err
 	}
 
+	if len(a.scopedImages(r.Project, ver)) > 0 {
+		if _, err := a.scopedTransport(); err != nil {
+			return err
+		}
+	}
 	hook := a.hookFunc(ver, "deploy", nil)
 	if err = hook(ctx, "pre-connect", nil); err != nil {
 		return err
@@ -435,6 +440,10 @@ func (a *app) scopedPlan(ctx context.Context, ver string) (changes []plan.Change
 	if err != nil {
 		return nil, err
 	}
+	decision, err := a.scopedTransport()
+	if len(built) > 0 && err != nil {
+		return nil, err
+	}
 	g, h, err := a.hello(ctx, gate.VerbDeploy)
 	if err != nil {
 		return nil, err
@@ -457,8 +466,8 @@ func (a *app) scopedPlan(ctx context.Context, ver string) (changes []plan.Change
 		step.Fail(err, hint)
 		return nil, &silentError{err}
 	}
-	if len(built) > 0 && a.cfg.Transport.Mode != transport.MethodRegistry {
-		a.transportDecision(g.Name(), transport.Fallback("gate"))
+	if len(built) > 0 {
+		a.transportDecision(g.Name(), decision)
 	}
 	step.Done()
 	u.Plan(changes)
@@ -521,10 +530,26 @@ func (a *app) scopedBuild(ctx context.Context, r *composefile.Result, ver, serve
 	return built, nil
 }
 
+// scopedTransport resolves the Gate's supported image transfer modes.
+func (a *app) scopedTransport() (transport.Decision, error) {
+	switch a.cfg.Transport.Mode {
+	case transport.MethodPussh:
+		return transport.Decision{}, errors.New("transport.mode pussh is not available through the Gate; set transport.mode: auto, load, or registry")
+	case transport.MethodRegistry:
+		return transport.Decision{Mode: transport.MethodRegistry, Reason: "explicit transport"}, nil
+	default:
+		return transport.Fallback("gate"), nil
+	}
+}
+
 // scopedShip returns the image archive to stream with the deploy request
 // (nil when the Server has every image), or, with transport.mode registry,
 // pushes the images and returns them for the Gate to pull.
 func (a *app) scopedShip(ctx context.Context, g *remote.Gate, built []string, platform string) (io.Reader, []string, error) {
+	decision, err := a.scopedTransport()
+	if err != nil {
+		return nil, nil, err
+	}
 	step := a.ui.Step("", "Ship %d image(s)", len(built))
 	if a.cfg.Transport.Mode == transport.MethodRegistry {
 		if a.cfg.Registry == nil {
@@ -532,6 +557,7 @@ func (a *app) scopedShip(ctx context.Context, g *remote.Gate, built []string, pl
 			step.Fail(err, "configure registry, or use transport.mode auto")
 			return nil, nil, &silentError{err}
 		}
+		a.transportDecision(g.Name(), decision)
 		if err := transport.PushRegistry(ctx, built, step.Output()); err != nil {
 			step.Fail(err, "log in to the registry with `docker login`")
 			return nil, nil, &silentError{err}
@@ -553,7 +579,7 @@ func (a *app) scopedShip(ctx context.Context, g *remote.Gate, built []string, pl
 		step.Done("already on the Server")
 		return nil, nil, nil
 	}
-	a.transportDecision(g.Name(), transport.Fallback("gate"))
+	a.transportDecision(g.Name(), decision)
 	pr, pw := io.Pipe()
 	go func() { pw.CloseWithError(transport.SaveArchive(ctx, missing, platform, pw)) }()
 	step.Done(fmt.Sprintf("%d streamed with the deploy", len(missing)))

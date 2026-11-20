@@ -1207,5 +1207,5 @@ func (a *app) appPS(cmd *cobra.Command) error {
 var _ = release.ProjectName
 
 func (a *app) transportDecision(host string, d transport.Decision) {
-	a.ui.Event("transport", fmt.Sprintf("%s: %s: %s; hint: %s", host, d.Mode, d.Reason, d.Hint), map[string]any{"host": host, "mode": d.Mode, "reason": d.Reason, "hint": d.Hint})
+	a.ui.Event("transport", d.Message(host), map[string]any{"host": host, "mode": d.Mode, "reason": d.Reason, "hint": d.Hint})
 }

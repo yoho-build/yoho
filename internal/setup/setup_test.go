@@ -785,3 +785,78 @@ func TestImageStoreProbeScript(t *testing.T) {
 		})
 	}
 }
+
+func TestContainerdPlanWithoutSudo(t *testing.T) {
+	for _, active := range []bool{false, true} {
+		for _, explicit := range []bool{false, true} {
+			t.Run(fmt.Sprintf("active=%v/explicit=%v", active, explicit), func(t *testing.T) {
+				h := host(ubuntu, "none")
+				base := h.respond
+				h.respond = func(script string) string {
+					if active && strings.Contains(script, ".DriverStatus") {
+						return `[["driver-type","io.containerd.snapshotter.v1"]]`
+					}
+					return base(script)
+				}
+				steps, err := Plan(context.Background(), h, Config{ContainerdImageStore: explicit})
+				if err != nil {
+					t.Fatal(err)
+				}
+				var found bool
+				for _, p := range steps {
+					if p.Step.ID != "containerd-image-store" {
+						continue
+					}
+					found = true
+					if active {
+						if p.Needed || p.Blocked != "" || p.Detail != "ok" {
+							t.Fatalf("%+v", p)
+						}
+					} else if explicit {
+						if !p.Needed || p.Blocked == "" {
+							t.Fatalf("%+v", p)
+						}
+					} else if p.Needed || p.Blocked != "" || !strings.Contains(p.Detail, "--containerd-image-store") {
+						t.Fatalf("%+v", p)
+					}
+				}
+				if !found {
+					t.Fatal("missing step")
+				}
+				for _, cmd := range h.cmds {
+					if strings.Contains(cmd.Script, "daemon.json") {
+						t.Fatalf("read privileged config: %s", cmd.Script)
+					}
+				}
+			})
+		}
+	}
+}
+
+func TestContainerdAlreadyActive(t *testing.T) {
+	for _, explicit := range []bool{false, true} {
+		h := host(ubuntu, "root")
+		h.respond = func(script string) string {
+			if strings.Contains(script, ".DriverStatus") {
+				return `[["driver-type","io.containerd.snapshotter.v1"]]`
+			}
+			return ""
+		}
+		step := containerdStep(explicit)
+		needed, detail, err := step.Check(context.Background(), h)
+		if err != nil || needed || detail != "ok" {
+			t.Fatalf("%v %q %v", needed, detail, err)
+		}
+		if err := step.apply(context.Background(), h); err != nil {
+			t.Fatal(err)
+		}
+		for _, cmd := range h.cmds {
+			if cmd.Sudo || strings.Contains(cmd.Script, "daemon.json") || strings.Contains(cmd.Script, "restart") {
+				t.Fatalf("unnecessary mutation or sudo: %+v", cmd)
+			}
+		}
+		if len(h.files) != 1 {
+			t.Fatal("config changed")
+		}
+	}
+}
