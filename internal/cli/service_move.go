@@ -14,6 +14,7 @@ import (
 	"github.com/yoho-build/yoho/internal/config"
 	"github.com/yoho-build/yoho/internal/deploy"
 	"github.com/yoho-build/yoho/internal/plan"
+	"github.com/yoho-build/yoho/internal/remote"
 )
 
 func init() { extraCommands = append(extraCommands, serviceCmd) }
@@ -68,7 +69,7 @@ func (a *app) moveService(ctx context.Context, service, target string, yes, clea
 		if err = a.confirmApply(applyInput, isTTY(), yes); err != nil {
 			return err
 		}
-		unlock, e := a.deployLocks(ctx, s.hosts, "cleanup-source")
+		unlock, e := a.operationLocks(ctx, s.hosts, deploy.LockInfo{Command: "service move --cleanup-source"}, true)
 		if e != nil {
 			return e
 		}
@@ -97,7 +98,7 @@ func (a *app) moveService(ctx context.Context, service, target string, yes, clea
 	if err = a.confirmApply(applyInput, isTTY(), yes); err != nil {
 		return err
 	}
-	unlock, err := a.deployLocks(ctx, s.hosts, "service-move")
+	unlock, err := a.operationLocks(ctx, s.hosts, deploy.LockInfo{Command: "service move"}, true)
 	if err != nil {
 		return err
 	}
@@ -106,6 +107,7 @@ func (a *app) moveService(ctx context.Context, service, target string, yes, clea
 	images := map[string]string{}
 	built := []string{}
 	version := ""
+	sourceImageID := ""
 	for _, h := range s.hosts {
 		rel, e := deploy.CurrentRelease(ctx, h.Host, d.App, d.Destination)
 		if e != nil {
@@ -118,6 +120,9 @@ func (a *app) moveService(ctx context.Context, service, target string, yes, clea
 			return fmt.Errorf("Servers have mixed Releases; converge with yoho apply before moving")
 		}
 		version = rel.Version
+		if h.Name == m.Source {
+			sourceImageID = rel.ImageIDs[service]
+		}
 		for svc, img := range rel.Images {
 			if prev := images[svc]; prev != "" && prev != img {
 				return fmt.Errorf("Service %s images differ across Servers", svc)
@@ -128,6 +133,9 @@ func (a *app) moveService(ctx context.Context, service, target string, yes, clea
 	}
 	if version == "" {
 		return fmt.Errorf("deploy the Destination before moving a Service")
+	}
+	if err = a.checkRotateVersion(version); err != nil {
+		return err
 	}
 	s.ver = version
 	// newDeploy already stripped build on its copy, so set the current images.
@@ -142,6 +150,24 @@ func (a *app) moveService(ctx context.Context, service, target string, yes, clea
 	}
 	slices.Sort(built)
 	d.Built = slices.Compact(built)
+	if err = a.refusePendingRotations(ctx, s.hosts, nil); err != nil {
+		return err
+	}
+	if err = a.checkMoveConfig(ctx, d); err != nil {
+		return err
+	}
+	for _, h := range s.hosts {
+		if h.Name == target {
+			image := d.Project.Services[service].Image
+			id, e := h.Host.Output(ctx, remote.Cmd{Script: "set -eu\ndocker image inspect --format '{{.Id}}' " + remote.Quote(image)})
+			if e != nil || strings.TrimSpace(id) == "" || sourceImageID == "" || strings.TrimSpace(id) != sourceImageID {
+				return fmt.Errorf("target Server lacks the deployed Version's image %s; ship that image before moving", image)
+			}
+		}
+	}
+	if err = (deploy.Roles{}).Preflight(ctx, d); err != nil {
+		return err
+	}
 	if err = beginOperation(ctx); err != nil {
 		return err
 	}
@@ -165,7 +191,11 @@ func (a *app) moveService(ctx context.Context, service, target string, yes, clea
 		_ = f.Flush()
 	}
 	if err != nil {
-		return err
+		var partial *deploy.RolesFailure
+		if !errors.As(err, &partial) {
+			return err
+		}
+		a.ui.Warn("Move is partial: target data is retained and source remains stopped. Inspect the move journal and converge using this target placement.")
 	}
 	edit := deploy.MovedDestination(a.dest, service, target)
 	data, e := yaml.Marshal(map[string]any{"destinations": map[string]any{a.destName: map[string]any{"roles": edit.Roles}}})
@@ -173,6 +203,9 @@ func (a *app) moveService(ctx context.Context, service, target string, yes, clea
 		return e
 	}
 	a.ui.Info("Update and commit this Role placement in %s before the next apply:\n%s", a.path, string(data))
+	if err != nil {
+		return err
+	}
 	a.ui.Finished(nil, "Moved "+service+" to "+target+"; source volumes retained")
 	return nil
 }
@@ -209,4 +242,17 @@ func (a *app) moveBackupJob(ctx context.Context, s *session, service string) (*b
 		return nil, e
 	}
 	return job, nil
+}
+
+func (a *app) checkMoveConfig(ctx context.Context, d *plan.Deploy) error {
+	changes, e := (deploy.Roles{}).Diff(ctx, d)
+	if e != nil {
+		return e
+	}
+	for _, c := range changes {
+		if c.Kind == "service" && c.Action != plan.ActionNoop {
+			return fmt.Errorf("local Compose or secrets differ from the deployed Version on %s/%s; deploy or undo those changes before moving", c.Server, c.Name)
+		}
+	}
+	return nil
 }

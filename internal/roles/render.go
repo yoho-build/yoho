@@ -4,6 +4,7 @@ package roles
 import (
 	"fmt"
 	"maps"
+	"net/netip"
 	"slices"
 	"strconv"
 
@@ -28,6 +29,9 @@ func Order(d config.Destination) ([]string, error) {
 		}
 		for _, svc := range c.Consumers {
 			for _, h := range d.ServiceServers(svc) {
+				if edges[p[0]] == nil || edges[h] == nil {
+					return nil, fmt.Errorf("connection placement references Server absent from Destination; retain all previous Servers before rollback")
+				}
 				if h != p[0] && !edges[p[0]][h] {
 					edges[p[0]][h] = true
 					degree[h]++
@@ -65,6 +69,13 @@ func Render(d *plan.Deploy, dest config.Destination, server string, addresses ma
 		return d, nil
 	}
 	out := *d
+	out.StrictSecretRefs = true
+	if out.Proxy.Tunnel != nil {
+		zero := 0
+		out.Proxy.HTTPPort = &zero
+		out.Proxy.HTTPSPort = &zero
+	}
+	out.SecretRefs = maps.Clone(d.SecretRefs)
 	p, err := d.Project.WithServicesTransform(func(_ string, s types.ServiceConfig) (types.ServiceConfig, error) { return s, nil })
 	if err != nil {
 		return nil, err
@@ -90,12 +101,14 @@ func Render(d *plan.Deploy, dest config.Destination, server string, addresses ma
 			continue
 		}
 		ext := d.Ext[name]
-		if ext.Proxy != nil && len(hosts) > 1 && d.Proxy.Tunnel != nil && d.Proxy.Tunnel.TokenSecret != "" {
-			proxy := *ext.Proxy
-			proxy.TLS = false
-			proxy.TLSStaging = false
-			ext.Proxy = &proxy
+		if ext.Proxy != nil {
+			pr := *ext.Proxy
+			if pr.SSL != nil {
+				pr.TLS = *pr.SSL
+			}
+			ext.Proxy = &pr
 		}
+
 		if len(hosts) > 0 && hosts[0] != server {
 			ext.ReleaseCommand = nil
 		}
@@ -119,14 +132,31 @@ func Render(d *plan.Deploy, dest config.Destination, server string, addresses ma
 			if addr == "" {
 				return nil, fmt.Errorf("connection %s Server %s has no effective private address", connName, providers[0])
 			}
+			ip, e := netip.ParseAddr(addr)
+			if e != nil {
+				return nil, fmt.Errorf("connection %s requires a private IP address", connName)
+			}
+			addr = ip.String()
 			if name == c.Service {
+				for _, p := range svc.Ports {
+					if p.Target != uint32(c.Port) || p.Protocol != "" && p.Protocol != "tcp" {
+						continue
+					}
+					bound, e := netip.ParseAddr(p.HostIP)
+					if e == nil && bound.IsLoopback() {
+						continue
+					}
+					if e != nil || bound != ip || p.Published != strconv.Itoa(c.Port) {
+						return nil, fmt.Errorf("connection %s may only publish %s:%d or an explicit loopback port", connName, addr, c.Port)
+					}
+				}
 				// Replace same-target TCP mappings with the protected private binding.
 				svc.Ports = slices.DeleteFunc(svc.Ports, func(p types.ServicePortConfig) bool {
-					return p.Target == uint32(c.Port) && (p.Protocol == "" || p.Protocol == "tcp")
+					return p.Target == uint32(c.Port) && (p.Protocol == "" || p.Protocol == "tcp") && sameIP(p.HostIP, addr) && p.Published == strconv.Itoa(c.Port)
 				})
 				svc.Ports = append(svc.Ports, types.ServicePortConfig{HostIP: addr, Target: uint32(c.Port), Published: strconv.Itoa(c.Port), Protocol: "tcp"})
 			}
-			if providers[0] == server || !slices.Contains(c.Consumers, name) {
+			if !slices.Contains(c.Consumers, name) {
 				continue
 			}
 			if svc.Environment == nil {
@@ -134,15 +164,50 @@ func Render(d *plan.Deploy, dest config.Destination, server string, addresses ma
 			}
 			port := strconv.Itoa(c.Port)
 			host := addr
+			if providers[0] == server {
+				host = c.Service
+			}
 			svc.Environment[config.ConnectionEnvName(connName)+"_HOST"] = &host
 			svc.Environment[config.ConnectionEnvName(connName)+"_PORT"] = &port
 			if svc.ExtraHosts == nil {
 				svc.ExtraHosts = types.HostsList{}
 			}
-			svc.ExtraHosts[c.Service] = []string{addr}
-			svc.ExtraHosts[c.Service+"."+d.App+".yoho.internal"] = []string{addr}
+			if providers[0] != server {
+				svc.ExtraHosts[c.Service] = []string{addr}
+				svc.ExtraHosts[c.Service+"."+d.App+".yoho.internal"] = []string{addr}
+			}
 		}
 		p.Services[name] = svc
+	}
+	// Preserve the qualified endpoint when a provider and consumer colocate.
+	for _, connName := range sortedKeys(dest.Connections) {
+		c := dest.Connections[connName]
+		provider, ok := p.Services[c.Service]
+		if !ok {
+			continue
+		}
+		local := false
+		for _, consumer := range c.Consumers {
+			_, exists := p.Services[consumer]
+			local = local || exists
+		}
+		if !local {
+			continue
+		}
+		if provider.Networks == nil {
+			provider.Networks = map[string]*types.ServiceNetworkConfig{"default": {}}
+		}
+		for n, nc := range provider.Networks {
+			if nc == nil {
+				nc = &types.ServiceNetworkConfig{}
+			}
+			alias := c.Service + "." + d.App + ".yoho.internal"
+			if !slices.Contains(nc.Aliases, alias) {
+				nc.Aliases = append(nc.Aliases, alias)
+			}
+			provider.Networks[n] = nc
+		}
+		p.Services[c.Service] = provider
 	}
 	// Unused top-level resources must not create duplicate Stateful volumes
 	// or ship another Server's Compose secret/config files.
@@ -197,4 +262,13 @@ func sortedKeys[V any](m map[string]V) []string {
 	}
 	slices.Sort(out)
 	return out
+}
+
+func sameIP(a, b string) bool {
+	x, e := netip.ParseAddr(a)
+	if e != nil {
+		return false
+	}
+	y, e := netip.ParseAddr(b)
+	return e == nil && x == y
 }

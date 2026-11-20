@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/netip"
 	"strconv"
 	"strings"
 
@@ -45,7 +46,25 @@ func CheckBindings(ctx context.Context, h remote.Host, app, dest, server string,
 				return err
 			}
 			bs := bindings[strconv.Itoa(c.Port)+"/tcp"]
-			if len(bs) != 1 || bs[0].HostIP != addresses[server] || bs[0].HostPort != strconv.Itoa(c.Port) {
+			want, e := netip.ParseAddr(addresses[server])
+			if e != nil {
+				return e
+			}
+			found := false
+			for _, binding := range bs {
+				ip, e := netip.ParseAddr(binding.HostIP)
+				if e != nil {
+					return e
+				}
+				if ip.IsLoopback() {
+					continue
+				}
+				if ip != want || binding.HostPort != strconv.Itoa(c.Port) {
+					return fmt.Errorf("connection %s has an unexpected public binding", c.Service)
+				}
+				found = true
+			}
+			if !found {
 				return fmt.Errorf("connection %s:%d is not bound exclusively to %s", c.Service, c.Port, addresses[server])
 			}
 		}

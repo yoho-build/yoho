@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	"github.com/yoho-build/yoho/internal/config"
+	"github.com/yoho-build/yoho/internal/deploy"
 	"github.com/yoho-build/yoho/internal/plan"
 	"github.com/yoho-build/yoho/internal/release"
 	"github.com/yoho-build/yoho/internal/schedule"
@@ -132,11 +133,17 @@ func (a *app) planSchedules(ctx context.Context, hosts []plan.NamedHost, store *
 // applySchedules converges Scheduled Jobs to config (install/update/remove).
 func (a *app) applySchedules(ctx context.Context, hosts []plan.NamedHost, store *secrets.Store) error {
 	if a.dest.Roles != nil {
+		u, e := a.operationLocks(ctx, hosts, deploy.LockInfo{Command: "schedule install"}, false)
+		if e != nil {
+			return e
+		}
+		defer func() { _ = u(context.WithoutCancel(ctx)) }()
 		for _, h := range hosts {
 			b, e := a.rolesJobsApp(ctx, hosts, h)
 			if e != nil {
 				return e
 			}
+			b.rolesLocksHeld = true
 			if e = b.applySchedules(ctx, []plan.NamedHost{h}, store); e != nil {
 				return e
 			}

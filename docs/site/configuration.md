@@ -16,10 +16,10 @@ Validate with `yoho config check`; print the resolved file with `yoho config sho
 | `servers.<name>.ssh` | Required. `[user@]host[:port]`; honors `~/.ssh/config`, agent, ProxyJump. |
 | `servers.<name>.sudo` | Use `sudo -n` for privileged steps (setup, schedule install). |
 | `servers.<name>.root` | State directory on the Server. Default `/var/lib/yoho`. |
-| `servers.<name>.private_address`, `labels` | Private Swarm address and placement labels; mesh address takes precedence when enabled. |
+| `servers.<name>.private_address`, `labels` | Private Roles/Swarm address and placement labels; mesh address takes precedence when enabled. |
 | `servers.<name>.endpoint` | Mesh public `host[:port]`, defaults to SSH host and mesh port; `none` for NATed Servers. |
 | `network.mesh`, `network.subnet`, `network.port` | Opt-in [WireGuard mesh](mesh.md): `none` (default) or `wireguard`, `10.210.0.0/24`, UDP `51820`. |
-| `destinations.<name>.servers` | Required. Exactly one for the compose runtime; several for swarm (first is the manager; all share one `root`). |
+| `destinations.<name>.servers` | Required. Exactly one for Compose without Roles; several with Roles or Swarm (first is the manager; all share one `root`). |
 | `destinations.<name>.runtime` | `compose` (default) or `swarm`. Switching causes downtime. |
 | `destinations.<name>.env` | Non-secret variables for compose interpolation (image tags, ports). |
 | `destinations.<name>.proxy` | Overrides the top-level `proxy` for this Destination. |
@@ -185,6 +185,7 @@ The Cloudflare API token needs Account > Cloudflare Tunnel > Edit. It is resolve
 | `proxy.health_port` | Optional Proxy HTTP probe port, 1–65535. Omitted: use `proxy.port` (traffic still uses `proxy.port`). Explicit `0` is invalid. |
 | `proxy.health_timeout` | Optional positive Go duration per Proxy HTTP probe, e.g. `750ms` or `2s`. Omitted: pinned kamal-proxy default. Empty, zero, negative and unitless values are invalid. Separate from `deploy_timeout` and Docker `healthcheck.timeout`. |
 | `proxy.tls` | Let's Encrypt in the Proxy. Leave off behind a tunnel. |
+| `proxy.ssl` | Explicit TLS selection; `false` is required for multi-Server Roles behind an external TLS load balancer. Named Tunnel ingress keeps public Proxy ports closed. |
 | `proxy.tls_staging` | Use untrusted Let's Encrypt staging certificates for trials. Default false; requires `tls: true`. Changing this updates the route. See [Customer-owned domains](custom-domains.md#staging-trials). |
 | `proxy.deploy_timeout`, `drain_timeout` | Seconds; default 30 each. |
 | `stateful` | Pin to one Server, stop-first recreate, never scaled. |
@@ -201,7 +202,7 @@ The Cloudflare API token needs Account > Cloudflare Tunnel > Edit. It is resolve
 | `backup.restore_dump` | Command receiving the dump on stdin. Empty: dumps stay on the Server. |
 | `backup.verify` | Command run in the restored copy by `yoho backup drill` after it is healthy; nonzero exit fails the drill. |
 | `strict_drain` | Swarm only: Proxy routes to tasks instead of the service VIP. |
-| `endpoint` | Reserved for Roles. |
+| `endpoint` | Legacy reserved field; use Destination `connections` for remote Service endpoints. |
 
 Stateful rule: a Service with volumes deployed to several Servers without `stateful: true` is an error.
 

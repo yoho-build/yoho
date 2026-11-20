@@ -533,3 +533,20 @@ jobs:
         with:
           name: fault-${{ matrix.fault }}
           path: ${{ runner.temp }}/resilience-logs
+
+  roles:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+      - name: Build Yoho
+        run: go build -o "$RUNNER_TEMP/yoho" ./cmd/yoho
+      - name: Shellcheck Roles harness
+        run: shellcheck test/integration/roles.sh
+      - name: Roles across two SSH Docker Servers
+        env:
+          YOHO_BIN: ${{ runner.temp }}/yoho
+        run: bash test/integration/roles.sh

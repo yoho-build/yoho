@@ -55,3 +55,10 @@ func TestRolesConfigValidation(t *testing.T) {
 		})
 	}
 }
+
+func TestReviewRcloneIndependentRoleOwnersWarn(t *testing.T) {
+	c := &Config{Destinations: map[string]Destination{"production": {Roles: map[string]Role{"one": {Services: []string{"db"}, Servers: []string{"a"}}, "two": {Services: []string{"files"}, Servers: []string{"b"}}}}}, Backups: BackupsConfig{Targets: map[string]BackupTarget{"same": {RcloneConfigSecret: "OAUTH"}}, Jobs: map[string]BackupJob{"db": {Destination: "production", Target: "same", Services: []string{"db"}}, "files": {Destination: "production", Target: "same", Services: []string{"files"}}}}}
+	if got := strings.Join(RcloneWarnings(c), "\n"); !strings.Contains(got, "independent Roles Servers a, b") {
+		t.Fatal(got)
+	}
+}

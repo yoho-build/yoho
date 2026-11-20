@@ -625,9 +625,14 @@ func (a *app) refusePendingRotations(ctx context.Context, hosts []plan.NamedHost
 	if len(hosts) == 0 || hosts[0].Host == nil {
 		return nil
 	}
-	if err := deploy.CheckPendingRotations(ctx, hosts[0].Host, a.cfg.App, a.destName, allow); err != nil {
-		a.ui.Error(err, hintFor(err, "check that the Server is reachable"))
-		return &silentError{err}
+	for _, h := range hosts {
+		if a.dest.Roles == nil && h.Name != hosts[0].Name {
+			continue
+		}
+		if err := deploy.CheckPendingRotations(ctx, h.Host, a.cfg.App, a.destName, allow); err != nil {
+			a.ui.Error(err, hintFor(err, "check that the Server is reachable"))
+			return &silentError{err}
+		}
 	}
 	return nil
 }

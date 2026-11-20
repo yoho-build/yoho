@@ -250,14 +250,18 @@ func (a *app) collectChanges(ctx context.Context, s *session, refresh bool) (cha
 		return nil, false, &silentError{err}
 	}
 	changes = append(changes, cc...)
-	pending, err := deploy.PendingRotations(ctx, s.hosts[0].Host, a.cfg.App, a.destName)
-	if err != nil {
-		step.Fail(err, "check that the Server is reachable")
-		return nil, false, &silentError{err}
-	}
 	step.Done()
-	if len(pending) > 0 {
-		a.ui.Warn("%s", deploy.PendingRotationWarning(pending))
+	for _, h := range s.hosts {
+		if a.dest.Roles == nil && h.Name != s.hosts[0].Name {
+			continue
+		}
+		pending, e := deploy.PendingRotations(ctx, h.Host, a.cfg.App, a.destName)
+		if e != nil {
+			return nil, false, e
+		}
+		if len(pending) > 0 {
+			a.ui.Warn("%s: %s", h.Name, deploy.PendingRotationWarning(pending))
+		}
 	}
 	if w := deploy.GateHardeningWarning(changes); w != "" {
 		a.ui.Warn("%s", w)
@@ -437,6 +441,15 @@ func (a *app) apply(ctx context.Context, o applyOptions) (err error) {
 		return &silentError{&validationError{terr}}
 	}
 
+	if a.dest.Roles != nil {
+		pd, e := a.newDeploy(s, nil, true)
+		if e != nil {
+			return e
+		}
+		if e = (deploy.Roles{}).Preflight(ctx, pd); e != nil {
+			return e
+		}
+	}
 	deployNeeded := true
 	if o.ShowPlan && approved == nil {
 		var changes []plan.Change
@@ -521,6 +534,15 @@ func (a *app) apply(ctx context.Context, o applyOptions) (err error) {
 	if err = a.refusePendingRotations(ctx, s.hosts, nil); err != nil {
 		return err
 	}
+	if a.dest.Roles != nil {
+		pd, e := a.newDeploy(s, nil, true)
+		if e != nil {
+			return e
+		}
+		if e = (deploy.Roles{}).Preflight(ctx, pd); e != nil {
+			return e
+		}
+	}
 	// Preview admission and mesh reconciliation mutate the Server. Verified
 	// no-op plans returned above; start the operation before either mutation.
 	if a.previewName != "" || a.cfg.Network.Mesh == "wireguard" {
@@ -534,6 +556,9 @@ func (a *app) apply(ctx context.Context, o applyOptions) (err error) {
 		}
 	}
 	if err = a.reconcileMesh(ctx); err != nil {
+		return err
+	}
+	if err = a.rolesAddresses(ctx, s.hosts); err != nil {
 		return err
 	}
 	// A migration cutover is decided (and its tokens resolved) before the

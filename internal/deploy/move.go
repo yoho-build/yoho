@@ -65,7 +65,7 @@ func PlanMove(d *plan.Deploy, service, target string) (MovePlan, error) {
 		if !ok || bool(cfg.External) || cfg.Driver != "" && cfg.Driver != "local" || len(cfg.DriverOpts) > 0 {
 			return m, fmt.Errorf("volume %s must be a Yoho-owned plain local volume", v.Source)
 		}
-		if len(ext.Backup.Dump) == 0 && !slices.Contains(ext.Backup.Volumes, v.Source) {
+		if !slices.Contains(ext.Backup.Volumes, v.Source) {
 			return m, fmt.Errorf("Backup must include volume %s", v.Source)
 		}
 		for other, s := range d.Project.Services {
@@ -196,8 +196,22 @@ func MoveService(ctx context.Context, d *plan.Deploy, m MovePlan, backup func(co
 		return err
 	}
 	stopped := false
+	targetAuthoritative := false
 	defer func() {
 		if err == nil || !stopped {
+			return
+		}
+		if targetAuthoritative {
+			journal.State = "partial"
+			journal.Steps["source"] = "stopped-volume-retained"
+			journal.Steps["target"] = "data-retained-inspect-and-converge"
+			persist := save(context.WithoutCancel(ctx))
+			var partial *RolesFailure
+			if errors.As(err, &partial) {
+				err = &RolesFailure{Err: errors.Join(err, persist), Changed: append(slices.Clone(partial.Changed), m.Source+"/"+m.Service), Unchanged: partial.Unchanged}
+			} else {
+				err = &RolesFailure{Err: errors.Join(err, persist), Changed: []string{m.Target + "/" + m.Service}}
+			}
 			return
 		}
 		cctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Minute)
@@ -220,6 +234,7 @@ func MoveService(ctx context.Context, d *plan.Deploy, m MovePlan, backup func(co
 			old := *d
 			old.Hook = nil
 			old.ServiceMove = true
+			old.SkipReleaseCommands = true
 			_, restart = (Roles{LockHeld: true}).Deploy(cctx, &old)
 		}
 		journal.State = "failed"
@@ -271,7 +286,7 @@ func MoveService(ctx context.Context, d *plan.Deploy, m MovePlan, backup func(co
 			if !needed {
 				continue
 			}
-			owner := generatedOwner(d, key)
+			owner := GeneratedOwner(d, key)
 			var ownerHost remote.Host
 			for _, h := range d.Servers {
 				if h.Name == owner {
@@ -293,9 +308,12 @@ func MoveService(ctx context.Context, d *plan.Deploy, m MovePlan, backup func(co
 	}); err != nil {
 		return err
 	}
+	targetAuthoritative = true
 	if err = step("start-check-repoint", func() error {
 		next := *d
 		next.ServiceMove = true
+		next.SkipReleaseCommands = true
+		next.Hook = nil
 		next.Roles = MovedDestination(d.Roles, m.Service, m.Target)
 		_, e := (Roles{LockHeld: true}).Deploy(ctx, &next)
 		return e

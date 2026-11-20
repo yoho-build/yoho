@@ -352,6 +352,9 @@ func (p ServiceProxy) CustomDomainsAllow() string {
 
 // ValidateRouting checks TLS hosts versus custom_domains.allow.
 func (p ServiceProxy) ValidateRouting() error {
+	if p.SSL != nil {
+		p.TLS = *p.SSL
+	}
 	if p.TLSStaging && !p.TLS {
 		return fmt.Errorf("x-yoho.proxy.tls_staging requires tls: true")
 	}
@@ -645,6 +648,43 @@ func RcloneWarnings(c *Config) []string {
 		for i, a := range dests {
 			for _, b := range dests[i+1:] {
 				warnings = append(warnings, fmt.Sprintf("rclone_config_secret %s is used by Destinations %s and %s; OAuth remotes rotate refresh tokens, so give each Destination its own authorized remote/secret", key, a, b))
+			}
+		}
+	}
+	for _, destName := range sortedKeys(c.Destinations) {
+		d := c.Destinations[destName]
+		if d.Roles == nil {
+			continue
+		}
+		serversByKey := map[string]map[string]bool{}
+		for _, job := range c.Backups.Jobs {
+			if job.Destination != destName {
+				continue
+			}
+			key := c.Backups.Targets[job.Target].RcloneConfigSecret
+			if key == "" {
+				continue
+			}
+			if serversByKey[key] == nil {
+				serversByKey[key] = map[string]bool{}
+			}
+			if len(job.Services) == 0 {
+				for _, role := range d.Roles {
+					for _, server := range role.Servers {
+						serversByKey[key][server] = true
+					}
+				}
+			} else {
+				for _, svc := range job.Services {
+					for _, server := range d.ServiceServers(svc) {
+						serversByKey[key][server] = true
+					}
+				}
+			}
+		}
+		for _, key := range sortedKeys(serversByKey) {
+			if len(serversByKey[key]) > 1 {
+				warnings = append(warnings, fmt.Sprintf("rclone_config_secret %s is used on independent Roles Servers %s in Destination %s; give each Server its own authorized OAuth remote/secret", key, strings.Join(sortedKeys(serversByKey[key]), ", "), destName))
 			}
 		}
 	}

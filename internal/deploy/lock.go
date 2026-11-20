@@ -4,8 +4,11 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"github.com/yoho-build/yoho/internal/plan"
 	"path"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -226,4 +229,34 @@ func acquireLockScript(ctx context.Context, host remote.Host, dir, script string
 		}
 		return nil
 	}, nil
+}
+
+// AcquireLocks is the single multi-Server lock coordinator. On refusal it
+// releases every acquired lock, and cleanup uses an uncancelled context.
+// take permits the CLI's existing --lock-wait policy without duplicating order.
+func AcquireLocks(ctx context.Context, hosts []plan.NamedHost, app, dest string, info LockInfo, take func(context.Context, plan.NamedHost, LockInfo) (func(context.Context) error, error)) (func(context.Context) error, error) {
+	hosts = slices.Clone(hosts)
+	slices.SortFunc(hosts, func(a, b plan.NamedHost) int { return strings.Compare(a.Name, b.Name) })
+	var held []func(context.Context) error
+	unlock := func(ctx context.Context) error {
+		var errs []error
+		for i := len(held) - 1; i >= 0; i-- {
+			errs = append(errs, held[i](context.WithoutCancel(ctx)))
+		}
+		return errors.Join(errs...)
+	}
+	for _, h := range hosts {
+		var u func(context.Context) error
+		var e error
+		if take != nil {
+			u, e = take(ctx, h, info)
+		} else {
+			u, e = AcquireLock(ctx, h.Host, app, dest, info)
+		}
+		if e != nil {
+			return nil, errors.Join(e, unlock(ctx))
+		}
+		held = append(held, u)
+	}
+	return unlock, nil
 }

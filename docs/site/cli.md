@@ -270,3 +270,10 @@ plans and operation Service state include Server placement. Mixed rollout: exit
 13; disconnected/unknown outcome: exit 14. Backups follow the volume owner.
 
 For a Roles Destination, `yoho status` shows each proxied Service’s per-Server Proxy and route state; `yoho status --operation ID` reads rollout progress. `yoho releases` includes a Server column.
+
+Roles Service commands `app run`, `app exec` and `app logs` accept `--server`.
+Without it, replicas use the first hosting Server with a note; logs for Services
+on different Servers are grouped by placement (following requires one Server).
+`remove`, maintenance locks, Backup operations and Scheduled Job installation
+coordinate all affected Servers. Status and Scheduled Job status inspect all
+Roles Servers.

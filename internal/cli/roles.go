@@ -2,7 +2,6 @@ package cli
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"github.com/yoho-build/yoho/internal/config"
 	"github.com/yoho-build/yoho/internal/deploy"
@@ -25,32 +24,7 @@ func (a *app) deployLocks(ctx context.Context, hosts []plan.NamedHost, ver strin
 	if a.dest.Roles == nil {
 		return a.deployLock(ctx, hosts[0], ver)
 	}
-	hosts = slices.Clone(hosts)
-	slices.SortFunc(hosts, func(a, b plan.NamedHost) int {
-		if a.Name < b.Name {
-			return -1
-		}
-		if a.Name > b.Name {
-			return 1
-		}
-		return 0
-	})
-	var releases []func(context.Context) error
-	unlock := func(ctx context.Context) error {
-		var errs []error
-		for i := len(releases) - 1; i >= 0; i-- {
-			errs = append(errs, releases[i](ctx))
-		}
-		return errors.Join(errs...)
-	}
-	for _, h := range hosts {
-		f, err := a.deployLock(ctx, h, ver)
-		if err != nil {
-			return nil, errors.Join(err, unlock(context.WithoutCancel(ctx)))
-		}
-		releases = append(releases, f)
-	}
-	return unlock, nil
+	return a.operationLocks(ctx, hosts, deploy.LockInfo{Version: ver, Command: "deploy"}, true)
 }
 
 func (a *app) rolesAddresses(ctx context.Context, hosts []plan.NamedHost) error {
@@ -66,17 +40,23 @@ func (a *app) rolesAddresses(ctx context.Context, hosts []plan.NamedHost) error 
 	if err != nil {
 		return err
 	}
-	names := []string{}
-	for n := range a.cfg.Servers {
-		names = append(names, n)
-	}
-	state, err := mesh.Allocate(mesh.Defaults(a.cfg.Network).Subnet, names, copies)
-	if err != nil {
-		return err
+	allocations := map[string]string{}
+	for _, copy := range copies {
+		for name, addr := range copy.Addresses {
+			if prev := allocations[name]; prev != "" && prev != addr {
+				return fmt.Errorf("conflicting mesh allocation for %s; run yoho mesh up", name)
+			}
+			allocations[name] = addr
+		}
 	}
 	for i, h := range hosts {
-		hosts[i].Server.PrivateAddress = h.Server.EffectivePrivateAddress(state.Addresses[h.Name])
+		addr := allocations[h.Name]
+		if addr == "" {
+			return fmt.Errorf("Server %s has no mesh allocation; run yoho mesh up", h.Name)
+		}
+		hosts[i].Server.PrivateAddress = addr
 	}
+
 	return nil
 }
 
@@ -188,4 +168,23 @@ func (a *app) rolesStatus(ctx context.Context) error {
 		}
 	}
 	return nil
+}
+
+func (a *app) operationLocks(ctx context.Context, hosts []plan.NamedHost, info deploy.LockInfo, steps bool) (func(context.Context) error, error) {
+	if a.dest.Roles == nil && len(hosts) > 1 {
+		hosts = hosts[:1]
+	}
+	return deploy.AcquireLocks(ctx, hosts, a.cfg.App, a.destName, info, func(ctx context.Context, h plan.NamedHost, info deploy.LockInfo) (func(context.Context) error, error) {
+		if !steps {
+			return a.acquireLock(ctx, h.Host, info)
+		}
+		step := a.ui.Step(h.Name, "Acquire lock")
+		u, e := a.acquireLock(ctx, h.Host, info)
+		if e != nil {
+			step.Fail(e, hintFor(e, "check that the Server is reachable"))
+			return nil, &silentError{e}
+		}
+		step.Done()
+		return u, nil
+	})
 }

@@ -535,7 +535,12 @@ func checkDoctorBackups(ctx context.Context, a *app, h plan.NamedHost, maxAge ti
 }
 
 func checkDoctorDrill(ctx context.Context, a *app, h plan.NamedHost, now time.Time) doctorFinding {
-	entries, err := audit.ReadCommand(ctx, h.Host, a.cfg.App, a.destName, "backup drill")
+	authority, done, err := a.authority(ctx, h)
+	if err != nil {
+		return doctorFinding{Check: "drill", Severity: severityWarning, Subject: h.Name, Message: err.Error()}
+	}
+	defer done()
+	entries, err := audit.ReadCommand(ctx, authority, a.cfg.App, a.destName, "backup drill")
 	if err != nil {
 		return doctorFinding{
 			Check:    "drill",
@@ -548,6 +553,19 @@ func checkDoctorDrill(ctx context.Context, a *app, h plan.NamedHost, now time.Ti
 	var last time.Time
 	for _, r := range audit.Pair(entries) {
 		first := r.First()
+		if dest, ok := a.cfg.Destinations[a.destName]; ok && dest.Roles != nil {
+			job := ""
+			if args, ok := first.Args["args"].([]any); ok && len(args) > 0 {
+				job, _ = args[0].(string)
+			}
+			if job != "" {
+				if _, ok := a.cfg.Backups.Jobs[job]; !ok {
+					continue
+				}
+			} else if len(a.cfg.Backups.Jobs) == 0 {
+				continue
+			}
+		}
 		if first.Command != "backup drill" || r.Finished == nil {
 			continue
 		}
@@ -638,7 +656,17 @@ func checkDoctorFirewall(ctx context.Context, a *app, h plan.NamedHost) []doctor
 			Message:  "firewall check skipped (setup.firewall: false)",
 		}}
 	}
-	needed, detail, err := setup.CheckFirewall(ctx, h.Host, h.Server.Sudo, a.setupProxyPorts(), a.cfg.Setup.AllowPorts)
+	ports := a.setupProxyPorts()
+	if a.dest.Roles != nil {
+		r, e := a.compose(ctx)
+		if e != nil {
+			return []doctorFinding{{Check: "firewall", Severity: severityError, Subject: h.Name, Message: e.Error()}}
+		}
+		if !a.serverHasProxy(h.Name, r.Ext) {
+			ports = nil
+		}
+	}
+	needed, detail, err := setup.CheckFirewall(ctx, h.Host, h.Server.Sudo, ports, a.cfg.Setup.AllowPorts)
 	if err != nil {
 		return []doctorFinding{{
 			Check:    "firewall",

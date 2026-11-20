@@ -5,7 +5,7 @@
 > for proven migration, interrupted-rollout recovery and blank-Server restore.
 
 
-Set `runtime: swarm` on a Destination to deploy with `docker stack deploy`; required for more than one Server.
+Set `runtime: swarm` on a Destination to deploy with `docker stack deploy`; the frozen Swarm runtime. New multi-Server Compose Apps use [Roles](roles.md).
 
 ```yaml
 servers:

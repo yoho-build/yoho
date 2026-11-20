@@ -57,3 +57,5 @@ TLS disabled. DNS-01 and shared certificate issuance are not implemented.
 Swarm receives bug/security fixes and CI only (ADR 0017).
 
 Without Roles, multiple Compose Servers are refused with: `multiple Compose Servers require destinations.<name>.roles; assign every Service to a Role`.
+
+Roles is **operator-only**, including `YOHO_ACCESS=scoped`: `Roles are operator-only; scoped (Gate) access is not supported`. Multi-Server ingress requires a named Tunnel or explicit `x-yoho.proxy.ssl: false`. Connection filtering uses mangle PREROUTING before any FORWARD ACCEPT.

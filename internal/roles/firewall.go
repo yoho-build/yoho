@@ -9,100 +9,119 @@ import (
 	"net/netip"
 	"os"
 	"slices"
+	"sort"
 	"strings"
 
 	"github.com/yoho-build/yoho/internal/config"
 	"github.com/yoho-build/yoho/internal/remote"
 )
 
-// Rule describes a Docker forwarding rule using the pre-DNAT destination.
+const firewallChain = "YOHO-ROLES"
+
+// Rule filters only new requests before DNAT; replies never match.
 type Rule struct {
 	Tool string
 	Args []string
 }
 
-func (r Rule) command(action string) string {
-	return remote.Quote(r.Tool) + " " + action + " DOCKER-USER " + remote.QuoteArgs(r.Args...)
+func firewallOwner(app, dest string) string { return "yoho-roles " + app + "/" + dest }
+func chainPrefix(app, dest string) string {
+	sum := sha256.Sum256([]byte(app + "/" + dest))
+	return fmt.Sprintf("YOHO-R-%x-", sum[:4])
 }
 
 func FirewallRules(app, dest, server string, d config.Destination, addresses map[string]string) ([]Rule, error) {
 	var out []Rule
-	names := make([]string, 0, len(d.Connections))
-	for n := range d.Connections {
-		names = append(names, n)
-	}
-	slices.Sort(names)
-	for _, n := range names {
-		c := d.Connections[n]
-		hs := d.ServiceServers(c.Service)
-		if len(hs) != 1 {
-			return nil, fmt.Errorf("connection %s must be singleton", n)
+	for _, name := range sortedKeys(d.Connections) {
+		c := d.Connections[name]
+		providers := d.ServiceServers(c.Service)
+		if len(providers) != 1 {
+			return nil, fmt.Errorf("connection %s must be singleton", name)
 		}
-		if hs[0] != server {
+		if providers[0] != server {
 			continue
 		}
-		addr, err := netip.ParseAddr(addresses[server])
-		if err != nil {
-			return nil, fmt.Errorf("connection %s missing provider private address", n)
+		addr, e := netip.ParseAddr(addresses[server])
+		if e != nil {
+			return nil, e
 		}
 		tool := "iptables"
 		if addr.Is6() {
 			tool = "ip6tables"
 		}
-		base := []string{"-p", "tcp", "-m", "conntrack", "--ctorigdst", addr.String(), "--ctorigdstport", fmt.Sprint(c.Port), "-m", "comment", "--comment", "yoho-roles " + app + "/" + dest + "/" + n}
-		sources := []string{addr.String()}
+		sources := []string{}
 		for _, svc := range c.Consumers {
 			for _, h := range d.ServiceServers(svc) {
 				ip, e := netip.ParseAddr(addresses[h])
 				if e != nil || ip.Is4() != addr.Is4() {
-					return nil, fmt.Errorf("connection %s consumer %s needs a private address of the provider's IP family", n, h)
+					return nil, fmt.Errorf("connection %s consumer %s needs an address of the provider's IP family", name, h)
 				}
 				sources = append(sources, ip.String())
 			}
 		}
 		slices.Sort(sources)
 		sources = slices.Compact(sources)
+		base := []string{"-d", addr.String(), "-p", "tcp", "--dport", fmt.Sprint(c.Port), "-m", "conntrack", "--ctstate", "NEW", "--ctdir", "ORIGINAL", "-m", "comment", "--comment", firewallOwner(app, dest) + "/" + name}
 		for _, src := range sources {
-			args := append(slices.Clone(base), "-s", src, "-j", "ACCEPT")
-			out = append(out, Rule{tool, args})
+			args := append([]string{"-s", src}, base...)
+			out = append(out, Rule{tool, append(args, "-j", "RETURN")})
 		}
 		out = append(out, Rule{tool, append(slices.Clone(base), "-j", "DROP")})
 	}
 	return out, nil
 }
 
-// FirewallScript installs the complete desired rules before deleting older
-// owned rules. Insertion is reversed so DROP is always present before ACCEPT.
-// No untagged rule is removed, even on a Server shared with other Apps.
+// FirewallScript fills a fresh owned sub-chain, then swaps only this App's jump
+// in one xtables operation. The shared chain and other Apps are never flushed.
 func FirewallScript(app, dest string, rules []Rule) string {
-	prefix := "yoho-roles " + app + "/" + dest + "/"
+	owner := firewallOwner(app, dest)
+	prefix := chainPrefix(app, dest)
 	var b strings.Builder
-	b.WriteString("#!/bin/sh\nset -eu\n")
+	b.WriteString("#!/bin/sh\nset -eu\ncommand -v flock >/dev/null\nmkdir -p /run/lock\nexec 9>/run/lock/yoho-roles-firewall.lock\nflock 9\n")
 	for _, tool := range []string{"iptables", "ip6tables"} {
-		b.WriteString("command -v " + tool + " >/dev/null\n" + tool + " -w -S DOCKER-USER >/dev/null\n")
-		count := 0
+		xt := tool + " -w -t mangle"
+		b.WriteString("command -v " + tool + " >/dev/null\n" + xt + " -N YOHO-ROLES 2>/dev/null || " + xt + " -S YOHO-ROLES >/dev/null\n")
+		b.WriteString("new=" + remote.Quote(prefix) + "$$\n" + xt + " -N \"$new\"\nswapped=0\ntrap 'if [ \"$swapped\" = 0 ]; then " + xt + " -F \"$new\"; " + xt + " -X \"$new\"; fi' EXIT HUP INT TERM\n")
 		for _, r := range rules {
 			if r.Tool == tool {
-				count++
+				b.WriteString(xt + " -A \"$new\" " + remote.QuoteArgs(r.Args...) + "\n")
 			}
 		}
-		for i := len(rules) - 1; i >= 0; i-- {
-			if rules[i].Tool == tool {
-				b.WriteString(rules[i].command("-w -I") + "\n")
-			}
-		}
-		// The first count owned rules are the rules inserted above. Remove the
-		// remainder by descending rule number, preserving all unrelated rules.
-		b.WriteString(tool + " -w -L DOCKER-USER -n --line-numbers | awk -v tag=" + remote.Quote("/* "+prefix) + " -v keep=" + fmt.Sprint(count) + " 'index($0,tag) { n++; if(n>keep) print $1 }' | sort -rn | while IFS= read -r n; do " + tool + " -w -D DOCKER-USER \"$n\"; done\n")
-	}
-	for _, r := range rules {
-		b.WriteString(r.command("-w -C") + "\n")
+		// Read the owned pointer by exact comment; unrelated jumps retain position.
+		b.WriteString("old=$(" + xt + " -S YOHO-ROLES | awk -v tag=" + remote.Quote("--comment \""+owner+"\"") + " '$1==\"-A\" { n++; if(index($0,tag)) print n, $NF }')\n")
+		b.WriteString("if [ -n \"$old\" ]; then\n set -- $old\n [ \"$#\" = 2 ] || { echo 'duplicate Roles firewall owner jump' >&2; exit 1; }\n slot=$1; previous=$2\n case \"$previous\" in " + prefix + "*) ;; *) echo 'foreign firewall chain at owned jump' >&2; exit 1;; esac\n " + xt + " -R YOHO-ROLES \"$slot\" -m comment --comment " + remote.Quote(owner) + " -j \"$new\"\nelse\n previous=\n " + xt + " -A YOHO-ROLES -m comment --comment " + remote.Quote(owner) + " -j \"$new\"\nfi\nswapped=1\n")
+		b.WriteString(xt + " -C PREROUTING -m comment --comment yoho-roles -j YOHO-ROLES 2>/dev/null || " + xt + " -I PREROUTING 1 -m comment --comment yoho-roles -j YOHO-ROLES\n")
+		b.WriteString("if [ -n \"$previous\" ]; then " + xt + " -F \"$previous\"; " + xt + " -X \"$previous\"; fi\ntrap - EXIT HUP INT TERM\n")
+		// Upgrade legacy protection only after the earlier mangle hook is installed.
+		b.WriteString("if " + tool + " -w -t filter -S DOCKER-USER >/dev/null 2>&1; then\n " + tool + " -w -t filter -L DOCKER-USER -n --line-numbers | awk -v tag=" + remote.Quote("/* "+owner+"/") + " 'index($0,tag) {print $1}' | sort -rn | while IFS= read -r n; do " + tool + " -w -t filter -D DOCKER-USER \"$n\"; done\nfi\n")
 	}
 	return b.String()
 }
 
-// Protect persists only Yoho-owned scripts and a oneshot unit; the unit
-// replays every App's firewall after Docker starts, without a Yoho daemon.
+const firewallReplay = `#!/bin/sh
+set -u
+failed=0
+for f in /etc/yoho/firewall/*.sh; do
+ [ -f "$f" ] || continue
+ if ! /bin/sh "$f"; then echo "Yoho firewall replay failed: $f" >&2; failed=1; fi
+done
+exit "$failed"
+`
+const firewallUnit = `[Unit]
+Description=Yoho connection firewall before networking and Docker
+DefaultDependencies=no
+After=local-fs.target
+Wants=network-pre.target
+Before=network-pre.target docker.service
+[Service]
+Type=oneshot
+ExecStart=/bin/sh /etc/yoho/firewall-replay
+RemainAfterExit=yes
+[Install]
+WantedBy=network-pre.target
+RequiredBy=docker.service
+`
+
 func Protect(ctx context.Context, h remote.Host, app, dest string, rules []Rule) error {
 	if len(rules) == 0 {
 		_, e := h.ReadFile(ctx, FirewallPath(app, dest), true)
@@ -113,63 +132,218 @@ func Protect(ctx context.Context, h remote.Host, app, dest string, rules []Rule)
 			return e
 		}
 	}
+	if e := h.Run(ctx, remote.Cmd{Script: "set -eu\ncommand -v iptables >/dev/null\ncommand -v ip6tables >/dev/null\ncommand -v flock >/dev/null\ncommand -v systemctl >/dev/null\n", Sudo: true}); e != nil {
+		return fmt.Errorf("Roles firewall unavailable: %w", e)
+	}
 	script := FirewallScript(app, dest, rules)
-	// Verify tool/chain support before replacing the persisted policy.
-	if err := h.Run(ctx, remote.Cmd{Script: "set -eu\ncommand -v iptables >/dev/null\ncommand -v ip6tables >/dev/null\niptables -w -S DOCKER-USER >/dev/null\nip6tables -w -S DOCKER-USER >/dev/null\ncommand -v systemctl >/dev/null", Sudo: true}); err != nil {
-		return fmt.Errorf("Roles firewall unavailable: %w", err)
+	// Persist before installing: a crash cannot publish unprotected providers on reboot.
+	if e := h.WriteFile(ctx, FirewallPath(app, dest), []byte(script), 0700, true); e != nil {
+		return e
 	}
-	file := FirewallPath(app, dest)
-	if err := h.Run(ctx, remote.Cmd{Script: script, Sudo: true}); err != nil {
-		return fmt.Errorf("Roles firewall reconciliation failed: %w", err)
-	}
-	metadata, e := json.Marshal(rules)
+	data, e := json.Marshal(rules)
 	if e != nil {
 		return e
 	}
-	if e = h.WriteFile(ctx, file+".json", metadata, 0600, true); e != nil {
+	if e = h.WriteFile(ctx, FirewallPath(app, dest)+".json", data, 0600, true); e != nil {
 		return e
 	}
-	if err := h.WriteFile(ctx, file, []byte(script), 0700, true); err != nil {
-		return err
+	if e = h.WriteFile(ctx, "/etc/yoho/firewall-replay", []byte(firewallReplay), 0700, true); e != nil {
+		return e
 	}
-	unit := "[Unit]\nDescription=Yoho Docker connection firewall\nAfter=docker.service\nRequires=docker.service\nPartOf=docker.service\n[Service]\nType=oneshot\nExecStart=/bin/sh -ec 'for f in /etc/yoho/firewall/*.sh; do [ ! -f \"$f\" ] || /bin/sh \"$f\"; done'\nRemainAfterExit=yes\n[Install]\nWantedBy=docker.service\n"
-	if err := h.WriteFile(ctx, "/etc/systemd/system/yoho-firewall.service", []byte(unit), 0644, true); err != nil {
-		return err
+	if e = h.WriteFile(ctx, "/etc/systemd/system/yoho-firewall.service", []byte(firewallUnit), 0644, true); e != nil {
+		return e
 	}
-	if err := h.Run(ctx, remote.Cmd{Script: "set -eu\nsystemctl daemon-reload\nsystemctl enable yoho-firewall.service\n", Sudo: true}); err != nil {
-		return err
+	if e = h.Run(ctx, remote.Cmd{Script: script, Sudo: true}); e != nil {
+		return fmt.Errorf("Roles firewall reconciliation failed: %w", e)
 	}
-	return CheckFirewall(ctx, h, rules)
+	if e = h.Run(ctx, remote.Cmd{Script: "set -eu\nsystemctl daemon-reload\nsystemctl enable yoho-firewall.service\n", Sudo: true}); e != nil {
+		return e
+	}
+	return CheckFirewall(ctx, h, rules, app+"/"+dest)
 }
 
-// CheckFirewall is read-only and refuses missing protection.
-func CheckFirewall(ctx context.Context, h remote.Host, rules []Rule) error {
-	script := "set -eu\n"
-	prefix := ""
-	for _, r := range rules {
-		script += r.command("-w -C") + "\n"
-		for i, a := range r.Args {
-			if a == "--comment" && i+1 < len(r.Args) {
-				tag := r.Args[i+1]
-				idx := strings.LastIndex(tag, "/")
-				if idx > 0 {
-					prefix = "/* " + tag[:idx+1]
+// CheckFirewall checks graph membership and exact relative rule content. It
+// never assumes this App is first among other Apps in the shared chain.
+func CheckFirewall(ctx context.Context, h remote.Host, rules []Rule, owners ...string) error {
+	owner := ""
+	if len(owners) > 0 {
+		owner = "yoho-roles " + owners[0]
+	}
+	if owner == "" {
+		for _, r := range rules {
+			for i, a := range r.Args {
+				if a == "--comment" && i+1 < len(r.Args) {
+					tag := r.Args[i+1]
+					owner = tag[:strings.LastIndex(tag, "/")]
+					break
 				}
 			}
 		}
 	}
-	if prefix != "" {
-		for _, tool := range []string{"iptables", "ip6tables"} {
-			n := 0
-			for _, r := range rules {
-				if r.Tool == tool {
-					n++
+	if owner == "" {
+		return nil
+	}
+	parts := strings.SplitN(strings.TrimPrefix(owner, "yoho-roles "), "/", 2)
+	if len(parts) != 2 {
+		return fmt.Errorf("invalid firewall owner")
+	}
+	for _, tool := range []string{"iptables", "ip6tables"} {
+		read := func(chain string) ([][]string, error) {
+			out, e := h.Output(ctx, remote.Cmd{Script: "set -eu\n" + tool + " -w -t mangle -S " + remote.Quote(chain), Sudo: true})
+			if e != nil {
+				return nil, e
+			}
+			var rows [][]string
+			for _, line := range strings.Split(out, "\n") {
+				args, e := splitRule(line)
+				if e != nil {
+					return nil, e
+				}
+				if len(args) > 2 && args[0] == "-A" {
+					if args[1] != chain {
+						return nil, fmt.Errorf("unexpected chain")
+					}
+					rows = append(rows, args[2:])
 				}
 			}
-			script += tool + " -w -L DOCKER-USER -n --line-numbers | awk -v tag=" + remote.Quote(prefix) + " -v want=" + fmt.Sprint(n) + " 'index($0,tag) { n++; if($1> want) bad=1 } END { if(bad || n!=want) exit 1 }'\n"
+			return rows, nil
+		}
+		root, e := read("PREROUTING")
+		if e != nil {
+			return e
+		}
+		found := 0
+		for _, row := range root {
+			if sameRule(row, []string{"-m", "comment", "--comment", "yoho-roles", "-j", firewallChain}) {
+				found++
+			}
+		}
+		if found != 1 {
+			return fmt.Errorf("%s: missing or duplicate Yoho PREROUTING jump", tool)
+		}
+		entries, e := read(firewallChain)
+		if e != nil {
+			return e
+		}
+		chain := ""
+		for _, row := range entries {
+			for i, a := range row {
+				if a == "--comment" && i+1 < len(row) && row[i+1] == owner {
+					if chain != "" {
+						return fmt.Errorf("duplicate App firewall jump")
+					}
+					if len(row) < 2 {
+						return fmt.Errorf("invalid App jump")
+					}
+					chain = row[len(row)-1]
+					if !sameRule(row, []string{"-m", "comment", "--comment", owner, "-j", chain}) {
+						return fmt.Errorf("conditional App firewall jump")
+					}
+				}
+			}
+		}
+		if !strings.HasPrefix(chain, chainPrefix(parts[0], parts[1])) {
+			return fmt.Errorf("%s: missing owned App firewall chain", tool)
+		}
+		actual, e := read(chain)
+		if e != nil {
+			return e
+		}
+		var desired [][]string
+		for _, r := range rules {
+			if r.Tool == tool {
+				desired = append(desired, r.Args)
+			}
+		}
+		if len(actual) != len(desired) {
+			return fmt.Errorf("%s: App firewall rule count differs", tool)
+		}
+		for i := range actual {
+			if !sameRule(actual[i], desired[i]) {
+				return fmt.Errorf("%s: App firewall rule %d differs", tool, i+1)
+			}
 		}
 	}
-	return h.Run(ctx, remote.Cmd{Script: script, Sudo: true})
+	return nil
+}
+
+// splitRule reads xtables' shell-quoted output without executing it.
+func splitRule(s string) ([]string, error) {
+	var out []string
+	var b strings.Builder
+	quote := rune(0)
+	escape, started := false, false
+	for _, c := range s {
+		if escape {
+			b.WriteRune(c)
+			escape = false
+			started = true
+			continue
+		}
+		if c == '\\' && quote != '\'' {
+			escape = true
+			continue
+		}
+		if quote != 0 {
+			if c == quote {
+				quote = 0
+			} else {
+				b.WriteRune(c)
+			}
+			started = true
+			continue
+		}
+		if c == '\'' || c == '"' {
+			quote = c
+			started = true
+			continue
+		}
+		if c == ' ' || c == '\t' {
+			if started {
+				out = append(out, b.String())
+				b.Reset()
+				started = false
+			}
+			continue
+		}
+		b.WriteRune(c)
+		started = true
+	}
+	if quote != 0 || escape {
+		return nil, fmt.Errorf("invalid xtables rule quoting")
+	}
+	if started {
+		out = append(out, b.String())
+	}
+	return out, nil
+}
+func sameRule(a, b []string) bool {
+	normalize := func(args []string) string {
+		var tokens []string
+		for i := 0; i < len(args); i++ {
+			k := args[i]
+			if i+1 >= len(args) {
+				tokens = append(tokens, k)
+				continue
+			}
+			v := args[i+1]
+			i++
+			if k == "-m" && v == "tcp" {
+				continue
+			}
+			if k == "-s" || k == "-d" {
+				if p, e := netip.ParsePrefix(v); e == nil && p.Bits() == p.Addr().BitLen() {
+					v = p.Addr().String()
+				} else if ip, e := netip.ParseAddr(v); e == nil {
+					v = ip.String()
+				}
+			}
+			tokens = append(tokens, k+"="+v)
+		}
+		sort.Strings(tokens)
+		return strings.Join(tokens, "\x00")
+	}
+	return normalize(a) == normalize(b)
 }
 
 // CheckAddress verifies the published address is assigned to an interface.
@@ -213,6 +387,7 @@ func ExpandProtection(ctx context.Context, h remote.Host, app, dest string, desi
 	}
 	out := slices.Clone(desired)
 	for _, rule := range previous {
+		rule = upgradeFirewallRule(rule)
 		found := false
 		for _, want := range out {
 			if rule.Tool == want.Tool && slices.Equal(rule.Args, want.Args) {
@@ -236,4 +411,26 @@ func ExpandProtection(ctx context.Context, h remote.Host, app, dest string, desi
 		return -1
 	})
 	return out, nil
+}
+
+func upgradeFirewallRule(r Rule) Rule {
+	if !slices.Contains(r.Args, "--ctorigdst") {
+		return r
+	}
+	out := []string{}
+	for i := 0; i < len(r.Args); i++ {
+		a := r.Args[i]
+		switch a {
+		case "--ctorigdst":
+			a = "-d"
+		case "--ctorigdstport":
+			a = "--dport"
+		case "ACCEPT":
+			a = "RETURN"
+		}
+		out = append(out, a)
+	}
+	out = append(out, "--ctstate", "NEW", "--ctdir", "ORIGINAL")
+	r.Args = out
+	return r
 }

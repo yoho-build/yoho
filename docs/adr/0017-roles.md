@@ -1,6 +1,7 @@
 # Roles: multi-Server Compose
 
-Status: Accepted. Supersedes the multi-Server requirement of ADR 0007.
+Status: Accepted. Firewall, rollout safety and operational details are superseded
+by ADR 0019. Supersedes the multi-Server requirement of ADR 0007.
 
 Roles are the opt-in multi-Server path for the Compose runtime. Without
 `destinations.<name>.roles`, existing plans and rendering remain unchanged.

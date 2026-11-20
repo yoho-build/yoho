@@ -32,9 +32,32 @@ func CheckRoles(r *Result, d config.Destination, proxy config.ProxyConfig, app .
 		if len(hosts) > 1 && (ext.Stateful || stateDescription(svc, r.Project.WorkingDir) != "") {
 			add(name, "Stateful Service must resolve to exactly one Server (ADR 0005)")
 		}
-		if len(hosts) > 1 && ext.Proxy != nil && ext.Proxy.TLS && (proxy.Tunnel == nil || proxy.Tunnel.TokenSecret == "") {
-			add(name, "multi-Server Proxy TLS requires a named Cloudflare Tunnel; configure proxy.tunnel.token_secret or disable x-yoho.proxy.tls behind an external load balancer (DNS-01 is unsupported)")
+		if !ext.Stateful && stateDescription(svc, r.Project.WorkingDir) != "" {
+			add(name, "persistent data requires x-yoho.stateful: true with Roles")
 		}
+		if len(hosts) > 1 && ext.Proxy != nil {
+			if proxy.Tunnel != nil && proxy.Tunnel.TokenSecret == "" {
+				add(name, "multi-Server ingress requires a named Cloudflare Tunnel; Quick Tunnels are unsupported")
+			}
+			if (proxy.Tunnel == nil || proxy.Tunnel.TokenSecret == "") && (ext.Proxy.SSL == nil || *ext.Proxy.SSL) {
+				add(name, "multi-Server Proxy TLS requires a named Cloudflare Tunnel or explicit x-yoho.proxy.ssl: false")
+			}
+		}
+		for dep, condition := range svc.DependsOn {
+			for _, h := range hosts {
+				if slices.Contains(d.ServiceServers(dep), h) {
+					continue
+				}
+				connected := false
+				for _, c := range d.Connections {
+					connected = connected || c.Service == dep && slices.Contains(c.Consumers, name)
+				}
+				if !connected || condition.Condition == "service_completed_successfully" {
+					add(name, "cross-Server depends_on %s requires a connection (or colocate the Services); completion jobs must be colocated", dep)
+				}
+			}
+		}
+
 	}
 	for _, role := range d.Roles {
 		for _, svc := range role.Services {
@@ -74,6 +97,9 @@ func CheckRoles(r *Result, d config.Destination, proxy config.ProxyConfig, app .
 			if !ok {
 				add(consumer, "connection %s references unknown consumer", name)
 				continue
+			}
+			if cs.NetworkMode != "" {
+				add(consumer, "connection %s consumer must use Compose networking", name)
 			}
 			for _, h := range d.ServiceServers(consumer) {
 				if slices.Contains(d.ServiceServers(conn.Service), h) {

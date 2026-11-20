@@ -305,6 +305,23 @@ func (a *app) prepareBackupFor(ctx context.Context, name, dest string, needServi
 
 func (a *app) backupLock(h remote.Host, command string) backup.LockFunc {
 	return func(ctx context.Context) (func(context.Context) error, error) {
+		if a.dest.Roles != nil {
+			hosts, closeHosts, e := a.connect(ctx)
+			if e != nil {
+				return nil, e
+			}
+			u, e := a.operationLocks(ctx, hosts, deploy.LockInfo{Command: command}, false)
+			if e != nil {
+				closeHosts()
+				return nil, e
+			}
+			if e = beginOperation(ctx); e != nil {
+				_ = u(ctx)
+				closeHosts()
+				return nil, e
+			}
+			return func(ctx context.Context) error { defer closeHosts(); return u(ctx) }, nil
+		}
 		unlock, err := a.acquireLock(ctx, h, deploy.LockInfo{Command: command})
 		if err != nil {
 			return nil, err
@@ -973,7 +990,7 @@ func backupCheckCmd(g *globals) *cobra.Command {
 				}
 			}()
 			ctx := cmd.Context()
-			j, err := a.prepareBackup(ctx, name, false)
+			j, err := a.prepareBackup(ctx, name, a.dest.Roles != nil)
 			if err != nil {
 				return err
 			}

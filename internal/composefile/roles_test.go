@@ -40,7 +40,7 @@ func TestRolesServiceValidation(t *testing.T) {
 		}, "multi-Server Proxy TLS"},
 		{"multi ingress external TLS", func(r *Result, d *config.Destination, p *config.ProxyConfig) {
 			d.Roles["app"] = config.Role{Services: []string{"web"}, Servers: []string{"a", "b"}}
-			r.Ext["web"] = config.ServiceExt{Proxy: &config.ServiceProxy{TLS: false}}
+			r.Ext["web"] = config.ServiceExt{Proxy: &config.ServiceProxy{TLS: false, SSL: boolPointer(false)}}
 		}, ""},
 		{"multi ingress tunnel", func(r *Result, d *config.Destination, p *config.ProxyConfig) {
 			d.Roles["app"] = config.Role{Services: []string{"web"}, Servers: []string{"a", "b"}}
@@ -65,3 +65,5 @@ func TestRolesServiceValidation(t *testing.T) {
 		})
 	}
 }
+
+func boolPointer(v bool) *bool { return &v }

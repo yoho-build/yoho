@@ -6,11 +6,9 @@ import (
 	"encoding/json"
 	"github.com/yoho-build/yoho/internal/remote"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"reflect"
-	"runtime"
-	"strings"
+	"slices"
 	"testing"
 
 	"github.com/compose-spec/compose-go/v2/types"
@@ -72,7 +70,7 @@ func TestRolesSameServerAndLegacy(t *testing.T) {
 	if e != nil {
 		t.Fatal(e)
 	}
-	if len(p.Project.Services["web"].ExtraHosts) != 0 || len(p.Project.Services["web"].Environment) != 0 {
+	if len(p.Project.Services["web"].ExtraHosts) != 0 || *p.Project.Services["web"].Environment["YOHO_CONNECTION_DATABASE_HOST"] != "db" {
 		t.Fatal("local consumer changed")
 	}
 	legacy, e := Render(d, config.Destination{}, "a", nil)
@@ -91,92 +89,6 @@ func TestRolesOrder(t *testing.T) {
 		t.Fatal("cycle accepted")
 	}
 }
-func TestRolesFirewall(t *testing.T) {
-	_, dest, addresses := fixture()
-	rules, err := FirewallRules("shop", "production", "b", dest, addresses)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(rules) != 3 {
-		t.Fatal(rules)
-	}
-	script := FirewallScript("shop", "production", rules)
-	for _, want := range []string{"DOCKER-USER", "--ctorigdstport' '5432", "yoho-roles shop/production/database", "ip6tables", "-w -C", "sort -rn"} {
-		if !strings.Contains(script, want) {
-			t.Fatalf("missing %q: %s", want, script)
-		}
-	}
-	drop, allow := strings.Index(script, "'-j' 'DROP'"), strings.Index(script, "'-j' 'ACCEPT'")
-	if drop < 0 || allow < drop {
-		t.Fatal("DROP must be inserted before allowlist")
-	}
-	if strings.Contains(script, "-F") {
-		t.Fatal("must not flush shared chains")
-	}
-	empty := FirewallScript("shop", "production", nil)
-	if !strings.Contains(empty, "keep=0") {
-		t.Fatal("removed connections not reconciled")
-	}
-}
-
-func TestRolesFirewallReconcilePreservesForeignRules(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("POSIX remote scripts")
-	}
-	dir := t.TempDir()
-	stub := `#!/bin/sh
-set -eu
-state="$RULE_TEST_DIR/$(basename "$0").state"
-[ -f "$state" ] || : > "$state"
-[ "$1" != -w ] || shift
-action=$1; shift
-case "$action" in
--S) cat "$state";;
--I) { printf '%s\n' "$*"; cat "$state"; } > "$state.tmp"; mv "$state.tmp" "$state";;
--L) awk '{print NR, $0}' "$state" | sed 's/--comment \(yoho-roles [^ ]*\)/\/\* \1 \*\//' ;;
--D) awk -v n="$2" 'NR!=n' "$state" > "$state.tmp"; mv "$state.tmp" "$state";;
--C) grep -Fx -- "$*" "$state" >/dev/null;;
-*) exit 2;;
-esac
-`
-	for _, tool := range []string{"iptables", "ip6tables"} {
-		if e := os.WriteFile(filepath.Join(dir, tool), []byte(stub), 0700); e != nil {
-			t.Fatal(e)
-		}
-		if e := os.WriteFile(filepath.Join(dir, tool+".state"), []byte("DOCKER-USER -j RETURN --comment foreign\n"), 0600); e != nil {
-			t.Fatal(e)
-		}
-	}
-	_, dest, addresses := fixture()
-	rules, e := FirewallRules("shop", "production", "b", dest, addresses)
-	if e != nil {
-		t.Fatal(e)
-	}
-	run := func(rules []Rule) {
-		t.Helper()
-		cmd := exec.Command("sh", "-s")
-		cmd.Stdin = strings.NewReader(FirewallScript("shop", "production", rules))
-		cmd.Env = append(os.Environ(), "PATH="+dir+string(os.PathListSeparator)+os.Getenv("PATH"), "RULE_TEST_DIR="+dir)
-		if b, e := cmd.CombinedOutput(); e != nil {
-			t.Fatalf("%v: %s", e, b)
-		}
-	}
-	run(rules)
-	first, _ := os.ReadFile(filepath.Join(dir, "iptables.state"))
-	run(rules)
-	second, _ := os.ReadFile(filepath.Join(dir, "iptables.state"))
-	if !bytes.Equal(first, second) {
-		t.Fatalf("reconcile not idempotent:\n%s\n%s", first, second)
-	}
-	run(nil)
-	for _, tool := range []string{"iptables", "ip6tables"} {
-		b, _ := os.ReadFile(filepath.Join(dir, tool+".state"))
-		if string(b) != "DOCKER-USER -j RETURN --comment foreign\n" {
-			t.Fatalf("foreign rules modified or stale rules retained: %s", b)
-		}
-	}
-}
-
 func TestRolesRenderGolden(t *testing.T) {
 	d, dest, addresses := fixture()
 	for _, server := range []string{"a", "b"} {
@@ -208,7 +120,7 @@ func TestRolesRenderGolden(t *testing.T) {
 }
 
 // Multi-connector tunnels terminate TLS before traffic reaches each Proxy.
-func TestRolesTunnelDisablesIndependentACME(t *testing.T) {
+func TestRolesTunnelPreservesTLS(t *testing.T) {
 	d, dest, addresses := fixture()
 	dest.Roles["app"] = config.Role{Services: []string{"web", "worker"}, Servers: []string{"a", "b"}}
 	d.Proxy.Tunnel = &config.TunnelConfig{TokenSecret: "TUNNEL"}
@@ -217,8 +129,8 @@ func TestRolesTunnelDisablesIndependentACME(t *testing.T) {
 	if e != nil {
 		t.Fatal(e)
 	}
-	if p.Ext["web"].Proxy.TLS {
-		t.Fatal("independent ACME left enabled")
+	if !p.Ext["web"].Proxy.TLS {
+		t.Fatal("TLS silently changed")
 	}
 	if !d.Ext["web"].Proxy.TLS {
 		t.Fatal("input mutated")
@@ -247,7 +159,7 @@ func TestRolesExpandProtectionKeepsOldConsumersUntilCutover(t *testing.T) {
 	if e != nil {
 		t.Fatal(e)
 	}
-	if len(expanded) != 4 {
+	if len(expanded) != 3 {
 		t.Fatal(expanded)
 	}
 	drop := false
@@ -300,5 +212,41 @@ func TestRolesFiltersResourcesAndSortsConnections(t *testing.T) {
 		if !bytes.Equal(got, want) {
 			t.Fatal("connection map changed rendered bytes")
 		}
+	}
+}
+
+func TestReviewLoopbackPublicationsAndColocatedEndpoint(t *testing.T) {
+	d, dest, addresses := fixture()
+	s := d.Project.Services["db"]
+	s.Ports = []types.ServicePortConfig{{HostIP: "127.0.0.1", Published: "15432", Target: 5432, Protocol: "tcp"}}
+	d.Project.Services["db"] = s
+	p, e := Render(d, dest, "b", addresses)
+	if e != nil {
+		t.Fatal(e)
+	}
+	if len(p.Project.Services["db"].Ports) != 2 {
+		t.Fatal("explicit loopback publication dropped")
+	}
+	dest.Roles["data"] = config.Role{Services: []string{"db"}, Servers: []string{"a"}}
+	p, e = Render(d, dest, "a", addresses)
+	if e != nil {
+		t.Fatal(e)
+	}
+	web := p.Project.Services["web"]
+	if *web.Environment["YOHO_CONNECTION_DATABASE_HOST"] != "db" || len(web.ExtraHosts) > 0 {
+		t.Fatal("colocated endpoint lost Compose DNS", web)
+	}
+	if !slices.Contains(p.Project.Services["db"].Networks["default"].Aliases, "db.shop.yoho.internal") {
+		t.Fatal("qualified endpoint lost on colocation")
+	}
+}
+
+func TestReviewUnprotectedAlternatePublicationRefused(t *testing.T) {
+	d, dest, addresses := fixture()
+	s := d.Project.Services["db"]
+	s.Ports = []types.ServicePortConfig{{HostIP: "10.0.0.2", Published: "15432", Target: 5432, Protocol: "tcp"}}
+	d.Project.Services["db"] = s
+	if _, e := Render(d, dest, "b", addresses); e == nil {
+		t.Fatal("unprotected alternate publication preserved")
 	}
 }

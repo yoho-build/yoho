@@ -147,8 +147,12 @@ func classifyOperation(ctx context.Context, err error) error {
 	started := r != nil && r.mutated
 	result := mutationResult(err, started)
 	if r != nil && r.op != nil && len(r.op.Services) > 0 && result.Outcome != "unknown" {
-		result.Changed = []string{}
-		result.Unchanged = []string{}
+		var rolesFailure *deploy.RolesFailure
+		if !errors.As(err, &rolesFailure) {
+			result.Changed = []string{}
+			result.Unchanged = []string{}
+		}
+
 		for name, state := range r.op.Services {
 			if state == "changed" {
 				result.Changed = append(result.Changed, name)
@@ -156,6 +160,7 @@ func classifyOperation(ctx context.Context, err error) error {
 				result.Unchanged = append(result.Unchanged, name)
 			}
 		}
+		result.Unchanged = slices.DeleteFunc(result.Unchanged, func(s string) bool { return slices.Contains(result.Changed, s) })
 		sort.Strings(result.Changed)
 		result.Changed = slices.Compact(result.Changed)
 		sort.Strings(result.Unchanged)

@@ -14,7 +14,12 @@ import (
 )
 
 func (a *app) rotateRoles(ctx context.Context, services, generated []string, dry bool) (err error) {
-	s, err := a.openSession(ctx, "rotate", dry, false)
+	if !dry {
+		if err = a.hookFunc("current", "secrets rotate", nil)(ctx, "pre-connect", nil); err != nil {
+			return err
+		}
+	}
+	s, err := a.openSession(ctx, "rotate", true, false)
 	if err != nil {
 		return err
 	}
@@ -25,7 +30,7 @@ func (a *app) rotateRoles(ctx context.Context, services, generated []string, dry
 		}
 	}
 	if !dry {
-		unlock, e := a.deployLocks(ctx, s.hosts, "secrets-rotate")
+		unlock, e := a.operationLocks(ctx, s.hosts, deploy.LockInfo{Command: "secrets rotate"}, true)
 		if e != nil {
 			return e
 		}
@@ -57,6 +62,7 @@ func (a *app) rotateRoles(ctx context.Context, services, generated []string, dry
 		return err
 	}
 	s.ver = version
+
 	d, err := a.newDeploy(s, images, true)
 	if err != nil {
 		return err
@@ -141,10 +147,7 @@ func (a *app) rotateRoles(ctx context.Context, services, generated []string, dry
 		a.ui.Finished(nil, "Dry run; nothing changed")
 		return nil
 	}
-	if len(restarts) == 0 && len(rotations) == 0 {
-		a.ui.Finished(nil, "Secrets unchanged; nothing to restart")
-		return nil
-	}
+
 	// Keep each Server's image IDs and current secret generation as the restart
 	// base, rather than comparing all Servers against the first one's Release.
 	for _, h := range s.hosts {
@@ -159,7 +162,7 @@ func (a *app) rotateRoles(ctx context.Context, services, generated []string, dry
 	d.Restart = restarts
 	d.Hook = a.hookFunc(version, "secrets rotate", s.hosts)
 	d.Out = s.store.Redactor(a.ui.Progress())
-	_, err = (deploy.Roles{LockHeld: true}).Deploy(ctx, d)
+	err = deployRolesRotation(ctx, d, restarts)
 	if f, ok := d.Out.(interface{ Flush() error }); ok {
 		_ = f.Flush()
 	}
@@ -173,4 +176,15 @@ func (a *app) rotateRoles(ctx context.Context, services, generated []string, dry
 	}
 	a.ui.Finished(nil, "Rotated secrets across consumer Servers")
 	return nil
+}
+
+// An empty Restart means a full rollout in the Runtime contract. Rotation
+// must never pass an empty selection through to that API.
+func deployRolesRotation(ctx context.Context, d *plan.Deploy, services []string) error {
+	if len(services) == 0 {
+		return nil
+	}
+	d.Restart = services
+	_, e := (deploy.Roles{LockHeld: true}).Deploy(ctx, d)
+	return e
 }

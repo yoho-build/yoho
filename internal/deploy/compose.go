@@ -264,7 +264,7 @@ func (c Compose) Deploy(ctx context.Context, d *plan.Deploy) (_ *release.Release
 	}
 
 	rel := &release.Release{
-		Roles: d.Roles.Roles, Connections: d.Roles.Connections,
+		Roles: d.Roles.Roles, Connections: d.Roles.Connections, GeneratedOwners: d.GeneratedOwners,
 		OperationID: d.OperationID,
 		App:         d.App, Destination: d.Destination, Server: srv.Name, Version: d.Version,
 		Runtime: "compose", Role: "all", DeployedAt: start, Performer: d.Performer,
@@ -313,7 +313,7 @@ func (c Compose) Deploy(ctx context.Context, d *plan.Deploy) (_ *release.Release
 	if err := c.hook(ctx, d, d.Version, "pre-app-boot", nil); err != nil {
 		return nil, err
 	}
-	if len(d.Restart) == 0 {
+	if len(d.Restart) == 0 && !d.SkipReleaseCommands {
 		if err := r.startDependencies(ctx, plans); err != nil {
 			return nil, err
 		}

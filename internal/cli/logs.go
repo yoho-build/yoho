@@ -183,6 +183,9 @@ the output, e.g. --since 10m -n 200.`,
 				}
 				return err
 			}
+			if a.dest.Roles != nil {
+				return a.rolesLogs(cmd, svcs, opts)
+			}
 			// With --grep the container's output goes through grep to stdout,
 			// so the script's stderr holds only its own messages: capture
 			// them, and print each once, with its hint.
@@ -204,6 +207,7 @@ the output, e.g. --since 10m -n 200.`,
 			return a.logsError(err, opts)
 		},
 	}
+	addServerFlag(c)
 	f := c.Flags()
 	f.BoolVarP(&o.Follow, "follow", "f", false, "Follow")
 	f.IntVarP(&o.Lines, "lines", "n", 100, "Lines from the end (0: none, -1: all); with --grep, matching lines; unbounded with --since/--grep")

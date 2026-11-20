@@ -92,17 +92,18 @@ func ProjectName(app, destination string) string {
 
 // Release records one deploy of an App to a Server.
 type Release struct {
-	Roles       map[string]config.Role       `json:"roles,omitempty"`
-	Connections map[string]config.Connection `json:"connections,omitempty"`
-	OperationID string                       `json:"operation_id,omitempty"`
-	App         string                       `json:"app"`
-	Destination string                       `json:"destination"`
-	Server      string                       `json:"server"`
-	Version     string                       `json:"version"`
-	Runtime     string                       `json:"runtime"` // compose | swarm
-	Role        string                       `json:"role"`    // "all" until Roles exist
-	DeployedAt  time.Time                    `json:"deployed_at"`
-	Performer   string                       `json:"performer"`
+	GeneratedOwners map[string]string            `json:"generated_owners,omitempty"`
+	Roles           map[string]config.Role       `json:"roles,omitempty"`
+	Connections     map[string]config.Connection `json:"connections,omitempty"`
+	OperationID     string                       `json:"operation_id,omitempty"`
+	App             string                       `json:"app"`
+	Destination     string                       `json:"destination"`
+	Server          string                       `json:"server"`
+	Version         string                       `json:"version"`
+	Runtime         string                       `json:"runtime"` // compose | swarm
+	Role            string                       `json:"role"`    // "all" until Roles exist
+	DeployedAt      time.Time                    `json:"deployed_at"`
+	Performer       string                       `json:"performer"`
 	// Service -> image reference actually deployed (tag@digest when known).
 	Images map[string]string `json:"images"`
 	// Service -> local image ID on the Server when the Release was
