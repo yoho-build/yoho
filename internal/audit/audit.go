@@ -198,21 +198,26 @@ func Append(ctx context.Context, h remote.Host, r Record) error {
 }
 
 // ReadScript prints the last lines of the log files that exist and are
-// trusted, oldest first: an unmigrated legacy <app dir>/audit.log{.2,.1,}
+// trusted, oldest first (lines <= 0 reads all lines): an unmigrated legacy <app dir>/audit.log{.2,.1,}
 // (skipped when it fails the trust checks), then <dest>.log.2, .1 and
 // <dest>.log. Read-only: it does not migrate.
 func ReadScript(app, destination string, lines int) string {
 	var b strings.Builder
-	n := strconv.Itoa(lines)
+	read := func(p string) string {
+		if lines <= 0 {
+			return "cat " + p
+		}
+		return "tail -n " + strconv.Itoa(lines) + " " + p
+	}
 	b.WriteString(safepath.AppLink(app, destination) + safepath.Script("audit log"))
 	b.WriteString("yoho_old=" + remote.Quote(legacyDir(app, destination)) + "\n")
 	b.WriteString("(\n for yoho_f in audit.log.2 audit.log.1 audit.log; do\n")
 	b.WriteString("  [ -e \"$yoho_old/$yoho_f\" ] || continue\n")
-	b.WriteString("  yoho_file \"$yoho_old/$yoho_f\"\n  tail -n " + n + " \"$yoho_old/$yoho_f\"\n done\n) 2>/dev/null || true\n")
+	b.WriteString("  yoho_file \"$yoho_old/$yoho_f\"\n  " + read("\"$yoho_old/$yoho_f\"") + "\n done\n) 2>/dev/null || true\n")
 	log := Path(app, destination)
 	for _, f := range []string{log + ".2", log + ".1", log} {
 		p := remote.Quote(f)
-		b.WriteString("if [ -e " + p + " ]; then yoho_file " + p + "; tail -n " + n + " " + p + "; fi\n")
+		b.WriteString("if [ -e " + p + " ]; then yoho_file " + p + "; " + read(p) + "; fi\n")
 	}
 	return b.String()
 }
@@ -247,6 +252,24 @@ func Read(ctx context.Context, h remote.Host, app, destination string, lines int
 		return nil, fmt.Errorf("read audit log on %s: %w", h.Name(), err)
 	}
 	return Parse(out), nil
+}
+
+// ReadCommand scans all retained audit lines, keeping only the requested command.
+// Both phases are retained so Pair can match them by run ID.
+func ReadCommand(ctx context.Context, h remote.Host, app, destination, command string) ([]Entry, error) {
+	out, err := h.Output(ctx, remote.Cmd{Script: ReadScript(app, destination, 0)})
+	if err != nil {
+		return nil, fmt.Errorf("read audit log on %s: %w", h.Name(), err)
+	}
+	var entries []Entry
+	for _, line := range strings.Split(out, "\n") {
+		for _, entry := range Parse(line) {
+			if entry.Command == command {
+				entries = append(entries, entry)
+			}
+		}
+	}
+	return entries, nil
 }
 
 // Run is a command with its started and finished records.

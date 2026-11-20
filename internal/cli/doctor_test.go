@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -29,6 +30,8 @@ type doctorFakeHost struct {
 	files map[string][]byte
 	out   func(cmd remote.Cmd) (string, error)
 }
+
+func (f *doctorFakeHost) Target() string { return "yoho@test" }
 
 func (f *doctorFakeHost) Name() string {
 	if f.name != "" {
@@ -74,6 +77,7 @@ func makeDoctorApp(t *testing.T, composeYAML string, mutate func(*config.Config)
 	if err != nil {
 		t.Fatal(err)
 	}
+	cfg.Builder.Engine = "docker"
 	if mutate != nil {
 		mutate(cfg)
 		b, err := json.Marshal(cfg)
@@ -177,27 +181,47 @@ volumes:
 }
 
 func TestDoctorScheduleMaxAge(t *testing.T) {
-	cases := []struct {
-		sched string
-		want  time.Duration
+	for _, tc := range []struct {
+		expr, fixture string
+		gap           time.Duration
 	}{
-		{"minutely", time.Hour},
-		{"hourly", 3 * time.Hour},
-		{"daily", 48 * time.Hour},
-		{"weekly", 8 * 24 * time.Hour},
-		{"monthly", 35 * 24 * time.Hour},
-		{"yearly", 370 * 24 * time.Hour},
-		{"Mon *-*-* 03:00:00", 8 * 24 * time.Hour},
-		{"*-*-* 03:00:00", 48 * time.Hour},
-		{"*-*-* *:00:00", 3 * time.Hour},
-		{"*-*-* */6:00:00", 13 * time.Hour},
-		{"*-*-01 03:00:00", 35 * 24 * time.Hour},
-		{"custom-unknown", 48 * time.Hour},
+		{"Monday *-*-* 03:00:00", "weekly", 7 * 24 * time.Hour},
+		{"Mon *-*-01..07 03:00:00", "monthly", 35 * 24 * time.Hour},
+		{"*-*-* 1/3:00:00", "step", 3 * time.Hour},
+		{"daily", "dst", 23 * time.Hour},
+	} {
+		t.Run(tc.fixture, func(t *testing.T) {
+			recorded, err := os.ReadFile(filepath.Join("testdata", "systemd-calendar-"+tc.fixture+".txt"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			h := &doctorFakeHost{out: func(c remote.Cmd) (string, error) {
+				if !strings.Contains(c.Script, "--iterations=2 "+remote.Quote(tc.expr)) {
+					t.Fatalf("wrong calendar command: %s", c.Script)
+				}
+				return string(recorded), nil
+			}}
+			got, fallback, err := scheduleMaxAge(context.Background(), h, tc.expr)
+			if err != nil || fallback || got != 2*tc.gap+time.Hour {
+				t.Fatalf("got %s, fallback=%v, err=%v", got, fallback, err)
+			}
+		})
 	}
-	for _, tc := range cases {
-		t.Run(tc.sched, func(t *testing.T) {
-			if got := scheduleMaxAge(tc.sched); got != tc.want {
-				t.Errorf("scheduleMaxAge(%q) = %s, want %s", tc.sched, got, tc.want)
+	for _, tc := range []struct {
+		name, output      string
+		commandErr        error
+		fallback, wantErr bool
+	}{
+		{name: "unavailable", output: "yoho-systemd-analyze-unavailable\n", fallback: true},
+		{name: "invalid calendar", commandErr: errors.New("Invalid argument"), wantErr: true},
+		{name: "no future elapse", output: "Next elapse: never\n", wantErr: true},
+		{name: "unreadable output", output: "", wantErr: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := &doctorFakeHost{out: func(remote.Cmd) (string, error) { return tc.output, tc.commandErr }}
+			got, fallback, err := scheduleMaxAge(context.Background(), h, "daily")
+			if (err != nil) != tc.wantErr || fallback != tc.fallback || (fallback && got != 8*24*time.Hour) {
+				t.Fatalf("got %s %v %v", got, fallback, err)
 			}
 		})
 	}
@@ -232,6 +256,8 @@ func TestDoctorBackupsAndDrill(t *testing.T) {
 					return fmt.Sprintf("shop-production-%s.json\n", jobName), nil
 				case strings.Contains(s, "systemctl") && strings.Contains(s, "show"):
 					return fmt.Sprintf("ActiveState=%s\nNextElapseUSecRealtime=tomorrow\nLastTriggerUSec=today\nResult=success\n", timerState), nil
+				case strings.Contains(s, "systemd-analyze"):
+					return "Next elapse: Sat 2026-11-21 03:00:00 UTC\nIter. #2: Sun 2026-11-22 03:00:00 UTC\n", nil
 				case strings.Contains(s, "date -u +%s.%N"):
 					return clockStr, nil
 				case strings.Contains(s, "audit"):
@@ -670,4 +696,266 @@ func TestDoctorEndToEndJSONAndExitCodes(t *testing.T) {
 			t.Fatalf("unexpected human output:\n%s", out)
 		}
 	})
+}
+
+func TestDoctorMissingScheduledBackupAndUnreadableTimer(t *testing.T) {
+	a := makeDoctorApp(t, "services:\n  web: {image: nginx, restart: unless-stopped}\n", func(c *config.Config) {
+		c.App = "shop"
+		c.Backups.Jobs = map[string]config.BackupJob{"nightly": {Destination: "production", Schedule: "daily"}}
+	})
+	h := &doctorFakeHost{}
+	fs := checkDoctorBackups(context.Background(), a, plan.NamedHost{Name: "primary", Host: h}, 48*time.Hour, false, time.Now())
+	found := false
+	for _, f := range fs {
+		if f.Subject == "nightly" && strings.Contains(f.Message, "not installed") {
+			found = f.Severity == severityError && strings.Contains(f.Hint, "yoho schedule install")
+		}
+	}
+	if !found || exitCodeOf(emitDoctorResults(a, fs)) != 1 {
+		t.Fatalf("missing job must fail doctor: %+v", fs)
+	}
+
+	spec, _ := json.Marshal(schedule.Spec{App: "shop", Destination: "production", Job: "nightly", Schedule: "daily"})
+	now := time.Now().UTC().Truncate(time.Second)
+	state, _ := json.Marshal(map[string]schedule.JobState{"nightly": {LastSuccess: &now}})
+	h.files = map[string][]byte{schedule.SpecPath("shop", "production", "nightly"): spec, schedule.StatePath("shop", "production"): state}
+	h.out = func(c remote.Cmd) (string, error) {
+		switch {
+		case strings.Contains(c.Script, "ls -1"):
+			return "shop-production-nightly.json\n", nil
+		case strings.Contains(c.Script, "systemctl"):
+			return "", errors.New("show failed")
+		case strings.Contains(c.Script, "date -u"):
+			return fmt.Sprintf("%d.000000000\n", now.Unix()), nil
+		}
+		return "", nil
+	}
+	fs = checkDoctorBackups(context.Background(), a, plan.NamedHost{Name: "primary", Host: h}, 48*time.Hour, false, now)
+	for _, f := range fs {
+		if f.Subject == "nightly" && f.Message == "timer state unreadable" && f.Severity == severityWarning {
+			return
+		}
+	}
+	t.Fatalf("missing unreadable timer warning: %+v", fs)
+}
+
+func TestDoctorDrillScansAllHistoryAndPairsRuns(t *testing.T) {
+	a := makeDoctorApp(t, "services:\n  web: {image: nginx}\n", nil)
+	now := time.Date(2026, 11, 20, 12, 0, 0, 0, time.UTC)
+	var log strings.Builder
+	add := func(r audit.Record) {
+		b, err := r.Line()
+		if err != nil {
+			t.Fatal(err)
+		}
+		log.Write(b)
+		log.WriteByte('\n')
+	}
+	zero := 0
+	add(audit.Record{Time: now.Add(-48 * time.Hour), Run: "good", Command: "backup drill", Phase: audit.Started})
+	add(audit.Record{Time: now.Add(-47 * time.Hour), Run: "good", Command: "backup drill", Phase: audit.Finished, Exit: &zero})
+	add(audit.Record{Time: now.Add(-24 * time.Hour), Run: "cleanup", Command: "backup drill", Phase: audit.Started, Args: map[string]any{"cleanup": true}})
+	for i := 0; i < 600; i++ {
+		add(audit.Record{Time: now.Add(-12 * time.Hour), Run: fmt.Sprint(i), Command: "deploy", Phase: audit.Finished, Exit: &zero})
+	}
+	add(audit.Record{Time: now.Add(-time.Hour), Run: "cleanup", Command: "backup drill", Phase: audit.Finished, Exit: &zero})
+	h := &doctorFakeHost{out: func(c remote.Cmd) (string, error) {
+		if strings.Contains(c.Script, "tail -n") || !strings.Contains(c.Script, "cat ") {
+			t.Fatalf("audit scan truncated history: %s", c.Script)
+		}
+		return log.String(), nil
+	}}
+	f := checkDoctorDrill(context.Background(), a, plan.NamedHost{Name: "primary", Host: h}, now)
+	if f.Severity != severityInfo || !strings.Contains(f.Message, "2026-11-18") {
+		t.Fatalf("wrong successful drill: %+v", f)
+	}
+}
+
+func TestDoctorSwarmPublishedPorts(t *testing.T) {
+	a := makeDoctorApp(t, "services:\n  api:\n    image: nginx\n    ports: ['127.0.0.1:8080:80', '192.0.2.1:9090:90']\n", func(c *config.Config) {
+		d := c.Destinations["production"]
+		d.Runtime = "swarm"
+		c.Destinations["production"] = d
+	})
+	_, fs := checkDoctorConfig(context.Background(), a)
+	found := false
+	for _, f := range fs {
+		if f.Check == "ports" && strings.Contains(f.Message, "8080:80") && strings.Contains(f.Message, "9090:90") {
+			found = true
+			if strings.Contains(f.Hint, "127.0.0.1") || !strings.Contains(f.Message, "Swarm ingress") {
+				t.Fatalf("incorrect Swarm guidance: %+v", f)
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("missed interface-specific Swarm ports: %+v", fs)
+	}
+	h := &doctorFakeHost{out: func(c remote.Cmd) (string, error) {
+		if !strings.Contains(c.Script, "docker service ls --filter 'label=com.docker.stack.namespace="+a.project()+"'") || strings.Contains(c.Script, "docker ps") {
+			t.Fatalf("wrong Swarm query: %s", c.Script)
+		}
+		return "app_api\t*:8080->80/tcp, *:9090->90/tcp\n", nil
+	}}
+	fs = checkDoctorPublishedPorts(context.Background(), a, plan.NamedHost{Name: "primary", Host: h})
+	if len(fs) != 1 || !strings.Contains(fs[0].Message, "8080") || strings.Contains(fs[0].Hint, "127.0.0.1") {
+		t.Fatalf("wrong live Swarm finding: %+v", fs)
+	}
+}
+
+func TestDoctorDiskReservedSpaceAndNoAvailableSpace(t *testing.T) {
+	a := makeDoctorApp(t, "services:\n  web: {image: nginx}\n", nil)
+	for _, tc := range []struct{ name, df, severity, pct string }{
+		{"reserved blocks", "104857600\t96468992\t4194304", severityError, "96%"},
+		{"small full volume", "1024\t0\t0", severityError, "100%"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := &doctorFakeHost{out: func(remote.Cmd) (string, error) { return "docker\t/data\t/data\t" + tc.df + "\n", nil }}
+			fs := checkDoctorDisk(context.Background(), a, plan.NamedHost{Name: "primary", Host: h})
+			if len(fs) != 1 || fs[0].Severity != tc.severity || !strings.Contains(fs[0].Message, tc.pct) {
+				t.Fatalf("wrong disk finding: %+v", fs)
+			}
+		})
+	}
+}
+
+func TestDoctorContainerTransportAndLocalPussh(t *testing.T) {
+	for _, mode := range []string{"auto", "load", "pussh", "registry"} {
+		t.Run(mode, func(t *testing.T) {
+			a := makeDoctorApp(t, "services:\n  web: {build: .}\n", func(c *config.Config) { c.Builder.Engine = "container"; c.Transport.Mode = mode })
+			h := &doctorFakeHost{out: func(remote.Cmd) (string, error) {
+				t.Fatal("Apple container should not probe Docker store")
+				return "", nil
+			}}
+			fs := checkDoctorTransport(context.Background(), a, plan.NamedHost{Name: "primary", Host: h}, true)
+			if len(fs) != 1 {
+				t.Fatal(fs)
+			}
+			if mode == "auto" || mode == "load" {
+				if fs[0].Severity != severityInfo || !strings.Contains(fs[0].Message, "archive load (Apple container)") || strings.Contains(fs[0].Hint, "pussh") {
+					t.Fatal(fs)
+				}
+			} else if fs[0].Severity != severityError || !strings.Contains(fs[0].Message, "needs images in the local Docker") {
+				t.Fatal(fs)
+			}
+		})
+	}
+	a := makeDoctorApp(t, "services:\n  web: {build: .}\n", func(c *config.Config) { c.Transport.Mode = "pussh" })
+	fs := checkDoctorTransport(context.Background(), a, plan.NamedHost{Name: "local", Host: &remote.Local{}}, true)
+	if len(fs) != 1 || fs[0].Severity != severityError || !strings.Contains(fs[0].Message, "no ssh target") {
+		t.Fatalf("local pussh: %+v", fs)
+	}
+}
+
+func TestDoctorInvalidMaxAgeJSON(t *testing.T) {
+	oldRoot := release.Root
+	t.Cleanup(func() { release.Root = oldRoot })
+	p := appDir(t, "compose", "services:\n  web: {image: nginx}\n")
+	for _, age := range []string{"0", "-1h", "invalid"} {
+		t.Run(age, func(t *testing.T) {
+			g := &globals{configPath: p, json: true}
+			cmd := doctorCmd(g)
+			var out bytes.Buffer
+			cmd.SetOut(&out)
+			cmd.SetErr(&out)
+			cmd.SetArgs([]string{"--max-age", age})
+			cmd.SilenceErrors = true
+			cmd.SilenceUsage = true
+			err := cmd.Execute()
+			if exitCodeOf(err) != 1 {
+				t.Fatalf("got %v", err)
+			}
+			var events []map[string]any
+			for _, line := range strings.Split(strings.TrimSpace(out.String()), "\n") {
+				var ev map[string]any
+				if err := json.Unmarshal([]byte(line), &ev); err != nil {
+					t.Fatal(err)
+				}
+				events = append(events, ev)
+			}
+			if len(events) != 2 || events[0]["event"] != "finding" || events[1]["event"] != "doctor" || events[1]["destination"] != "production" || events[1]["ok"] != false {
+				t.Fatalf("bad JSON: %s", out.String())
+			}
+		})
+	}
+}
+
+func TestDoctorOfflineValidationContinuesAfterSecretKeysError(t *testing.T) {
+	a := makeDoctorApp(t, "services:\n  db:\n    image: postgres\n    x-yoho: {stateful: true}\n", nil)
+	if err := os.MkdirAll(filepath.Join(a.dir, ".yoho", "secrets"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	_, fs := checkDoctorConfig(context.Background(), a)
+	var secretError, backupWarning bool
+	for _, f := range fs {
+		if f.Check == "config" && f.Severity == severityError && strings.Contains(f.Message, "secrets") {
+			secretError = true
+		}
+		if f.Check == "backup" && f.Subject == "db" {
+			backupWarning = true
+		}
+	}
+	if !secretError || !backupWarning {
+		t.Fatalf("validation stopped on secret key error: %+v", fs)
+	}
+}
+
+func TestDoctorValidatesPreviewTemplate(t *testing.T) {
+	g := previewFixture(t, "")
+	writePreviewTestFile(t, filepath.Join(filepath.Dir(g.configPath), "compose.staging.yaml"), "services:\n  api:\n    image: nginx\n    x-yoho:\n      proxy: {hosts: [api.example.com], port: 80}\n")
+	cmd := doctorCmd(g)
+	cmd.SetContext(context.Background())
+	a, err := g.load(cmd)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, fs := checkDoctorConfig(context.Background(), a)
+	for _, f := range fs {
+		if f.Severity == severityError && strings.Contains(f.Message, "{service}") {
+			return
+		}
+	}
+	t.Fatalf("doctor missed invalid preview: %+v", fs)
+}
+
+func TestDoctorSkipsProxyAfterComposeLoadFailure(t *testing.T) {
+	oldRoot := release.Root
+	t.Cleanup(func() { release.Root = oldRoot })
+	p := appDir(t, "compose", "services: [invalid")
+	g := &globals{configPath: p, json: true}
+	cmd := doctorCmd(g)
+	cmd.SetContext(context.Background())
+	var out bytes.Buffer
+	cmd.SetOut(&out)
+	h := &doctorFakeHost{out: func(c remote.Cmd) (string, error) {
+		if strings.Contains(c.Script, "container inspect") {
+			t.Fatal("Proxy should be skipped")
+		}
+		return "", nil
+	}}
+	err := runDoctor(cmd, g, doctorOptions{connect: func(context.Context, *app) ([]plan.NamedHost, func(), error) {
+		return []plan.NamedHost{{Name: "primary", Host: h}}, func() {}, nil
+	}, localExec: func(context.Context, transport.Command) error { return nil }})
+	if exitCodeOf(err) != 1 || !strings.Contains(out.String(), "Proxy check skipped") || strings.Contains(out.String(), "no proxied Services") {
+		t.Fatalf("misleading proxy after config failure: %v\n%s", err, out.String())
+	}
+}
+
+func TestDoctorAutoEngineOnAppleSilicon(t *testing.T) {
+	if runtime.GOOS != "darwin" || runtime.GOARCH != "arm64" {
+		t.Skip("Apple silicon engine selection")
+	}
+	bin := t.TempDir()
+	if err := os.WriteFile(filepath.Join(bin, "container"), []byte("#!/bin/sh\nexit 0\n"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin)
+	a := makeDoctorApp(t, "services:\n  web: {build: .}\n", func(c *config.Config) { c.Builder.Engine = "auto"; c.Transport.Mode = "auto" })
+	h := &doctorFakeHost{out: func(remote.Cmd) (string, error) {
+		t.Fatal("auto Apple container should not probe Docker")
+		return "", nil
+	}}
+	fs := checkDoctorTransport(context.Background(), a, plan.NamedHost{Name: "primary", Host: h}, true)
+	if len(fs) != 1 || fs[0].Severity != severityInfo || !strings.Contains(fs[0].Message, "archive load (Apple container)") {
+		t.Fatalf("auto engine: %+v", fs)
+	}
 }

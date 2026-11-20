@@ -523,21 +523,6 @@ func runConfigCheck(cmd *cobra.Command, g *globals, offline bool) error {
 		}
 		return fail(code, err, "fix the compose file, then run `yoho config check` again")
 	}
-	// Validate the preview template too, including Service-dependent host patterns.
-	// This only loads config and compose: no Server connection or secret resolution.
-	if a.cfg.Previews != nil {
-		previousRoot := release.Root
-		preview, previewErr := g.loadPreviewTemplate(cmd)
-		if previewErr == nil {
-			preview.derivePreview("config-check")
-			_, previewErr = preview.compose(cmd.Context())
-		}
-		release.Root = previousRoot
-		if previewErr != nil {
-			errCount = 1
-			return fail(exitFindings, previewErr, "fix previews or its template overlay, then run `yoho config check` again")
-		}
-	}
 	services = len(r.Project.Services)
 	keys, err := a.secretKeys(r)
 	if err != nil {
@@ -545,7 +530,7 @@ func runConfigCheck(cmd *cobra.Command, g *globals, offline bool) error {
 		return fail(exitLoad, err, "")
 	}
 	keyCount = len(keys)
-	findings := a.configFindings(r, keys)
+	findings := a.offlineConfigFindings(cmd, r, keys)
 	for _, f := range findings {
 		if f.Level == composefile.LevelError {
 			errCount++
@@ -566,6 +551,25 @@ func runConfigCheck(cmd *cobra.Command, g *globals, offline bool) error {
 	step.Done(fmt.Sprintf("%s, %s, runtime %s", ui.Count(services, "service", ""), ui.Count(keyCount, "secret key", ""), a.dest.Runtime))
 	a.ui.Check(true, 0, offline, services, keyCount)
 	return nil
+}
+
+// offlineConfigFindings shares all offline validation, including previews,
+// between config check and doctor. It never resolves secret values.
+func (a *app) offlineConfigFindings(cmd *cobra.Command, r *composefile.Result, keys []string) []composefile.Finding {
+	findings := a.configFindings(r, keys)
+	if a.cfg.Previews != nil {
+		previousRoot := release.Root
+		defer func() { release.Root = previousRoot }()
+		preview, err := a.g.loadPreviewTemplate(cmd)
+		if err == nil {
+			preview.derivePreview("config-check")
+			_, err = preview.compose(cmd.Context())
+		}
+		if err != nil {
+			findings = append(findings, composefile.Finding{Level: composefile.LevelError, Message: "previews: " + err.Error() + ". Hint: fix previews or its template overlay, then run `yoho config check` again"})
+		}
+	}
+	return findings
 }
 
 // configFindings runs all offline config and compose checks for a Destination.

@@ -1,0 +1,8 @@
+  Original form: daily
+Normalized form: *-*-* 00:00:00
+    Next elapse: Sun 2026-03-08 00:00:00 MST
+       (in UTC): Sun 2026-03-08 07:00:00 UTC
+       From now: 1 day left
+       Iter. #2: Mon 2026-03-09 00:00:00 MDT
+       (in UTC): Mon 2026-03-09 06:00:00 UTC
+       From now: 2 days left

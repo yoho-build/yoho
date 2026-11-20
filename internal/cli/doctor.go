@@ -3,7 +3,9 @@ package cli
 import (
 	"context"
 	"fmt"
+	"os/exec"
 	"path"
+	"runtime"
 	"slices"
 	"strconv"
 	"strings"
@@ -12,6 +14,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/yoho-build/yoho/internal/audit"
+	"github.com/yoho-build/yoho/internal/build"
 	"github.com/yoho-build/yoho/internal/composefile"
 	"github.com/yoho-build/yoho/internal/config"
 	"github.com/yoho-build/yoho/internal/deploy"
@@ -49,14 +52,15 @@ type doctorFinding struct {
 }
 
 type doctorOptions struct {
-	maxAge    time.Duration
-	connect   func(ctx context.Context, a *app) ([]plan.NamedHost, func(), error)
-	localExec transport.Exec
-	now       func() time.Time
+	validationErr error
+	maxAge        time.Duration
+	connect       func(ctx context.Context, a *app) ([]plan.NamedHost, func(), error)
+	localExec     transport.Exec
+	now           func() time.Time
 }
 
 func doctorCmd(g *globals) *cobra.Command {
-	var maxAge time.Duration
+	var maxAge string
 	c := &cobra.Command{
 		Use:   "doctor",
 		Short: "Check whether a Destination is production-safe (read-only)",
@@ -75,13 +79,18 @@ Exit codes: 0 no errors (warnings and info still exit 0), 1 one or more
 error findings (or a load/connection failure).`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			if cmd.Flags().Changed("max-age") && maxAge <= 0 {
-				return fmt.Errorf("--max-age must be a positive duration (e.g. 48h)")
+			var age time.Duration
+			var err error
+			if cmd.Flags().Changed("max-age") {
+				age, err = time.ParseDuration(maxAge)
+				if err != nil || age <= 0 {
+					err = fmt.Errorf("--max-age must be a positive duration (e.g. 48h)")
+				}
 			}
-			return runDoctor(cmd, g, doctorOptions{maxAge: maxAge})
+			return runDoctor(cmd, g, doctorOptions{maxAge: age, validationErr: err})
 		},
 	}
-	c.Flags().DurationVar(&maxAge, "max-age", 0, "Override the Backup freshness threshold for every Scheduled Job (e.g. 48h; default: derived from each job's schedule)")
+	c.Flags().StringVar(&maxAge, "max-age", "", "Override the Backup freshness threshold for every Scheduled Job (e.g. 48h; default: derived from each job's schedule)")
 	return c
 }
 
@@ -92,6 +101,9 @@ func runDoctor(cmd *cobra.Command, g *globals, opts doctorOptions) error {
 		u.DoctorFinding("config", severityError, "", err.Error(), "check yoho.yml and pass -d <destination> if needed")
 		u.DoctorSummary(false, 1, 0, 0, g.destination)
 		return &exitError{1, &silentError{err}}
+	}
+	if opts.validationErr != nil {
+		return emitDoctorResults(a, []doctorFinding{{Check: "config", Severity: severityError, Message: opts.validationErr.Error(), Hint: "pass --max-age with a positive duration (e.g. 48h)"}})
 	}
 	ctx := cmd.Context()
 	if opts.now == nil {
@@ -142,7 +154,11 @@ func runDoctor(cmd *cobra.Command, g *globals, opts doctorOptions) error {
 		findings = append(findings, checkDoctorFirewall(ctx, a, h)...)
 		findings = append(findings, checkDoctorPublishedPorts(ctx, a, h)...)
 		findings = append(findings, checkDoctorDisk(ctx, a, h)...)
-		findings = append(findings, checkDoctorProxy(ctx, a, h, needsProxy)...)
+		if r == nil {
+			findings = append(findings, doctorFinding{Check: "proxy", Severity: severityWarning, Subject: h.Name, Message: "Proxy check skipped because compose config failed", Hint: "fix config and rerun `yoho doctor`"})
+		} else {
+			findings = append(findings, checkDoctorProxy(ctx, a, h, needsProxy)...)
+		}
 		findings = append(findings, checkDoctorTransport(ctx, a, h, pusshOK)...)
 	}
 
@@ -192,10 +208,14 @@ func checkDoctorConfig(ctx context.Context, a *app) (*composefile.Result, []doct
 			Message:  err.Error(),
 			Hint:     "check .yoho/secrets and secrets.values, then run `yoho config check`",
 		})
-		return r, out
 	}
 
-	raw := a.configFindings(r, keys)
+	cmd := &cobra.Command{Use: "doctor"}
+	cmd.SetContext(ctx)
+	raw := a.offlineConfigFindings(cmd, r, keys)
+	if len(a.cfg.Secrets.Nonempty) > 0 {
+		raw = append(raw, composefile.Finding{Level: composefile.LevelWarning, Message: "secrets.nonempty not verified (--offline)"})
+	}
 	var backupFindings, otherFindings []doctorFinding
 	for _, f := range raw {
 		sev := severityWarning
@@ -256,13 +276,21 @@ func checkDoctorConfig(ctx context.Context, a *app) (*composefile.Result, []doct
 		if err != nil {
 			continue
 		}
-		if pub := composefile.PublicPorts(svc); len(pub) > 0 {
+		pub := composefile.PublicPorts(svc)
+		exposure := "on 0.0.0.0/:: outside the Proxy (bypasses ufw)"
+		hint := "bind private ports to 127.0.0.1, or route HTTP traffic through x-yoho.proxy"
+		if a.dest.Runtime == "swarm" {
+			pub = composefile.PublishedPorts(svc)
+			exposure = "on every node and interface via the Swarm ingress mesh (bypasses ufw)"
+			hint = "remove published ports and use the stack network, or route HTTP traffic through x-yoho.proxy"
+		}
+		if len(pub) > 0 {
 			otherFindings = append(otherFindings, doctorFinding{
 				Check:    "ports",
 				Severity: severityWarning,
 				Subject:  name,
-				Message:  fmt.Sprintf("Service %s publishes port(s) %s on 0.0.0.0/:: outside the Proxy (bypasses ufw)", name, strings.Join(pub, ", ")),
-				Hint:     "bind private ports to 127.0.0.1, or route HTTP traffic through x-yoho.proxy",
+				Message:  fmt.Sprintf("Service %s publishes port(s) %s %s", name, strings.Join(pub, ", "), exposure),
+				Hint:     hint,
 			})
 		}
 	}
@@ -364,10 +392,24 @@ func checkDoctorBackups(ctx context.Context, a *app, h plan.NamedHost, maxAge ti
 			if !installed[name] {
 				out = append(out, doctorFinding{
 					Check:    "backup",
-					Severity: severityWarning,
+					Severity: severityError,
 					Subject:  name,
 					Message:  fmt.Sprintf("Backup job %s (%s) is not installed as a Scheduled Job on %s", name, a.cfg.Backups.Jobs[name].Schedule, h.Name),
 					Hint:     fmt.Sprintf("run `yoho schedule install -d %s`", a.destName),
+				})
+			}
+		}
+
+		for _, s := range sts {
+			if s.TimerState == "" {
+				out = append(out, doctorFinding{Check: "backup", Severity: severityWarning, Subject: s.Job, Message: "timer state unreadable", Hint: fmt.Sprintf("inspect `yoho schedule status -d %s` and systemctl on the Server", a.destName)})
+			} else if s.TimerState != "active" {
+				out = append(out, doctorFinding{
+					Check:    "backup",
+					Severity: severityError,
+					Subject:  s.Job,
+					Message:  fmt.Sprintf("Scheduled Job %s timer is %s (not active)", s.Job, s.TimerState),
+					Hint:     fmt.Sprintf("run `yoho schedule install -d %s` to re-enable the timer", a.destName),
 				})
 			}
 		}
@@ -388,18 +430,18 @@ func checkDoctorBackups(ctx context.Context, a *app, h plan.NamedHost, maxAge ti
 				})
 			} else {
 				for _, s := range sts {
-					if s.TimerState != "" && s.TimerState != "active" {
-						out = append(out, doctorFinding{
-							Check:    "backup",
-							Severity: severityError,
-							Subject:  s.Job,
-							Message:  fmt.Sprintf("Scheduled Job %s timer is %s (not active)", s.Job, s.TimerState),
-							Hint:     fmt.Sprintf("run `yoho schedule install -d %s` to re-enable the timer", a.destName),
-						})
-					}
 					window := maxAge
 					if window <= 0 {
-						window = scheduleMaxAge(s.Schedule)
+						var unavailable bool
+						var ageErr error
+						window, unavailable, ageErr = scheduleMaxAge(ctx, h.Host, s.Schedule)
+						if ageErr != nil {
+							out = append(out, doctorFinding{Check: "backup", Severity: severityError, Subject: s.Job, Message: ageErr.Error(), Hint: "check the schedule with systemd-analyze calendar on the Server, or pass --max-age"})
+							continue
+						}
+						if unavailable {
+							out = append(out, doctorFinding{Check: "backup", Severity: severityInfo, Subject: s.Job, Message: "systemd-analyze unavailable on Server; using conservative 8d Backup freshness threshold", Hint: "install systemd-analyze or pass --max-age"})
+						}
 					}
 					health := schedule.SuccessHealth(s.State, serverNow, window)
 					switch health {
@@ -463,7 +505,7 @@ func checkDoctorBackups(ctx context.Context, a *app, h plan.NamedHost, maxAge ti
 }
 
 func checkDoctorDrill(ctx context.Context, a *app, h plan.NamedHost, now time.Time) doctorFinding {
-	entries, err := audit.Read(ctx, h.Host, a.cfg.App, a.destName, 500)
+	entries, err := audit.ReadCommand(ctx, h.Host, a.cfg.App, a.destName, "backup drill")
 	if err != nil {
 		return doctorFinding{
 			Check:    "drill",
@@ -520,68 +562,40 @@ func checkDoctorDrill(ctx context.Context, a *app, h plan.NamedHost, now time.Ti
 	}
 }
 
-// scheduleMaxAge returns a freshness threshold with headroom for common
-// systemd OnCalendar expressions. Unknown expressions fall back to 48h.
-func scheduleMaxAge(onCalendar string) time.Duration {
-	s := strings.ToLower(strings.TrimSpace(onCalendar))
-	switch s {
-	case "minutely":
-		return time.Hour
-	case "hourly":
-		return 3 * time.Hour
-	case "daily":
-		return 48 * time.Hour
-	case "weekly":
-		return 8 * 24 * time.Hour
-	case "monthly":
-		return 35 * 24 * time.Hour
-	case "quarterly":
-		return 100 * 24 * time.Hour
-	case "semiannually", "semi-annually":
-		return 190 * 24 * time.Hour
-	case "yearly", "annually":
-		return 370 * 24 * time.Hour
+// scheduleMaxAge asks the Server's systemd to interpret its own calendar syntax.
+// Only a missing systemd-analyze permits the conservative fallback.
+func scheduleMaxAge(ctx context.Context, h remote.Host, onCalendar string) (time.Duration, bool, error) {
+	out, err := h.Output(ctx, remote.Cmd{Script: "set -eu\nLC_ALL=C; export LC_ALL\nif ! command -v systemd-analyze >/dev/null 2>&1; then echo yoho-systemd-analyze-unavailable; exit 0; fi\nsystemd-analyze calendar --iterations=2 " + remote.Quote(onCalendar) + "\n"})
+	if err != nil {
+		return 0, false, fmt.Errorf("could not evaluate Backup schedule %q: %w", onCalendar, err)
 	}
-	// Weekday prefix (e.g. "Mon *-*-* 03:00:00", "Sun 02:00").
-	for _, wd := range []string{"mon", "tue", "wed", "thu", "fri", "sat", "sun"} {
-		if strings.HasPrefix(s, wd) && (len(s) == len(wd) || s[len(wd)] == ' ' || s[len(wd)] == ',' || s[len(wd)] == '.' || s[len(wd)] == '-') {
-			return 8 * 24 * time.Hour
-		}
+	if strings.TrimSpace(out) == "yoho-systemd-analyze-unavailable" {
+		return 8 * 24 * time.Hour, true, nil
 	}
-	fields := strings.Fields(s)
-	var datePart, timePart string
-	for _, f := range fields {
-		if strings.Contains(f, "-") && datePart == "" {
-			datePart = f
-		} else if strings.Contains(f, ":") && timePart == "" {
-			timePart = f
-		}
-	}
-	if datePart != "" {
-		parts := strings.Split(datePart, "-")
-		if len(parts) == 3 {
-			// Specific month & day (yearly)
-			if parts[1] != "*" && !strings.HasPrefix(parts[1], "*/") && parts[2] != "*" && !strings.HasPrefix(parts[2], "*/") {
-				return 370 * 24 * time.Hour
+	var elapses []time.Time
+	for _, line := range strings.Split(out, "\n") {
+		label, value, ok := strings.Cut(strings.TrimSpace(line), ":")
+		if ok && label == "(in UTC)" && len(elapses) > 0 {
+			t, err := time.Parse("Mon 2006-01-02 15:04:05 MST", strings.TrimSpace(value))
+			if err != nil {
+				return 0, false, fmt.Errorf("could not parse systemd UTC elapse: %w", err)
 			}
-			// Specific day of month (monthly, e.g. *-*-01)
-			if parts[2] != "*" && !strings.HasPrefix(parts[2], "*/") {
-				return 35 * 24 * time.Hour
-			}
+			elapses[len(elapses)-1] = t
+			continue
 		}
+		if !ok || (label != "Next elapse" && !strings.HasPrefix(label, "Iter. #")) {
+			continue
+		}
+		t, err := time.Parse("Mon 2006-01-02 15:04:05 MST", strings.TrimSpace(value))
+		if err != nil {
+			return 0, false, fmt.Errorf("could not parse systemd calendar elapse: %w", err)
+		}
+		elapses = append(elapses, t)
 	}
-	if timePart != "" {
-		hour, _, _ := strings.Cut(timePart, ":")
-		if hour == "*" {
-			return 3 * time.Hour
-		}
-		if rest, ok := strings.CutPrefix(hour, "*/"); ok {
-			if n, err := strconv.Atoi(rest); err == nil && n > 0 {
-				return time.Duration(n*2+1) * time.Hour
-			}
-		}
+	if len(elapses) != 2 || !elapses[1].After(elapses[0]) {
+		return 0, false, fmt.Errorf("systemd calendar returned no two increasing elapses for %q", onCalendar)
 	}
-	return 48 * time.Hour
+	return 2*elapses[1].Sub(elapses[0]) + time.Hour, false, nil
 }
 
 // checkDoctorFirewall checks ufw state using setup.CheckFirewall.
@@ -630,6 +644,9 @@ func checkDoctorPublishedPorts(ctx context.Context, a *app, h plan.NamedHost) []
 		"{ docker ps --filter " + q("label=com.docker.compose.project="+proj) + " --format '{{.Names}}\t{{.Ports}}'\n" +
 		"  docker ps --filter " + q("label=com.docker.stack.namespace="+proj) + " --format '{{.Names}}\t{{.Ports}}'\n" +
 		"} | sort -u\n"
+	if a.dest.Runtime == "swarm" {
+		script = "set -eu\ndocker service ls --filter " + q("label=com.docker.stack.namespace="+proj) + " --format '{{.Name}}\t{{.Ports}}'\n"
+	}
 	out, err := h.Host.Output(ctx, remote.Cmd{Script: script})
 	if err != nil {
 		return []doctorFinding{{
@@ -651,13 +668,25 @@ func checkDoctorPublishedPorts(ctx context.Context, a *app, h plan.NamedHost) []
 			continue
 		}
 		pub := parseWildcardPublishedPorts(ports)
+		hint := "remove published ports or bind to 127.0.0.1, or route HTTP traffic through x-yoho.proxy"
+		exposure := "on 0.0.0.0/:: outside the Proxy (bypasses ufw)"
+		if a.dest.Runtime == "swarm" {
+			pub = nil
+			for _, p := range strings.Split(ports, ",") {
+				if strings.Contains(p, "->") {
+					pub = append(pub, strings.TrimSpace(p))
+				}
+			}
+			exposure = "on every node and interface via the Swarm ingress mesh (bypasses ufw)"
+			hint = "remove published ports and use the stack network, or route HTTP traffic through x-yoho.proxy"
+		}
 		if len(pub) > 0 {
 			findings = append(findings, doctorFinding{
 				Check:    "ports",
 				Severity: severityWarning,
 				Subject:  h.Name + "/" + name,
-				Message:  fmt.Sprintf("container %s publishes %s on 0.0.0.0/:: outside the Proxy (bypasses ufw)", name, strings.Join(pub, ", ")),
-				Hint:     "remove published ports or bind to 127.0.0.1, or route HTTP traffic through x-yoho.proxy",
+				Message:  fmt.Sprintf("Service %s publishes %s %s", name, strings.Join(pub, ", "), exposure),
+				Hint:     hint,
 			})
 		}
 	}
@@ -753,12 +782,15 @@ disk backup-cache ` + remote.Quote(backupCache) + `
 
 	var findings []doctorFinding
 	for _, d := range disks {
-		usedPct := float64(d.Used) / float64(d.Total) * 100
+		usedPct := 100.0
+		if d.Avail > 0 {
+			usedPct = float64(d.Used) / (float64(d.Used) + float64(d.Avail)) * 100
+		}
 		label := diskLabel(d.Label)
 		sev := severityInfo
 		hint := ""
 		switch {
-		case usedPct >= 95 || (d.Total >= 2*gib && d.Avail < 1*gib):
+		case d.Avail == 0 || usedPct >= 95 || (d.Total >= 2*gib && d.Avail < 1*gib):
 			sev = severityError
 			hint = diskHint(d.Label)
 		case usedPct >= 85 || (d.Total >= 10*gib && d.Avail < 5*gib):
@@ -936,6 +968,15 @@ func checkDoctorTransport(ctx context.Context, a *app, h plan.NamedHost, pusshOK
 		}}
 	}
 
+	engine, _ := build.ResolveEngine(a.cfg.Builder, runtime.GOOS, runtime.GOARCH, exec.LookPath, func() error {
+		return exec.CommandContext(ctx, "container", "system", "status").Run()
+	})
+	if err := transport.ValidateEngineMode(engine, a.cfg.Transport.Mode); err != nil {
+		return []doctorFinding{{Check: "transport", Severity: severityError, Subject: h.Name, Message: err.Error(), Hint: "set transport.mode: auto or load, or builder.engine: docker"}}
+	}
+	if engine == build.EngineContainer {
+		return []doctorFinding{{Check: "transport", Severity: severityInfo, Subject: h.Name, Message: "transport: archive load (Apple container)"}}
+	}
 	mode := a.cfg.Transport.Mode
 	if mode == "" {
 		mode = "auto"
@@ -958,6 +999,13 @@ func checkDoctorTransport(ctx context.Context, a *app, h plan.NamedHost, pusshOK
 		}}
 	}
 
+	if err := transport.PusshTarget(h.Host); err != nil {
+		sev := severityInfo
+		if mode == transport.MethodPussh {
+			sev = severityError
+		}
+		return []doctorFinding{{Check: "transport", Severity: sev, Subject: h.Name, Message: "transport: full archive (docker save | docker load); pussh unavailable: " + err.Error(), Hint: "use transport.mode: auto or load for a local Server"}}
+	}
 	containerdOK, err := transport.ServerContainerdImageStore(ctx, h.Host)
 	if err != nil {
 		return []doctorFinding{{
