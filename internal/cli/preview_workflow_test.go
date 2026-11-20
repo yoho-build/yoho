@@ -88,3 +88,23 @@ func TestPreviewWorkflowRequiresSSHCredentialsBeforeWriting(t *testing.T) {
 		})
 	}
 }
+
+func TestPreviewWorkflowHasOptInPruneJob(t *testing.T) {
+	w := readPreviewWorkflow(t)
+	job, ok := w.Jobs["prune"]
+	if !ok {
+		t.Fatal("missing prune safety-net job")
+	}
+	if !strings.Contains(job.If, "prune-older-than") || !strings.Contains(job.If, "YOHO_PREVIEW_PRUNE_OLDER_THAN") {
+		t.Fatalf("prune job must be opt-in: %s", job.If)
+	}
+	var foundPrune bool
+	for _, s := range job.Steps {
+		if strings.Contains(s.Run, "preview prune") && strings.Contains(s.Run, "--older-than") && strings.Contains(s.Run, "--yes") {
+			foundPrune = true
+		}
+	}
+	if !foundPrune {
+		t.Fatal("prune job does not run preview prune --older-than ... --yes")
+	}
+}

@@ -1,5 +1,10 @@
 name: Yoho preview
 on:
+  # Optional scheduled safety net (opt-in: uncomment and set repository
+  # variable YOHO_PREVIEW_PRUNE_OLDER_THAN, e.g. "7d", plus PREVIEW_KNOWN_HOSTS
+  # and PREVIEW_SSH_KEY, or call this reusable workflow from your own schedule).
+  # schedule:
+  #   - cron: "0 4 * * *"
   workflow_call:
     inputs:
       yoho-version:
@@ -14,6 +19,14 @@ on:
         description: Trusted known_hosts entries for the template Server.
         type: string
         required: true
+      prune-older-than:
+        description: Optional age threshold for the scheduled prune safety-net job (for example 7d).
+        type: string
+        default: ""
+      prune-keep:
+        description: Optional minimum number of newest previews to keep when pruning.
+        type: string
+        default: ""
     secrets:
       SSH_KEY:
         required: true
@@ -22,7 +35,7 @@ on:
 permissions:
   contents: read
 concurrency:
-  group: preview-${{ github.repository }}-${{ github.event.number }}
+  group: preview-${{ github.repository }}-${{ github.event.number || 'prune' }}
   cancel-in-progress: false
 jobs:
   preview:
@@ -64,11 +77,56 @@ jobs:
         working-directory: ${{ inputs.app-dir }}
         env:
           PREVIEW_NUMBER: ${{ github.event.number }}
+          PREVIEW_BRANCH: ${{ github.head_ref }}
           OP_SERVICE_ACCOUNT_TOKEN: ${{ secrets.OP_SERVICE_ACCOUNT_TOKEN }}
-        run: yoho preview up --name "pr-$PREVIEW_NUMBER"
+        run: yoho preview up --name "pr-$PREVIEW_NUMBER" --pr "$PREVIEW_NUMBER" --branch "$PREVIEW_BRANCH"
       - name: Remove preview
         if: github.event.action == 'closed'
         working-directory: ${{ inputs.app-dir }}
         env:
           PREVIEW_NUMBER: ${{ github.event.number }}
         run: yoho preview down --name "pr-$PREVIEW_NUMBER" --yes
+
+  prune:
+    # Opt-in safety net: runs only when prune-older-than is passed or when
+    # triggered on a schedule with vars.YOHO_PREVIEW_PRUNE_OLDER_THAN set.
+    if: (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || inputs.prune-older-than != '') && (inputs.prune-older-than != '' || vars.YOHO_PREVIEW_PRUNE_OLDER_THAN != '')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+      - uses: yoho-build/yoho/.github/actions/setup-yoho@v0.8.2
+        with:
+          version: ${{ inputs.yoho-version || 'latest' }}
+      - name: Configure SSH
+        env:
+          PREVIEW_SSH_KEY: ${{ secrets.SSH_KEY }}
+          PREVIEW_KNOWN_HOSTS: ${{ inputs.ssh-known-hosts || vars.PREVIEW_KNOWN_HOSTS }}
+        run: |
+          set -eu
+          case "$PREVIEW_SSH_KEY" in
+            *[![:space:]]*) ;;
+            *) echo "::error::SSH_KEY is required for preview SSH access" >&2; exit 1 ;;
+          esac
+          case "$PREVIEW_KNOWN_HOSTS" in
+            *[![:space:]]*) ;;
+            *) echo "::error::ssh-known-hosts must contain trusted Server host keys" >&2; exit 1 ;;
+          esac
+          umask 077
+          mkdir -p "$HOME/.ssh"
+          printf '%s\n' "$PREVIEW_SSH_KEY" > "$HOME/.ssh/id_ed25519"
+          printf '%s\n' "$PREVIEW_KNOWN_HOSTS" > "$HOME/.ssh/known_hosts"
+      - name: Prune stale previews
+        working-directory: ${{ inputs.app-dir || '.' }}
+        env:
+          PRUNE_OLDER_THAN: ${{ inputs.prune-older-than || vars.YOHO_PREVIEW_PRUNE_OLDER_THAN }}
+          PRUNE_KEEP: ${{ inputs.prune-keep || vars.YOHO_PREVIEW_PRUNE_KEEP }}
+        run: |
+          set -eu
+          set -- preview prune --older-than "$PRUNE_OLDER_THAN" --yes
+          if [ -n "$PRUNE_KEEP" ]; then
+            set -- "$@" --keep "$PRUNE_KEEP"
+          fi
+          yoho "$@"

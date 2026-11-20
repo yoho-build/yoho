@@ -6,24 +6,42 @@ import (
 	"fmt"
 	"path"
 	"slices"
+	"strconv"
 	"strings"
+	"time"
 
 	"github.com/yoho-build/yoho/internal/config"
 	"github.com/yoho-build/yoho/internal/release"
 	"github.com/yoho-build/yoho/internal/remote"
 )
 
+// previewNow is the clock used to stamp preview records. Tests may replace it.
+var previewNow = func() time.Time { return time.Now().UTC() }
+
 // PreviewRecord authorizes destructive teardown of this exact App Destination.
 // Written under the Destination lock before building, so failed first deploys
 // can also be torn down. Version is the last attempted Version.
 type PreviewRecord struct {
-	App         string   `json:"app"`
-	Name        string   `json:"name"`
-	Destination string   `json:"destination"`
-	Project     string   `json:"project"`
-	Hosts       []string `json:"hosts"`
-	Services    []string `json:"services"`
-	Version     string   `json:"version"`
+	App            string    `json:"app"`
+	Name           string    `json:"name"`
+	Destination    string    `json:"destination"`
+	Project        string    `json:"project"`
+	Hosts          []string  `json:"hosts"`
+	Services       []string  `json:"services"`
+	Version        string    `json:"version"`
+	CreatedAt      time.Time `json:"created_at,omitzero"`
+	LastDeployedAt time.Time `json:"last_deployed_at,omitzero"`
+	PR             int       `json:"pr,omitempty"`
+	Branch         string    `json:"branch,omitempty"`
+}
+
+// ActivityTime returns LastDeployedAt when present, otherwise CreatedAt.
+// Older records written without timestamps return the zero time.
+func (p PreviewRecord) ActivityTime() time.Time {
+	if !p.LastDeployedAt.IsZero() {
+		return p.LastDeployedAt
+	}
+	return p.CreatedAt
 }
 
 func (p PreviewRecord) Validate(app, dest string) error {
@@ -91,7 +109,27 @@ func MarkPreview(ctx context.Context, h remote.Host, p PreviewRecord) error {
 			return fmt.Errorf("refusing to adopt unmarked Destination %s as a preview", p.Destination)
 		}
 	}
-	if old != nil {
+	now := previewNow().UTC()
+	if old == nil {
+		if p.CreatedAt.IsZero() {
+			p.CreatedAt = now
+		}
+		if p.LastDeployedAt.IsZero() {
+			p.LastDeployedAt = now
+		}
+	} else {
+		// Preserve the original creation time (including zero/unknown for
+		// legacy markers written before timestamps were recorded).
+		p.CreatedAt = old.CreatedAt
+		if p.LastDeployedAt.IsZero() {
+			p.LastDeployedAt = now
+		}
+		if p.PR == 0 {
+			p.PR = old.PR
+		}
+		if p.Branch == "" {
+			p.Branch = old.Branch
+		}
 		for _, service := range old.Services {
 			if !slices.Contains(p.Services, service) {
 				p.Services = append(p.Services, service)
@@ -178,4 +216,33 @@ func ListPreviews(ctx context.Context, h remote.Host, app string) ([]PreviewReco
 		}
 	}
 	return previews, nil
+}
+
+// PreviewDiskUsage returns the best-effort disk usage in bytes of each
+// preview's App directory (<root>/apps/<app>/<dest>). It uses POSIX `du -sk`
+// without root or Docker queries; entries that cannot be measured are omitted.
+func PreviewDiskUsage(ctx context.Context, h remote.Host, app string, dests []string) map[string]int64 {
+	if len(dests) == 0 {
+		return nil
+	}
+	var quoted []string
+	for _, dest := range dests {
+		quoted = append(quoted, remote.Quote(release.AppDir(app, dest)))
+	}
+	script := "set -eu\nfor d in " + strings.Join(quoted, " ") + "; do\n  if [ -d \"$d\" ] && [ ! -L \"$d\" ]; then\n    kb=$(du -sk \"$d\" 2>/dev/null | awk '{print $1}') || kb=\"\"\n    printf '%s\\t%s\\n' \"${d##*/}\" \"$kb\"\n  fi\ndone"
+	out, err := h.Output(ctx, remote.Cmd{Script: script})
+	if err != nil {
+		return nil
+	}
+	usage := map[string]int64{}
+	for _, line := range lines(out) {
+		dest, kbStr, ok := strings.Cut(line, "\t")
+		if !ok || kbStr == "" {
+			continue
+		}
+		if kb, err := strconv.ParseInt(strings.TrimSpace(kbStr), 10, 64); err == nil && kb > 0 {
+			usage[dest] = kb * 1024
+		}
+	}
+	return usage
 }

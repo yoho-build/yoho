@@ -48,3 +48,23 @@ Destination can never be removed through it. There is no resident preview daemon
 or automatic expiry (ADR 0003). Inventory and scheduled cleanup use `preview list`
 and explicit `preview down` calls. Scoped Gate support and Backup seeding are
 future work.
+
+## Amendment 2026-11
+
+`preview.json` now records optional `created_at`, `last_deployed_at`, `pr`, and
+`branch` fields so operators can inspect preview age and activity (`yoho preview list`
+shows age, last deploy, and best-effort App directory disk usage). Older markers
+without timestamps are treated as having unknown age.
+
+`yoho preview prune [--older-than DURATION] [--keep N]` provides explicit,
+reviewable bulk cleanup: it prints the removal plan, asks for confirmation unless
+`--yes` or `--auto-approve` is passed, skips unknown-age markers under
+`--older-than` unless `--include-unknown-age` is set, and removes each preview
+through the same verified `preview down` path (Destination lock, marker check,
+and project-scoped teardown). A failure on one preview does not halt the rest.
+
+An optional `previews.max_active` cap refuses creating a new preview when the
+active preview count reaches the limit (updating an already-active preview is
+still allowed), hinting to prune. There is still no resident expiry daemon
+(ADR 0003): unattended cleanup remains an explicit CLI call from a scheduled
+CI workflow or Scheduled Job.

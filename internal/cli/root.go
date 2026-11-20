@@ -120,8 +120,10 @@ func (g *globals) ui(cmd *cobra.Command) *ui.UI {
 
 // app is a loaded App: Yoho file plus selected Destination.
 type app struct {
-	previewName  string
-	templateName string
+	previewName   string
+	previewPR     int
+	previewBranch string
+	templateName  string
 
 	g        *globals
 	dir      string
