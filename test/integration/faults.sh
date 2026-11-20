@@ -55,13 +55,6 @@ start_apply() {
  child=$!
  wait_until test -f "$WORK/ready"
 }
-candidate_started() {
- local id
- for id in $(docker ps -q --filter label=com.docker.compose.project=yoho-shop-production --filter label=com.docker.compose.service=web); do
-  [[ $id == "$oldweb" ]] || return 0
- done
- return 1
-}
 finish_apply() {
  RC=0
  wait "$child" || RC=$?
@@ -87,7 +80,7 @@ PYWEB
  printf '\n// fault scenario %s\n' "$scenario" >> main.go
  git add main.go && git commit -qm "fault $scenario"
  old=$(readlink "$ROOT/apps/shop/production/current")
- oldweb=$(docker ps -q --filter label=com.docker.compose.project=yoho-shop-production --filter label=com.docker.compose.service=web)
+ candidate_version=$(git rev-parse HEAD)
  case $scenario in
  lock)
   start_apply
@@ -101,7 +94,8 @@ PYWEB
  ssh)
   start_apply
   touch "$WORK/go"
-  wait_until candidate_started
+  wait_until candidate_started "$candidate_version"
+  kill -0 "$child" # Never claim injection after the deploy has already exited.
   # Kill the existing ControlMaster and reject reconnection until the command
   # exits. HTTP remains reachable so Server state is independently observable.
   sudo iptables -I OUTPUT -d 127.0.0.1 -p tcp --dport 22 -j REJECT
@@ -139,17 +133,16 @@ PYWEB
  docker)
   start_apply
   touch "$WORK/go"
-  wait_until candidate_started
+  wait_until candidate_started "$candidate_version"
+  kill -0 "$child" # Never claim injection after the deploy has already exited.
   # Stop the socket too, so an API request cannot auto-start Docker and mask
   # the fault. This is the outage half of a deterministic daemon restart.
   sudo systemctl stop docker.socket docker
   touch "$WORK/go"
   finish_apply
-  case $RC in
-   13) assert_result "$WORK/$scenario.jsonl" "$RC" partial 13 ;;
-   14) assert_result "$WORK/$scenario.jsonl" "$RC" unknown 14 ;;
-   *) echo "unexpected Docker outage exit $RC" >&2; exit 1 ;;
-  esac
+  operation_id=$(jq -ser '[.[] | select(.event == "operation_started")] | select(length == 1) | .[0].operation_id | select(type == "string" and test("^[A-Za-z0-9_-]{1,128}$"))' "$WORK/$scenario.jsonl")
+  server_run cat "$ROOT/apps/shop/production/operations/$operation_id.json" > "$WORK/docker-operation.json"
+  docker_fault_result "$WORK/$scenario.jsonl" "$WORK/docker-operation.json" "$RC"
   sudo systemctl start docker.socket docker
   wait_until healthy
   records_valid

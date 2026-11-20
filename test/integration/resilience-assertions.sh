@@ -34,3 +34,40 @@ recovery_event() {
    has("scheduled_jobs_reinstalled") and .scheduled_jobs_reinstalled == null and
    (has("needs_old_server") | not))' "$1"
 }
+
+# A release-command one-off shares web's labels/version. Require the actual
+# running Service candidate, never the old web or its transient migration.
+candidate_started() {
+ local version=$1 rows
+ rows=$(docker ps --filter status=running \
+  --filter label=com.docker.compose.project=yoho-shop-production \
+  --filter label=com.docker.compose.service=web \
+  --filter label=yoho.app=shop --filter label=yoho.destination=production \
+  --filter label=yoho.service=web --filter "label=yoho.version=$version" \
+  --format '{"id":{{json .ID}},"state":{{json .State}},"project":{{json (.Label "com.docker.compose.project")}},"app":{{json (.Label "yoho.app")}},"destination":{{json (.Label "yoho.destination")}},"service":{{json (.Label "yoho.service")}},"version":{{json (.Label "yoho.version")}},"oneoff":{{json (.Label "com.docker.compose.oneoff")}}}') || return 1
+ jq -sec --arg version "$version" '
+  map(select((.id | type == "string" and length > 0) and
+   .state == "running" and .project == "yoho-shop-production" and
+   .app == "shop" and .destination == "production" and .service == "web" and
+   .version == $version and (.oneoff | ascii_downcase) == "false")) |
+  select(length == 1) | .[0]' <<< "$rows"
+}
+
+docker_fault_result() {
+ # Unknown remains valid when lost observations prevent a definite result.
+ # Known failure is valid only if the durable record has no changed Service.
+ jq -se --slurpfile record "$2" --argjson code "$3" '
+  [.[] | select(.event == "finished")] as $finished |
+  [.[] | select(.event == "operation_started")] as $started |
+  ($record | length == 1) and ($finished | length == 1) and
+  ($started | length == 1) and
+  ($record[0].id | type == "string" and length > 0) and
+  $record[0].id == $started[0].operation_id and
+  $record[0].id == $finished[0].operation_id and
+  ($record[0].services | type == "object") and
+  (if $finished[0].outcome == "unknown" then $code == 14
+   elif (any($record[0].services[]; . == "changed") or
+         (($record[0].changed // []) | length > 0)) then
+    $finished[0].outcome == "partial" and $code == 13
+   else $finished[0].outcome == "failed" and $code == 1 end)' "$1" >/dev/null
+}
