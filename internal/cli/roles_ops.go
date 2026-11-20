@@ -46,15 +46,39 @@ func (a *app) serviceApp(cmd *cobra.Command, service string) (*app, error) {
 	b.dest.Servers = []string{server}
 	return &b, nil
 }
-func (a *app) rolesLogs(cmd *cobra.Command, services []string, opts dash.LogsOptions) error {
-	chosen, _ := cmd.Flags().GetString("server")
+func (a *app) rolesLogGroups(services []string, chosen string) (map[string][]string, error) {
 	groups := map[string][]string{}
+	if len(services) == 0 { // --all: include every placement, including replicas.
+		for _, role := range a.dest.Roles {
+			services = append(services, role.Services...)
+		}
+		slices.Sort(services)
+		for _, svc := range slices.Compact(services) {
+			for _, server := range a.dest.ServiceServers(svc) {
+				if chosen == "" || server == chosen {
+					groups[server] = append(groups[server], svc)
+				}
+			}
+		}
+		if len(groups) == 0 {
+			return nil, fmt.Errorf("no Roles Services placed on Server %q", chosen)
+		}
+		return groups, nil
+	}
 	for _, svc := range services {
 		h, e := a.serviceServer(svc, chosen)
 		if e != nil {
-			return e
+			return nil, e
 		}
 		groups[h] = append(groups[h], svc)
+	}
+	return groups, nil
+}
+func (a *app) rolesLogs(cmd *cobra.Command, services []string, opts dash.LogsOptions) error {
+	chosen, _ := cmd.Flags().GetString("server")
+	groups, e := a.rolesLogGroups(services, chosen)
+	if e != nil {
+		return e
 	}
 	if opts.Follow && len(groups) > 1 {
 		return fmt.Errorf("following logs across Servers requires --server and Services hosted there")

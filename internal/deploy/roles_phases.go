@@ -7,6 +7,7 @@ import (
 	"slices"
 
 	"github.com/yoho-build/yoho/internal/plan"
+	"github.com/yoho-build/yoho/internal/proxy"
 	"github.com/yoho-build/yoho/internal/release"
 	"github.com/yoho-build/yoho/internal/remote"
 	"github.com/yoho-build/yoho/internal/roles"
@@ -84,6 +85,16 @@ func prepareRoleCommands(ctx context.Context, d *plan.Deploy) (*runner, []servic
 	for _, m := range values {
 		for _, v := range m {
 			r.secretVals = append(r.secretVals, v)
+		}
+	}
+	// Release containers and prerequisites can join the external yoho network
+	// before Compose.Deploy gets a chance to create it on a fresh Server.
+	if needsProxy(plans) {
+		if e := proxy.BootWith(ctx, h.Host, d.Proxy, r.out, proxy.BootOptions{OnReboot: ProxyRebootHook(d, d.Version, h)}); e != nil {
+			return nil, nil, e
+		}
+		if e := ensureScopedNetwork(ctx, h.Host, d); e != nil {
+			return nil, nil, e
 		}
 	}
 	return r, plans, nil

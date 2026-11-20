@@ -157,6 +157,60 @@ func TestReviewMigrationBeforeFirstReplicaOnProviderServer(t *testing.T) {
 		t.Fatal("migration ran on wrong Server or consumer replica started", events)
 	}
 }
+
+func TestReviewFirstProxiedReleaseCommandPreparesProxy(t *testing.T) {
+	for _, bootFails := range []bool{false, true} {
+		t.Run(map[bool]string{false: "first deploy", true: "network failure"}[bootFails], func(t *testing.T) {
+			d := rolesTestDeploy()
+			d.Ext = map[string]config.ServiceExt{
+				"web": {Proxy: &config.ServiceProxy{Port: 8000}, ReleaseCommand: []string{"migrate"}},
+				"db":  {Stateful: true},
+			}
+			network, proxy, migrated := false, false, false
+			for i, h := range d.Servers {
+				base, server := h.Host.(*rolesHost), h.Name
+				base.files[path.Join(release.AppDir(d.App, d.Destination), "hmac.key")] = []byte(strings.Repeat("ab", 32))
+				d.Servers[i].Host = &moveTestHost{rolesHost: base, respond: func(c remote.Cmd) (string, error, bool) {
+					switch {
+					case strings.Contains(c.Script, "LoggingDriver"):
+						return "json-file", nil, true
+					case strings.Contains(c.Script, "docker network create yoho"):
+						if server != "a" {
+							t.Fatal("Proxy network prepared on data-only Server")
+						}
+						if bootFails {
+							return "", errors.New("network unavailable"), true
+						}
+						network = true
+					case strings.Contains(c.Script, "docker run -d --label 'yoho.proxy.config="):
+						if server != "a" || !network {
+							t.Fatal("Proxy booted before network or on wrong Server")
+						}
+						proxy = true
+					case strings.Contains(c.Script, "'migrate'"):
+						if server != "a" || !network || !proxy {
+							return "", errors.New("release container requires yoho network and Proxy"), true
+						}
+						migrated = true
+					}
+					return "", nil, true
+				}}
+			}
+			parts, _, err := roleParts(d)
+			if err != nil {
+				t.Fatal(err)
+			}
+			err = rolesReleasePhase(context.Background(), d, parts)
+			if bootFails {
+				if err == nil || !strings.Contains(err.Error(), "network unavailable") || migrated {
+					t.Fatal("release ran after network failure", err, migrated)
+				}
+			} else if err != nil || !migrated {
+				t.Fatal("fresh proxied release command failed", err, migrated)
+			}
+		})
+	}
+}
 func TestReviewMoveBackupCoversEveryVolumeEvenWithDump(t *testing.T) {
 	d := rolesTestDeploy()
 	svc := d.Project.Services["db"]

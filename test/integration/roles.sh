@@ -21,7 +21,7 @@ cleanup() {
       docker exec "$server" iptables -t mangle -S || true
     done
   fi
-  docker rm -f "$server_a" "$server_b" "$outsider" >/dev/null 2>&1 || true
+  docker rm -fv "$server_a" "$server_b" "$outsider" >/dev/null 2>&1 || true
   docker network rm "$network" >/dev/null 2>&1 || true
   docker image rm "$image" >/dev/null 2>&1 || true
   if [[ -n "${SSH_AGENT_PID:-}" ]]; then ssh-agent -k >/dev/null || true; fi
@@ -53,7 +53,8 @@ docker build -t "$image" "$work"
 docker network create "$network" >/dev/null
 for spec in "$server_a:2222" "$server_b:2223"; do
   name=${spec%:*}; port=${spec##*:}
-  docker run -d --privileged --network "$network" --name "$name" -p "127.0.0.1:$port:22" "$image" >/dev/null
+  # Keep inner image layers off the outer container's overlay filesystem.
+  docker run -d --privileged -v /var/lib/docker --network "$network" --name "$name" -p "127.0.0.1:$port:22" "$image" >/dev/null
 done
 a_ip=$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' "$server_a")
 b_ip=$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' "$server_b")

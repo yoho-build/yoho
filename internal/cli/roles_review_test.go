@@ -16,6 +16,7 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/yoho-build/yoho/internal/composefile"
 	"github.com/yoho-build/yoho/internal/config"
+	"github.com/yoho-build/yoho/internal/dash"
 	"github.com/yoho-build/yoho/internal/deploy"
 	"github.com/yoho-build/yoho/internal/operation"
 	"github.com/yoho-build/yoho/internal/plan"
@@ -62,6 +63,46 @@ func TestReviewServiceCommandsAndRemoveUsePlacement(t *testing.T) {
 	a.dest.Roles["app"] = config.Role{Services: []string{"web"}, Servers: []string{"b", "a"}}
 	if server, e := a.serviceServer("web", "b"); e != nil || server != "b" {
 		t.Fatal(server, e)
+	}
+}
+
+func TestReviewRolesLogsAllFollowRequiresServer(t *testing.T) {
+	a, _ := reviewApp(t)
+	c := &cobra.Command{}
+	addServerFlag(c)
+	if err := a.rolesLogs(c, nil, dash.LogsOptions{Follow: true}); err == nil || !strings.Contains(err.Error(), "--server") {
+		t.Fatal("--all -f silently returned without following any Services", err)
+	}
+}
+
+func TestReviewRolesLogsAllGroupsPlacements(t *testing.T) {
+	a, _ := reviewApp(t)
+	// Replicas belong in both groups for --all, even though an explicitly
+	// named Service defaults to its first Server.
+	a.dest.Roles["app"] = config.Role{Services: []string{"web"}, Servers: []string{"a", "b"}}
+	for _, tt := range []struct {
+		name     string
+		services []string
+		server   string
+		want     map[string][]string
+	}{
+		{"--all", nil, "", map[string][]string{"a": {"web"}, "b": {"db", "web"}}},
+		{"--all --server b", nil, "b", map[string][]string{"b": {"db", "web"}}},
+		{"--all -f --server a", nil, "a", map[string][]string{"a": {"web"}}},
+		{"named replica", []string{"web"}, "", map[string][]string{"a": {"web"}}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := a.rolesLogGroups(tt.services, tt.server)
+			if err != nil || !reflect.DeepEqual(got, tt.want) {
+				t.Fatal(got, err, "want", tt.want)
+			}
+		})
+	}
+	if _, err := a.rolesLogGroups(nil, "missing"); err == nil {
+		t.Fatal("unknown --server silently accepted")
+	}
+	if _, err := a.rolesLogGroups([]string{"db"}, "a"); err == nil {
+		t.Fatal("named Service outside placement accepted")
 	}
 }
 func TestReviewBackupCheckResolvesOwner(t *testing.T) {
