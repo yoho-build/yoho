@@ -143,7 +143,8 @@ var GateTries = 5
 
 // Gate defines the gate helpers. yoho_gate_take DIR takes a mkdir gate
 // (retrying GateTries times) and records $yoho_gate_info in DIR/info.json;
-// it returns 1 when the gate stays held. Taken gates are released on any
+// it returns 1 when the gate stays held, or 2 for filesystem errors.
+// Taken gates are released on any
 // exit by the EXIT trap, so a refusal never leaves one behind. A killed
 // shell (SSH loss, SIGKILL) can; the held error names the gate to remove.
 func Gate() string {
@@ -161,13 +162,14 @@ trap 'yoho_gate_drop' EXIT
 trap 'exit 1' HUP INT TERM
 yoho_gate_take() {
  yoho_n=0
- while ! mkdir "$1" 2>/dev/null; do
+ while ! yoho_gate_error=$(LC_ALL=C mkdir "$1" 2>&1); do
+  case "$yoho_gate_error" in *": File exists") ;; *) printf '%s\n' "$yoho_gate_error" >&2; return 2 ;; esac
   yoho_n=$((yoho_n+1)); [ "$yoho_n" -lt ` + strconv.Itoa(max(GateTries, 1)) + ` ] || return 1
   sleep 1
  done
  yoho_gates="$yoho_gates
 $1"
- printf '%s' "${yoho_gate_info:-}" > "$1/info.json" || true
+ printf '%s' "${yoho_gate_info:-}" > "$1/info.json" || return 2
 }
 `
 }
@@ -221,6 +223,6 @@ func LockTaker(app, destination, info string, report bool) string {
 	return "umask 077\n" + Gate() +
 		"yoho_gate_info=" + remote.Quote(info) + "\n" +
 		"mkdir -p " + remote.Quote(meta) + "\n" +
-		"yoho_gate_take " + remote.Quote(gate) + " || { " + held + "; }\n" +
+		"yoho_gate_take " + remote.Quote(gate) + " || { [ \"$?\" -eq 1 ] || exit 1; " + held + "; }\n" +
 		"if [ -e " + remote.Quote(journal) + " ] || [ -L " + remote.Quote(journal) + " ]; then " + pending + "; fi\n"
 }

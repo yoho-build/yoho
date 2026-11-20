@@ -283,28 +283,64 @@ QA on a small PostgreSQL 17 App (dump-only Backup in a local restic repository, 
 
 ## Losing a Server
 
-When the Server of a compose Destination (or the first Server of a Swarm Destination) is gone, recovery is: a new Server, the App deployed, the data restored. You need the Backup off the lost Server ([High availability & recovery](high-availability.md#off-server-backups-are-the-recovery-path)) and your Yoho file, compose file and secrets locally.
+The Compose recovery procedure uses only the git checkout, operator secrets (or
+password-manager references), an off-Server Backup Target, and an image source.
+The old Server is unnecessary. Keep public ingress pointed away until validation
+finishes: the first apply starts Services with empty data.
 
-1. **Provision.** Create the Server, point `servers.<name>.ssh` at it (or reuse the name with the new address), then:
+1. Point `servers.<name>.ssh` at the replacement Debian/Ubuntu Server. Reattach
+   the external Backup disk, or ensure its S3/SFTP credentials work there.
+2. Check out the desired git version, including build inputs, and resolve
+   `.yoho/secrets`. With registry-less transport, the first apply rebuilds from
+   this checkout. Old Release images are lost unless kept in a registry or image
+   archive; restoring data does not recover images. Load an archive on the new
+   Server before using `apply --skip-build`, or use your configured registry.
+3. Run this fixed sequence (the initial apply creates volumes and a Release;
+   restore requires both):
 
    ```sh
-   yoho setup -d production --plan   # what will change
-   yoho setup -d production -y       # Docker, deploy user, directories, firewall
+   yoho setup -d production --yes
+   yoho apply -d production --auto-approve
+   yoho backup restore latest -d production --yes --report
+   yoho apply -d production --auto-approve
    ```
 
-   On Swarm, run `yoho swarm init` and `yoho swarm join` next.
-2. **Deploy.** `yoho deploy -d production` creates the App directory, the volumes and fresh generated secrets, and starts the Services with empty data. If the Proxy routes real traffic, consider keeping DNS (or the Tunnel) pointed away until step 4.
-3. **Restore.** Find the Backup and restore it. The restore stops the Services, restores volumes, generated secrets (encrypted Targets) and dumps, then resumes them:
+   Restore stops all consumers and replaces the data. The final apply converges
+   restored generated secrets and **reinstalls Scheduled Jobs** from configuration.
+   Do not omit it, even if restore succeeded. This procedure needs volume Backups
+   for the database, as in the quickstart. Dump-only recovery needs the database's
+   `restore_dump` command and appropriate credentials instead.
+4. Verify `yoho app ps`, the public HTTP health endpoint, known database rows,
+   a new job processed by the worker, and `yoho schedule status`. Reopen ingress.
+   A successful restore alone proves neither full App health nor Scheduled Jobs.
 
-   ```sh
-   yoho backup list -d production
-   yoho backup restore latest -d production -y
-   ```
+Data written after the selected Backup's recovery point is lost. `latest` selects
+the newest successful Backup in the selected job's Target. An explicit ID reports
+that Backup's time, even if a newer Backup exists.
 
-   If it warns that generated secrets changed, run `yoho deploy -d production` again so Services read the restored values (the database password from the Backup matches the restored data).
-4. **Check and reopen.** `yoho app ps -d production`, look at your data, then point DNS or the Tunnel back. Re-install Scheduled Jobs with `yoho schedule install -d production` so Backups continue.
+`backup restore --report` emits a `recovery` NDJSON event with `--json` and a human
+summary otherwise. `recovery_point` is the selected Backup's UTC timestamp;
+`data_restore_seconds` covers this restore command's work (including lookup,
+confirmation, transfer and Hooks). `needs_old_server` is omitted: restore cannot
+prove that the Backup Target is independent storage or that images survive loss
+of the old Server. A local-looking repository path might be either a root disk
+or an external mount.
+`full_recovery_seconds`, `image_source`, and `scheduled_jobs_reinstalled` are
+`null`: restore cannot observe setup, reconstruction, later apply or ingress.
 
-Timings from QA (local Server, Docker already installed, small PostgreSQL App, local restic repository; a fresh Destination stands in for the new Server): `yoho setup --plan` 0.6 s (setup itself not run on the shared QA Server; installing Docker usually takes minutes), first `yoho deploy` 4.7 s, `yoho backup restore latest --from production -d dr -y --copy-generated-secrets` 7.0 s, second `yoho deploy` 3.7 s: under 20 s once the Server runs Docker. Real recoveries are dominated by provisioning, image transfer and Backup download; `yoho backup drill` measures the last two parts on your own data.
+Recovery is measured in CI by the integration workflow's **recovery** job. Its
+step summary and `recovery-report` artifact print the observed report, including
+full recovery seconds from setup start through healthy Proxy, restored rows,
+worker completion and active Backup timer; image source is `rebuilt from git at <version>`, and `scheduled_jobs_reinstalled` is `true` only after verification. The harness
+adds `needs_old_server: false` only after destroying the old App resources and
+reconstructing from the retained git checkout and reattached external Target.
+A CI run on 2026-11-20 (GitHub ubuntu-24.04 runner, quickstart web + worker +
+Postgres, a few rows) measured: recovery point 52 s before restore, data restore
+5.8 s, full recovery 42 s, image source rebuilt from git, Scheduled Jobs
+reinstalled. Real numbers grow with data size and image build time. The fixture destroys all App
+containers, volumes, built images, Proxy state and the original Yoho root, then
+uses a second SSH user and fresh root. It reuses the runner's installed OS and
+Docker, so it does not measure installing Docker on a bare VM.
 
 ## Swarm
 

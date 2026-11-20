@@ -32,7 +32,15 @@ Or grab just that directory from GitHub. The App is one Go binary: `web` serves 
 
 ## 3. Point it at your Server
 
-In `yoho.yml`, set `servers.primary.ssh` to `root@YOUR_SERVER` (or `you@YOUR_SERVER` if that user already has sudo). Leave the rest for the demo:
+In `yoho.yml`, set `servers.primary.ssh` to `root@YOUR_SERVER` (or `you@YOUR_SERVER` if that user already has sudo). The example includes a commented, opt-in nightly Backup. To enable it, mount external storage at
+`/mnt/off-server`, or change `backups.targets.recovery.repository` to your
+off-Server restic location. Give the deploy user ownership of that repository
+(and on a replacement, reassign ownership to its deploy user). Uncomment the
+`backups:` example only after the storage is writable. Add `RESTIC_PASSWORD=$(op read …)` (or your chosen
+provider) to `.yoho/secrets`; keep this password outside the Server so recovery
+can decrypt the Backup. See [Backups](backups.md#losing-a-server).
+
+The Proxy settings for the demo are:
 
 ```yaml
 proxy:
@@ -183,4 +191,34 @@ Yoho does not load `compose.local.yaml`. That overlay is only for `docker compos
 - [Configuration](configuration.md) — Yoho file and `x-yoho`
 - [Secrets](secrets.md) — 1Password, Bitwarden, generated keys
 - [Zero-downtime & proxy](zero-downtime.md) — plan, apply, rollback
-- [Backups & restore](backups.md) — add a Backup Target when you care about the volume
+- [Backups & restore](backups.md) — configure the example’s off-Server Backup Target
+
+## Lose the Server
+
+First enable the optional Backup above and run `yoho apply --auto-approve` to
+install its Scheduled Job.
+
+After trying deploy, a failed deploy and rollback above, write a known job with
+`curl -X POST "$url/jobs" --data-binary before-loss` and wait for it to show `done`
+in `GET /jobs`. Take `yoho backup run nightly` and keep the git checkout, operator
+secrets and Backup password off the Server.
+
+Replace the Server address in `yoho.yml`, mount the external Backup disk (or make
+the remote restic Target reachable), and keep DNS/Tunnel traffic away while data
+is empty. Run:
+
+```sh
+yoho setup --yes
+yoho apply --auto-approve
+yoho backup restore latest --yes --report
+yoho apply --auto-approve
+yoho app ps
+yoho schedule status
+```
+
+Check `/up`, the original row in `/jobs`, and a newly submitted job reaching
+`done`. Then reopen ingress; a Quick Tunnel on the replacement has a new URL
+(`yoho tunnel status`). The final apply reinstalls the nightly Scheduled Job.
+Writes after the Backup are lost, and images are rebuilt from the checkout;
+older Release images require a saved archive or registry. See the
+[recovery report and CI measurements](backups.md#losing-a-server).

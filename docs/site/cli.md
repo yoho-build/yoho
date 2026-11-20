@@ -50,7 +50,7 @@ Global flags (every command): `-c, --config FILE`, `-d, --destination NAME` (def
 | `backup run [JOB] [--lock-wait[=D]]` | Take a Backup now. `--lock-wait` waits for a held Destination lock (also on `backup restore` and `backup drill`). |
 | `backup list [JOB]` | Stored Backups, newest first. |
 | `backup pull [JOB] [--to DIR] [--limit N]` | Mirror new archives of an `archive` target to a local directory; never deletes. |
-| `backup restore ID [--job JOB] [-y]` | Restore a Backup (`latest` for the newest); asks for confirmation unless `-y`. |
+| `backup restore ID [--job JOB] [-y] [--report]` | Restore a Backup (`latest` for the newest); asks for confirmation unless `-y`. `--report` emits recovery point and restore duration; full recovery, image source and Scheduled Jobs remain unknown until verified after apply. |
 | `backup restore ID --from DEST [--copy-generated-secrets] -d DEST2` | Restore a Backup taken by another Destination of the same App (e.g. production into staging). Keeps the target's generated secrets unless `--copy-generated-secrets`. Another App's Backup is refused. |
 | `backup restore --cleanup` | Remove leftover `restore-*`, `run-*` and stale `check-*` staging; Services that an interrupted restore stopped are not resumed afterwards. |
 | `backup check [JOB] [--id ID \| --read-data]` | Read-only integrity check of the Backup Target or one archive Backup. Not a restore proof. |

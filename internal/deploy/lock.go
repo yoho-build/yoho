@@ -161,7 +161,7 @@ func AcquireLock(ctx context.Context, host remote.Host, app, destination string,
 		"if [ -L " + qc + " ]; then yoho_private " + qc + "\n" +
 		"elif [ -e " + qc + " ]; then [ -d " + qc + " ] || yoho_bad " + qc + "\n" +
 		"else mkdir -p " + qc + "; fi\n" +
-		"if mkdir " + q + " 2>/dev/null; then cat > " + q + "/info.json; echo acquired; else echo held; cat " + q + "/info.json 2>/dev/null || true; fi"
+		lockDirectoryScript(q)
 	return acquireLockScript(ctx, host, dir, script, data)
 }
 
@@ -180,8 +180,23 @@ func AcquirePreviewLock(ctx context.Context, host remote.Host, app string, info 
 	script := safepath.Script("preview lock") + safepath.Creation +
 		"yoho_make " + remote.Quote(path.Dir(dir)) + "\n" +
 		"yoho_path " + q + "\n" +
-		"if mkdir " + q + " 2>/dev/null; then cat > " + q + "/info.json; echo acquired; else echo held; cat " + q + "/info.json 2>/dev/null || true; fi"
+		lockDirectoryScript(q)
 	return acquireLockScript(ctx, host, dir, script, data)
+}
+
+// lockDirectoryScript distinguishes a held lock from a filesystem failure.
+// If recording a newly acquired lock fails (for example ENOSPC), remove only
+// the directory this invocation created so a retry can acquire it.
+// Use mkdir's C-locale error to distinguish contention: a later directory
+// inspection would race an unlock and misclassify a vanished lock as I/O.
+func lockDirectoryScript(q string) string {
+	return "yoho_lock_write() {\n" +
+		"if cat > \"$1\"; then return 0; fi\n" +
+		"rm -f " + q + "/info.json; rmdir " + q + "\n" +
+		"echo 'cannot record Destination lock; check free disk space and permissions' >&2; return 1\n}\n" +
+		"if yoho_lock_error=$(LC_ALL=C mkdir " + q + " 2>&1); then yoho_lock_write " + q + "/info.json; echo acquired; else echo held; " +
+		"case \"$yoho_lock_error\" in *\": File exists\") ;; *) printf '%s\\n' \"$yoho_lock_error\" >&2; echo 'cannot create Destination lock; check free disk space and permissions' >&2; exit 1 ;; esac; " +
+		"cat " + q + "/info.json 2>/dev/null || true; fi"
 }
 
 func acquireLockScript(ctx context.Context, host remote.Host, dir, script string, data []byte) (func(context.Context) error, error) {

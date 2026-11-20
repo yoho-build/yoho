@@ -485,3 +485,32 @@ func TestMigratePlanDisplaysRollbackPortWarning(t *testing.T) {
 		t.Fatalf("missing warning: %s", out)
 	}
 }
+
+// Exercise the cutover Server's lock protocol without needing the API listener
+// used by cutoverFixture, so script compatibility is checked in sandboxes too.
+func TestCutoverLockHostSerializesWithoutAPI(t *testing.T) {
+	ctx := context.Background()
+	h := &migratetest.Host{}
+	unlock, err := deploy.AcquireLock(ctx, h, "shop", "production", deploy.LockInfo{Command: "deploy"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = deploy.AcquireLock(ctx, h, "shop", "production", deploy.LockInfo{Command: "rollback --cutover"})
+	var locked *deploy.LockedError
+	if !errors.As(err, &locked) {
+		t.Fatalf("held lock: %v", err)
+	}
+	if err := unlock(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if h.Locked {
+		t.Fatal("unlock left the cutover Server locked")
+	}
+	unlock, err = deploy.AcquireLock(ctx, h, "shop", "production", deploy.LockInfo{Command: "deploy"})
+	if err != nil {
+		t.Fatalf("reacquire: %v", err)
+	}
+	if err := unlock(ctx); err != nil {
+		t.Fatal(err)
+	}
+}

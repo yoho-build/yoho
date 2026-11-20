@@ -474,3 +474,62 @@ jobs:
             echo "| --- | --- | --- | --- |"
             echo "| e2e-go | $cell | n/a | n/a |"
           } >> "$GITHUB_STEP_SUMMARY"
+
+  recovery:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+      - name: Prepare disposable Server and CLI
+        run: |
+          mkdir -p "$RUNNER_TEMP/bin" "$RUNNER_TEMP/resilience-logs"
+          go build -o "$RUNNER_TEMP/bin/yoho" ./cmd/yoho
+          . ./test/integration/run.sh
+          setup_localhost_ssh
+      - name: Recover quickstart on a blank Server
+        env:
+          YOHO_E2E: '1'
+          YOHO_E2E_DISPOSABLE: '1'
+          YOHO_BIN: ${{ runner.temp }}/bin/yoho
+          RESILIENCE_LOG_DIR: ${{ runner.temp }}/resilience-logs
+        run: bash test/integration/recovery.sh
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: recovery-report
+          path: ${{ runner.temp }}/resilience-logs
+
+  faults:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        fault: [ssh, lock, disk, docker, reboot, backup]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+      - name: Prepare disposable Server and CLI
+        run: |
+          mkdir -p "$RUNNER_TEMP/bin" "$RUNNER_TEMP/resilience-logs"
+          go build -o "$RUNNER_TEMP/bin/yoho" ./cmd/yoho
+          . ./test/integration/run.sh
+          setup_localhost_ssh
+      - name: Inject fault and verify convergence
+        env:
+          YOHO_E2E: '1'
+          YOHO_E2E_DISPOSABLE: '1'
+          YOHO_E2E_FAULTS: ${{ matrix.fault }}
+          YOHO_BIN: ${{ runner.temp }}/bin/yoho
+          RESILIENCE_LOG_DIR: ${{ runner.temp }}/resilience-logs
+        run: bash test/integration/faults.sh
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: fault-${{ matrix.fault }}
+          path: ${{ runner.temp }}/resilience-logs

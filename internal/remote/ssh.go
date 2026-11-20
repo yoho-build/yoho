@@ -519,7 +519,9 @@ func (s *SSH) execWith(ctx context.Context, run ExecFunc, label string, argv []s
 		return nil
 	}
 	var ec interface{ ExitCode() int }
-	if errors.As(err, &ec) && ec.ExitCode() >= 0 {
+	// A signaled SSH process has exit code -1: keep it structured so
+	// callers cannot mistake an interrupted mutation for a known failure.
+	if errors.As(err, &ec) {
 		ee := &ExitError{Host: s.name, Script: label, Code: ec.ExitCode(), Stderr: strings.TrimSpace(stderr.String())}
 		if line := sshFailure(ee); line != "" {
 			return &ConnectError{ExitError: ee, Target: s.Target(), Line: line, Shown: stderrW != nil, Hint: s.connectHint()}

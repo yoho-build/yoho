@@ -118,3 +118,32 @@ yoho lock release --force                      # also a lock a killed command le
 ```
 
 While a lock taken with `yoho lock acquire` is held, deploys and rollbacks refuse with its message, and a Scheduled Backup is skipped (``skipped: the Destination is locked by hand (…); this Scheduled Backup runs again at its next time after `yoho lock release` ``). `yoho lock release` without `--force` refuses a lock a command holds: wait for it, or use `--force` when that run was killed. `--json` emits a `lock` event (`action`, `locked`, `performer`, `command`, `version`, `message`, `since`, `manual`). A held Destination gate (`<root>/appdirs/<app>/d/<destination>/gate`, taken for a moment by every lock taker) is not the lock: remove it by hand when a killed run left it.
+
+## Failure behavior
+
+These Compose scenarios are exercised by the integration workflow's `faults`
+job, one disposable runner per fault. A failed command never implies an automatic
+rollback. Inspect the outcome and Server state before recovering a stale lock.
+
+| Fault | Expected outcome and recovery |
+| --- | --- |
+| SSH lost during deploy | Exit 14 / `unknown` once mutation started; never infer success from disconnect. Old route remains available in the tested interruption while the new web candidate is awaiting readiness. After the failed process exits, release any leftover lock with `yoho lock release --force`, then repeat apply. A later interruption may already have switched traffic. |
+| Concurrent apply | Second command exits 11 / `failed` while the first holds the Destination lock; no interleaved Release. Alternatively pass `--lock-wait`. Repeat apply after the first finishes. |
+| Yoho root full | Exhaustion in the pre-deploy Hook (after operation and Release preparation) aborts before rollout with nonzero / `failed`; the previous Release keeps serving and its record stays valid JSON. Free space and repeat apply. The test exhausts a limited tmpfs holding the Yoho root, not Docker's data root; it does not promise rollback for disk exhaustion after cutover. |
+| Docker daemon interrupted during deploy | The test waits for the running web candidate with the new Version and excludes release-command one-offs. With no changed Service in the operation record, exit 1 / `failed` is correct; with changed Services, require 13 / `partial` or 14 / `unknown`. Unknown/14 also covers lost observations before any recorded change; never false success. Restart Docker, inspect state, then repeat apply to converge. Availability during the daemon outage is not guaranteed. |
+| Server reboot (Docker restart simulation) | With `restart: unless-stopped` on Services, the Proxy and running Services return without a Yoho mutation. HTTP health, all three Service health checks, a worker job and the recorded operation's status are checked before another apply. Full kernel/OS reboot is not simulated. |
+| Backup interrupted by SIGINT | Exit 14 / `unknown`; no newly published successful Backup in the tested quiescence interruption. The backed-up Service and other owned volume writers paused by Backup are unpaused through cleanup. This fixture’s Web and worker Services are not paused. Repeat Backup after verifying state; an interruption after publication can leave a complete valid Backup. |
+
+Run locally only on a disposable Linux machine:
+
+```sh
+mkdir -p qa/resilience
+go build -o "$PWD/qa/resilience/yoho" ./cmd/yoho
+YOHO_E2E=1 YOHO_E2E_DISPOSABLE=1 YOHO_E2E_FAULTS=ssh,lock,disk,docker,reboot,backup \
+  bash test/integration/faults.sh
+```
+
+SSH key authentication to `$USER@127.0.0.1`, Docker and passwordless sudo are
+required. Select any comma-separated subset with `YOHO_E2E_FAULTS`. The tests
+change the runner's firewall and Docker service and use port 18080. They must
+never run on a Server hosting unrelated Apps.
