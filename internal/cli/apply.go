@@ -393,7 +393,7 @@ func (a *app) apply(ctx context.Context, o applyOptions) (err error) {
 		}
 	}()
 	if a.previewName != "" {
-		if err = deploy.MarkPreview(ctx, s.hosts[0].Host, a.previewRecord(s)); err != nil {
+		if err = a.admitPreview(ctx, s.hosts[0].Host, a.previewRecord(s)); err != nil {
 			return err
 		}
 	}

@@ -54,6 +54,15 @@ func TestValidatePreviews(t *testing.T) {
 			t.Fatal("unsupported template accepted")
 		}
 	}
+	c.Destinations["staging"] = Destination{}
+	c.Previews.MaxActive = 5
+	if errs := ValidatePreviews(c); len(errs) != 0 {
+		t.Fatalf("positive max_active rejected: %v", errs)
+	}
+	c.Previews.MaxActive = -1
+	if len(ValidatePreviews(c)) == 0 {
+		t.Fatal("negative max_active accepted")
+	}
 }
 
 func TestPreviewDestination(t *testing.T) {

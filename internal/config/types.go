@@ -508,6 +508,7 @@ type SecretRefs []SecretRef
 
 // PreviewsConfig derives ephemeral Destinations from one configured template.
 type PreviewsConfig struct {
-	From string `json:"from" jsonschema:"required"`
-	Host string `json:"host" jsonschema:"required"`
+	From      string `json:"from" jsonschema:"required"`
+	Host      string `json:"host" jsonschema:"required"`
+	MaxActive int    `json:"max_active,omitempty" jsonschema:"minimum=0"`
 }

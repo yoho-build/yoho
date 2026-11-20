@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/spf13/cobra"
 	"github.com/yoho-build/yoho/internal/composefile"
@@ -19,16 +20,25 @@ func init() { extraCommands = append(extraCommands, previewCmd) }
 func previewCmd(g *globals) *cobra.Command {
 	c := &cobra.Command{Use: "preview", Short: "Deploy and tear down ephemeral Destinations"}
 	var name string
+	var pr int
+	var branch string
 	var o applyOptions
 	up := &cobra.Command{Use: "up", Short: "Build and deploy a preview from previews.from", Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
+			if pr < 0 {
+				return errors.New("--pr must be positive")
+			}
 			a, err := g.loadPreview(cmd, name)
 			if err != nil {
 				return err
 			}
+			a.previewPR = pr
+			a.previewBranch = strings.TrimSpace(branch)
 			return a.deploy(cmd.Context(), o)
 		}}
 	up.Flags().StringVar(&name, "name", "", "Preview name (for example pr-123)")
+	up.Flags().IntVar(&pr, "pr", 0, "Pull request number to record on the preview")
+	up.Flags().StringVar(&branch, "branch", "", "Git branch name to record on the preview")
 	up.Flags().StringVar(&o.Version, "version", "", "Version to deploy (default: git SHA)")
 	up.Flags().BoolVar(&o.SkipBuild, "skip-build", false, "Use images already built for this preview Version")
 	addLockWaitFlag(up)
@@ -63,19 +73,9 @@ func previewCmd(g *globals) *cobra.Command {
 			defer closeHosts()
 			h := hosts[0]
 			step := a.ui.Step(h.Name, "Remove preview %s and its volumes", a.previewName)
-			if _, err := deploy.CheckPreviewDir(ctx, h.Host, a.cfg.App, a.destName); err != nil {
-				step.Fail(err, "only marked previews or empty preview directories can be removed")
-				return &silentError{err}
-			}
-			unlock, err := a.acquireLock(ctx, h.Host, deploy.LockInfo{Command: "preview down"})
+			p, hint, err := a.removePreviewOnHost(ctx, h, a.previewName, a.destName, "preview down", nil)
 			if err != nil {
-				step.Fail(err, hintFor(err, ""))
-				return &silentError{err}
-			}
-			defer func() { _ = unlock(context.WithoutCancel(ctx)) }()
-			p, err := deploy.RemovePreview(ctx, h.Host, a.cfg.App, a.destName, h.Server.Sudo)
-			if err != nil {
-				step.Fail(err, "only marked previews can be removed; rerun to finish an interrupted teardown")
+				step.Fail(err, hint)
 				return &silentError{err}
 			}
 			hostsOut := []string{}
@@ -105,23 +105,35 @@ func previewCmd(g *globals) *cobra.Command {
 				return err
 			}
 			defer closeHosts()
+			now := time.Now().UTC()
 			var rows [][]string
 			for _, h := range hosts {
 				previews, err := deploy.ListPreviews(cmd.Context(), h.Host, a.cfg.App)
 				if err != nil {
 					return err
 				}
+				var dests []string
+				filtered := make([]deploy.PreviewRecord, 0, len(previews))
 				for _, p := range previews {
 					if _, configured := a.cfg.Destinations[p.Destination]; configured {
 						continue
 					}
-					rows = append(rows, []string{p.Name, h.Name, strings.Join(p.Hosts, ", "), p.Version})
+					filtered = append(filtered, p)
+					dests = append(dests, p.Destination)
+				}
+				usage := deploy.PreviewDiskUsage(cmd.Context(), h.Host, a.cfg.App, dests)
+				for _, p := range filtered {
+					age, lastDeploy := formatPreviewTimestamps(p, now)
+					rows = append(rows, []string{
+						p.Name, h.Name, strings.Join(p.Hosts, ", "), p.Version,
+						age, lastDeploy, humanBytes(usage[p.Destination]),
+					})
 				}
 			}
-			a.ui.Table([]string{"NAME", "SERVER", "HOSTS", "VERSION"}, rows)
+			a.ui.Table([]string{"NAME", "SERVER", "HOSTS", "VERSION", "AGE", "LAST DEPLOY", "DISK"}, rows)
 			return nil
 		}}
-	c.AddCommand(up, down, list)
+	c.AddCommand(up, down, list, previewPruneCmd(g))
 	return c
 }
 
@@ -322,7 +334,16 @@ func (a *app) preparePreviewCompose(r *composefile.Result) error {
 }
 
 func (a *app) previewRecord(s *session) deploy.PreviewRecord {
-	p := deploy.PreviewRecord{App: a.cfg.App, Name: a.previewName, Destination: a.destName, Project: a.project(), Version: s.ver, Hosts: []string{}}
+	p := deploy.PreviewRecord{
+		App:         a.cfg.App,
+		Name:        a.previewName,
+		Destination: a.destName,
+		Project:     a.project(),
+		Version:     s.ver,
+		Hosts:       []string{},
+		PR:          a.previewPR,
+		Branch:      a.previewBranch,
+	}
 	for _, name := range sortedKeys(s.r.Ext) {
 		e := s.r.Ext[name]
 		p.Services = append(p.Services, name)

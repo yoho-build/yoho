@@ -13,6 +13,7 @@ Point wildcard DNS `*.preview.example.com` at the template Server. Configure:
 previews:
   from: staging
   host: "{name}.preview.example.com"
+  max_active: 10 # optional; 0 or omitted means unlimited
 ```
 
 The template must exist and use the compose runtime with operator access. Its
@@ -56,10 +57,12 @@ Services without explicit hosts are refused for previews.
 ## Commands
 
 ```sh
-yoho preview up --name pr-123
+yoho preview up --name pr-123 [--pr 123] [--branch feat/checkout]
 yoho preview up --name pr-123 --version abc123 --skip-build
 yoho preview list
 yoho preview down --name pr-123 --yes
+yoho preview prune --older-than 7d
+yoho preview prune --keep 3 --yes
 ```
 
 A preview named `N` uses Destination `preview-N`, App directory
@@ -69,13 +72,19 @@ This namespace keeps configured Destinations untouched: `--name staging` targets
 Destination literally named `preview-N` is refused as a collision.
 
 `up` uses the normal build, ship and deploy path and prints the URL(s). Run it
-again to update the same preview. `--skip-build` uses image tags for this preview,
-not the template's tags. The effective Yoho overlay configuration selects the
-template through `previews.from`; that template’s own overlay is loaded and
-validated as well. `--lock-wait` works on `up` and `down`.
+again to update the same preview. Each preview records `created_at`,
+`last_deployed_at`, and optional `--pr` / `--branch` metadata in its on-Server
+`preview.json` marker. When `previews.max_active` is set, `up` refuses to create
+a new preview once the cap is reached (updating an already-active preview is
+still allowed) and hints to prune. `--skip-build` uses image tags for this
+preview, not the template's tags. The effective Yoho overlay configuration
+selects the template through `previews.from`; that template’s own overlay is
+loaded and validated as well. `--lock-wait` works on `up`, `down`, and `prune`.
 
-`list` reads markers from the template's Servers and shows name, Server, hosts
-and the last attempted Version. Markers must match the directory they occupy.
+`list` reads markers from the template's Servers and shows name, Server, hosts,
+the last attempted Version, age, last deploy, and best-effort App directory disk
+usage. Older markers without timestamps show `unknown` for age and last deploy.
+Markers must match the directory they occupy.
 `down` asks for confirmation on a terminal;
 `--yes` is required in CI and with `--json`. It verifies the preview marker
 under the Destination lock and removes the preview's containers (including
@@ -93,8 +102,18 @@ Failed first deploys leave a marker and can be torn down. Interrupted teardowns
 can be retried. JSON output includes `preview.up` / `preview.down` events with
 `name` and `hosts`.
 
+`prune` selects stale previews with `--older-than DURATION` (for example `7d`,
+`48h`, `2w`) and/or `--keep N` (protect the `N` newest previews by last deploy
+time). It prints a reviewable plan and asks for confirmation unless `--yes` or
+`--auto-approve` is passed (`--json` requires `--yes` or `--auto-approve`).
+Older markers without timestamps are skipped by `--older-than` unless
+`--include-unknown-age` is set. Each selected preview is removed through the
+same verified `preview down` path; a failure on one preview does not stop the
+others, and the final summary and `preview.prune` JSON event list every outcome.
+Rerunning `prune` is idempotent.
+
 There is one template per App, no Swarm or scoped Gate support, no Backup seeding,
-and no automatic expiry. Retain the template's Server configuration until its
+and no resident expiry daemon. Retain the template's Server configuration until its
 previews are removed; changing Servers does not move existing previews.
 
 ## GitHub Actions
@@ -140,7 +159,33 @@ SSH keys or trusted-host entries before writing SSH files. Same-repository PR co
 must also be trusted: it runs builds and Hooks with operator SSH access and the
 template's secrets. Review code before granting that access.
 
-Closed-event jobs can be missed. In a scheduled workflow, run `yoho preview list`,
-compare names with open PRs, then call `yoho preview down --name pr-N --yes` for
-stale previews. Keep scheduled cleanup in the same per-PR concurrency group as
-updates. Preview inventory has no automatic TTL or prune command.
+Closed-event jobs can be missed. Add a scheduled safety-net workflow that calls
+the same reusable workflow with `prune-older-than` (and optionally `prune-keep`):
+
+::: v-pre
+```yaml
+name: Prune stale previews
+on:
+  schedule:
+    - cron: "0 4 * * *"
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  prune:
+    uses: yoho-build/yoho/.github/workflows/yoho-preview.yml@main
+    with:
+      yoho-version: latest
+      app-dir: .
+      ssh-known-hosts: ${{ vars.PREVIEW_KNOWN_HOSTS }}
+      prune-older-than: 7d
+      prune-keep: "3"
+    secrets:
+      SSH_KEY: ${{ secrets.PREVIEW_SSH_KEY }}
+```
+:::
+
+Because the `prune` job in `yoho-preview.yml` is opt-in (gated on
+`prune-older-than` or `vars.YOHO_PREVIEW_PRUNE_OLDER_THAN`), existing PR
+workflows are unaffected. You can also run `yoho preview prune --older-than 7d --yes`
+from a cron job or Scheduled Job without any GitHub API token.

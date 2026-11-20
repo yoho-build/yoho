@@ -321,8 +321,9 @@ func TestPreviewNameFlagOnlyOnUpAndDown(t *testing.T) {
 	c := previewCmd(&globals{})
 	for _, sub := range c.Commands() {
 		has := sub.Flags().Lookup("name") != nil || c.PersistentFlags().Lookup("name") != nil
-		if has != (sub.Name() != "list") {
-			t.Errorf("%s --name available=%v", sub.Name(), has)
+		want := sub.Name() == "up" || sub.Name() == "down"
+		if has != want {
+			t.Errorf("%s --name available=%v, want %v", sub.Name(), has, want)
 		}
 	}
 }

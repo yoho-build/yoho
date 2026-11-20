@@ -45,6 +45,11 @@ func performer() string {
 	return "unknown"
 }
 
+// connectServer is replaceable by tests that run the CLI against a local Server.
+var connectServer = func(name, target string, sudo bool, opts remote.SSHOptions) (remote.Host, error) {
+	return remote.NewSSH(name, target, sudo, opts)
+}
+
 // connect opens the Destination's Servers.
 func (a *app) connect(ctx context.Context) ([]plan.NamedHost, func(), error) {
 	var hosts []plan.NamedHost
@@ -56,7 +61,7 @@ func (a *app) connect(ctx context.Context) ([]plan.NamedHost, func(), error) {
 	for _, name := range a.dest.Servers {
 		srv := a.cfg.Servers[name]
 		step := a.ui.Step(name, "Connect %s", srv.SSH)
-		h, err := remote.NewSSH(name, srv.SSH, srv.Sudo, a.sshOptions())
+		h, err := connectServer(name, srv.SSH, srv.Sudo, a.sshOptions())
 		if err == nil {
 			_, err = h.Output(ctx, remote.Cmd{Script: "docker version --format '{{.Server.Version}}'"})
 		}

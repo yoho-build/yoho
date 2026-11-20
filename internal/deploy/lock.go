@@ -162,6 +162,30 @@ func AcquireLock(ctx context.Context, host remote.Host, app, destination string,
 		"elif [ -e " + qc + " ]; then [ -d " + qc + " ] || yoho_bad " + qc + "\n" +
 		"else mkdir -p " + qc + "; fi\n" +
 		"if mkdir " + q + " 2>/dev/null; then cat > " + q + "/info.json; echo acquired; else echo held; cat " + q + "/info.json 2>/dev/null || true; fi"
+	return acquireLockScript(ctx, host, dir, script, data)
+}
+
+// AcquirePreviewLock serializes preview admission across all Destinations of an
+// App. It is held only while counting previews and writing their markers.
+func AcquirePreviewLock(ctx context.Context, host remote.Host, app string, info LockInfo) (func(context.Context) error, error) {
+	if info.Time.IsZero() {
+		info.Time = time.Now().UTC()
+	}
+	data, err := json.Marshal(info)
+	if err != nil {
+		return nil, err
+	}
+	dir := path.Join(release.AppDir(app, ""), "preview.lock")
+	q := remote.Quote(dir)
+	script := safepath.Script("preview lock") + safepath.Creation +
+		"yoho_make " + remote.Quote(path.Dir(dir)) + "\n" +
+		"yoho_path " + q + "\n" +
+		"if mkdir " + q + " 2>/dev/null; then cat > " + q + "/info.json; echo acquired; else echo held; cat " + q + "/info.json 2>/dev/null || true; fi"
+	return acquireLockScript(ctx, host, dir, script, data)
+}
+
+func acquireLockScript(ctx context.Context, host remote.Host, dir, script string, data []byte) (func(context.Context) error, error) {
+	q := remote.Quote(dir)
 	out, err := host.Output(ctx, remote.Cmd{Script: script, Stdin: bytes.NewReader(data)})
 	if err != nil {
 		return nil, fmt.Errorf("acquire lock on %s: %w", host.Name(), err)

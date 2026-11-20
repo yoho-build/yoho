@@ -119,6 +119,7 @@ yoho backup restore ID --from production -d staging [--copy-generated-secrets]  
 yoho backup drill [JOB] [--id ID] [--keep] | --cleanup   # restore into a throwaway yoho-<app>-<destination>-drill-<8 random hex> project, health + verify, RTO timings; App untouched
 yoho backup restore --cleanup | drill --cleanup   # remove leftovers that run/restore/drill warn about: restore-* and stale run-*/check-* staging | drill projects + drill-* staging (may hold decrypted Backups); restore --cleanup drops prior-state.json, so stopped Services are not resumed
 yoho schedule install [JOB...] [--binary PATH] | status [--max-age 48h] | remove [JOB...]
+yoho preview up --name N [--pr P] [--branch B] | list | down --name N [-y] | prune [--older-than 7d] [--keep N] [-y|--auto-approve]
 yoho swarm init [-y] | join [-y] | status
 yoho skill install [--dir DIR] [--agent claude|codex|all] [--only A,B | --exclude A,B] [--no-migrate-refs] [--project [--force]] | list | print [SKILL]
 ```

@@ -44,6 +44,9 @@ func ValidatePreviews(c *Config) []error {
 	if _, err := c.Previews.RenderHost("preview", "web"); err != nil {
 		errs = append(errs, err)
 	}
+	if c.Previews.MaxActive < 0 {
+		errs = append(errs, fmt.Errorf("previews.max_active must be 0 or greater, got %d", c.Previews.MaxActive))
+	}
 	return errs
 }
 

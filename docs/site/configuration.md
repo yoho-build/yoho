@@ -280,11 +280,14 @@ volumes:
 previews:
   from: staging
   host: "{name}.preview.example.com"
+  max_active: 10
 ```
 
 `from` names one configured compose Destination with operator access. `host`
 must contain `{name}` and render valid DNS hostnames; include `{service}` when
-several proxied Services have hosts. Previews reuse the template's overlays,
-Servers and secrets, with separate App directories and named volumes. They
-exclude Migration Cutover, Backup jobs, tunnel management and fixed subnets.
-See [Preview environments](previews.md) for `up`, `down`, limits and CI setup.
+several proxied Services have hosts. Optional `max_active` (0 or omitted for
+unlimited) caps active previews on `preview up`, hinting to prune. Previews
+reuse the template's overlays, Servers and secrets, with separate App
+directories and named volumes. They exclude Migration Cutover, Backup jobs,
+tunnel management and fixed subnets. See [Preview environments](previews.md) for
+`up`, `down`, `prune`, limits and CI setup.

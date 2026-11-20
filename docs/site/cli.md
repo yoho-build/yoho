@@ -149,17 +149,21 @@ Each finding has a `severity` (`error`, `warning`, or `info`) and a one-line fix
 
 Exit codes: `0` when there are no `error` findings (warnings and info exit `0`), `1` when one or more findings have severity `error` (or when configuration or Server connection fails).
 
-## `preview up`, `preview down`, `preview list`
+## `preview up`, `preview down`, `preview list`, `preview prune`
 
 ```sh
-yoho preview up --name pr-123 [--version VERSION] [--skip-build] [--lock-wait]
+yoho preview up --name pr-123 [--pr 123] [--branch BRANCH] [--version VERSION] [--skip-build] [--lock-wait]
 yoho preview down --name pr-123 [--yes] [--lock-wait]
 yoho preview list
+yoho preview prune [--older-than DURATION] [--keep N] [--include-unknown-age] [--yes|--auto-approve] [--lock-wait]
 ```
 
-Derive an ephemeral Destination from `previews.from`, list its Server markers,
-or remove a verified preview including its volumes. Names normalize to lowercase
-letters, digits and dashes, at most 40 characters. `down --yes` confirms data
-deletion for CI and is required with `--json`. `up` and `down` emit `preview.up`
-and `preview.down` JSON events with name and hosts. See [Previews](previews.md)
-for configuration, safety limits, secrets layering and GitHub Actions.
+Derive an ephemeral Destination from `previews.from`, list its Server markers
+(with age, last deploy, and App directory disk usage), remove a verified preview
+including its volumes, or bulk-prune stale previews by age or keep-N count.
+Names normalize to lowercase letters, digits and dashes, at most 40 characters.
+`down --yes` and `prune --yes`/`--auto-approve` confirm data deletion for CI and
+are required with `--json`. `up`, `down`, and `prune` emit `preview.up`,
+`preview.down`, `preview.prune_plan`, and `preview.prune` JSON events. See
+[Previews](previews.md) for configuration (`previews.max_active`), safety limits,
+secrets layering and GitHub Actions.
