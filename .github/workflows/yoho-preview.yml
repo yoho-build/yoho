@@ -134,7 +134,8 @@ jobs:
           PRUNE_KEEP: ${{ inputs.prune-keep || vars.YOHO_PREVIEW_PRUNE_KEEP }}
         run: |
           set -eu
-          if ! yoho preview prune --help >/dev/null 2>&1; then
+          # Older releases print the parent `preview` help and exit 0, so check for a prune-only flag.
+          if ! yoho preview prune --help 2>/dev/null | grep -q -- '--older-than'; then
             echo "::notice::Installed Yoho does not support preview prune; skipping"
             exit 0
           fi

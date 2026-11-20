@@ -148,8 +148,8 @@ func TestPreviewWorkflowFeatureDetection(t *testing.T) {
 set -eu
 if [ "${3:-}" = --help ]; then
   if [ "$2" = up ]; then printf '%s\n' "$UP_HELP"; exit 0; fi
-  if [ "$PRUNE_SUPPORTED" = true ]; then exit 0; fi
-  exit 1
+  if [ "$PRUNE_SUPPORTED" = true ]; then printf '%s\n' "--older-than string  --keep int"; exit 0; fi
+  printf '%s\n' "Manage Preview Destinations" "Available Commands: up down list"; exit 0
 fi
 printf '%s\n' "$@"
 `
