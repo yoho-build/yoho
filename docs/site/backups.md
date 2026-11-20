@@ -334,8 +334,10 @@ full recovery seconds from setup start through healthy Proxy, restored rows,
 worker completion and active Backup timer; image source is `rebuilt from git at <version>`, and `scheduled_jobs_reinstalled` is `true` only after verification. The harness
 adds `needs_old_server: false` only after destroying the old App resources and
 reconstructing from the retained git checkout and reattached external Target.
-No CI run has been measured in the implementation sandbox; use the workflow logs
-for actual numbers rather than an estimate. The fixture destroys all App
+A CI run on 2026-11-20 (GitHub ubuntu-24.04 runner, quickstart web + worker +
+Postgres, a few rows) measured: recovery point 52 s before restore, data restore
+5.8 s, full recovery 42 s, image source rebuilt from git, Scheduled Jobs
+reinstalled. Real numbers grow with data size and image build time. The fixture destroys all App
 containers, volumes, built images, Proxy state and the original Yoho root, then
 uses a second SSH user and fresh root. It reuses the runner's installed OS and
 Docker, so it does not measure installing Docker on a bare VM.
