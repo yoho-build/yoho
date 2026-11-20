@@ -609,6 +609,7 @@ func TestDoctorEndToEndJSONAndExitCodes(t *testing.T) {
 		cmd.SetOut(&buf)
 		cmd.SetErr(&buf)
 		cmd.SilenceErrors, cmd.SilenceUsage = true, true
+		cmd.SetContext(context.Background())
 		err := runDoctor(cmd, g, doctorOptions{
 			connect: func(_ context.Context, _ *app) ([]plan.NamedHost, func(), error) {
 				return []plan.NamedHost{{Name: "primary", Host: h}}, func() {}, nil
