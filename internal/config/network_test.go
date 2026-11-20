@@ -40,3 +40,26 @@ func TestNetworkDefaultsAndValidation(t *testing.T) {
 		}
 	}
 }
+
+func TestNetworkPrefixContainment(t *testing.T) {
+	for _, raw := range []string{"10.0.0.0/7", "192.168.0.0/15", "172.16.0.0/11"} {
+		if errs := validateNetwork(&Config{Network: NetworkConfig{Subnet: raw}}); len(errs) == 0 {
+			t.Fatal("accepted", raw)
+		}
+	}
+	for _, raw := range []string{"10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"} {
+		if errs := validateNetwork(&Config{Network: NetworkConfig{Subnet: raw}}); len(errs) != 0 {
+			t.Fatal(raw, errs)
+		}
+	}
+	for _, subnet := range []string{"10.210.0.0/24", "10.210.0.0/25", "10.0.0.0/8"} {
+		c := &Config{Network: NetworkConfig{Mesh: "wireguard"}, Servers: map[string]Server{"a": {SSH: "root@203.0.113.1"}}, Destinations: map[string]Destination{"production": {Subnet: subnet}}}
+		if errs := validateNetwork(c); len(errs) == 0 {
+			t.Fatal("overlap accepted", subnet)
+		}
+	}
+	c := &Config{Network: NetworkConfig{Mesh: "wireguard", Subnet: "10.210.0.0/30"}, Servers: map[string]Server{"a": {}, "b": {}, "c": {}}}
+	if errs := validateNetwork(c); len(errs) == 0 {
+		t.Fatal("capacity accepted")
+	}
+}

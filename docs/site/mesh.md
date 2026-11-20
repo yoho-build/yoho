@@ -23,7 +23,8 @@ resolve to its public NAT egress IP for the peer firewall allowlist. Configure
 public egress DNS first; Yoho has no public address discovery service.
 
 Run `yoho mesh up` (also called by `yoho setup` after confirmation and by
-`yoho apply`/`yoho deploy`). It reconciles every configured Server, even when
+`yoho apply`/`yoho deploy` for real Destinations; previews reuse the mesh).
+It reconciles every configured Server, even when
 `--destination` selects only one Destination. Serialize these commands across
 Apps sharing a mesh. `yoho plan` reports interface changes, peer additions and
 removals, and address assignments without installing anything.
@@ -32,7 +33,11 @@ The first public Server in sorted name order is the hub. NATed Servers initiate
 outbound connections to it every 25 seconds and route all mesh traffic through
 it. Other public Servers connect directly and reach NATed Servers through the
 hub. IPv4 forwarding and a UFW forwarding rule on `yoho0` are enabled on the
-hub. Only peer public IPs receive inbound UDP rules tagged `yoho-mesh`.
+hub, along with an idempotent `yoho-mesh` iptables forwarding rule in
+`DOCKER-USER` (or `FORWARD` when absent), persisted through wg-quick hooks.
+Only directly connected peer public IPs receive inbound UDP rules tagged
+`yoho-mesh`. Outbound-only Servers have no fixed listen port or inbound rule.
+IPv6 UFW rules are added only when that Server enables IPv6 in UFW.
 Yoho does not enable UFW or change its global policy; if UFW is disabled,
 configure equivalent restrictions in the provider firewall. No NAT hole
 punching, hub failover, or Swarm control-port firewall configuration is provided.
@@ -57,11 +62,14 @@ yoho mesh down          # remove owned yoho0 files, keys, unit enablement and UF
 Rotation and interface changes can briefly interrupt mesh traffic. Teardown
 removes Yoho's forwarding sysctl file, but leaves the current kernel forwarding
 setting intact because Docker or another network may need it. Teardown leaves
-unrelated networks and firewall rules intact. To remove a Server, first run
-`mesh down` against the old config (all listed Servers), then remove it and run
-`mesh up` against the new config. Alternatively, retain access to the removed
-Server and clean up its mesh separately; reconciliation can only reach Servers
-still in the config.
+unrelated networks and firewall rules intact. To remove a Server, remove it
+from the config and run
+`yoho mesh up`. Surviving Servers remove its peer while retaining its address
+tombstone and all existing allocations. Keep SSH access to the removed Server
+and tear down its mesh separately with a temporary Yoho file listing only that
+Server and its original `root` and SSH routing. `yoho mesh down` is explicit full
+teardown of every Server listed in its config and deletes their allocation state;
+never run it on surviving Servers as part of Server removal.
 
 Swarm uses the assigned mesh address for `--advertise-addr`; run `mesh up`
 before `swarm init` or `swarm join`. Future Roles connections can use the same

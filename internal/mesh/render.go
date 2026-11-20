@@ -34,7 +34,14 @@ func Render(name string, network config.NetworkConfig, s State) (string, error) 
 		return "", err
 	}
 	var b strings.Builder
-	fmt.Fprintf(&b, "# Managed by Yoho\n[Interface]\nAddress = %s/%d\nListenPort = %d\nPostUp = wg set %%i private-key /etc/wireguard/yoho0.key\n", self.Address, p.Bits(), network.Port)
+	fmt.Fprintf(&b, "# Managed by Yoho\n[Interface]\nAddress = %s/%d\n", self.Address, p.Bits())
+	if self.Endpoint != "none" {
+		fmt.Fprintf(&b, "ListenPort = %d\n", network.Port)
+	}
+	b.WriteString("PostUp = wg set %i private-key /etc/wireguard/yoho0.key\n")
+	if name == h {
+		fmt.Fprintf(&b, "PostUp = %s\nPostDown = %s\n", forwardUp, forwardDown)
+	}
 	for _, n := range keys(s.Peers) {
 		peer := s.Peers[n]
 		if n == name {
@@ -95,7 +102,7 @@ func Collisions(subnet, routes string, pools []string) error {
 			continue
 		}
 		candidate := f[0]
-		if candidate == "local" || candidate == "broadcast" {
+		if candidate == "local" || candidate == "broadcast" || candidate == "blackhole" || candidate == "unreachable" || candidate == "prohibit" || candidate == "throw" || candidate == "unicast" {
 			if len(f) < 2 {
 				continue
 			}
@@ -114,3 +121,7 @@ func Collisions(subnet, routes string, pools []string) error {
 	}
 	return nil
 }
+
+// Only Yoho's interface forwarding rule is managed, even with Docker's DROP policy.
+const forwardUp = `chain=FORWARD; if iptables -nL DOCKER-USER >/dev/null 2>&1; then chain=DOCKER-USER; fi; iptables -C "$chain" -i yoho0 -o yoho0 -m comment --comment yoho-mesh -j ACCEPT 2>/dev/null || iptables -I "$chain" 1 -i yoho0 -o yoho0 -m comment --comment yoho-mesh -j ACCEPT`
+const forwardDown = `for chain in DOCKER-USER FORWARD; do while iptables -C "$chain" -i yoho0 -o yoho0 -m comment --comment yoho-mesh -j ACCEPT 2>/dev/null; do iptables -D "$chain" -i yoho0 -o yoho0 -m comment --comment yoho-mesh -j ACCEPT; done; done`

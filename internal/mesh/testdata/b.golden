@@ -1,7 +1,6 @@
 # Managed by Yoho
 [Interface]
 Address = 10.210.0.2/24
-ListenPort = 51820
 PostUp = wg set %i private-key /etc/wireguard/yoho0.key
 
 [Peer]

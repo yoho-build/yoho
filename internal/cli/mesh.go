@@ -3,6 +3,7 @@ package cli
 import (
 	"context"
 	"fmt"
+	"slices"
 	"sort"
 
 	"github.com/spf13/cobra"
@@ -39,7 +40,12 @@ func (a *app) meshHosts(ctx context.Context) ([]plan.NamedHost, func(), error) {
 	sort.Strings(ns)
 	for _, n := range ns {
 		s := a.cfg.Servers[n]
-		h, e := remote.NewSSH(n, s.SSH, s.Sudo, a.sshOptions())
+		opts, e := a.meshSSHOptions(n)
+		if e != nil {
+			done()
+			return nil, nil, e
+		}
+		h, e := remote.NewSSH(n, s.SSH, s.Sudo, opts)
 		if e != nil {
 			done()
 			return nil, nil, e
@@ -113,7 +119,7 @@ func (a *app) runMesh(ctx context.Context, verb string) error {
 }
 
 func (a *app) meshChanges(ctx context.Context) ([]plan.Change, error) {
-	if a.cfg.Network.Mesh != "wireguard" {
+	if a.cfg.Network.Mesh != "wireguard" || a.previewName != "" {
 		return nil, nil
 	}
 	hosts, done, err := a.meshHosts(ctx)
@@ -137,4 +143,31 @@ func (a *app) meshAdvertise(ctx context.Context, h plan.NamedHost) (string, erro
 		return "", fmt.Errorf("Server %s has no mesh allocation; run yoho mesh up", h.Name)
 	}
 	return h.Server.EffectivePrivateAddress(address), nil
+}
+
+// A Server shared by Destinations must have the same route in each.
+func (a *app) meshSSHOptions(name string) (remote.SSHOptions, error) {
+	var result remote.SSHOptions
+	found := false
+	for _, d := range a.cfg.Destinations {
+		if !slices.Contains(d.Servers, name) {
+			continue
+		}
+		var o remote.SSHOptions
+		if d.SSH != nil && d.SSH.Via == "cloudflare" {
+			o.CloudflareHostname = d.SSH.Hostname
+		}
+		if found && o.CloudflareHostname != result.CloudflareHostname {
+			return result, fmt.Errorf("Server %s has ambiguous Destination SSH routing", name)
+		}
+		result, found = o, true
+	}
+	return result, nil
+}
+
+func (a *app) reconcileMesh(ctx context.Context) error {
+	if a.previewName != "" || a.cfg.Network.Mesh != "wireguard" {
+		return nil
+	}
+	return a.runMesh(ctx, "up")
 }

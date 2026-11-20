@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -264,7 +265,7 @@ func TestMeshDiff(t *testing.T) {
 			t.Fatal(e)
 		}
 		endpoint := s.Peers[name].Endpoint
-		hosts = append(hosts, plan.NamedHost{Name: name, Server: config.Server{SSH: "root@203.0.113.1", Endpoint: endpoint}, Host: &fakeHost{files: map[string][]byte{"/var/lib/yoho/mesh/state.json": b}}})
+		hosts = append(hosts, plan.NamedHost{Name: name, Server: config.Server{SSH: "root@203.0.113.1", Endpoint: endpoint}, Host: &fakeHost{files: map[string][]byte{"/var/lib/yoho/mesh/state.json": b, "/etc/wireguard/yoho0.conf": mustRender(t, name, s)}}})
 	}
 	if c, e := Diff(ctx, config.NetworkConfig{}, hosts); e != nil || len(c) != 0 {
 		t.Fatal(c, e)
@@ -352,4 +353,289 @@ fi
 	if strings.Count(string(b), "--force delete") != 2 || strings.Contains(string(b), "203.0.113.2") {
 		t.Fatalf("wrong rules removed: %s", b)
 	}
+}
+
+func mustRender(t *testing.T, name string, s State) []byte {
+	t.Helper()
+	out, err := Render(name, s.Network, s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return []byte(out)
+}
+
+// pingHost preserves ping's exit status, as the real Host does.
+type pingHost struct {
+	fakeHost
+	output string
+	err    error
+}
+
+func (h *pingHost) Output(context.Context, remote.Cmd) (string, error) { return h.output, h.err }
+func TestPingAverage(t *testing.T) {
+	for _, tc := range []struct {
+		out, want string
+		err       error
+	}{
+		{"PING peer\n64 bytes from peer\nrtt min/avg/max/mdev = 0.100/1.230/2.000/0.300 ms\n", "1.230ms", nil},
+		{"100% packet loss", "", fmt.Errorf("exit 1")},
+		{"rtt min/avg/max/mdev = bad/input", "", nil},
+	} {
+		got, err := Ping(context.Background(), plan.NamedHost{Host: &pingHost{output: tc.out, err: tc.err}}, "10.210.0.2")
+		if got != tc.want || (err != nil) != (tc.err != nil) {
+			t.Fatalf("got %q, %v", got, err)
+		}
+	}
+}
+func TestRouteTypes(t *testing.T) {
+	for _, typ := range []string{"blackhole", "unreachable", "prohibit", "throw", "local", "broadcast", "unicast"} {
+		if err := Collisions("10.210.0.0/24", typ+" 10.210.0.0/24 table 52", nil); err == nil {
+			t.Fatal("missed", typ)
+		}
+	}
+}
+func TestRemovalPreservesAddresses(t *testing.T) {
+	ctx := context.Background()
+	var hosts []plan.NamedHost
+	for _, name := range []string{"a", "b", "c"} {
+		hosts = append(hosts, plan.NamedHost{Name: name, Server: config.Server{SSH: "root@203.0.113.1"}, Host: &fakeHost{files: map[string][]byte{}, public: fixture().Peers[name].PublicKey}})
+	}
+	if err := Up(ctx, config.NetworkConfig{}, hosts, false); err != nil {
+		t.Fatal(err)
+	}
+	survivors := []plan.NamedHost{hosts[0], hosts[2]}
+	if err := Up(ctx, config.NetworkConfig{}, survivors, false); err != nil {
+		t.Fatal(err)
+	}
+	copies, err := Read(ctx, survivors)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, s := range copies {
+		if _, ok := s.Peers["b"]; ok {
+			t.Fatal("removed peer retained")
+		}
+		next, err := Allocate("10.210.0.0/24", []string{"a", "c", "d"}, []State{s})
+		if err != nil || next.Addresses["c"] != "10.210.0.3" || next.Addresses["b"] != "10.210.0.2" || next.Addresses["d"] != "10.210.0.4" {
+			t.Fatal(next, err)
+		}
+	}
+}
+func TestKeyDivergenceAndStaleConfig(t *testing.T) {
+	ctx := context.Background()
+	var hosts []plan.NamedHost
+	s := fixture()
+	s.Network = Defaults(config.NetworkConfig{})
+	for _, name := range []string{"a", "b", "c"} {
+		b, _ := json.Marshal(s)
+		hosts = append(hosts, plan.NamedHost{Name: name, Server: config.Server{Endpoint: s.Peers[name].Endpoint}, Host: &fakeHost{files: map[string][]byte{"/var/lib/yoho/mesh/state.json": b, "/etc/wireguard/yoho0.conf": mustRender(t, name, s)}}})
+	}
+	peer := s.Peers["a"]
+	peer.PublicKey = base64.StdEncoding.EncodeToString([]byte(strings.Repeat("x", 32)))
+	s.Peers["a"] = peer
+	b, _ := json.Marshal(s)
+	hosts[0].Host.(*fakeHost).files[statePath(hosts[0])] = b
+	changes, err := Diff(ctx, s.Network, hosts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, c := range changes {
+		if c.Name == "a" && c.Server == "b" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("public key divergence missed", changes)
+	}
+	for _, h := range hosts {
+		h.Host.(*fakeHost).files[statePath(h)] = b
+	}
+	changes, err = Diff(ctx, s.Network, hosts)
+	if err != nil || len(changes) == 0 {
+		t.Fatal("stale render missed", changes, err)
+	}
+}
+
+// A failed state publication must leave every interface configuration untouched.
+type failingStateHost struct {
+	*fakeHost
+	fail bool
+}
+
+func (h *failingStateHost) WriteFile(ctx context.Context, p string, b []byte, m os.FileMode, sudo bool) error {
+	if h.fail && strings.HasSuffix(p, "state.json") {
+		return fmt.Errorf("interrupted")
+	}
+	return h.fakeHost.WriteFile(ctx, p, b, m, sudo)
+}
+func TestRotationPublishesStatesBeforeConfigs(t *testing.T) {
+	ctx := context.Background()
+	var hosts []plan.NamedHost
+	for _, name := range []string{"a", "b"} {
+		hosts = append(hosts, plan.NamedHost{Name: name, Server: config.Server{SSH: "root@203.0.113.1"}, Host: &failingStateHost{fakeHost: &fakeHost{files: map[string][]byte{}, public: fixture().Peers[name].PublicKey}}})
+	}
+	if err := Up(ctx, config.NetworkConfig{}, hosts, false); err != nil {
+		t.Fatal(err)
+	}
+	old := string(hosts[0].Host.(*failingStateHost).files["/etc/wireguard/yoho0.conf"])
+	for _, h := range hosts {
+		h.Host.(*failingStateHost).public = base64.StdEncoding.EncodeToString([]byte(strings.Repeat("x", 32)))
+	}
+	hosts[1].Host.(*failingStateHost).fail = true
+	if err := Up(ctx, config.NetworkConfig{}, hosts, true); err == nil {
+		t.Fatal("expected interruption")
+	}
+	if string(hosts[0].Host.(*failingStateHost).files["/etc/wireguard/yoho0.conf"]) != old {
+		t.Fatal("configuration changed before all states published")
+	}
+}
+func TestForwardingAndOutboundOnly(t *testing.T) {
+	s := fixture()
+	hubConfig := string(mustRender(t, "a", s))
+	for _, want := range []string{"PostUp = " + forwardUp, "PostDown = " + forwardDown, "--comment yoho-mesh", "DOCKER-USER"} {
+		if !strings.Contains(hubConfig, want) {
+			t.Fatal("missing", want)
+		}
+	}
+	if strings.Contains(string(mustRender(t, "b", s)), "ListenPort") {
+		t.Fatal("NAT Server listens on fixed port")
+	}
+	for _, script := range []string{prerequisites, forwardUp, forwardDown} {
+		cmd := exec.Command("sh", "-n")
+		cmd.Stdin = strings.NewReader(script)
+		if b, err := cmd.CombinedOutput(); err != nil {
+			t.Fatal(err, string(b))
+		}
+	}
+}
+
+func TestInboundFirewallFamiliesAndTopology(t *testing.T) {
+	dir := t.TempDir()
+	log := filepath.Join(dir, "rules")
+	defaults := filepath.Join(dir, "defaults")
+	if err := os.WriteFile(filepath.Join(dir, "ufw"), []byte("#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$UFW_LOG\"\n"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	sources := map[string][]string{"a": {"203.0.113.1", "2001:db8::1"}, "b": {"203.0.113.2", "2001:db8::2"}, "c": {"203.0.113.3", "2001:db8::3"}}
+	for _, mode := range []string{"no", "yes"} {
+		if err := os.WriteFile(defaults, []byte("IPV6="+mode+"\n"), 0600); err != nil {
+			t.Fatal(err)
+		}
+		for _, name := range []string{"a", "b", "c"} {
+			_ = os.Remove(log)
+			script := inboundFirewall(name, Defaults(config.NetworkConfig{}), fixture(), sources)
+			script = strings.ReplaceAll(script, "/etc/default/ufw", remote.Quote(defaults))
+			cmd := exec.Command("sh", "-c", "set -eu\n"+script)
+			cmd.Env = append(os.Environ(), "PATH="+dir+":"+os.Getenv("PATH"), "UFW_LOG="+log)
+			if out, err := cmd.CombinedOutput(); err != nil {
+				t.Fatal(err, string(out), script)
+			}
+			b, _ := os.ReadFile(log)
+			if name == "b" && len(b) != 0 {
+				t.Fatal("NAT Server opens inbound", string(b))
+			}
+			if name == "c" && strings.Contains(string(b), "203.0.113.2") {
+				t.Fatal("public non-hub allows NAT peer")
+			}
+			want := 2
+			if name == "b" {
+				want = 0
+			}
+			if name == "c" {
+				want = 1
+			}
+			if mode == "yes" {
+				want *= 2
+			}
+			if strings.Count(string(b), "comment yoho-mesh") != want {
+				t.Fatalf("%s/%s: %s", mode, name, b)
+			}
+		}
+	}
+}
+func TestPreflightBeforeIPAndOptionalDocker(t *testing.T) {
+	h := &fakeHost{files: map[string][]byte{}, public: fixture().Peers["a"].PublicKey}
+	host := plan.NamedHost{Name: "a", Server: config.Server{SSH: "root@203.0.113.1"}, Host: h}
+	if err := Up(context.Background(), config.NetworkConfig{}, []plan.NamedHost{host}, false); err != nil {
+		t.Fatal(err)
+	}
+	if len(h.scripts) < 3 || h.scripts[0] != prerequisites || !strings.Contains(h.scripts[1], "ip -4 route") {
+		t.Fatal("ip used before dependencies", h.scripts)
+	}
+	// Use an empty PATH to model a fresh Server with no Docker binary.
+	cmd := exec.Command("/bin/sh", "-c", h.scripts[2])
+	cmd.Env = []string{"PATH=" + t.TempDir()}
+	if out, err := cmd.CombinedOutput(); err != nil || len(out) != 0 {
+		t.Fatal("Docker absence fails collision preflight", err, string(out))
+	}
+	if err := Down(context.Background(), host); err != nil {
+		t.Fatal(err)
+	}
+	down := h.scripts[len(h.scripts)-1]
+	if strings.Index(down, "systemctl stop wg-quick@yoho0") < 0 || strings.Index(down, "systemctl stop") > strings.Index(down, "systemctl disable") || strings.Index(down, "systemctl stop") > strings.Index(down, "wg-quick down") {
+		t.Fatal("unit not stopped before teardown", down)
+	}
+}
+
+func TestForwardRuleIdempotence(t *testing.T) {
+	dir := t.TempDir()
+	stub := `#!/bin/sh
+case "$1" in
+ -nL) test "$DOCKER_CHAIN" = yes ;;
+ -C) test -f "$RULE_DIR/$2" ;;
+ -I) touch "$RULE_DIR/$2"; echo "$*" >> "$RULE_DIR/inserted" ;;
+ -D) rm "$RULE_DIR/$2" ;;
+ *) exit 1 ;;
+esac
+`
+	if err := os.WriteFile(filepath.Join(dir, "iptables"), []byte(stub), 0700); err != nil {
+		t.Fatal(err)
+	}
+	for _, docker := range []string{"yes", "no"} {
+		rules := t.TempDir()
+		env := append(os.Environ(), "PATH="+dir+":"+os.Getenv("PATH"), "RULE_DIR="+rules, "DOCKER_CHAIN="+docker)
+		run := func(script string) {
+			t.Helper()
+			cmd := exec.Command("sh", "-c", "set -eu\n"+script)
+			cmd.Env = env
+			if out, err := cmd.CombinedOutput(); err != nil {
+				t.Fatal(err, string(out))
+			}
+		}
+		run(forwardUp)
+		run(forwardUp)
+		b, err := os.ReadFile(filepath.Join(rules, "inserted"))
+		if err != nil || strings.Count(string(b), "--comment yoho-mesh") != 1 {
+			t.Fatal("non-idempotent", string(b), err)
+		}
+		chain := "FORWARD"
+		if docker == "yes" {
+			chain = "DOCKER-USER"
+		}
+		if !strings.Contains(string(b), "-I "+chain+" 1 -i yoho0 -o yoho0") {
+			t.Fatal("wrong forwarding chain", string(b))
+		}
+		run(forwardDown)
+		run(forwardDown)
+		if _, err := os.Stat(filepath.Join(rules, chain)); !os.IsNotExist(err) {
+			t.Fatal("rule survived teardown", err)
+		}
+	}
+}
+func TestDiffDetectsKeyWrittenBeforeState(t *testing.T) {
+	s := fixture()
+	s.Network = Defaults(config.NetworkConfig{})
+	b, _ := json.Marshal(s)
+	h := &fakeHost{files: map[string][]byte{"/var/lib/yoho/mesh/state.json": b, "/etc/wireguard/yoho0.conf": mustRender(t, "a", s)}, public: base64.StdEncoding.EncodeToString([]byte(strings.Repeat("x", 32)))}
+	changes, err := Diff(context.Background(), s.Network, []plan.NamedHost{{Name: "a", Server: config.Server{Endpoint: s.Peers["a"].Endpoint}, Host: h}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range changes {
+		if c.Name == "a" && strings.Contains(strings.Join(c.Reasons, " "), "public key changed") {
+			return
+		}
+	}
+	t.Fatal("key change before state update missed", changes)
 }

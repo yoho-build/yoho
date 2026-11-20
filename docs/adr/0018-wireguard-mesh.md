@@ -27,8 +27,8 @@ key from its root-only file. Status filters the interface dump on the Server
 before stdout, because its first row contains the private key.
 
 Yoho owns yoho0, its unit, its WireGuard key/config, its mesh state and the
-`yoho-mesh` UFW rules. Reconciliation deletes only tagged rules; teardown
-preserves unrelated interfaces, networks and firewall policy. NATed Servers
+`yoho-mesh` UFW and iptables forwarding rules. Reconciliation deletes only
+tagged rules; teardown preserves unrelated interfaces, networks and firewall policy. NATed Servers
 need a known public egress IP for a restrictive hub firewall. Resolve the SSH
 hostname of an `endpoint: none` Server for that allowlist; it must resolve to
 its public egress IP (including dynamic DNS where necessary). Yoho cannot

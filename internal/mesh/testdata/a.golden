@@ -3,6 +3,8 @@
 Address = 10.210.0.1/24
 ListenPort = 51820
 PostUp = wg set %i private-key /etc/wireguard/yoho0.key
+PostUp = chain=FORWARD; if iptables -nL DOCKER-USER >/dev/null 2>&1; then chain=DOCKER-USER; fi; iptables -C "$chain" -i yoho0 -o yoho0 -m comment --comment yoho-mesh -j ACCEPT 2>/dev/null || iptables -I "$chain" 1 -i yoho0 -o yoho0 -m comment --comment yoho-mesh -j ACCEPT
+PostDown = for chain in DOCKER-USER FORWARD; do while iptables -C "$chain" -i yoho0 -o yoho0 -m comment --comment yoho-mesh -j ACCEPT 2>/dev/null; do iptables -D "$chain" -i yoho0 -o yoho0 -m comment --comment yoho-mesh -j ACCEPT; done; done
 
 [Peer]
 PublicKey = AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=

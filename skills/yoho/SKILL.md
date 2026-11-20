@@ -207,6 +207,10 @@ across Destinations; serialize them. `yoho setup` and apply/deploy reconcile it;
 `mesh rotate-keys`, `mesh down`. Run up before `swarm init/join`: the assigned
 mesh IP takes precedence over `private_address`. The first public Server by
 name routes NATed traffic with keepalive 25. Keys stay on their Server; never
-read or print `/etc/wireguard/yoho0.key` or a raw WireGuard dump. Teardown before
-removing a Server from config, then up on the new list. Roles/connections are
+read or print `/etc/wireguard/yoho0.key` or a raw WireGuard dump. Remove a Server
+from config, then run up to preserve surviving allocations and tombstones.
+Clean up only the removed Server using a separate config listing it alone
+(with its original root and SSH routing). Down is full teardown and deletes
+allocation state; never use it on surviving Servers during removal. Previews
+reuse the mesh without reconciling it. Roles/connections are
 reserved for a later feature.

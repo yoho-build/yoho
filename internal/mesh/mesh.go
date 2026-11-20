@@ -52,7 +52,7 @@ func names(hosts []plan.NamedHost) []string {
 	return ns
 }
 
-// Diff reads only persisted public state. Hosts must be in sorted name order.
+// Diff reads public keys, state and rendered configuration. Hosts must be in sorted name order.
 func Diff(ctx context.Context, n config.NetworkConfig, hosts []plan.NamedHost) ([]plan.Change, error) {
 	n = Defaults(n)
 	copies, err := Read(ctx, hosts)
@@ -64,6 +64,25 @@ func Diff(ctx context.Context, n config.NetworkConfig, hosts []plan.NamedHost) (
 		return nil, err
 	}
 	var changes []plan.Change
+	for i, h := range hosts {
+		pub, e := h.Host.Output(ctx, remote.Cmd{Script: publicKeyScript, Sudo: true, Stderr: io.Discard})
+		if e != nil {
+			return nil, e
+		}
+		if pub = strings.TrimSpace(pub); pub != "" && pub != copies[i].Peers[h.Name].PublicKey {
+			changes = append(changes, plan.Change{Kind: "mesh", Name: h.Name, Server: h.Name, Action: plan.ActionUpdate, Reasons: []string{"mesh public key changed"}})
+		}
+		expected, e := Render(h.Name, copies[i].Network, copies[i])
+		if e == nil {
+			old, e := h.Host.ReadFile(ctx, "/etc/wireguard/yoho0.conf", true)
+			if e != nil && !errors.Is(e, os.ErrNotExist) {
+				return nil, e
+			}
+			if string(old) != expected {
+				changes = append(changes, plan.Change{Kind: "mesh", Name: "yoho0", Server: h.Name, Action: plan.ActionUpdate, Reasons: []string{"mesh rendered configuration changed"}})
+			}
+		}
+	}
 	for i, h := range hosts {
 		ep, e := endpoint(h.Server, n.Port)
 		if e != nil {
@@ -77,7 +96,7 @@ func Diff(ctx context.Context, n config.NetworkConfig, hosts []plan.NamedHost) (
 		if copies[i].Addresses[h.Name] == "" {
 			changes = append(changes, plan.Change{Kind: "mesh", Name: h.Name, Server: h.Name, Action: plan.ActionCreate, Reasons: []string{"assign address " + s.Addresses[h.Name]}})
 		}
-		for _, peer := range hosts {
+		for j, peer := range hosts {
 			if peer.Name == h.Name {
 				continue
 			}
@@ -86,13 +105,13 @@ func Diff(ctx context.Context, n config.NetworkConfig, hosts []plan.NamedHost) (
 			reason := "add peer"
 			if ok {
 				action = plan.ActionUpdate
-				reason = "peer endpoint or address changed"
+				reason = "peer endpoint, address or public key changed"
 			}
 			ep, e := endpoint(peer.Server, n.Port)
 			if e != nil {
 				return nil, e
 			}
-			if !ok || old.Endpoint != ep || old.Address != s.Addresses[peer.Name] {
+			if !ok || old.Endpoint != ep || old.Address != s.Addresses[peer.Name] || old.PublicKey == "" || old.PublicKey != copies[j].Peers[peer.Name].PublicKey {
 				changes = append(changes, plan.Change{Kind: "mesh", Name: peer.Name, Server: h.Name, Action: action, Reasons: []string{reason}})
 			}
 		}
@@ -130,8 +149,11 @@ func endpoint(s config.Server, port int) (string, error) {
 	return net.JoinHostPort(host, strconv.Itoa(port)), nil
 }
 
+const prerequisites = `set -eu
+if ! command -v wg >/dev/null 2>&1 || ! command -v ufw >/dev/null 2>&1 || ! command -v ping >/dev/null 2>&1 || ! command -v ip >/dev/null 2>&1 || ! command -v iptables >/dev/null 2>&1; then apt-get update >&2; DEBIAN_FRONTEND=noninteractive apt-get install -y wireguard-tools iproute2 iputils-ping ufw iptables >&2; fi
+`
+
 const prepare = `set -eu
-if ! command -v wg >/dev/null 2>&1 || ! command -v ufw >/dev/null 2>&1 || ! command -v ping >/dev/null 2>&1; then apt-get update >&2; DEBIAN_FRONTEND=noninteractive apt-get install -y wireguard-tools iproute2 iputils-ping ufw >&2; fi
 if [ ! -d /etc/wireguard ]; then install -d -m 700 /etc/wireguard; fi
 for file in /etc/wireguard/yoho0.conf /etc/wireguard/yoho0.key /etc/wireguard/yoho0.key.next /etc/wireguard/yoho0.owned /etc/sysctl.d/99-yoho-mesh.conf; do
  test ! -L "$file" || { echo 'refusing mesh file symlink' >&2; exit 1; }
@@ -215,11 +237,15 @@ func Up(ctx context.Context, n config.NetworkConfig, hosts []plan.NamedHost, rot
 		for _, ip := range ips {
 			sources[h.Name] = append(sources[h.Name], ip.IP.String())
 		}
+		if e = h.Host.Run(ctx, remote.Cmd{Script: prerequisites, Sudo: true}); e != nil {
+			return e
+		}
 		routes, e := h.Host.Output(ctx, remote.Cmd{Script: "set -eu\nip -4 route show table all", Sudo: true})
 		if e != nil {
 			return e
 		}
 		pools, e := h.Host.Output(ctx, remote.Cmd{Script: `set -eu
+if ! command -v docker >/dev/null 2>&1; then exit 0; fi
 ids=$(docker network ls -q)
 if [ -n "$ids" ]; then docker network inspect --format '{{range .IPAM.Config}}{{println .Subnet}}{{end}}' $ids; fi`, Sudo: true})
 		if e != nil {
@@ -251,6 +277,13 @@ if [ -n "$ids" ]; then docker network inspect --format '{{range .IPAM.Config}}{{
 		}
 		configs[h.Name] = c
 	}
+	// Publish every public state before changing any live peer configuration.
+	b, _ := json.MarshalIndent(s, "", "  ")
+	for _, h := range hosts {
+		if e := h.Host.WriteFile(ctx, statePath(h), b, 0600, true); e != nil {
+			return e
+		}
+	}
 	for _, h := range hosts {
 		old, e := h.Host.ReadFile(ctx, "/etc/wireguard/yoho0.conf", true)
 		if e != nil && !errors.Is(e, os.ErrNotExist) {
@@ -265,20 +298,14 @@ if [ -n "$ids" ]; then docker network inspect --format '{{range .IPAM.Config}}{{
 		if e = h.Host.WriteFile(ctx, "/etc/wireguard/yoho0.conf", []byte(configs[h.Name]), 0600, true); e != nil {
 			return e
 		}
-		script := "set -eu\nchown root:root /etc/wireguard/yoho0.conf\n" + clearFirewall
-		for _, peer := range hosts {
-			if peer.Name == h.Name {
-				continue
-			}
-			for _, ip := range sources[peer.Name] {
-				script += "ufw allow proto udp from " + remote.Quote(ip) + " to any port " + strconv.Itoa(n.Port) + " comment yoho-mesh >/dev/null\n"
-			}
-		}
+		script := "set -eu\nchown root:root /etc/wireguard/yoho0.conf\n" + clearFirewall + forwardDown + "\n"
+		script += inboundFirewall(h.Name, n, s, sources)
 		if h.Name == hub(s) {
 			script += `if [ -e /etc/sysctl.d/99-yoho-mesh.conf ]; then grep -qx '# Managed by Yoho' /etc/sysctl.d/99-yoho-mesh.conf; fi
 printf '# Managed by Yoho\nnet.ipv4.ip_forward=1\n' > /etc/sysctl.d/99-yoho-mesh.conf
 sysctl -p /etc/sysctl.d/99-yoho-mesh.conf >/dev/null
 `
+			script += forwardUp + "\n"
 			// UFW's default forward policy otherwise blocks NAT peer traffic.
 			script += "ufw route allow in on yoho0 out on yoho0 from " + remote.Quote(n.Subnet) + " to " + remote.Quote(n.Subnet) + " comment yoho-mesh >/dev/null\n"
 		} else {
@@ -287,10 +314,6 @@ sysctl -p /etc/sysctl.d/99-yoho-mesh.conf >/dev/null
 		script += "systemctl enable wg-quick@yoho0 >/dev/null\nif ! ip link show yoho0 >/dev/null 2>&1; then wg-quick up yoho0; fi\n"
 		script += "wg set yoho0 private-key /etc/wireguard/yoho0.key\n"
 		if e = h.Host.Run(ctx, remote.Cmd{Script: script, Sudo: true}); e != nil {
-			return e
-		}
-		b, _ := json.MarshalIndent(s, "", "  ")
-		if e = h.Host.WriteFile(ctx, statePath(h), b, 0600, true); e != nil {
 			return e
 		}
 	}
@@ -302,15 +325,16 @@ func Down(ctx context.Context, h plan.NamedHost) error {
 if [ ! -f /etc/wireguard/yoho0.owned ]; then exit 0; fi
 if [ -e /etc/wireguard/yoho0.conf ]; then
  grep -qx '# Managed by Yoho' /etc/wireguard/yoho0.conf
- if ip link show yoho0 >/dev/null 2>&1; then wg-quick down yoho0; fi
 fi
+systemctl stop wg-quick@yoho0
+if [ -e /etc/wireguard/yoho0.conf ] && ip link show yoho0 >/dev/null 2>&1; then wg-quick down yoho0; fi
 systemctl disable wg-quick@yoho0 >/dev/null
 rm -f /etc/wireguard/yoho0.conf /etc/wireguard/yoho0.key /etc/wireguard/yoho0.key.next
 if [ -f /etc/sysctl.d/99-yoho-mesh.conf ]; then
  grep -qx '# Managed by Yoho' /etc/sysctl.d/99-yoho-mesh.conf
  rm /etc/sysctl.d/99-yoho-mesh.conf
 fi
-` + clearFirewall + "rm -f " + remote.Quote(statePath(h)) + "\nrm -f /etc/wireguard/yoho0.owned\n"})
+` + clearFirewall + forwardDown + "\nrm -f " + remote.Quote(statePath(h)) + "\nrm -f /etc/wireguard/yoho0.owned\n"})
 }
 
 // PeerStatus never includes the interface row (which contains the private key).
@@ -320,6 +344,8 @@ type PeerStatus struct {
 	RX                  uint64 `json:"rx_bytes"`
 	TX                  uint64 `json:"tx_bytes"`
 }
+
+const publicKeyScript = "set -eu\nif [ -f /etc/wireguard/yoho0.owned ] && [ -s /etc/wireguard/yoho0.key ]; then wg pubkey < /etc/wireguard/yoho0.key; fi"
 
 const statusScript = "set -eu\nwg show yoho0 public-key >/dev/null\nwg show yoho0 dump | awk 'NR > 1 { print $1, $5, $6, $7 }'"
 
@@ -366,7 +392,21 @@ func Ping(ctx context.Context, h plan.NamedHost, address string) (string, error)
 	if _, err := netipAddress(address); err != nil {
 		return "", err
 	}
-	return h.Host.Output(ctx, remote.Cmd{Script: "set -eu\nping -c 3 -W 1 " + remote.Quote(address)})
+	out, err := h.Host.Output(ctx, remote.Cmd{Script: "set -eu\nLC_ALL=C ping -c 3 -W 1 " + remote.Quote(address)})
+	if err != nil {
+		return "", err
+	}
+	for _, line := range strings.Split(out, "\n") {
+		if strings.HasPrefix(line, "rtt min/avg/max/mdev = ") {
+			values := strings.Split(strings.TrimPrefix(line, "rtt min/avg/max/mdev = "), "/")
+			if len(values) == 4 {
+				if _, e := strconv.ParseFloat(values[1], 64); e == nil {
+					return values[1] + "ms", nil
+				}
+			}
+		}
+	}
+	return "", nil
 }
 func netipAddress(s string) (net.IP, error) {
 	ip := net.ParseIP(s)
@@ -374,4 +414,24 @@ func netipAddress(s string) (net.IP, error) {
 		return nil, fmt.Errorf("invalid mesh address")
 	}
 	return ip, nil
+}
+
+func inboundFirewall(name string, n config.NetworkConfig, s State, sources map[string][]string) string {
+	if s.Peers[name].Endpoint == "none" {
+		return ""
+	}
+	var script string
+	for _, peer := range keys(s.Peers) {
+		if peer == name || (name != hub(s) && s.Peers[peer].Endpoint == "none") {
+			continue
+		}
+		for _, ip := range sources[peer] {
+			rule := "ufw allow proto udp from " + remote.Quote(ip) + " to any port " + strconv.Itoa(n.Port) + " comment yoho-mesh >/dev/null\n"
+			if strings.Contains(ip, ":") {
+				rule = `if grep -Eq "^IPV6=[\"']?yes[\"']?$" /etc/default/ufw; then` + "\n" + rule + "fi\n"
+			}
+			script += rule
+		}
+	}
+	return script
 }

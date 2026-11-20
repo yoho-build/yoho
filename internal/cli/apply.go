@@ -424,10 +424,8 @@ func (a *app) apply(ctx context.Context, o applyOptions) (err error) {
 			return err
 		}
 	}
-	if a.cfg.Network.Mesh == "wireguard" {
-		if err = a.runMesh(ctx, "up"); err != nil {
-			return err
-		}
+	if err = a.reconcileMesh(ctx); err != nil {
+		return err
 	}
 	// Refuse before building: the runtime checks again.
 	if err = a.refusePendingRotations(ctx, s.hosts, nil); err != nil {
