@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -11,6 +12,7 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/yoho-build/yoho/internal/config"
 	"github.com/yoho-build/yoho/internal/gate"
 	"github.com/yoho-build/yoho/internal/release"
 	"github.com/yoho-build/yoho/internal/remote"
@@ -97,7 +99,7 @@ func inProcessGate(t *testing.T, h remote.Host, old bool) {
 	t.Cleanup(func() { gateSSHOptions = nil })
 }
 
-func scopedPlanRun(t *testing.T, h remote.Host, old bool) (string, error) {
+func scopedPlanRun(t *testing.T, h remote.Host, old bool, transportMode ...string) (string, error) {
 	t.Helper()
 	t.Setenv("YOHO_ACCESS", "")
 	oldRoot := release.Root
@@ -108,14 +110,30 @@ func scopedPlanRun(t *testing.T, h remote.Host, old bool) (string, error) {
 		t.Fatal(err)
 	}
 	os.WriteFile(gate.MembersPath("shop", "production"), []byte("members:\n  alice: {verbs: [deploy]}\n"), 0o600)
-	b, _ := json.Marshal(gate.Settings{Server: "primary"})
+	settings := gate.Settings{Server: "primary"}
+	if len(transportMode) > 0 {
+		settings.Registry = &config.Registry{Prefix: "registry.example"}
+	}
+	b, _ := json.Marshal(settings)
 	os.WriteFile(gate.SettingsPath("shop", "production"), b, 0o600)
 	inProcessGate(t, h, old)
 
 	app := t.TempDir()
 	os.WriteFile(filepath.Join(app, "yoho.yml"), []byte("app: shop\nservers: {primary: {ssh: deb@203.0.113.10, root: "+release.Root+"}}\ndestinations:\n  production: {servers: [primary], access: scoped}\n"), 0o644)
 	os.WriteFile(filepath.Join(app, "compose.yaml"), []byte("services: {web: {image: nginx, restart: unless-stopped}}\n"), 0o644)
-	c := planCmd(&globals{configPath: filepath.Join(app, "yoho.yml")})
+	if len(transportMode) > 0 {
+		f, err := os.OpenFile(filepath.Join(app, "yoho.yml"), os.O_APPEND|os.O_WRONLY, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, err = fmt.Fprintf(f, "transport: {mode: %s}\nregistry: {prefix: registry.example}\n", transportMode[0])
+		f.Close()
+		if err != nil {
+			t.Fatal(err)
+		}
+		os.WriteFile(filepath.Join(app, "compose.yaml"), []byte("services: {web: {build: .}}\n"), 0o644)
+	}
+	c := planCmd(&globals{configPath: filepath.Join(app, "yoho.yml"), json: len(transportMode) > 0})
 	var out bytes.Buffer
 	c.SetOut(&out)
 	c.SetErr(&out)
@@ -152,5 +170,45 @@ func TestScopedPlanOlderGate(t *testing.T) {
 	out, err := scopedPlanRun(t, &planHost{}, true)
 	if err == nil || !strings.Contains(out, "the Server's Gate cannot plan") || !strings.Contains(out, "yoho access install") {
 		t.Fatalf("error %v, output:\n%s", err, out)
+	}
+}
+
+func TestScopedPlanTransport(t *testing.T) {
+	for _, mode := range []string{"auto", "load", "registry", "pussh"} {
+		t.Run(mode, func(t *testing.T) {
+			out, err := scopedPlanRun(t, &planHost{}, false, mode)
+			if mode == "pussh" {
+				if err == nil || !strings.Contains(err.Error(), "not available through the Gate") {
+					t.Fatalf("%v\n%s", err, out)
+				}
+				if strings.Contains(out, `"event":"transport"`) {
+					t.Fatal(out)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("%v\n%s", err, out)
+			}
+			want := "load"
+			if mode == "registry" {
+				want = mode
+			}
+			found := false
+			for _, line := range strings.Split(strings.TrimSpace(out), "\n") {
+				var e map[string]any
+				if err := json.Unmarshal([]byte(line), &e); err != nil {
+					t.Fatal(err)
+				}
+				if e["event"] == "transport" {
+					found = true
+					if e["mode"] != want {
+						t.Fatal(line)
+					}
+				}
+			}
+			if !found {
+				t.Fatal(out)
+			}
+		})
 	}
 }

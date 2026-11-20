@@ -388,10 +388,13 @@ func (a *app) buildAndShip(ctx context.Context, s *session, o applyOptions) (map
 		for _, h := range hosts {
 			hs = append(hs, h.Host)
 		}
+		shipOut := store.Redactor(step.Output())
 		res, perr := transport.Push(ctx, transport.PushOptions{
 			Images: built, Hosts: hs, Mode: a.cfg.Transport.Mode, Registry: a.cfg.Registry,
-			RegistryPassword: regPW, Out: step.Output(), Platform: platform, Engine: engine,
+			RegistryPassword: regPW, Out: shipOut, Platform: platform, Engine: engine,
+			OnDecision: a.transportDecision,
 		})
+		_ = shipOut.Flush()
 		if perr != nil {
 			step.Fail(perr, "try `transport: {mode: load}` or configure a registry")
 			return nil, &silentError{perr}
@@ -425,11 +428,11 @@ func (a *app) directBuilder(ctx context.Context, hosts []plan.NamedHost, platfor
 	if !use {
 		h.Close()
 		if reason != "" {
-			more := ""
+			hint := "review builder.direct settings; images ship through this machine"
 			if build.IsProbeReason(reason) {
-				more = "; run `yoho builder check` for setup steps"
+				hint = "run yoho builder check for setup steps"
 			}
-			a.ui.Info("  direct ship off (%s); images come back through this machine%s", reason, more)
+			a.transportDecision("builder", transport.Decision{Mode: "auto", Reason: "direct ship unavailable: " + reason, Hint: hint})
 		}
 		return nil, err
 	}
@@ -1202,3 +1205,7 @@ func (a *app) appPS(cmd *cobra.Command) error {
 }
 
 var _ = release.ProjectName
+
+func (a *app) transportDecision(host string, d transport.Decision) {
+	a.ui.Event("transport", d.Message(host), map[string]any{"host": host, "mode": d.Mode, "reason": d.Reason, "hint": d.Hint})
+}

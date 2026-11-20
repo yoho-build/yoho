@@ -98,7 +98,7 @@ yoho secrets list                 # keys, sources, lengths (no values)
 yoho secrets print KEY --reveal   # TTY only
 yoho secrets rotate [SERVICE...] [--dry-run]  # re-resolve, restart only changed Services (from a checkout of the deployed Version)
 yoho secrets rotate --generated KEY... [--dry-run]  # new x-yoho.generate value: ALTER ROLE/USER (or x-yoho.rotate) first, then restart its users
-yoho setup [--plan] [-y] [--containerd-image-store]   # provision Servers (interactive)
+yoho setup [--plan] [-y] [--containerd-image-store | --no-containerd-image-store]   # provision Servers (interactive)
 yoho plan [--version V] [--detailed-exitcode]   # read-only diff; exit 2 = changes
 yoho apply [--auto-approve] [--skip-build] [--version V]   # plan, confirm, deploy
 yoho deploy [--skip-build] [--version V]   # apply --auto-approve without the plan
@@ -189,3 +189,9 @@ Fetch with `curl -sL <url>` (not a summarizing fetch tool). Relative paths are u
 - `references/migrate-dokploy.md`: https://raw.githubusercontent.com/yoho-build/yoho/main/skills/yoho/references/migrate-dokploy.md
 - `references/migrate-ansible.md`: https://raw.githubusercontent.com/yoho-build/yoho/main/skills/yoho/references/migrate-ansible.md
 - `references/migrate-railway.md`: https://raw.githubusercontent.com/yoho-build/yoho/main/skills/yoho/references/migrate-railway.md
+
+### Transport choices
+
+`yoho setup` validates the local Docker pussh plugin and includes enabling the containerd image store on Servers with no running containers (restarts Docker, still confirmed per step). `--no-containerd-image-store` opts out. Busy or uninspectable Servers require explicit `--containerd-image-store`; plan a maintenance window. Setup prints the hint without restarting Docker automatically there.
+
+Docker auto transport uses pussh when the local plugin, SSH target and Server containerd image store are available; otherwise it sends full gzip archives, then optionally falls back to the configured registry. Apple container and Gate uploads use full archives: their docker load paths cannot safely import omitted blobs. Direct Builders stream full gzip/zstd archives. Unchanged images are skipped. Gate builds currently require Docker. Human fallback messages include a reason and hint; `--json` emits `transport` events with `host`, `mode`, `reason`, `hint`. A plan's choice is provisional until the actual transfer.

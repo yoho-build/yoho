@@ -98,45 +98,46 @@ func ContainerLoadScript(ids map[string]ArchiveIDs, refs []string) string {
 // loadContainer saves imgs from container's store to a private temp file
 // (container cannot write the archive to stdout) and streams it, with a
 // docker-archive manifest.json added, into `docker load` on h.
-func (p *pusher) loadContainer(ctx context.Context, h remote.Host, imgs []string) error {
+func (p *pusher) loadContainer(ctx context.Context, h remote.Host, imgs []string) (int64, error) {
 	dir, err := os.MkdirTemp("", "yoho-images-") // 0700
 	if err != nil {
-		return err
+		return 0, err
 	}
 	defer os.RemoveAll(dir)
 	archive := filepath.Join(dir, "images.tar")
 	var stderr bytes.Buffer
 	// container prints saved refs on stdout; discard.
 	if err := p.o.Exec(ctx, Command{Argv: ContainerSaveArgv(p.o.Platform, archive, imgs), Stdout: io.Discard, Stderr: &stderr}); err != nil {
-		return fmt.Errorf("container image save: %w %s", err, strings.TrimSpace(stderr.String()))
+		return 0, fmt.Errorf("container image save: %w %s", err, strings.TrimSpace(stderr.String()))
 	}
 	if err := os.Chmod(archive, 0o600); err != nil {
-		return err
+		return 0, err
 	}
 	f, err := os.Open(archive)
 	if err != nil {
-		return err
+		return 0, err
 	}
 	defer f.Close()
 	ids, extra, err := DockerArchiveManifest(f, p.o.Platform, imgs)
 	if err != nil {
-		return err
+		return 0, err
 	}
 	for _, img := range imgs {
 		if _, ok := ids[img]; !ok {
-			return fmt.Errorf("image archive does not contain %s", img)
+			return 0, fmt.Errorf("image archive does not contain %s", img)
 		}
 	}
 	if _, err := f.Seek(0, io.SeekStart); err != nil {
-		return err
+		return 0, err
 	}
 
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	pr, pw := io.Pipe()
 	writeErr := make(chan error, 1)
+	cw := &countWriter{w: pw}
 	go func() {
-		err := appendTar(pw, f, extra)
+		err := appendTar(cw, f, extra)
 		pw.CloseWithError(err)
 		writeErr <- err
 	}()
@@ -145,9 +146,10 @@ func (p *pusher) loadContainer(ctx context.Context, h remote.Host, imgs []string
 	if runErr != nil {
 		cancel()
 		<-writeErr
-		return runErr
+		return cw.n.Load(), runErr
 	}
-	return <-writeErr
+	err = <-writeErr
+	return cw.n.Load(), err
 }
 
 // appendTar copies the tar in r to w, normalizing the image names in

@@ -167,3 +167,41 @@ For Docker-built images, `transport.mode: auto` tries, in order:
 3. `registry`: configure `registry:`.
 
 Image tag is the Version (git SHA, or `_uncommitted_<8 hex>` from a hash of the uncommitted content, with a warning). Use `yoho deploy --version V` to override, `--skip-build` to reuse built images.
+
+
+Auto fallbacks print a one-line reason and hint even without `-v`. With `--json`, the same decision is a `transport` event containing `host`, `mode`, `reason` and `hint`. For example, a missing Server containerd image store selects `load` and suggests `yoho setup --containerd-image-store` (restarts Docker). Other reasons include a missing local pussh plugin, no SSH target, failed Docker inspection, a failed pussh transfer, or a failed load followed by registry fallback. Plans show the expected path; transfer failures can change it during apply/deploy. Remote Builder direct selection is finalized after its checks.
+
+Apple container and Gate archive imports retain every blob. RootFS layer digests are uncompressed diff IDs, not proof that the corresponding OCI compressed blobs exist in the Server's content store. Plain `docker load` has no negotiated partial-layout capability; the Gate also validates complete uploads before loading. Yoho therefore keeps the full archive and reports that reason instead of omitting blobs speculatively. Gate builds require Docker. For layer reuse, use Docker pussh on the operator path or a registry on the Gate path. Unchanged whole images are skipped on both paths. Direct Builders still stream full gzip/zstd archives.
+
+## Transport benchmark
+
+Run `test/bench/transport.sh` from a checkout against an **idle, disposable Linux Server**. It creates a 496 MiB random base layer and changes a separate 4 MiB random layer for the warm deploy (~500 MiB total). Each mode gets fresh base bytes, so a previous mode does not warm its cache. No global image pruning or daemon configuration changes are performed. It retains only logs/CSV locally, and leaves its App, Releases and images on the Server and Builder for inspection. Remove only those benchmark resources afterwards.
+
+Prerequisites: the built Yoho binary on PATH (or an absolute `YOHO` path), Docker 28+ (`save --platform`), SSH alias with operator access to the Server, and a running Docker daemon there. Run setup separately. Pussh needs its local plugin and the Server containerd image store; it is forced in the benchmark so a failure cannot silently measure load. Apple container needs macOS and its running service. Direct needs a Builder on the Server's platform, with trusted SSH access to the Server (`yoho builder check`); it is forced too. For Gate, first provision scoped access for App `transport-bench`, Destination `production`, Service `web`, through a restricted SSH alias with a deploy grant. Use a policy allowing the image and archive size (at least 600 MiB). Set `BENCH_APP` if that disposable App has another name.
+
+```sh
+go build -o /tmp/yoho-transport-bench ./cmd/yoho
+YOHO=/tmp/yoho-transport-bench \
+BENCH_SSH=bench-server BENCH_INTERFACE=eth0 \
+BENCH_BUILDER=bench-builder BENCH_GATE_SSH=bench-member \
+  test/bench/transport.sh
+# A subset, or a different Server architecture:
+BENCH_SSH=bench-server BENCH_INTERFACE=eth0 \
+BENCH_PLATFORM=linux/arm64 BENCH_MODES='pussh gzip zstd' \
+  test/bench/transport.sh
+```
+
+Optional paths without their prerequisites are marked SKIP; a failed enabled path stops the benchmark. `BENCH_OUTPUT` overrides the default `qa/transport-bench-<timestamp>` results directory. Use simple SSH aliases (ports/keys in ssh config). `BENCH_GATE_SSH` is the restricted alias; byte counters are read through the operator's `BENCH_SSH` connection to the same Server. Disable shell-history/audit wrappers that expose secrets; this fixture needs no secret values.
+
+`results.csv` records cold and warm Server interface RX-byte deltas and wall seconds. These are network bytes including SSH/control overhead, **not** compressed payload bytes; use an idle interface to avoid unrelated traffic. It reads Linux sysfs counters rather than guessing pussh bytes from its output. Deploy paths include build and rollout in wall time; logs retain Yoho's Ship timings where available. The gzip/zstd baselines prebuild/export and time compression + transfer + load; zstd is a manual save/load baseline (operator Yoho load currently uses gzip). Direct automatically chooses zstd only if present at both ends; record the codec and versions alongside results. Wall seconds have one-second resolution. Review the logs, and compare warm bytes with 8 MiB (twice the changed layer size) to evaluate the layer-diff target; full archive paths are expected to exceed it.
+
+Results to be filled by the orchestrator after running the benchmark; no Docker/SSH measurements were run in the implementation sandbox:
+
+| Path | Cold bytes | Cold wall seconds | Warm bytes | Warm wall seconds | Notes |
+| --- | ---: | ---: | ---: | ---: | --- |
+| Docker pussh | pending | pending | pending | pending | layer diff |
+| save/load gzip | pending | pending | pending | pending | full archive baseline |
+| save/load zstd | pending | pending | pending | pending | full archive baseline |
+| Apple container | pending | pending | pending | pending | full archive; safe partial load unavailable |
+| direct Builder | pending | pending | pending | pending | record gzip/zstd |
+| Gate | pending | pending | pending | pending | full validated archive |
