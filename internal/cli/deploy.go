@@ -175,6 +175,9 @@ func (s *session) close() {
 // resolveDeployVersion returns ver, or the git version of the App directory.
 func (a *app) resolveDeployVersion(ver string) (string, error) {
 	if ver != "" {
+		if !version.Valid(ver) {
+			return "", &validationError{fmt.Errorf("invalid Version %q", ver)}
+		}
 		return ver, nil
 	}
 	v, err := version.FromGit(a.dir)
@@ -192,7 +195,7 @@ func (a *app) openSession(ctx context.Context, ver string, readOnly, refresh boo
 	r, err := a.compose(ctx)
 	if err != nil {
 		step.Fail(err, "run `yoho config check`")
-		return nil, &silentError{err}
+		return nil, &silentError{&validationError{err}}
 	}
 	if refresh {
 		hasBuild := false
@@ -202,7 +205,7 @@ func (a *app) openSession(ctx context.Context, ver string, readOnly, refresh boo
 		if !hasBuild {
 			err = errors.New("nothing to refresh: no Service has build:")
 			step.Fail(err, "add build: to a Service, or deploy without --refresh")
-			return nil, &silentError{err}
+			return nil, &silentError{&validationError{err}}
 		}
 	}
 	keys, _ := a.secretKeys(r)
@@ -215,7 +218,7 @@ func (a *app) openSession(ctx context.Context, ver string, readOnly, refresh boo
 	if composefile.HasErrors(findings) {
 		err = errors.New("compose check failed")
 		step.Fail(err, "fix the errors above, then `yoho config check`")
-		return nil, &silentError{err}
+		return nil, &silentError{&validationError{err}}
 	}
 	step.Done(ui.Count(len(r.Project.Services), "service", ""))
 
@@ -226,6 +229,7 @@ func (a *app) openSession(ctx context.Context, ver string, readOnly, refresh boo
 		return nil, &silentError{err}
 	}
 	step.Done(ui.Count(len(store.Keys()), "key", ""))
+	u.SetRedact(store.RedactString)
 	s := &session{a: a, ver: ver, r: r, store: store, red: store.Redactor(os.Stdout)}
 
 	if !readOnly {
@@ -358,6 +362,9 @@ func (a *app) buildAndShip(ctx context.Context, s *session, o applyOptions) (map
 		for _, h := range hosts[1:] {
 			others = append(others, h.Host)
 		}
+		if err := beginOperation(ctx); err != nil {
+			return nil, err
+		}
 		shipped, serr := build.ShipFromServer(ctx, hosts[0].Host, others, built, step.Output())
 		if serr != nil {
 			step.Fail(serr, "check Docker on the other Servers, or build with builder.location=local")
@@ -370,6 +377,9 @@ func (a *app) buildAndShip(ctx context.Context, s *session, o applyOptions) (map
 		var hs []remote.Host
 		for _, h := range hosts {
 			hs = append(hs, h.Host)
+		}
+		if err := beginOperation(ctx); err != nil {
+			return nil, err
 		}
 		dres, serr := build.ShipDirect(ctx, builder, hs, built, platform, step.Output())
 		if serr != nil {
@@ -387,6 +397,9 @@ func (a *app) buildAndShip(ctx context.Context, s *session, o applyOptions) (map
 		var hs []remote.Host
 		for _, h := range hosts {
 			hs = append(hs, h.Host)
+		}
+		if err := beginOperation(ctx); err != nil {
+			return nil, err
 		}
 		shipOut := store.Redactor(step.Output())
 		res, perr := transport.Push(ctx, transport.PushOptions{
@@ -532,10 +545,11 @@ func (a *app) newDeploy(s *session, images map[string]string, forPlan bool) (*pl
 	composefile.StripBuild(proj, images)
 	svcSecrets, refs, err := serviceSecrets(s.store, s.r)
 	if err != nil {
-		return nil, err
+		return nil, &validationError{err}
 	}
 	return &plan.Deploy{
 		App: a.cfg.App, Destination: a.destName, Version: s.ver, Performer: performer(),
+		OperationID: a.operation, OnService: a.progress,
 		Servers: s.hosts, Project: proj, Ext: s.r.Ext, Built: built,
 		ServiceSecrets: svcSecrets, SecretRefs: refs, Env: a.dest.Env, Subnet: a.dest.Subnet, Registry: a.cfg.Registry,
 		Proxy: a.proxyConfig(), RetainReleases: a.cfg.RetainReleases, Hook: s.hook,
@@ -841,7 +855,7 @@ func (a *app) rollback(ctx context.Context, v string, releaseSecrets bool) (err 
 		a.ui.Finished(err, "")
 		return err
 	}
-	d := &plan.Deploy{App: a.cfg.App, Destination: a.destName, Performer: performer(), Servers: hosts,
+	d := &plan.Deploy{OperationID: a.operation, OnService: a.progress, App: a.cfg.App, Destination: a.destName, Performer: performer(), Servers: hosts,
 		Proxy: a.proxyConfig(), Registry: a.cfg.Registry, RetainReleases: a.cfg.RetainReleases, Out: a.ui.Progress(),
 		RollbackReleaseSecrets: releaseSecrets}
 	target, err := a.resolveVersion(ctx, d, v)
@@ -864,6 +878,9 @@ func (a *app) rollback(ctx context.Context, v string, releaseSecrets bool) (err 
 			err = uerr
 		}
 	}()
+	if err = beginOperation(ctx); err != nil {
+		return err
+	}
 	a.ui.Warn("volumes and database migrations are not reverted")
 	if releaseSecrets {
 		a.ui.Warn("--with-release-secrets: the Services start with Release %s's own secret values; every secret rotated since (a replaced API key, a leaked password) comes back until the next deploy", shortVersion(target))
@@ -1037,6 +1054,9 @@ after pre-connect.`,
 				if err := hook(ctx, "pre-proxy-reboot"); err != nil {
 					return err
 				}
+				if err := beginOperation(ctx); err != nil {
+					return err
+				}
 				if err := proxy.Boot(ctx, h.Host, a.proxyConfig(), step.Output()); err != nil {
 					step.Fail(err, "check that the Proxy ports are free on the Server")
 					return &silentError{err}
@@ -1143,6 +1163,9 @@ func (a *app) swarmExec(cmd *cobra.Command, svc string, command []string, term t
 		if err == nil && id != "" {
 			defer h.Close()
 			script := "docker exec " + swarmExecFlags(term) + remote.Quote(id) + " " + remote.QuoteArgs(command...)
+			if err := beginOperation(ctx); err != nil {
+				return err
+			}
 			if term.attached() {
 				return commandExit(h.RunTerminal(ctx, script, term.tty, cmd.InOrStdin(), cmd.OutOrStdout(), cmd.ErrOrStderr()))
 			}
@@ -1208,4 +1231,25 @@ var _ = release.ProjectName
 
 func (a *app) transportDecision(host string, d transport.Decision) {
 	a.ui.Event("transport", d.Message(host), map[string]any{"host": host, "mode": d.Mode, "reason": d.Reason, "hint": d.Hint})
+}
+
+func (s *session) replaceStore(store *secrets.Store) {
+	values := map[string]string{}
+	if s.store != nil {
+		for _, key := range s.store.Keys() {
+			value, _ := s.store.Get(key)
+			values["previous/"+key] = value
+		}
+	}
+	for _, key := range store.Keys() {
+		value, _ := store.Get(key)
+		values["current/"+key] = value
+	}
+	combined := secrets.New(values)
+	s.store = store
+	s.a.ui.SetRedact(combined.RedactString)
+	if s.red != nil {
+		_ = s.red.Flush()
+	}
+	s.red = combined.Redactor(os.Stdout)
 }

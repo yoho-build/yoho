@@ -102,6 +102,9 @@ func readMembers(ctx context.Context, h remote.Host, app, dest string) (*gate.Me
 
 // writeAccessFile writes a root-owned file in the access directory (0700).
 func writeAccessFile(ctx context.Context, h remote.Host, p string, data []byte) error {
+	if err := beginOperation(ctx); err != nil {
+		return err
+	}
 	dir := path.Dir(p)
 	if err := h.Run(ctx, remote.Cmd{Script: "set -eu\nmkdir -p -m 0700 " + remote.Quote(dir) + "\nchown root:root " + remote.Quote(dir) + "\nchmod 0700 " + remote.Quote(dir), Sudo: true}); err != nil {
 		return err
@@ -348,6 +351,9 @@ func writeGateKeys(ctx context.Context, h remote.Host, user string, keys []gateK
 	if err != nil {
 		return err
 	}
+	if err := beginOperation(ctx); err != nil {
+		return err
+	}
 	dir := path.Join(home, ".ssh")
 	if err := h.Run(ctx, remote.Cmd{Script: "set -eu\ninstall -d -m 0755 -o root -g root " + remote.Quote(dir), Sudo: true}); err != nil {
 		return err
@@ -522,6 +528,9 @@ func (a *app) pushAccessSecrets(ctx context.Context) error {
 		asEnv[svc] = ext.SecretsAsEnv
 	}
 	step = u.Step(h.Name, "Store secrets generation")
+	if err := beginOperation(ctx); err != nil {
+		return err
+	}
 	gen, err := deploy.WriteSecretsGeneration(ctx, h.Host, a.cfg.App, a.destName, "access-push", svcSecrets, asEnv)
 	if err != nil {
 		step.Fail(err, "")
@@ -665,6 +674,9 @@ func (a *app) installGate(ctx context.Context, binary string) error {
 		step.Fail(err, "")
 		return &silentError{err}
 	}
+	if err := beginOperation(ctx); err != nil {
+		return err
+	}
 	sum := sha256.Sum256(data)
 	want := fmt.Sprintf("%x", sum)
 	shaCmd := "sha256sum " + remote.Quote(GateBinary) + " 2>/dev/null | cut -d' ' -f1"
@@ -674,6 +686,7 @@ func (a *app) installGate(ctx context.Context, binary string) error {
 			return &silentError{err}
 		}
 	}
+
 	if err := h.Run(ctx, remote.Cmd{Script: "set -eu\nchown root:root " + remote.Quote(GateBinary) + "\nchmod 0755 " + remote.Quote(GateBinary), Sudo: true}); err != nil {
 		step.Fail(err, "")
 		return &silentError{err}

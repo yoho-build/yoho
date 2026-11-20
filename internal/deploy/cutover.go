@@ -53,6 +53,7 @@ func RouteName(app, destination, service string) string {
 // runner executes cutover steps on one Server. All remote work goes through
 // h, so tests assert the exact command sequence with a fake Host.
 type runner struct {
+	onService func(context.Context, string, string)
 	h         remote.Host
 	out       io.Writer
 	server    string
@@ -342,6 +343,7 @@ func (r *runner) cutover(ctx context.Context, plans []servicePlan) (err error) {
 	var staged []*stagedProxy
 	var failedService string
 	for _, sp := range plans {
+		r.report(ctx, sp.Name, "unchanged")
 		f := r.fact(sp.Name)
 		if sp.proxied() {
 			f.ProxyRoute = "not-attempted"
@@ -395,6 +397,7 @@ func (r *runner) cutover(ctx context.Context, plans []servicePlan) (err error) {
 			failedService = sp.Name
 			r.phase = "service-prepare"
 			r.fact(sp.Name).Convergence = "attempted"
+			r.report(ctx, sp.Name, "attempted")
 			candidate, prepErr := r.prepareProxied(ctx, sp)
 			if candidate != nil {
 				staged = append(staged, candidate)
@@ -407,6 +410,7 @@ func (r *runner) cutover(ctx context.Context, plans []servicePlan) (err error) {
 				return r.failure(ctx, prepErr, sp.Name, ids)
 			}
 			r.fact(sp.Name).Convergence = "complete"
+			r.report(ctx, sp.Name, "ready")
 			if routesKnown && earlySwitch(candidate, routes[RouteName(r.app, r.dest, sp.Name)]) {
 				r.phase = "proxy-switch"
 				r.fact(sp.Name).ProxyRoute = "uncertain"
@@ -416,6 +420,7 @@ func (r *runner) cutover(ctx context.Context, plans []servicePlan) (err error) {
 					return err
 				}
 				r.fact(sp.Name).ProxyRoute = "switched"
+				r.report(ctx, sp.Name, "changed")
 				r.logf("route %s is live for %s, %s after cutover started", RouteName(r.app, r.dest, sp.Name), routeHosts(sp), time.Since(cutoverStart).Round(100*time.Millisecond))
 			}
 		}
@@ -436,6 +441,7 @@ func (r *runner) cutover(ctx context.Context, plans []servicePlan) (err error) {
 			return err
 		}
 		r.fact(failedService).ProxyRoute = "switched"
+		r.report(ctx, failedService, "changed")
 	}
 	r.phase = "orphan-cleanup"
 	failedService = ""
@@ -451,6 +457,7 @@ func (r *runner) startBatch(ctx context.Context, batch []servicePlan, level, lev
 	for i, sp := range batch {
 		names[i] = sp.Name
 		r.fact(sp.Name).Convergence = "attempted"
+		r.report(ctx, sp.Name, "attempted")
 	}
 	if len(batch) == 1 {
 		r.logf("starting %s", names[0])
@@ -685,6 +692,9 @@ func (r *runner) waitServices(ctx context.Context, batch []servicePlan, ready st
 			return err
 		}
 		r.fact(batch[0].Name).Convergence = ready
+		if ready != "prerequisite-ready" {
+			r.report(ctx, batch[0].Name, "changed")
+		}
 		return nil
 	}
 	waitCtx, cancel := context.WithCancel(ctx)
@@ -713,6 +723,9 @@ func (r *runner) waitServices(ctx context.Context, batch []servicePlan, ready st
 		_, _ = r.out.Write(outs[i].Bytes())
 		if errs[i] == nil {
 			r.fact(sp.Name).Convergence = ready
+			if ready != "prerequisite-ready" {
+				r.report(ctx, sp.Name, "changed")
+			}
 		}
 	}
 	if failed >= 0 {
@@ -948,4 +961,10 @@ func (r *runner) removeOrphans(ctx context.Context, plans []servicePlan) error {
 		return fmt.Errorf("remove orphan containers: %w", err)
 	}
 	return nil
+}
+
+func (r *runner) report(ctx context.Context, service, state string) {
+	if r.onService != nil {
+		r.onService(ctx, service, state)
+	}
 }

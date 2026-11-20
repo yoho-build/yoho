@@ -45,6 +45,7 @@ const (
 
 // Record is one line of the audit log.
 type Record struct {
+	OperationID string    `json:"operation_id,omitempty"`
 	Time        time.Time `json:"time"` // UTC
 	Run         string    `json:"run"`  // pairs the started and finished records of one command
 	Phase       string    `json:"phase"`

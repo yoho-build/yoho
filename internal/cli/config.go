@@ -69,13 +69,16 @@ Destination).`,
 
 func schemaCmd(g *globals) *cobra.Command {
 	var ext bool
+	var events bool
 	c := &cobra.Command{
 		Use:   "schema",
 		Short: "Print the JSON Schema of the Yoho file (or of x-yoho with --ext)",
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			var b []byte
 			var err error
-			if ext {
+			if events {
+				b = ui.EventsSchema()
+			} else if ext {
 				b, err = config.ServiceExtSchema()
 			} else {
 				b, err = config.Schema()
@@ -88,6 +91,8 @@ func schemaCmd(g *globals) *cobra.Command {
 		},
 	}
 	c.Flags().BoolVar(&ext, "ext", false, "Schema of the compose x-yoho extension")
+	c.Flags().BoolVar(&events, "events", false, "Versioned NDJSON event schema")
+	c.MarkFlagsMutuallyExclusive("ext", "events")
 	return c
 }
 

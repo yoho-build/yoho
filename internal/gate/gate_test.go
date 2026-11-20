@@ -36,6 +36,8 @@ func (f *fakeHost) Run(_ context.Context, c remote.Cmd) error {
 	out, err := "", error(nil)
 	if f.reply != nil {
 		out, err = f.reply(c.Script)
+	} else if strings.Contains(c.Script, "echo acquired; else echo held") {
+		out = "acquired"
 	}
 	if c.Stdout != nil {
 		io.WriteString(c.Stdout, out)

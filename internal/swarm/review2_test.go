@@ -168,9 +168,18 @@ func TestRedeploySameVersionFailureRestoresStack(t *testing.T) {
 
 	sim.failOnce = true
 	d := testDeploy(t, h, nil)
+	var progress []string
+	d.OnService = func(_ context.Context, name, state string) {
+		if stackDeploys(h) > 1 {
+			progress = append(progress, name+":"+state)
+		}
+	}
 	setWebImage(d, "shop-web:other")
 	if _, err := (Runtime{}).Deploy(ctx, d); err == nil {
 		t.Fatal("want error")
+	}
+	if len(progress) > 0 {
+		t.Fatalf("restore changed the failed operation: %v", progress)
 	}
 	if n := stackDeploys(h); n != 2 {
 		t.Fatalf("want the attempt and the restore, got %d stack deploys:\n%s", n, h.all())

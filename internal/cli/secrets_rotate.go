@@ -280,6 +280,9 @@ func (a *app) rotateSecrets(ctx context.Context, services, generated []string, d
 	// not: the rotated keys' consumers still restart, then rotate fails.
 	var partial error
 	if len(gens) > 0 && !dryRun {
+		if err = beginOperation(ctx); err != nil {
+			return err
+		}
 		h := hosts[0].Host
 		res := rotateGeneratedKeys(u, hosts[0].Name, gens, func(g *deploy.GeneratedRotation, logf, warnf func(string, ...any)) error {
 			// An earlier run swapped the new value in but stopped before
@@ -375,6 +378,9 @@ func (a *app) rotateSecrets(ctx context.Context, services, generated []string, d
 		return err
 	}
 	d.Restart, d.RestartFrom = changed, cur
+	if err = beginOperation(ctx); err != nil {
+		return err
+	}
 	rel, err := a.rollout(ctx, s, d, runtime)
 	if err != nil {
 		if len(gens) > 0 {

@@ -112,6 +112,7 @@ func (a *app) gateCall(ctx context.Context, verb string, args any, payload io.Re
 		return a.fail(err)
 	}
 	defer g.Close()
+	g.OnAccepted = func() { markScopedMutation(ctx) }
 	if err := g.Call(ctx, verb, args, payload, out, result); err != nil {
 		if ctx.Err() != nil {
 			return ctx.Err()
@@ -125,7 +126,8 @@ func (a *app) gateFail(err error) error {
 	var ge *remote.GateError
 	if errors.As(err, &ge) {
 		ge = refusalHint(ge)
-		return a.fail(&hintError{ge.Message, ge.Hint})
+		a.ui.Error(ge, ge.Hint)
+		return &silentError{ge}
 	}
 	return a.fail(err)
 }
@@ -175,7 +177,11 @@ var (
 // one; Gates that predate rollouts (h.Rollouts false) get neither.
 func (a *app) gateCallOrAttach(ctx context.Context, g *remote.Gate, h *gate.HelloResult, verb string, args any, payload io.Reader, out io.Writer, result any) error {
 	if h != nil && h.Rollouts {
-		id := rand.Text()
+		id := operationID(ctx)
+		if id == "" {
+			id = rand.Text()
+		}
+		a.ui.Event("rollout", "", map[string]any{"rollout_id": id})
 		switch x := args.(type) {
 		case gate.DeployArgs:
 			x.Rollout = id
@@ -185,6 +191,7 @@ func (a *app) gateCallOrAttach(ctx context.Context, g *remote.Gate, h *gate.Hell
 			args = x
 		}
 	}
+	g.OnAccepted = func() { markScopedMutation(ctx) }
 	err := g.Call(ctx, verb, args, payload, out, result)
 	if !remote.IsDisconnect(err) || h == nil || !h.Rollouts {
 		return err
@@ -210,6 +217,7 @@ func (a *app) gateCallOrAttach(ctx context.Context, g *remote.Gate, h *gate.Hell
 			last = herr
 			continue
 		}
+		g2.OnAccepted = g.OnAccepted
 		last = g2.Call(ctx, verb, args, nil, out, result)
 		g2.Close()
 		if last == nil || !remote.IsDisconnect(last) {
@@ -279,7 +287,7 @@ func (a *app) scopedDeploy(ctx context.Context, ver string, skipBuild bool) (err
 		}
 	}()
 	if loc := a.cfg.Builder.Location; loc != "" && loc != "local" {
-		return fmt.Errorf("builder.location=%s is not available with scoped access\nhint: build on this machine (builder.location: local); the Gate only receives finished images", loc)
+		return &validationError{fmt.Errorf("builder.location=%s is not available with scoped access\nhint: build on this machine (builder.location: local); the Gate only receives finished images", loc)}
 	}
 	if ver, err = a.resolveDeployVersion(ver); err != nil {
 		return err
@@ -368,7 +376,7 @@ func (a *app) scopedLoad(ctx context.Context) (*composefile.Result, error) {
 	r, err := a.compose(ctx)
 	if err != nil {
 		step.Fail(err, "run `yoho config check`")
-		return nil, &silentError{err}
+		return nil, &silentError{&validationError{err}}
 	}
 	var keys []string
 	for _, e := range r.Ext {
@@ -387,7 +395,7 @@ func (a *app) scopedLoad(ctx context.Context) (*composefile.Result, error) {
 	if composefile.HasErrors(findings) {
 		err = errors.New("compose check failed")
 		step.Fail(err, "fix the errors above, then `yoho config check`")
-		return nil, &silentError{err}
+		return nil, &silentError{&validationError{err}}
 	}
 	step.Done(fmt.Sprintf("%d services", len(r.Project.Services)))
 	return r, nil
@@ -453,7 +461,7 @@ func (a *app) scopedPlan(ctx context.Context, ver string) (changes []plan.Change
 	if !h.Plan {
 		err := errors.New("the Server's Gate cannot plan")
 		step.Fail(err, olderGateHint)
-		return nil, &silentError{err}
+		return nil, &silentError{&validationError{err}}
 	}
 	if err := g.Call(ctx, gate.VerbPlan, gate.PlanArgs{Version: ver, Compose: compose, Built: built}, nil, step.Output(), &changes); err != nil {
 		hint := "see `yoho releases` and `yoho app ps`"
@@ -464,7 +472,7 @@ func (a *app) scopedPlan(ctx context.Context, ver string) (changes []plan.Change
 			}
 		}
 		step.Fail(err, hint)
-		return nil, &silentError{err}
+		return nil, &silentError{&validationError{err}}
 	}
 	if len(built) > 0 {
 		a.transportDecision(g.Name(), decision)
@@ -511,7 +519,7 @@ func (a *app) scopedBuild(ctx context.Context, r *composefile.Result, ver, serve
 	})
 	if err != nil {
 		step.Fail(err, "rerun with -v to see the full build output")
-		return nil, &silentError{err}
+		return nil, &silentError{&validationError{err}}
 	}
 	var built []string
 	for _, im := range imgs {
@@ -521,7 +529,7 @@ func (a *app) scopedBuild(ctx context.Context, r *composefile.Result, ver, serve
 		if im.Engine == transport.EngineContainer {
 			err := errors.New("images built with Apple container cannot be shipped through the Gate yet")
 			step.Fail(err, "set builder.engine: docker")
-			return nil, &silentError{err}
+			return nil, &silentError{&validationError{err}}
 		}
 		built = append(built, im.Ref)
 	}

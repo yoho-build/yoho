@@ -27,19 +27,24 @@ const (
 
 // UI writes progress. Safe for concurrent use.
 type UI struct {
-	mu         sync.Mutex
-	w          io.Writer // all output; clears and redraws the live line around writes
-	out        io.Writer // the underlying writer
-	mode       Mode
-	color      bool
-	tty        bool       // human output to a terminal (independent of NO_COLOR)
-	cols       func() int // terminal width
-	live       string     // live line text; "" when none is shown
-	Verbose    bool
-	warnings   int
-	start      time.Time
-	progressAt time.Time // last human line; shared by every Progress writer
-	depth      int
+	mu            sync.Mutex
+	w             io.Writer // all output; clears and redraws the live line around writes
+	out           io.Writer // the underlying writer
+	mode          Mode
+	color         bool
+	tty           bool       // human output to a terminal (independent of NO_COLOR)
+	cols          func() int // terminal width
+	live          string     // live line text; "" when none is shown
+	Verbose       bool
+	warnings      int
+	start         time.Time
+	progressAt    time.Time // last human line; shared by every Progress writer
+	holdFinish    bool
+	finishSummary string
+	redact        func(string) string
+	operationID   string
+	finished      bool
+	depth         int
 }
 
 // heartbeatInterval is how long a step may stay silent before a "still
@@ -76,6 +81,9 @@ type liveWriter struct{ u *UI }
 
 func (l liveWriter) Write(p []byte) (int, error) {
 	u := l.u
+	if u.redact != nil && u.mode == Human {
+		p = []byte(u.redact(string(p)))
+	}
 	if u.live == "" {
 		return u.out.Write(p)
 	}
@@ -169,6 +177,17 @@ func (u *UI) paint(code, s string) string {
 }
 
 func (u *UI) event(kind string, fields map[string]any) {
+	operationID := fields["operation_id"]
+	if u.redact != nil {
+		fields = redactFields(fields, u.redact).(map[string]any)
+	}
+	if operationID != nil {
+		fields["operation_id"] = operationID
+	}
+	if u.operationID != "" {
+		fields["operation_id"] = u.operationID
+	}
+	fields["schema_version"] = 1
 	fields["event"] = kind
 	fields["time"] = time.Now().UTC().Format(time.RFC3339Nano)
 	b, _ := json.Marshal(fields)
@@ -577,9 +596,37 @@ func (s *Step) finish(err error, extra string) {
 func (u *UI) Finished(err error, summary string) {
 	u.mu.Lock()
 	defer u.mu.Unlock()
+	if u.holdFinish {
+		u.finishSummary = summary
+		return
+	}
+	if u.finished {
+		return
+	}
+	u.finished = true
 	d := time.Since(u.start)
 	if u.mode == JSON {
-		f := map[string]any{"duration_ms": d.Milliseconds(), "summary": summary}
+		outcome := "success"
+		if err != nil {
+			outcome = "failed"
+		}
+		var result interface {
+			OutcomeFields() (string, []string, []string)
+		}
+		var changed, unchanged []string
+		if errors.As(err, &result) {
+			outcome, changed, unchanged = result.OutcomeFields()
+		}
+		f := map[string]any{"duration_ms": d.Milliseconds(), "summary": summary, "outcome": outcome}
+		if outcome == "partial" {
+			if changed == nil {
+				changed = []string{}
+			}
+			if unchanged == nil {
+				unchanged = []string{}
+			}
+			f["changed"], f["unchanged"] = changed, unchanged
+		}
 		if err != nil {
 			f["error"] = err.Error()
 		}
@@ -886,4 +933,76 @@ func (p *progressWriter) line(l string) {
 		prefix = u.paint(cyan, "["+host+"]") + " "
 	}
 	fmt.Fprintln(u.w, u.indent()+"  "+u.paint(dim, "·")+" "+prefix+msg+" "+u.paint(dim, "+"+fmtDur(d)))
+}
+
+// Operation starts a mutation's output before any work or provider messages.
+func (u *UI) Operation(id string) {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	u.operationID = id
+	if u.mode == JSON {
+		u.event("operation_started", map[string]any{})
+	} else {
+		fmt.Fprintln(u.w, "Operation "+id)
+	}
+}
+
+// HoldFinish lets the command boundary report failures from deferred cleanup.
+func (u *UI) HoldFinish() { u.mu.Lock(); defer u.mu.Unlock(); u.holdFinish = true }
+func (u *UI) Complete(err error) {
+	u.mu.Lock()
+	u.holdFinish = false
+	summary := u.finishSummary
+	u.mu.Unlock()
+	u.Finished(err, summary)
+}
+func (u *UI) SetRedact(redact func(string) string) {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	u.redact = redact
+}
+func redactFields(v any, redact func(string) string) any {
+	switch x := v.(type) {
+	case string:
+		return redact(x)
+	case map[string]any:
+		r := map[string]any{}
+		for k, v := range x {
+			r[k] = redactFields(v, redact)
+		}
+		return r
+	case []any:
+		r := make([]any, len(x))
+		for i, v := range x {
+			r[i] = redactFields(v, redact)
+		}
+		return r
+	case []string:
+		r := make([]string, len(x))
+		for i, v := range x {
+			r[i] = redact(v)
+		}
+		return r
+	}
+	return v
+}
+
+// FinishedOutcome reports a successful query of an operation's outcome.
+func (u *UI) FinishedOutcome(outcome string, changed, unchanged []string) {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	if u.mode == JSON {
+		if changed == nil {
+			changed = []string{}
+		}
+		if unchanged == nil {
+			unchanged = []string{}
+		}
+		fields := map[string]any{"outcome": outcome, "duration_ms": time.Since(u.start).Milliseconds()}
+		if outcome == "partial" {
+			fields["changed"], fields["unchanged"] = changed, unchanged
+		}
+		u.event("finished", fields)
+	}
+	u.finished = true
 }

@@ -2,8 +2,8 @@ package cli
 
 import (
 	"context"
-	"errors"
 	"fmt"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -13,8 +13,10 @@ import (
 	"github.com/spf13/pflag"
 
 	"github.com/yoho-build/yoho/internal/audit"
+	"github.com/yoho-build/yoho/internal/operation"
 	"github.com/yoho-build/yoho/internal/remote"
 	"github.com/yoho-build/yoho/internal/secrets"
+	"github.com/yoho-build/yoho/internal/ui"
 	"github.com/yoho-build/yoho/internal/version"
 )
 
@@ -30,9 +32,13 @@ var auditedCommands = []string{
 	"secrets rotate",
 	"lock acquire", "lock release",
 	"proxy boot", "proxy upgrade",
+	"schedule install", "schedule remove", "tunnel up", "tunnel down", "tunnel route",
+	"app start", "app stop", "app restart", "setup", "access secrets push", "access add", "access rm", "access key add", "access key rm", "access install", "swarm init", "swarm join", "preview up", "preview down", "preview prune",
 }
 
 // auditSkipFlags are global flags that say nothing about the invocation.
+var localMutations = []string{"init", "upgrade", "builder setup", "skill install"}
+
 var auditSkipFlags = map[string]bool{"config": true, "destination": true, "json": true, "verbose": true, "secrets-retries": true}
 
 // auditSecretsTimeout bounds resolving secrets just to redact an exec argv.
@@ -40,24 +46,45 @@ const auditSecretsTimeout = 20 * time.Second
 
 // auditWrap wraps the RunE of every audited command below root.
 func auditWrap(g *globals, root *cobra.Command) {
-	var walk func(c *cobra.Command)
+	var walk func(*cobra.Command)
 	walk = func(c *cobra.Command) {
-		if c.HasParent() && c.RunE != nil {
-			path := strings.TrimPrefix(c.CommandPath(), root.Name()+" ")
-			for _, name := range auditedCommands {
-				if name == path {
-					inner := c.RunE
-					c.RunE = func(cmd *cobra.Command, args []string) error {
-						s := g.auditStart(cmd, args)
-						if s != nil {
-							cmd.SetContext(context.WithValue(cmd.Context(), auditRunKey{}, s))
-						}
-						err := inner(cmd, args)
-						s.finish(err)
-						return err
+		if c.RunE != nil {
+			inner := c.RunE
+			c.RunE = func(cmd *cobra.Command, args []string) error {
+				g.activeUI = g.ui(cmd)
+				defer func() { g.activeUI = nil }()
+				path := strings.TrimPrefix(cmd.CommandPath(), root.Name()+" ")
+				audited := slices.Contains(auditedCommands, path)
+				local := slices.Contains(localMutations, path)
+				quiet := rawOutputCommand(cmd) || readOnlyMode(cmd, g.json) || ownSummaryCommand(cmd)
+				if rawOutputCommand(cmd) {
+					mode := ui.Human
+					if g.json {
+						mode = ui.JSON
 					}
-					break
+					g.activeUI = ui.New(cmd.ErrOrStderr(), mode, g.verbose)
 				}
+				var r *auditRun
+				if audited || local {
+					id := audit.NewRun()
+					cmd.SetContext(context.WithValue(cmd.Context(), operationKey{}, id))
+					r = &auditRun{begin: time.Now()}
+					r.loader = func() *auditRun { return g.auditStart(cmd, args) }
+					cmd.SetContext(context.WithValue(cmd.Context(), auditRunKey{}, r))
+					if !quiet {
+						g.activeUI.Operation(id)
+					}
+				}
+				g.activeUI.HoldFinish()
+				err := inner(cmd, args)
+				if audited || local {
+					err = classifyOperation(cmd.Context(), err)
+					r.finish(err)
+				}
+				if !quiet && (audited || local || g.json) {
+					g.activeUI.Complete(err)
+				}
+				return err
 			}
 		}
 		for _, sub := range c.Commands() {
@@ -65,6 +92,22 @@ func auditWrap(g *globals, root *cobra.Command) {
 		}
 	}
 	walk(root)
+}
+
+func readOnlyMode(cmd *cobra.Command, jsonMode bool) bool {
+	for _, name := range []string{"dry-run", "list-templates"} {
+		if f := cmd.Flags().Lookup(name); f != nil && f.Value.String() == "true" {
+			return true
+		}
+	}
+	if cmd.Name() == "setup" {
+		if f := cmd.Flags().Lookup("plan"); f != nil && f.Value.String() == "true" {
+			return true
+		}
+		yes, _ := cmd.Flags().GetBool("yes")
+		return !yes && (jsonMode || !stdinIsTTY())
+	}
+	return false
 }
 
 type auditRunKey struct{}
@@ -81,28 +124,51 @@ func auditNoteVersion(ctx context.Context, v string) {
 // auditRun is one audited command: the open Server connection and the
 // record being written. A nil *auditRun does nothing.
 type auditRun struct {
-	a     *app
-	h     remote.Host
-	rec   audit.Record
-	begin time.Time
-	red   *audit.Redactor
-	dead  bool // an append failed: stop trying and stop warning
+	loader  func() *auditRun
+	deleted bool
+	a       *app
+	h       remote.Host
+	rec     audit.Record
+	begin   time.Time
+	red     *audit.Redactor
+	mutated bool
+	op      *operation.Record
+	dead    bool // an append failed: stop trying and stop warning
 }
 
 // auditStart loads the App, writes the "started" record and returns the run
 // to finish. It never fails: whatever goes wrong, the command itself runs
 // (and reports its own load errors).
 func (g *globals) auditStart(cmd *cobra.Command, args []string) *auditRun {
+	if f := cmd.Flags().Lookup("plan"); cmd.Name() == "setup" && f != nil && f.Value.String() == "true" {
+		return nil
+	}
 	if f := cmd.Flags().Lookup("dry-run"); f != nil && f.Value.String() == "true" {
 		return nil // changes nothing
 	}
-	a, err := g.loadApp(cmd)
+	var a *app
+	if ctx := cmd.Context(); ctx != nil {
+		if r, _ := ctx.Value(auditRunKey{}).(*auditRun); r != nil {
+			a = r.a
+		}
+	}
+	var err error
+	if a == nil {
+		if strings.HasPrefix(cmd.CommandPath(), cmd.Root().Name()+" preview ") {
+			name, _ := cmd.Flags().GetString("name")
+			a, err = g.loadPreview(cmd, name)
+		} else if strings.HasPrefix(cmd.CommandPath(), cmd.Root().Name()+" access ") {
+			a, err = g.loadOperator(cmd)
+		} else {
+			a, err = g.loadApp(cmd)
+		}
+	}
 	if err != nil || a.scoped || len(a.dest.Servers) == 0 {
 		return nil // scoped access: the Gate writes its own audit
 	}
 	name := a.dest.Servers[0]
 	srv := a.cfg.Servers[name]
-	h, err := remote.NewSSH(name, srv.SSH, srv.Sudo, a.sshOptions())
+	h, err := connectServer(name, srv.SSH, srv.Sudo, a.sshOptions())
 	if err != nil {
 		return nil
 	}
@@ -113,7 +179,7 @@ func (g *globals) auditStart(cmd *cobra.Command, args []string) *auditRun {
 		r.red = a.auditRedactor(cmd.Context())
 	}
 	r.rec = audit.Record{
-		Time: r.begin.UTC(), Run: audit.NewRun(), Phase: audit.Started, Performer: performer(),
+		Time: r.begin.UTC(), Run: operationID(cmd.Context()), OperationID: operationID(cmd.Context()), Phase: audit.Started, Performer: performer(),
 		Command: command, App: a.cfg.App, Destination: a.destName,
 		Version: a.auditVersion(cmd, command, args),
 		Args:    auditArgs(cmd, command, args, r.red),
@@ -125,7 +191,7 @@ func (g *globals) auditStart(cmd *cobra.Command, args []string) *auditRun {
 
 // finish writes the "finished" record for err and closes the connection.
 func (r *auditRun) finish(err error) {
-	if r == nil {
+	if r == nil || r.h == nil {
 		return
 	}
 	defer r.h.Close()
@@ -133,11 +199,7 @@ func (r *auditRun) finish(err error) {
 	rec.Time, rec.Phase = time.Now().UTC(), audit.Finished
 	code := 0
 	if err != nil {
-		code = 1
-		var ee *exitError
-		if errors.As(err, &ee) {
-			code = ee.code
-		}
+		code = mutationCode(err, r.mutated)
 		rec.Error = r.red.String(err.Error())
 	}
 	rec.Exit = &code
@@ -146,6 +208,19 @@ func (r *auditRun) finish(err error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 	r.append(ctx, rec)
+	if r.op != nil && !r.deleted {
+		r.op.Result = mutationResult(err, r.mutated)
+		if r.op.Outcome == "unknown" {
+			r.op.State = "running"
+		} else {
+			r.op.State = "finished"
+		}
+		if e := operation.Save(ctx, r.h, r.rec.App, r.rec.Destination, *r.op); e != nil {
+			r.a.ui.Warn("operation outcome could not be recorded: %s", firstLine(r.red.String(e.Error())))
+		} else {
+			_ = operation.Prune(ctx, r.h, r.rec.App, r.rec.Destination, r.rec.Run)
+		}
+	}
 }
 
 // append writes rec; a failure warns once and disables the rest.
@@ -182,6 +257,11 @@ func (a *app) auditRedactor(ctx context.Context) *audit.Redactor {
 func (a *app) auditVersion(cmd *cobra.Command, command string, args []string) string {
 	switch command {
 	case "deploy", "apply":
+		if f := cmd.Flags().Lookup("plan"); f != nil && f.Value.String() != "" {
+			if p, err := readSavedPlan(f.Value.String()); err == nil {
+				return p.Version
+			}
+		}
 		if f := cmd.Flags().Lookup("version"); f != nil && f.Value.String() != "" {
 			return f.Value.String()
 		}
@@ -425,4 +505,73 @@ func parseSince(s string, now time.Time) (time.Time, error) {
 		return t, nil
 	}
 	return time.Time{}, fmt.Errorf("cannot read --since %q", s)
+}
+
+// beginOperation persists the mutation boundary after validation, confirmation,
+// connections and applicable locks. Local builds precede this boundary.
+func beginOperation(ctx context.Context) error {
+	if ctx == nil {
+		return nil
+	}
+	r, _ := ctx.Value(auditRunKey{}).(*auditRun)
+	if r == nil || r.op != nil {
+		return nil
+	}
+	if r.h == nil && r.loader != nil {
+		notedVersion := r.rec.Version
+		loaded := r.loader()
+		if loaded != nil {
+			*r = *loaded
+			if notedVersion != "" {
+				r.rec.Version = notedVersion
+			}
+		}
+	}
+	if r.h == nil {
+		if r.a != nil && !r.a.scoped {
+			return fmt.Errorf("cannot initialize Server operation record")
+		}
+		return nil
+	}
+	r.op = &operation.Record{ID: r.rec.Run, Command: r.rec.Command, Started: r.begin.UTC(), State: "running", Services: map[string]string{}}
+	if err := operation.Save(ctx, r.h, r.rec.App, r.rec.Destination, *r.op); err != nil {
+		r.op = nil
+		return err
+	}
+	r.mutated = true
+	return nil
+}
+
+func operationProgress(ctx context.Context) func(context.Context, string, string) {
+	return func(callCtx context.Context, service, state string) {
+		if ctx == nil {
+			return
+		}
+		r, _ := ctx.Value(auditRunKey{}).(*auditRun)
+		if r == nil || r.op == nil {
+			return
+		}
+		r.op.Services[service] = state
+		if err := operation.Save(callCtx, r.h, r.rec.App, r.rec.Destination, *r.op); err != nil {
+			r.a.ui.Warn("operation progress could not be recorded: %s", firstLine(r.red.String(err.Error())))
+		}
+	}
+}
+
+func rawOutputCommand(cmd *cobra.Command) bool {
+	path := strings.TrimPrefix(cmd.CommandPath(), cmd.Root().Name()+" ")
+	return slices.Contains([]string{"schema", "audit", "config show", "secrets print", "skill print", "app exec", "app run", "app stats", "app logs", "access audit"}, path)
+}
+
+// ownSummaryCommand reports read-only commands whose documented last --json
+// event is their own summary (`doctor`, `check`); no `finished` event follows it.
+func ownSummaryCommand(cmd *cobra.Command) bool {
+	path := strings.TrimPrefix(cmd.CommandPath(), cmd.Root().Name()+" ")
+	return slices.Contains([]string{"doctor", "config check"}, path)
+}
+
+func operationRemoved(ctx context.Context) {
+	if r, _ := ctx.Value(auditRunKey{}).(*auditRun); r != nil {
+		r.deleted = true
+	}
 }

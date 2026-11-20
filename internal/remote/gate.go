@@ -33,9 +33,10 @@ type GateRequest struct {
 // GateFrame is one line the Gate writes on stdout: progress text, the final
 // result, or the final error. Exactly one of Result or Error ends a call.
 type GateFrame struct {
-	Out    string          `json:"out,omitempty"`
-	Result json.RawMessage `json:"result,omitempty"`
-	Error  *GateError      `json:"error,omitempty"`
+	Accepted bool            `json:"accepted,omitempty"`
+	Out      string          `json:"out,omitempty"`
+	Result   json.RawMessage `json:"result,omitempty"`
+	Error    *GateError      `json:"error,omitempty"`
 }
 
 // GateError is a refused or failed Gate request.
@@ -43,7 +44,10 @@ type GateError struct {
 	Message string `json:"message"`
 	Hint    string `json:"hint,omitempty"`
 	// Code: denied, invalid, failed, no-containers, unsupported.
-	Code string `json:"code,omitempty"`
+	Code      string   `json:"code,omitempty"`
+	Outcome   string   `json:"outcome,omitempty"`
+	Changed   []string `json:"changed,omitempty"`
+	Unchanged []string `json:"unchanged,omitempty"`
 }
 
 func (e *GateError) Error() string { return e.Message }
@@ -55,6 +59,7 @@ const MaxGateRequest = 16 << 20
 // yoho-gate user whose forced command reads one GateRequest. Unlike Host it
 // cannot run scripts; it calls fixed verbs.
 type Gate struct {
+	OnAccepted  func()
 	ssh         *SSH
 	App         string
 	Destination string
@@ -94,7 +99,7 @@ func (g *Gate) Call(ctx context.Context, verb string, args any, payload io.Reade
 	if err != nil {
 		return err
 	}
-	dec := &frameDecoder{out: out, final: make(chan struct{})}
+	dec := &frameDecoder{accepted: g.OnAccepted, out: out, final: make(chan struct{})}
 	done := make(chan struct{})
 	go func() {
 		defer pw.Close()
@@ -293,13 +298,14 @@ func (f *FrameWriter) Fail(e *GateError) error { return f.frame(GateFrame{Error:
 
 // frameDecoder splits the Gate's stdout into frames.
 type frameDecoder struct {
-	out     io.Writer
-	final   chan struct{} // closed at the result or error frame (nil: unused)
-	closed  bool
-	buf     []byte
-	result  json.RawMessage
-	gateErr *GateError
-	bad     error
+	accepted func()
+	out      io.Writer
+	final    chan struct{} // closed at the result or error frame (nil: unused)
+	closed   bool
+	buf      []byte
+	result   json.RawMessage
+	gateErr  *GateError
+	bad      error
 }
 
 func (d *frameDecoder) Write(p []byte) (int, error) {
@@ -327,6 +333,9 @@ func (d *frameDecoder) line(b []byte) {
 		// Not a frame (e.g. a login banner): show it rather than drop it.
 		fmt.Fprintf(d.out, "%s\n", b)
 		return
+	}
+	if fr.Accepted && d.accepted != nil {
+		d.accepted()
 	}
 	if fr.Out != "" {
 		io.WriteString(d.out, fr.Out)
@@ -418,3 +427,5 @@ func (c *chunkReader) Read(p []byte) (int, error) {
 	}
 	return n, err
 }
+
+func (f *FrameWriter) Accepted() error { return f.frame(GateFrame{Accepted: true}) }

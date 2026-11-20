@@ -214,3 +214,32 @@ Clean up only the removed Server using a separate config listing it alone
 allocation state; never use it on surviving Servers during removal. Previews
 reuse the mesh without reconciling it. Roles/connections are
 reserved for a later feature.
+
+### Saved approvals and mutation recovery
+
+For unattended operator runs, prefer `yoho plan --out /tmp/yoho-plan.json --ttl
+1h`, review the artifact, then `yoho apply --plan /tmp/yoho-plan.json
+--auto-approve --json`. Keep artifacts outside build contexts. Saved plans
+require operator access and a converged App directory. Exit 15 means stale,
+expired, invalid or incompatible: generate and review a fresh plan. Verification
+happens under the deploy lock and emits `plan_verified`.
+
+Capture the first event's `operation_id`. Read the final `finished.outcome`:
+`success`, `partial`, `failed`, `unknown`; partial includes `changed` and
+`unchanged` Services. Stable mutation exits: 10 config/validation, 11 lock held,
+12 cannot reach Server, 13 partial (including Scheduled Jobs failure), 14 outcome
+unknown, 15 stale plan. Plan/config-check 0/1/2 and exec passthrough stay unchanged.
+Use `yoho schema --events` for the v1 NDJSON schema.
+
+After an operator connection drops, reconnect with `yoho status --operation ID
+--json`. A running record without a lock is unknown; inspect live Services and
+Releases before retrying. Do not infer rollback from an interrupted client.
+Records retain 50 operations. Gate deploys emit a reattachable `rollout_id` (the
+operation ID) and reconnect automatically; Members can inspect `yoho releases`.
+
+A saved plan is the approval: `apply --plan FILE --json` needs no second prompt
+or `--auto-approve`. Verification comes before change events and deploy Hooks;
+a verified no-op changes nothing. App-file and Hook contents are fingerprinted.
+`plan --out` refuses an unconverged `app_dir` with exit 10. Raw command streams
+and dry-run modes have no operation envelopes. Pre-mutation failures are known;
+unknown/14 is reserved for interruption after mutation or Gate acceptance.

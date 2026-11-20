@@ -80,7 +80,7 @@ func CheckPreviewDir(ctx context.Context, h remote.Host, app, dest string) (*Pre
 		return p, err
 	}
 	dir := remote.Quote(release.AppDir(app, dest))
-	out, err := h.Output(ctx, remote.Cmd{Script: "set -eu\nif [ -d " + dir + " ]; then find " + dir + " -mindepth 1 -maxdepth 1 ! -name lock ! -name .yoho-app.json -print; fi"})
+	out, err := h.Output(ctx, remote.Cmd{Script: "set -eu\nif [ -d " + dir + " ]; then find " + dir + " -mindepth 1 -maxdepth 1 ! -name lock ! -name .yoho-app.json ! -name operations -print; fi"})
 	if err != nil {
 		return nil, err
 	}
@@ -168,7 +168,7 @@ func RemovePreview(ctx context.Context, h remote.Host, app, dest string, sudo bo
 		// Only the lock and ownership marker are allowed here. Remove those
 		// artifacts and use rmdir so any newly appeared data makes cleanup fail.
 		dir := remote.Quote(release.AppDir(app, dest))
-		if err := h.Run(ctx, remote.Cmd{Script: "set -eu\nif [ -d " + dir + " ]; then rm -rf " + dir + "/lock; rm -f " + dir + "/.yoho-app.json; rmdir " + dir + "; fi"}); err != nil {
+		if err := h.Run(ctx, remote.Cmd{Script: "set -eu\nif [ -d " + dir + " ]; then rm -rf " + dir + "/lock " + dir + "/operations; rm -f " + dir + "/.yoho-app.json; rmdir " + dir + "; fi"}); err != nil {
 			return nil, err
 		}
 		return nil, nil

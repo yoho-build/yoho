@@ -2,6 +2,7 @@ package cli
 
 import (
 	"bufio"
+	"context"
 	"fmt"
 	"io"
 	"os"
@@ -73,19 +74,17 @@ Supports Debian and Ubuntu.`,
 				NoContainerdImageStore: noContainerd,
 				BuildOnServer:          a.cfg.Builder.Location == "server",
 			}
+			connected := map[string]remote.Host{}
+			defer func() {
+				for _, h := range connected {
+					_ = h.Close()
+				}
+			}()
 			for _, name := range a.dest.Servers {
 				srv := a.cfg.Servers[name]
-				cfg.Sudo = srv.Sudo
-				// Connecting as a non-root user means that user deploys; a
-				// separate deploy user is only created when setup runs as root.
-				cfg.Setup.User = a.cfg.Setup.User
-				if user, _, _, perr := remote.ParseTarget(srv.SSH); perr == nil && user != "" && user != "root" {
-					cfg.Setup.User = user
-				}
-				u.Title("Setup %s (%s)", name, srv.SSH)
 				// No docker check here: setup is what installs Docker.
 				step := u.Step(name, "Connect %s", srv.SSH)
-				h, cerr := remote.NewSSH(name, srv.SSH, srv.Sudo, a.sshOptions())
+				h, cerr := connectServer(name, srv.SSH, srv.Sudo, a.sshOptions())
 				if cerr == nil {
 					_, cerr = h.Output(ctx, remote.Cmd{Script: "true"})
 				}
@@ -98,8 +97,20 @@ Supports Debian and Ubuntu.`,
 					return &silentError{cerr}
 				}
 				step.Done()
+				connected[name] = h
+			}
+			for _, name := range a.dest.Servers {
+				srv := a.cfg.Servers[name]
+				cfg.Sudo = srv.Sudo
+				// Connecting as a non-root user means that user deploys; a
+				// separate deploy user is only created when setup runs as root.
+				cfg.Setup.User = a.cfg.Setup.User
+				if user, _, _, perr := remote.ParseTarget(srv.SSH); perr == nil && user != "" && user != "root" {
+					cfg.Setup.User = user
+				}
+				u.Title("Setup %s (%s)", name, srv.SSH)
+				h := connected[name]
 				err = a.setupServer(cmd, h, name, cfg, planOnly, yes)
-				h.Close()
 				if err != nil {
 					return err
 				}
@@ -114,6 +125,9 @@ Supports Debian and Ubuntu.`,
 					applyMesh = ans == "y" || ans == "yes"
 				}
 				if applyMesh {
+					if err = beginOperation(ctx); err != nil {
+						return err
+					}
 					if err = a.runMesh(ctx, "up"); err != nil {
 						return err
 					}
@@ -177,11 +191,24 @@ func (a *app) setupServer(cmd *cobra.Command, h remote.Host, name string, cfg se
 		return nil
 	}
 
+	dirsReady := true
+	for _, ps := range steps {
+		if ps.Step.ID == "dirs" && ps.Needed {
+			dirsReady = false
+			ps.Step.OnApplied = func(ctx context.Context) error { return beginOperation(ctx) }
+		}
+	}
 	all := yes
 	w := cmd.OutOrStdout()
 	var promptErr error
 	confirm := func(ps setup.PlannedStep) bool {
 		if all {
+			if dirsReady {
+				if err := beginOperation(ctx); err != nil {
+					promptErr = err
+					return false
+				}
+			}
 			return true
 		}
 		if promptErr != nil {
@@ -196,8 +223,20 @@ func (a *app) setupServer(cmd *cobra.Command, h remote.Host, name string, cfg se
 		switch ans {
 		case "a", "all":
 			all = true
+			if dirsReady {
+				if err := beginOperation(ctx); err != nil {
+					promptErr = err
+					return false
+				}
+			}
 			return true
 		case "y", "yes":
+			if dirsReady {
+				if err := beginOperation(ctx); err != nil {
+					promptErr = err
+					return false
+				}
+			}
 			return true
 		}
 		return false

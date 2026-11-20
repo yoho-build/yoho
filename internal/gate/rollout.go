@@ -471,10 +471,12 @@ func (c *call) startRollout(verb, version, id string, args any) (string, error) 
 	}
 	c.audit["detached"] = true
 	c.audit["rollout"] = id
+	_ = c.fw.Accepted()
 	return id, nil
 }
 
 func (c *call) attachRollout(ctx context.Context, id string) (any, error) {
+	_ = c.fw.Accepted()
 	c.watchClient()
 	app, dest := c.req.App, c.req.Destination
 	var (

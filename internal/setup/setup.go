@@ -62,9 +62,10 @@ type Step struct {
 	checkSudo bool
 	// absent: set by Check; the thing other steps need (the deploy user) does
 	// not exist yet. Only meaningful for steps others list in Needs.
-	absent bool
-	check  func(ctx context.Context, h remote.Host) (needed bool, detail string, err error)
-	apply  func(ctx context.Context, h remote.Host) error
+	absent    bool
+	check     func(ctx context.Context, h remote.Host) (needed bool, detail string, err error)
+	apply     func(ctx context.Context, h remote.Host) error
+	OnApplied func(context.Context) error
 }
 
 // Check reports whether the step would change the Server, and what.
@@ -73,7 +74,15 @@ func (s *Step) Check(ctx context.Context, h remote.Host) (bool, string, error) {
 }
 
 // Apply makes the change.
-func (s *Step) Apply(ctx context.Context, h remote.Host) error { return s.apply(ctx, h) }
+func (s *Step) Apply(ctx context.Context, h remote.Host) error {
+	if err := s.apply(ctx, h); err != nil {
+		return err
+	}
+	if s.OnApplied != nil {
+		return s.OnApplied(ctx)
+	}
+	return nil
+}
 
 // PlannedStep is a Step with its Check result.
 type PlannedStep struct {

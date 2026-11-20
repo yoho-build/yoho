@@ -50,8 +50,9 @@ func newRunner(d *plan.Deploy, composeFile string) *runner {
 	}
 	return &runner{
 		h: s.Host, out: out, server: s.Name, app: d.App, dest: d.Destination, registry: d.Registry,
-		cc:      composeCLI{project: release.ProjectName(d.App, d.Destination), dir: release.AppDir(d.App, d.Destination), file: composeFile},
-		restart: d.Restart,
+		cc:        composeCLI{project: release.ProjectName(d.App, d.Destination), dir: release.AppDir(d.App, d.Destination), file: composeFile},
+		restart:   d.Restart,
+		onService: d.OnService,
 	}
 }
 
@@ -263,7 +264,8 @@ func (c Compose) Deploy(ctx context.Context, d *plan.Deploy) (_ *release.Release
 	}
 
 	rel := &release.Release{
-		App: d.App, Destination: d.Destination, Server: srv.Name, Version: d.Version,
+		OperationID: d.OperationID,
+		App:         d.App, Destination: d.Destination, Server: srv.Name, Version: d.Version,
 		Runtime: "compose", Role: "all", DeployedAt: start, Performer: d.Performer,
 		Images: map[string]string{}, SecretsGeneration: generation, Files: appFileHashes,
 		Secrets:       secretAudit(d, svcSecrets, generated, key),
@@ -287,6 +289,7 @@ func (c Compose) Deploy(ctx context.Context, d *plan.Deploy) (_ *release.Release
 	}()
 
 	for _, sp := range plans {
+		r.report(ctx, sp.Name, "unchanged")
 		f := r.fact(sp.Name)
 		if sp.proxied() {
 			f.ProxyRoute = "not-attempted"
@@ -345,6 +348,7 @@ func (c Compose) Deploy(ctx context.Context, d *plan.Deploy) (_ *release.Release
 
 // finish records the Release, points `current` at it and prunes.
 func (c Compose) finish(ctx context.Context, d *plan.Deploy, r *runner, rel *release.Release) error {
+	rel.OperationID = d.OperationID
 	dir := release.AppDir(d.App, d.Destination)
 	if err := writeJSON(ctx, r.h, path.Join(release.Dir(d.App, d.Destination, rel.Version), "release.json"), rel); err != nil {
 		return err

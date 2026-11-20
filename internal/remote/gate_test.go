@@ -192,3 +192,21 @@ func TestGateCallReturnsWhenSSHExits(t *testing.T) {
 		})
 	}
 }
+
+func TestReviewAcceptedFrameMarksMutationBeforeDisconnect(t *testing.T) {
+	var b bytes.Buffer
+	if err := NewFrameWriter(&b).Accepted(); err != nil {
+		t.Fatal(err)
+	}
+	accepted := false
+	dec := &frameDecoder{out: io.Discard, accepted: func() { accepted = true }}
+	if _, err := dec.Write(b.Bytes()); err != nil {
+		t.Fatal(err)
+	}
+	if err := dec.finish(); err != nil {
+		t.Fatal(err)
+	}
+	if !accepted {
+		t.Fatal("Gate acceptance was lost before final result")
+	}
+}

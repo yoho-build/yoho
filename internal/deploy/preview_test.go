@@ -22,6 +22,12 @@ func TestPreviewMarkerAndTeardown(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(dir, "lock"), 0700); err != nil {
 		t.Fatal(err)
 	}
+	if err := os.MkdirAll(filepath.Join(dir, "operations"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "operations", "test.json"), []byte("{}"), 0600); err != nil {
+		t.Fatal(err)
+	}
 	if err := MarkPreview(ctx, h, p); err != nil {
 		t.Fatal(err)
 	}
@@ -177,6 +183,12 @@ func TestPreviewMissingMarkerCleansLockOnlyDirectory(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(dir, ".yoho-app.json"), []byte("{}"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(dir, "operations"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "operations", "test.json"), []byte("{}"), 0600); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := RemovePreview(context.Background(), &dockerHost{local: &remote.Local{}}, "shop", "preview-pr-1", false); err != nil {

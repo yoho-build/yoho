@@ -24,6 +24,8 @@ type Deploy struct {
 	Destination string
 	Version     string
 	Performer   string
+	OperationID string
+	OnService   func(context.Context, string, string)
 
 	// Servers of the Destination, same order as config. compose: exactly one.
 	// swarm: first is the manager.

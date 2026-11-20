@@ -169,6 +169,7 @@ Older preview records without timestamps are skipped by --older-than unless
 			removed := []string{}
 			absent := []string{}
 			failed := []map[string]string{}
+			var removalErrors []error
 			outcomes := make([]map[string]any, 0, len(targets))
 			var outcomeParts []string
 
@@ -183,6 +184,7 @@ Older preview records without timestamps are skipped by --older-than unless
 					continue
 				}
 				if rerr != nil {
+					removalErrors = append(removalErrors, rerr)
 					step.Fail(rerr, hint)
 					failed = append(failed, map[string]string{"name": rec.Name, "server": t.host.Name, "error": rerr.Error()})
 					outcomes = append(outcomes, map[string]any{"name": rec.Name, "server": t.host.Name, "status": "failed", "error": rerr.Error()})
@@ -215,7 +217,7 @@ Older preview records without timestamps are skipped by --older-than unless
 
 			summary := fmt.Sprintf("Pruned %s: %s", ui.Count(len(removed), "preview", ""), strings.Join(outcomeParts, ", "))
 			if len(failed) > 0 {
-				ferr := fmt.Errorf("%s failed to prune", ui.Count(len(failed), "preview", ""))
+				ferr := fmt.Errorf("%s failed to prune: %w", ui.Count(len(failed), "preview", ""), errors.Join(removalErrors...))
 				summary = fmt.Sprintf("Pruned %s, %s failed: %s",
 					ui.Count(len(removed), "preview", ""), ui.Count(len(failed), "preview", ""), strings.Join(outcomeParts, ", "))
 				a.ui.Finished(ferr, summary)
@@ -256,13 +258,18 @@ func (a *app) removePreviewOnHost(ctx context.Context, h plan.NamedHost, preview
 		return nil, hintFor(err, ""), err
 	}
 	defer func() { _ = unlock(context.WithoutCancel(ctx)) }()
-	if selected != nil {
-		current, err := deploy.ReadPreview(ctx, h.Host, a.cfg.App, dest)
-		if err != nil {
-			return nil, "only valid marked previews can be removed", err
-		}
-		if current != nil && !reflect.DeepEqual(current, selected) {
-			return nil, "", errPreviewChanged
+	current, err := deploy.CheckPreviewDir(ctx, h.Host, a.cfg.App, dest)
+	if err != nil {
+		return nil, "only valid marked previews or empty preview directories can be removed", err
+	}
+	if selected != nil && current != nil && !reflect.DeepEqual(current, selected) {
+		return nil, "", errPreviewChanged
+	}
+	if current != nil {
+		// Down records under the preview; prune records once under its template
+		// Destination so deleting previews cannot delete the run's record.
+		if err := beginOperation(ctx); err != nil {
+			return nil, "cannot record preview removal", err
 		}
 	}
 	p, err := deploy.RemovePreview(ctx, h.Host, a.cfg.App, dest, h.Server.Sudo)

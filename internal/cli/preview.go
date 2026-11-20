@@ -78,6 +78,7 @@ func previewCmd(g *globals) *cobra.Command {
 				step.Fail(err, hint)
 				return &silentError{err}
 			}
+			operationRemoved(ctx)
 			hostsOut := []string{}
 			summary := "Preview " + a.previewName + " removed"
 			if p == nil {
@@ -191,6 +192,13 @@ func (g *globals) loadPreviewTemplate(cmd *cobra.Command) (*app, error) {
 		return nil, a.fail(errors.New("preview commands require operator access"))
 	}
 	release.Root = a.root()
+	// loadApp cached selected, but template overlays produce this App copy.
+	// Keep operation persistence on the effective template/preview identity.
+	if ctx := cmd.Context(); ctx != nil {
+		if run, _ := ctx.Value(auditRunKey{}).(*auditRun); run != nil && run.h == nil {
+			run.a = &a
+		}
+	}
 	return &a, nil
 }
 

@@ -65,6 +65,8 @@ const stackLabel = "com.docker.stack.namespace"
 func ReleaseStack(stack string) string { return stack + "-release" }
 
 type runner struct {
+	onService func(context.Context, string, string)
+	reported  map[string]string
 	h         remote.Host
 	out       io.Writer
 	server    string
@@ -103,6 +105,7 @@ func newRunner(d *plan.Deploy) *runner {
 		out = io.Discard
 	}
 	return &runner{
+		onService: d.OnService, reported: map[string]string{},
 		h: d.Servers[0].Host, out: out, server: d.Servers[0].Name, app: d.App, dest: d.Destination,
 		stack: release.ProjectName(d.App, d.Destination), dir: release.AppDir(d.App, d.Destination),
 	}
@@ -276,7 +279,8 @@ func (rt Runtime) Deploy(ctx context.Context, d *plan.Deploy) (_ *release.Releas
 	}
 
 	rel := &release.Release{
-		App: d.App, Destination: d.Destination, Server: mgr.Name, Version: d.Version,
+		OperationID: d.OperationID,
+		App:         d.App, Destination: d.Destination, Server: mgr.Name, Version: d.Version,
 		Runtime: "swarm", Role: "all", DeployedAt: start, Performer: d.Performer,
 		Images: map[string]string{}, SecretsGeneration: generation,
 		Secrets:       deploy.SecretAudit(d, svcSecrets, generated, key),
@@ -403,6 +407,9 @@ const partialMarker = "partial"
 // was not fully restored or the re-deploy fails, partialMarker is left
 // instead of claiming a state the stack is not in.
 func (r *runner) restoreStack(ctx context.Context, d *plan.Deploy, relDir string, restored bool, attempted stackPlan) {
+	onService := r.onService
+	r.onService = nil
+	defer func() { r.onService = onService }()
 	marker := path.Join(relDir, partialMarker)
 	err := errors.New("the previous record could not be restored")
 	if restored {
@@ -752,6 +759,7 @@ func (r *runner) waitConverged(ctx context.Context, stack string, before map[str
 		}
 		observed = after
 		pending, failed := converged(before, after)
+		r.reportConvergence(ctx, stack, before, after, pending, failed)
 		if len(failed) > 0 {
 			return r.convergenceFailure(errors.New("Swarm update failed"), after, r.diagnose(ctx, stack, failed))
 		}
@@ -1051,6 +1059,7 @@ func (r *runner) runJob(ctx context.Context, c *compiled, relDir string, sp serv
 
 // finish records the Release, points `current` at it and prunes.
 func (r *runner) finish(ctx context.Context, d *plan.Deploy, rel *release.Release) error {
+	rel.OperationID = d.OperationID
 	relDir := release.Dir(d.App, d.Destination, rel.Version)
 	if err := deploy.WriteJSON(ctx, r.h, path.Join(relDir, "release.json"), rel); err != nil {
 		return err
@@ -1373,4 +1382,28 @@ func lines(s string) []string {
 		}
 	}
 	return out
+}
+
+func (r *runner) reportConvergence(ctx context.Context, stack string, before, after map[string]svcStatus, pending, failed []string) {
+	if r.onService == nil {
+		return
+	}
+	if r.reported == nil {
+		r.reported = map[string]string{}
+	}
+	for _, name := range sortedKeys(after) {
+		a := after[name]
+		b, existed := before[name]
+		state := "unchanged"
+		if !existed || a.UpdateStarted != "" && a.UpdateStarted != b.UpdateStarted {
+			state = "attempted"
+			if !slices.Contains(pending, name) && !slices.Contains(failed, name) {
+				state = "changed"
+			}
+		}
+		if r.reported[name] != state {
+			r.reported[name] = state
+			r.onService(ctx, strings.TrimPrefix(name, stack+"_"), state)
+		}
+	}
 }

@@ -36,6 +36,7 @@ var (
 )
 
 type applyOptions struct {
+	PlanFile    string
 	Version     string
 	SkipBuild   bool
 	Refresh     bool
@@ -53,6 +54,8 @@ type applyOptions struct {
 func planCmd(g *globals) *cobra.Command {
 	var ver string
 	var detailed bool
+	var out string
+	var ttl time.Duration
 	c := &cobra.Command{
 		Use:   "plan",
 		Short: "Show what apply would change on the Servers (read-only)",
@@ -69,6 +72,21 @@ grant.`,
 			if err != nil {
 				return err
 			}
+			if out != "" {
+				if err := a.savePlan(cmd.Context(), ver, out, ttl); err != nil {
+					return planOutputError(err)
+				}
+				if detailed {
+					p, err := readSavedPlan(out)
+					if err != nil {
+						return planOutputError(err)
+					}
+					if ui.HasChanges(p.Changes) {
+						exitFunc(2)
+					}
+				}
+				return nil
+			}
 			var changes []plan.Change
 			if a.scoped {
 				changes, err = a.scopedPlan(cmd.Context(), ver)
@@ -79,11 +97,14 @@ grant.`,
 				return err
 			}
 			if detailed && ui.HasChanges(changes) {
+				a.ui.Finished(nil, "")
 				exitFunc(2)
 			}
 			return nil
 		},
 	}
+	c.Flags().StringVar(&out, "out", "", "Write a versioned approval plan file")
+	c.Flags().DurationVar(&ttl, "ttl", time.Hour, "Saved plan validity")
 	c.Flags().StringVar(&ver, "version", "", "Version to plan for (default: git SHA)")
 	c.Flags().BoolVar(&detailed, "detailed-exitcode", false, "Exit with code 2 when there are changes (0: none, 1: error)")
 	return c
@@ -106,10 +127,14 @@ from the configuration.`,
 			return a.apply(cmd.Context(), o)
 		},
 	}
+	c.Flags().StringVar(&o.PlanFile, "plan", "", "Apply a saved approval plan after verification under the lock")
 	c.Flags().StringVar(&o.Version, "version", "", "Version to deploy (default: git SHA)")
 	c.Flags().BoolVar(&o.SkipBuild, "skip-build", false, "Use images already built for this version")
 	c.Flags().BoolVar(&o.AutoApprove, "auto-approve", false, "Apply without asking for confirmation")
 	addBuildFlags(c, &o)
+	c.MarkFlagsMutuallyExclusive("plan", "version")
+	c.MarkFlagsMutuallyExclusive("plan", "refresh")
+	c.MarkFlagsMutuallyExclusive("plan", "skip-build")
 	addCutoverFlags(c, &o)
 	addLockWaitFlag(c)
 	return c
@@ -338,6 +363,7 @@ func (a *app) apply(ctx context.Context, o applyOptions) (err error) {
 	start := time.Now()
 	defer func() {
 		if err != nil {
+			err = classifyMutation(err, !preMutation(ctx))
 			var je *jobsFailedError
 			if errors.As(err, &je) {
 				u.Event("jobs_failed", je.summary(), je.fields())
@@ -347,16 +373,30 @@ func (a *app) apply(ctx context.Context, o applyOptions) (err error) {
 			u.Finished(err, "")
 		}
 	}()
+	var approved *savedPlan
+	if o.PlanFile != "" {
+		if a.scoped {
+			return stalePlan("saved plans are unavailable for Members; ask an Operator")
+		}
+		approved, err = readSavedPlan(o.PlanFile)
+		if err != nil {
+			return err
+		}
+		if err = approved.validate(a.cfg.App, a.destName, Version, time.Now()); err != nil {
+			return err
+		}
+		o.Version = approved.Version
+	}
 	if err = o.validate(); err != nil {
-		return err
+		return &validationError{err}
 	}
 	if o.Refresh && a.dest.Runtime == "swarm" {
-		return a.fail(&hintError{"cannot refresh a Swarm Destination", "--refresh supports compose Destinations; on Swarm, change the Version"})
+		return a.fail(&validationError{&hintError{"cannot refresh a Swarm Destination", "--refresh supports compose Destinations; on Swarm, change the Version"}})
 	}
 	// Fail before any work when we could not ask.
-	if o.ShowPlan {
+	if o.ShowPlan && approved == nil {
 		if err = a.confirmPrecheck(o); err != nil {
-			return err
+			return &validationError{err}
 		}
 	}
 	ver, err := a.resolveDeployVersion(o.Version)
@@ -371,7 +411,7 @@ func (a *app) apply(ctx context.Context, o applyOptions) (err error) {
 	} else {
 		u.Title("Deploying %s@%s to %s", a.cfg.App, shortVersion(ver), a.destName)
 	}
-	s, err := a.openSession(ctx, ver, false, o.Refresh)
+	s, err := a.openSession(ctx, ver, approved != nil, o.Refresh)
 	if err != nil {
 		return err
 	}
@@ -381,17 +421,17 @@ func (a *app) apply(ctx context.Context, o applyOptions) (err error) {
 	// token cannot be resolved.
 	if _, terr := tunnelToken(s.store, a.proxyConfig().Tunnel); terr != nil {
 		u.Step("", "Cloudflare Tunnel").Fail(terr, "")
-		return &silentError{terr}
+		return &silentError{&validationError{terr}}
 	}
 
 	deployNeeded := true
-	if o.ShowPlan {
+	if o.ShowPlan && approved == nil {
 		var changes []plan.Change
 		if changes, deployNeeded, err = a.collectChanges(ctx, s, o.Refresh); err != nil {
 			return err
 		}
 		u.Plan(changes)
-		if !ui.HasChanges(changes) {
+		if !ui.HasChanges(changes) && approved == nil {
 			u.Finished(nil, "")
 			return nil
 		}
@@ -400,6 +440,15 @@ func (a *app) apply(ctx context.Context, o applyOptions) (err error) {
 		}
 	}
 
+	if approved != nil {
+		ac, e := a.planAppDirs(ctx, s.hosts)
+		if e != nil {
+			return e
+		}
+		if ui.HasChanges(ac) {
+			return stalePlan("App directory must be converged before using a saved plan")
+		}
+	}
 	// Converge app_dir (and finish an interrupted move) before building:
 	// Server builds write into the App directory.
 	if err = a.ensureAppDirs(ctx, s.hosts); err != nil {
@@ -419,16 +468,59 @@ func (a *app) apply(ctx context.Context, o applyOptions) (err error) {
 			}
 		}
 	}()
+	if approved != nil {
+		// Reload local inputs and resolve secrets again while holding the lock.
+		if err = a.reloadPlanConfig(); err != nil {
+			return err
+		}
+		fresh, ferr := a.compose(ctx)
+		if ferr != nil {
+			return stalePlan("config: %v", ferr)
+		}
+		s.r = fresh
+		store, ferr := a.loadSecrets(ctx, nil)
+		if ferr != nil {
+			return ferr
+		}
+		s.replaceStore(store)
+		changes, needed, ferr := a.collectChanges(ctx, s, false)
+		if ferr != nil {
+			return ferr
+		}
+		current, ferr := a.snapshotPlan(ctx, s, changes, time.Hour)
+		if ferr != nil {
+			return ferr
+		}
+		noop, verifyErr := a.verifyApproval(approved, current, changes)
+		if verifyErr != nil {
+			return verifyErr
+		}
+		deployNeeded = needed
+		if noop {
+			return nil
+		}
+		if err = a.hookFunc(ver, "deploy", nil)(ctx, "pre-connect", nil); err != nil {
+			return err
+		}
+	}
+
+	// Refuse before building: the runtime checks again.
+	if err = a.refusePendingRotations(ctx, s.hosts, nil); err != nil {
+		return err
+	}
+	// Preview admission and mesh reconciliation mutate the Server. Verified
+	// no-op plans returned above; start the operation before either mutation.
+	if a.previewName != "" || a.cfg.Network.Mesh == "wireguard" {
+		if err = beginOperation(ctx); err != nil {
+			return err
+		}
+	}
 	if a.previewName != "" {
 		if err = a.admitPreview(ctx, s.hosts[0].Host, a.previewRecord(s)); err != nil {
 			return err
 		}
 	}
 	if err = a.reconcileMesh(ctx); err != nil {
-		return err
-	}
-	// Refuse before building: the runtime checks again.
-	if err = a.refusePendingRotations(ctx, s.hosts, nil); err != nil {
 		return err
 	}
 	// A migration cutover is decided (and its tokens resolved) before the
@@ -476,6 +568,9 @@ func (a *app) apply(ctx context.Context, o applyOptions) (err error) {
 		if co.action == migrate.Skip {
 			co = nil
 		} else {
+			if err = beginOperation(ctx); err != nil {
+				return err
+			}
 			if err = co.prepare(ctx); err != nil {
 				return err
 			}
@@ -491,6 +586,9 @@ func (a *app) apply(ctx context.Context, o applyOptions) (err error) {
 		if co != nil {
 			d.Cutover = co.j.ID
 		}
+		if err = beginOperation(ctx); err != nil {
+			return err
+		}
 		preRollout = false
 		if rel, err = a.rollout(ctx, s, d, a.lockedRuntime()); err != nil {
 			return co.failed(ctx, err)
@@ -501,6 +599,9 @@ func (a *app) apply(ctx context.Context, o applyOptions) (err error) {
 				return co.failed(ctx, err)
 			}
 		}
+	}
+	if err = beginOperation(ctx); err != nil {
+		return err
 	}
 	if co == nil || !co.j.TunnelReconciled {
 		tunnelURLs, terr := a.reconcileTunnel(ctx, s)
@@ -557,6 +658,9 @@ func (a *app) deployLock(ctx context.Context, h plan.NamedHost, ver string) (fun
 
 // confirmPrecheck rejects an unconfirmable apply before connecting anywhere.
 func (a *app) confirmPrecheck(o applyOptions) error {
+	if o.PlanFile != "" {
+		return nil
+	}
 	if o.AutoApprove {
 		return nil
 	}
@@ -611,4 +715,31 @@ func addBuildFlags(c *cobra.Command, o *applyOptions) {
 	c.Flags().BoolVar(&o.Refresh, "refresh", false, "Pull base images and rebuild without cache (build Services only; bump image-only Service tags explicitly)")
 	c.Flags().BoolVar(&o.Scan, "scan", false, "Scan locally built images with Trivy or Grype before rollout (warnings only)")
 	c.MarkFlagsMutuallyExclusive("refresh", "skip-build")
+}
+
+func planOutputError(err error) error {
+	var silent *silentError
+	var exit *exitError
+	if errors.As(err, &exit) && exit.code == 15 {
+		if errors.As(err, &silent) {
+			return &silentError{errors.New(err.Error())}
+		}
+		return errors.New(err.Error())
+	}
+	return err
+}
+
+func (a *app) verifyApproval(approved, current *savedPlan, changes []plan.Change) (bool, error) {
+	if err := approved.validate(a.cfg.App, a.destName, Version, time.Now()); err != nil {
+		return false, err
+	}
+	if err := approved.compare(current); err != nil {
+		return false, err
+	}
+	a.ui.Event("plan_verified", "Saved plan verified", map[string]any{"format_version": 1})
+	noop := !ui.HasChanges(changes)
+	if noop {
+		a.ui.Finished(nil, "No changes; saved plan verified")
+	}
+	return noop, nil
 }

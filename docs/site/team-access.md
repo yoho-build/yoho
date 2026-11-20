@@ -283,3 +283,12 @@ ssh then runs `cloudflared access ssh --hostname ssh.example.com` as its ProxyCo
 - During a deploy the old and new containers run side by side, so an App can briefly use twice its limits.
 - A Member who can deploy can read that App's own secrets from inside the container (see [Secrets](#secrets)).
 - Short-lived certificates, `yoho login` and Access Tokens (the Access Service) come later. Until then, Members use restricted keys.
+
+### Saved-plan support
+
+Members can run ordinary `yoho plan` through the Gate. `plan --out FILE` and
+`apply --plan FILE` require Operator access and explicitly refuse scoped
+access. An Operator can use `YOHO_ACCESS=operator` with their own full SSH key.
+Gate deploys emit an operation ID and `rollout_id`, automatically reattach after
+a dropped connection, and record the operation ID in the Release. Members use
+`yoho releases` to inspect recovery; `status --operation` is operator-only.

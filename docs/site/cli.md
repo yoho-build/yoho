@@ -11,10 +11,10 @@ Global flags (every command): `-c, --config FILE`, `-d, --destination NAME` (def
 | `config check [--offline]` | Validate Yoho file, compose files, `x-yoho` and secret names; resolves local secrets only when `secrets.nonempty` is nonempty. `--offline` (or `YOHO_OFFLINE=1`) never resolves secrets. Exit 0 ok, 1 findings, 2 files could not be loaded. Warns when `ssh.via: cloudflare` would go through a `cloudflared` Service in the same App, and (like `plan` and `deploy`, once per run) when a Stateful Service has no Backup job of the Destination covering it. See [CI check](#ci-check). |
 | `config show` | Print the resolved Yoho file with defaults as JSON. |
 | `doctor [--max-age D]` | Read-only production-readiness check for a Destination: config and Backup coverage (Stateful Services first), Scheduled Backup freshness and last successful restore drill, firewall and public `0.0.0.0` ports outside the Proxy, free disk on Docker data root and Backup cache, Proxy state and version, pending secret-rotation generations, and image transport path. Exit 0 no errors, 1 any error. See [Doctor](#doctor). |
-| `schema [--ext]` | JSON Schema of the Yoho file, or of `x-yoho` with `--ext`. |
+| `schema [--ext | --events]` | JSON Schema of the Yoho file, or of `x-yoho` with `--ext`. |
 | `setup [--plan] [-y] [--containerd-image-store | --no-containerd-image-store]` | Provision the Destination's Servers (interactive). `--plan` only shows the checklist, `-y` applies every needed step. Enables the containerd image store by default without running containers; opt out with `--no-containerd-image-store`. See [Server setup](setup.md). |
-| `plan [--version V] [--detailed-exitcode]` | Read-only diff of the configuration against the Server: containers, Proxy routes, Proxy, Tunnel, Scheduled Jobs. Nothing is built or changed. With `--detailed-exitcode`: exit 0 no changes, 1 error, 2 changes. With scoped access the Gate plans (Services, routes and the Proxy only) with its limits applied, as a scoped deploy would; it needs the `deploy` grant. See [Team access](team-access.md). |
-| `apply [--refresh] [--scan] [--auto-approve] [--version V] [--skip-build] [--cutover-resume] [--cutover-allow-empty] [--lock-wait[=D]]` | Show the plan, ask `yes`, take the Destination lock, then build, ship, deploy, converge Tunnel and Scheduled Jobs, and remove what was deleted from config. Refuses without a terminal unless `--auto-approve`; `--json` requires `--auto-approve`. With a Destination `migrate` block, cuts over once; see [Migration cutover](configuration.md#migration-cutover-migrate). |
+| `plan [--version V] [--detailed-exitcode] [--out FILE] [--ttl 1h]` | Read-only diff of the configuration against the Server: containers, Proxy routes, Proxy, Tunnel, Scheduled Jobs. Nothing is built or changed. With `--detailed-exitcode`: exit 0 no changes, 1 error, 2 changes. With scoped access the Gate plans (Services, routes and the Proxy only) with its limits applied, as a scoped deploy would; it needs the `deploy` grant. See [Team access](team-access.md). |
+| `apply [--plan FILE] [--refresh] [--scan] [--auto-approve] [--version V] [--skip-build] [--cutover-resume] [--cutover-allow-empty] [--lock-wait[=D]]` | Show the plan, ask `yes`, take the Destination lock, then build, ship, deploy, converge Tunnel and Scheduled Jobs, and remove what was deleted from config. Refuses without a terminal unless `--auto-approve`; `--json` requires `--auto-approve` unless `--plan FILE` supplies the approval. With a Destination `migrate` block, cuts over once; see [Migration cutover](configuration.md#migration-cutover-migrate). |
 | `deploy [--refresh] [--scan] [--skip-build] [--version V] [--cutover-resume] [--cutover-allow-empty] [--lock-wait[=D]]` | Kamal-compatible `apply --auto-approve` without printing the plan (also converges Tunnel and Scheduled Jobs, and runs a pending migration cutover). Takes the Destination lock before building, so a concurrent deploy is refused before it builds; `--lock-wait` waits for it instead (bare flag: 15m, checking every 15s); see [Locks](zero-downtime.md#locks). Version defaults to the git SHA. `--cutover-resume` continues an unfinished cutover; `--cutover-allow-empty` accepts a `migrate.stop` that matches no running container. If the rollout succeeds but the requested Scheduled Jobs cannot be installed or removed (for example no systemd user bus), the exit status is still non-zero, the output ends with `Deployed APP@VERSION to DEST; Scheduled Jobs not installed: REASON` and `--json` emits a `jobs_failed` event (`rollout: "ok"`, `jobs: "failed"`, `version`, `error`) before `finished`. A Gate deploy whose SSH session drops (exit 255) still finishes on the Server; `yoho deploy` reconnects, or `yoho releases` shows the outcome. |
 | `releases` | List Releases on the Server, newest first. |
 | `remove [--volumes [--confirm APP]] [-y]` | Take the Destination off its Servers (like Kamal `remove`): under the Destination lock, remove its Scheduled Jobs, its Proxy routes (not the shared Proxy), its `yoho-<app>-<destination>` containers including one-offs (swarm: `docker stack rm`, then its Swarm secrets), its networks (never the shared `yoho` network), the App directory with its Releases and secrets (not the audit log, see [Audit log](#audit-log)), and images no other Destination's Release keeps. Objects are selected by their exact compose project / stack label, so other Apps, other Destinations and drill projects are never touched. Volumes and Backups are kept, and a later deploy starts on the same data. `--volumes` also deletes the Destination's named volumes (like ONCE `remove --remove-data`): type the App name at the prompt, or pass `--confirm APP` without a terminal. Backups (the local spool and every Backup Target) are never deleted. Shows what it removes and asks `yes` on a terminal unless `-y`; without a terminal, and with `--json`, `-y` is required. `--json` emits `remove_plan` per Server and a final `removed` event (`containers`, `routes`, `networks`, `volumes_removed`, `volumes_kept`). Tunnel ingress rules are not changed. |
@@ -115,7 +115,7 @@ Image references in the plan are the ones the Version would build. Uncommitted w
 
 `yoho config check --offline` needs no SSH key, Docker or password manager. It loads the Yoho file, the compose files and the Destination overlay, validates the schema and `x-yoho`, and checks that every name in `x-yoho.secrets` has a line in `.yoho/secrets` (or `secrets.values`, or is generated) without running any line. It opens no connection and runs no Hook. With `secrets.nonempty` set it skips resolving and prints the warning `secrets.nonempty not verified (--offline)`.
 
-Exit codes: `0` no errors, `1` findings or errors in the checked files (including an invalid `x-yoho` block), `2` the files could not be loaded (unreadable, parse error, failed interpolation, unknown Destination). With `--json` the last event before the process ends is `{"event":"check","ok":true,"errors":0,"warnings":0,"offline":true,"services":3,"secret_keys":5,"time":...}`; findings arrive earlier as `finding` events.
+Exit codes: `0` no errors, `1` findings or errors in the checked files (including an invalid `x-yoho` block), `2` the files could not be loaded (unreadable, parse error, failed interpolation, unknown Destination). With `--json` the check result before the final `finished` event is `{"event":"check","ok":true,"errors":0,"warnings":0,"offline":true,"services":3,"secret_keys":5,"time":...}`; findings arrive earlier as `finding` events.
 
 ```yaml
 # .github/workflows/check.yml
@@ -168,6 +168,12 @@ are required with `--json`. `up`, `down`, and `prune` emit `preview.up`,
 [Previews](previews.md) for configuration (`previews.max_active`), safety limits,
 secrets layering and GitHub Actions.
 
+`prune` records one operation under the template Destination (`previews.from`),
+starting when the first marked preview is revalidated under its Destination lock.
+The record survives preview deletion; query it with
+`yoho status -d TEMPLATE --operation ID`. No Server operation record is created
+until a marked preview passes that revalidation.
+
 Transport choices appear as `transport` events with `host`, `mode`, `reason` and `hint` under `--json`. Plans report the expected transport; apply/deploy can report further fallbacks if a transfer fails. See [Builds & image transport](builds.md#transport).
 
 ## Mesh
@@ -182,3 +188,71 @@ All mesh commands operate on every Server in the Yoho file and support global `-
 | `mesh down` | Remove owned interface, keys, config, unit enablement, state and tagged rules. |
 
 See [WireGuard mesh](mesh.md) for public endpoints, NAT routing and prerequisites.
+
+## Saved plans and operation outcomes
+
+For an unattended operator run, save the exact plan for review, then verify and apply it:
+
+```sh
+yoho plan --out /tmp/yoho-plan.json --ttl 1h
+yoho apply --plan /tmp/yoho-plan.json --auto-approve --json
+```
+
+The version 1 JSON file has `format_version`, `app`, `destination`, `servers`,
+`runtime`, `yoho_version`, `config_digest`, `secret_inventory_digest`,
+`target_version`, optional git `source_revision`, `build_input_digest`, `changes_digest`, `remote_state`, `changes`, `created_at`
+and `expires_at`. Timestamps are UTC RFC 3339. Digests are SHA-256 hex;
+`remote_state` maps Server names to Release fingerprints. `changes` contains
+`kind`, `name`, `server`, `action`, optional `reasons`, and optional `downtime`
+(true means interruption). Descriptive change reasons are SHA-256 hashes, with the complete changes fingerprint in `changes_digest`; structural metadata is preserved. The file contains no secret values. The inventory
+digest covers secret names and current Release generation names only.
+
+Apply rejects expired files, another App or Destination, different Yoho versions,
+and any difference after re-reading inputs and Server state under the deploy
+lock. It prints the changed field names and exits 15 before build or rollout.
+Successful verification emits `plan_verified`. The saved file supplies approval: no second prompt or `--auto-approve` is needed. Verification precedes change output and deploy Hooks. A verified zero-change plan returns success without deploying or reconciling resources. `--plan` cannot be combined with
+`--version`, `--refresh` or `--skip-build`. Put the artifact outside Docker build contexts (or
+exclude it with `.dockerignore`), so writing it does not change build inputs.
+`plan --out` refuses an unconverged `app_dir` with exit 10 and a convergence hint. Converge the move before saving a plan. Members may use ordinary `plan`,
+but saved plans require an Operator.
+
+Mutating commands print an operation ID before work starts. Raw streams (`app exec/run/stats/logs`, audit output) and read-only modes receive no operation header or final event on stdout. Persistent operation records start only after validation, confirmation, connections and applicable locks, at the first mutation; a local build failure stays a known failure. With `--json`, the
+first event is `operation_started` with `operation_id`; subsequent events carry
+the same ID. Audit `run` and `operation_id`, and the Release's `operation_id`,
+identify the same invocation. Gate deploys also emit their reattachable
+`rollout_id`, using that operation ID.
+
+The final `finished` event has `outcome`: `success`, `partial`, `failed` or
+`unknown`. A partial result includes `changed` and `unchanged` Service arrays;
+`jobs_failed` is partial even though the Release is live. Events include
+`schema_version: 1`. `yoho schema --events` prints their versioned JSON Schema
+(draft 2020-12). Schema and other raw artifact commands keep their payload format.
+
+After an interrupted operator mutation, reconnect and query:
+
+```sh
+yoho status --operation OPERATION_ID --json
+```
+
+Operator records live at `<root>/apps/<app>/<destination>/operations/<id>.json`
+with `id`, `command`, `started_at`, `state`, `services`, and the outcome fields.
+Writes are atomic; the newest 50 records are kept. A running record whose deploy
+lock is gone reports `unknown`. A held lock means work may still be running;
+wait and query again. Never treat missing records or an unknown outcome as
+success, or automatically retry a mutation that may already have run. Scoped
+Members recover through the Gate's automatic rollout reattachment and `releases`.
+
+| Exit | Meaning |
+| --- | --- |
+| 0 | Success |
+| 1 | Generic failure |
+| 10 | Mutation configuration or validation error |
+| 11 | Destination lock held |
+| 12 | Cannot connect to the Server before mutation |
+| 13 | Partial outcome, including `jobs_failed` |
+| 14 | Outcome unknown after mutation began |
+| 15 | Stale, expired, incompatible or invalid saved plan |
+
+Codes 10–15 apply to mutating commands; malformed flags/arguments and an unconverged `plan --out` also exit 10. With `--json`, Cobra validation emits one error event. Existing contracts stay unchanged:
+`plan --detailed-exitcode` uses 0/1/2 (unchanged/error/changes), `config check`
+uses 0/1/2, and `app exec` / `app run` pass through the executed command's code.

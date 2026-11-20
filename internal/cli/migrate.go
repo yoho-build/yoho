@@ -270,6 +270,9 @@ func (a *app) rollbackCutoverOn(ctx context.Context, h plan.NamedHost, store *se
 	}
 	start := time.Now()
 	step = u.Step(h.Name, "Roll back cutover %s", j.ID)
+	if err := beginOperation(ctx); err != nil {
+		return err
+	}
 	if err := migrate.Rollback(ctx, h.Host, cf, j, migrate.RollbackOptions{Force: force}); err != nil {
 		hint := ""
 		var drift *migrate.DriftError
