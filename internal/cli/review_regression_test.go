@@ -326,3 +326,27 @@ func TestReviewCutoverRollbackRecordsMutation(t *testing.T) {
 		t.Fatal("cutover rollback ran without operation record")
 	}
 }
+
+func TestOwnSummaryCommandsEndWithTheirSummary(t *testing.T) {
+	oldRoot := release.Root
+	t.Cleanup(func() { release.Root = oldRoot })
+	p := nonemptyApp(t, "compose", "services:\n  web: {image: nginx, restart: unless-stopped}\n", "", "")
+	g := &globals{configPath: p, json: true}
+	root := newRoot(g)
+	var b bytes.Buffer
+	root.SetOut(&b)
+	root.SetErr(io.Discard)
+	root.SetArgs([]string{"config", "check", "--offline", "--json", "-c", p})
+	if err := root.Execute(); err != nil {
+		t.Fatalf("%v\n%s", err, b.String())
+	}
+	lines := strings.Split(strings.TrimSpace(b.String()), "\n")
+	var last map[string]any
+	if err := json.Unmarshal([]byte(lines[len(lines)-1]), &last); err != nil || last["event"] != "check" {
+		t.Fatalf("last event must be check, got:\n%s", b.String())
+	}
+	doctor, _, err := root.Find([]string{"doctor"})
+	if err != nil || !ownSummaryCommand(doctor) {
+		t.Fatalf("doctor must keep its own final summary event: %v", err)
+	}
+}

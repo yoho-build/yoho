@@ -56,7 +56,7 @@ func auditWrap(g *globals, root *cobra.Command) {
 				path := strings.TrimPrefix(cmd.CommandPath(), root.Name()+" ")
 				audited := slices.Contains(auditedCommands, path)
 				local := slices.Contains(localMutations, path)
-				quiet := rawOutputCommand(cmd) || readOnlyMode(cmd, g.json)
+				quiet := rawOutputCommand(cmd) || readOnlyMode(cmd, g.json) || ownSummaryCommand(cmd)
 				if rawOutputCommand(cmd) {
 					mode := ui.Human
 					if g.json {
@@ -561,6 +561,13 @@ func operationProgress(ctx context.Context) func(context.Context, string, string
 func rawOutputCommand(cmd *cobra.Command) bool {
 	path := strings.TrimPrefix(cmd.CommandPath(), cmd.Root().Name()+" ")
 	return slices.Contains([]string{"schema", "audit", "config show", "secrets print", "skill print", "app exec", "app run", "app stats", "app logs", "access audit"}, path)
+}
+
+// ownSummaryCommand reports read-only commands whose documented last --json
+// event is their own summary (`doctor`, `check`); no `finished` event follows it.
+func ownSummaryCommand(cmd *cobra.Command) bool {
+	path := strings.TrimPrefix(cmd.CommandPath(), cmd.Root().Name()+" ")
+	return slices.Contains([]string{"doctor", "config check"}, path)
 }
 
 func operationRemoved(ctx context.Context) {
