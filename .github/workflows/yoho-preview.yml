@@ -56,7 +56,7 @@ jobs:
         if: github.event.action != 'closed'
       - name: Configure SSH
         env:
-          PREVIEW_SSH_KEY: ${{ secrets.SSH_KEY }}
+          PREVIEW_SSH_KEY: ${{ secrets.SSH_KEY || secrets.PREVIEW_SSH_KEY }}
           PREVIEW_KNOWN_HOSTS: ${{ inputs.ssh-known-hosts }}
         run: |
           set -eu
@@ -79,7 +79,17 @@ jobs:
           PREVIEW_NUMBER: ${{ github.event.number }}
           PREVIEW_BRANCH: ${{ github.head_ref }}
           OP_SERVICE_ACCOUNT_TOKEN: ${{ secrets.OP_SERVICE_ACCOUNT_TOKEN }}
-        run: yoho preview up --name "pr-$PREVIEW_NUMBER" --pr "$PREVIEW_NUMBER" --branch "$PREVIEW_BRANCH"
+        run: |
+          set -eu
+          help=$(yoho preview up --help)
+          set -- preview up --name "pr-$PREVIEW_NUMBER"
+          if printf '%s\n' "$help" | grep -q -- '--pr'; then
+            set -- "$@" --pr "$PREVIEW_NUMBER"
+          fi
+          if printf '%s\n' "$help" | grep -q -- '--branch'; then
+            set -- "$@" --branch "$PREVIEW_BRANCH"
+          fi
+          yoho "$@"
       - name: Remove preview
         if: github.event.action == 'closed'
         working-directory: ${{ inputs.app-dir }}
@@ -88,9 +98,8 @@ jobs:
         run: yoho preview down --name "pr-$PREVIEW_NUMBER" --yes
 
   prune:
-    # Opt-in safety net: runs only when prune-older-than is passed or when
-    # triggered on a schedule with vars.YOHO_PREVIEW_PRUNE_OLDER_THAN set.
-    if: (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || inputs.prune-older-than != '') && (inputs.prune-older-than != '' || vars.YOHO_PREVIEW_PRUNE_OLDER_THAN != '')
+    # Opt-in safety net: requires an age threshold or keep count.
+    if: (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || inputs.prune-older-than != '' || inputs.prune-keep != '') && (inputs.prune-older-than != '' || vars.YOHO_PREVIEW_PRUNE_OLDER_THAN != '' || inputs.prune-keep != '' || vars.YOHO_PREVIEW_PRUNE_KEEP != '')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -102,7 +111,7 @@ jobs:
           version: ${{ inputs.yoho-version || 'latest' }}
       - name: Configure SSH
         env:
-          PREVIEW_SSH_KEY: ${{ secrets.SSH_KEY }}
+          PREVIEW_SSH_KEY: ${{ secrets.SSH_KEY || secrets.PREVIEW_SSH_KEY }}
           PREVIEW_KNOWN_HOSTS: ${{ inputs.ssh-known-hosts || vars.PREVIEW_KNOWN_HOSTS }}
         run: |
           set -eu
@@ -125,8 +134,20 @@ jobs:
           PRUNE_KEEP: ${{ inputs.prune-keep || vars.YOHO_PREVIEW_PRUNE_KEEP }}
         run: |
           set -eu
-          set -- preview prune --older-than "$PRUNE_OLDER_THAN" --yes
-          if [ -n "$PRUNE_KEEP" ]; then
-            set -- "$@" --keep "$PRUNE_KEEP"
+          if ! yoho preview prune --help >/dev/null 2>&1; then
+            echo "::notice::Installed Yoho does not support preview prune; skipping"
+            exit 0
+          fi
+          set -- preview prune --yes
+          has_filter=false
+          case "$PRUNE_OLDER_THAN" in
+            *[![:space:]]*) set -- "$@" --older-than "$PRUNE_OLDER_THAN"; has_filter=true ;;
+          esac
+          case "$PRUNE_KEEP" in
+            *[![:space:]]*) set -- "$@" --keep "$PRUNE_KEEP"; has_filter=true ;;
+          esac
+          if [ "$has_filter" = false ]; then
+            echo "::error::Set prune-older-than or prune-keep" >&2
+            exit 1
           fi
           yoho "$@"

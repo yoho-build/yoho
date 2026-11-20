@@ -17,6 +17,7 @@ type previewWorkflow struct {
 			Name string            `yaml:"name"`
 			Uses string            `yaml:"uses"`
 			With map[string]string `yaml:"with"`
+			Env  map[string]string `yaml:"env"`
 			Run  string            `yaml:"run"`
 		} `yaml:"steps"`
 	} `yaml:"jobs"`
@@ -106,5 +107,65 @@ func TestPreviewWorkflowHasOptInPruneJob(t *testing.T) {
 	}
 	if !foundPrune {
 		t.Fatal("prune job does not run preview prune --older-than ... --yes")
+	}
+}
+
+func TestPreviewWorkflowFeatureDetection(t *testing.T) {
+	w := readPreviewWorkflow(t)
+	var up, prune string
+	for _, s := range w.Jobs["preview"].Steps {
+		if s.Name == "Update preview" {
+			up = s.Run
+		}
+	}
+	for _, s := range w.Jobs["prune"].Steps {
+		if s.Name == "Prune stale previews" {
+			prune = s.Run
+		}
+		if s.Name == "Configure SSH" && !strings.Contains(s.Env["PREVIEW_SSH_KEY"], "|| secrets.PREVIEW_SSH_KEY") {
+			t.Fatal("schedule SSH key fallback missing")
+		}
+	}
+	if up == "" || prune == "" {
+		t.Fatal("missing scripts")
+	}
+	for _, tc := range []struct {
+		name, script, help, age, keep, want string
+		supported, fail                     bool
+	}{
+		{name: "legacy up", script: up, want: "up\n--name\npr-12\n"},
+		{name: "modern up", script: up, help: "--pr int --branch string", want: "up\n--name\npr-12\n--pr\n12\n--branch\nfeat/demo\n"},
+		{name: "partial up", script: up, help: "--branch string", want: "up\n--name\npr-12\n--branch\nfeat/demo\n"},
+		{name: "legacy prune", script: prune, age: "7d", want: "::notice::"},
+		{name: "age prune", script: prune, supported: true, age: "7d", want: "prune\n--yes\n--older-than\n7d\n"},
+		{name: "keep only", script: prune, supported: true, age: " \t", keep: "0", want: "prune\n--yes\n--keep\n0\n"},
+		{name: "both filters", script: prune, supported: true, age: "7d", keep: "2", want: "prune\n--yes\n--older-than\n7d\n--keep\n2\n"},
+		{name: "blank filters", script: prune, supported: true, age: " \n", keep: "\t", want: "::error::", fail: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			bin := t.TempDir()
+			stub := `#!/bin/sh
+set -eu
+if [ "${3:-}" = --help ]; then
+  if [ "$2" = up ]; then printf '%s\n' "$UP_HELP"; exit 0; fi
+  if [ "$PRUNE_SUPPORTED" = true ]; then exit 0; fi
+  exit 1
+fi
+printf '%s\n' "$@"
+`
+			if err := os.WriteFile(filepath.Join(bin, "yoho"), []byte(stub), 0700); err != nil {
+				t.Fatal(err)
+			}
+			cmd := exec.Command("sh", "-c", tc.script)
+			supported := "false"
+			if tc.supported {
+				supported = "true"
+			}
+			cmd.Env = append(os.Environ(), "PATH="+bin+":"+os.Getenv("PATH"), "UP_HELP="+tc.help, "PRUNE_SUPPORTED="+supported, "PRUNE_OLDER_THAN="+tc.age, "PRUNE_KEEP="+tc.keep, "PREVIEW_NUMBER=12", "PREVIEW_BRANCH=feat/demo")
+			out, err := cmd.CombinedOutput()
+			if (err != nil) != tc.fail || !strings.Contains(string(out), tc.want) {
+				t.Fatalf("err=%v output=%q want=%q", err, out, tc.want)
+			}
+		})
 	}
 }

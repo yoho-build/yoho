@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"reflect"
 	"strings"
 	"time"
 
@@ -49,7 +50,7 @@ Older preview records without timestamps are skipped by --older-than unless
 			u = a.ui
 
 			var olderThan time.Duration
-			if strings.TrimSpace(olderThanStr) != "" {
+			if cmd.Flags().Changed("older-than") {
 				olderThan, err = deploy.ParsePreviewDuration(olderThanStr)
 				if err != nil {
 					return a.fail(&hintError{err.Error(), "pass a positive duration such as --older-than 7d or --older-than 48h"})
@@ -92,7 +93,7 @@ Older preview records without timestamps are skipped by --older-than unless
 				cand deploy.PreviewPruneCandidate
 			}
 			var targets []hostCandidate
-			var skippedUnknown []string
+			skippedUnknown := []string{}
 
 			for _, h := range hosts {
 				previews, err := deploy.ListPreviews(ctx, h.Host, a.cfg.App)
@@ -174,7 +175,13 @@ Older preview records without timestamps are skipped by --older-than unless
 			for _, t := range targets {
 				rec := t.cand.Record
 				step := a.ui.Step(t.host.Name, "Remove preview %s and its volumes", rec.Name)
-				p, hint, rerr := a.removePreviewOnHost(ctx, t.host, rec.Name, rec.Destination, "preview prune")
+				p, hint, rerr := a.removePreviewOnHost(ctx, t.host, rec.Name, rec.Destination, "preview prune", &rec)
+				if errors.Is(rerr, errPreviewChanged) {
+					step.Skip("preview changed since selection")
+					outcomes = append(outcomes, map[string]any{"name": rec.Name, "server": t.host.Name, "status": "skipped_changed"})
+					outcomeParts = append(outcomeParts, rec.Name+" (skipped_changed)")
+					continue
+				}
 				if rerr != nil {
 					step.Fail(rerr, hint)
 					failed = append(failed, map[string]string{"name": rec.Name, "server": t.host.Name, "error": rerr.Error()})
@@ -233,7 +240,7 @@ Older preview records without timestamps are skipped by --older-than unless
 // removePreviewOnHost runs the single verified preview teardown path shared by
 // `preview down` and `preview prune`: collision check, CheckPreviewDir,
 // per-preview Destination lock, and deploy.RemovePreview.
-func (a *app) removePreviewOnHost(ctx context.Context, h plan.NamedHost, previewName, dest, command string) (*deploy.PreviewRecord, string, error) {
+func (a *app) removePreviewOnHost(ctx context.Context, h plan.NamedHost, previewName, dest, command string, selected *deploy.PreviewRecord) (*deploy.PreviewRecord, string, error) {
 	if _, exists := a.cfg.Destinations[dest]; exists {
 		return nil, "configured Destinations cannot be removed as previews",
 			fmt.Errorf("preview %q collides with configured Destination %s", previewName, dest)
@@ -249,11 +256,42 @@ func (a *app) removePreviewOnHost(ctx context.Context, h plan.NamedHost, preview
 		return nil, hintFor(err, ""), err
 	}
 	defer func() { _ = unlock(context.WithoutCancel(ctx)) }()
+	if selected != nil {
+		current, err := deploy.ReadPreview(ctx, h.Host, a.cfg.App, dest)
+		if err != nil {
+			return nil, "only valid marked previews can be removed", err
+		}
+		if current != nil && !reflect.DeepEqual(current, selected) {
+			return nil, "", errPreviewChanged
+		}
+	}
 	p, err := deploy.RemovePreview(ctx, h.Host, a.cfg.App, dest, h.Server.Sudo)
 	if err != nil {
 		return nil, "only marked previews can be removed; rerun to finish an interrupted teardown", err
 	}
 	return p, "", nil
+}
+
+var errPreviewChanged = errors.New("preview changed since selection")
+
+// admitPreview is called under the Destination lock. The App lock makes
+// counting and reserving a slot atomic across different preview names.
+func (a *app) admitPreview(ctx context.Context, h remote.Host, record deploy.PreviewRecord) (err error) {
+	unlock, err := a.waitLock(ctx, func(ctx context.Context) (func(context.Context) error, error) {
+		return deploy.AcquirePreviewLock(ctx, h, a.cfg.App, deploy.LockInfo{Performer: performer(), Command: "preview up"})
+	})
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if uerr := unlock(context.WithoutCancel(ctx)); uerr != nil && err == nil {
+			err = uerr
+		}
+	}()
+	if err := a.checkPreviewMaxActive(ctx, h); err != nil {
+		return err
+	}
+	return deploy.MarkPreview(ctx, h, record)
 }
 
 func (a *app) checkPreviewMaxActive(ctx context.Context, h remote.Host) error {

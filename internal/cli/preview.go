@@ -73,7 +73,7 @@ func previewCmd(g *globals) *cobra.Command {
 			defer closeHosts()
 			h := hosts[0]
 			step := a.ui.Step(h.Name, "Remove preview %s and its volumes", a.previewName)
-			p, hint, err := a.removePreviewOnHost(ctx, h, a.previewName, a.destName, "preview down")
+			p, hint, err := a.removePreviewOnHost(ctx, h, a.previewName, a.destName, "preview down", nil)
 			if err != nil {
 				step.Fail(err, hint)
 				return &silentError{err}

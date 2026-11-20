@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -13,36 +12,50 @@ import (
 
 	"github.com/yoho-build/yoho/internal/deploy"
 	"github.com/yoho-build/yoho/internal/release"
+	"github.com/yoho-build/yoho/internal/remote"
 )
 
-// YOHO_E2E=1 YOHO_E2E_SSH=user@host with local Docker: create 3 previews plus
+// YOHO_E2E=1 [YOHO_E2E_SSH=user@host]: create 3 previews plus
 // a non-preview production resource, run `yoho preview prune --keep 1 --yes`,
 // and verify only the newest preview remains and no non-preview resource was touched.
 func TestE2EPreviewPrune(t *testing.T) {
 	target := os.Getenv("YOHO_E2E_SSH")
-	if os.Getenv("YOHO_E2E") != "1" || target == "" {
-		t.Skip("YOHO_E2E=1 and YOHO_E2E_SSH not set")
-	}
-	if _, err := exec.LookPath("docker"); err != nil {
-		t.Skip("docker not installed")
+	if os.Getenv("YOHO_E2E") != "1" {
+		t.Skip("YOHO_E2E=1 not set")
 	}
 
 	ctx := context.Background()
-	appName := fmt.Sprintf("e2eprune%d", time.Now().UnixNano()%1_000_000)
-	rootDir := t.TempDir()
+	appName := fmt.Sprintf("e2eprune%d", time.Now().UnixNano())
+	if target == "" {
+		target = "local"
+		oldConnect := connectServer
+		connectServer = func(name, _ string, _ bool, _ remote.SSHOptions) (remote.Host, error) {
+			return &remote.Local{HostName: name}, nil
+		}
+		t.Cleanup(func() { connectServer = oldConnect })
+	}
+	h, err := connectServer("s", target, false, remote.SSHOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = h.Close() })
+	rootDir, err := h.Output(ctx, remote.Cmd{Script: "set -eu\nmktemp -d /tmp/yoho-e2e-prune.XXXXXXXX"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = h.Run(ctx, remote.Cmd{Script: "set -eu\nrm -rf " + remote.Quote(rootDir)}) })
 	workDir := t.TempDir()
 
 	yohoCfg := fmt.Sprintf(`app: %s
-root: %s
 servers:
-  s: {ssh: %s}
+  s: {ssh: %q, root: %q}
 destinations:
   production: {servers: [s]}
   staging: {servers: [s]}
 previews:
   from: staging
   host: "{name}.preview.local"
-`, appName, rootDir, target)
+`, appName, target, rootDir)
 	composeCfg := `services:
   web:
     image: busybox:latest
@@ -63,7 +76,11 @@ previews:
 
 	dockerRun := func(args ...string) {
 		t.Helper()
-		out, err := exec.CommandContext(ctx, "docker", args...).CombinedOutput()
+		script := "set -eu\ndocker"
+		for _, arg := range args {
+			script += " " + remote.Quote(arg)
+		}
+		out, err := h.Output(ctx, remote.Cmd{Script: script})
 		if err != nil {
 			t.Fatalf("docker %s: %v\n%s", strings.Join(args, " "), err, out)
 		}
@@ -71,11 +88,8 @@ previews:
 
 	prodProject := release.ProjectName(appName, "production")
 	prodDir := release.AppDir(appName, "production")
-	if err := os.MkdirAll(prodDir, 0o700); err != nil {
-		t.Fatal(err)
-	}
 	prodMarker := filepath.Join(prodDir, "keep.txt")
-	if err := os.WriteFile(prodMarker, []byte("production"), 0o600); err != nil {
+	if err := h.WriteFile(ctx, prodMarker, []byte("production"), 0o600, false); err != nil {
 		t.Fatal(err)
 	}
 	prodVol := prodProject + "_data"
@@ -88,8 +102,8 @@ previews:
 		"-v", prodVol+":/data",
 		"busybox:latest", "sleep", "300")
 	t.Cleanup(func() {
-		exec.Command("docker", "rm", "-fv", prodContainer).Run()
-		exec.Command("docker", "volume", "rm", "-f", prodVol).Run()
+		h.Run(ctx, remote.Cmd{Script: "docker rm -fv " + remote.Quote(prodContainer)})
+		h.Run(ctx, remote.Cmd{Script: "docker volume rm -f " + remote.Quote(prodVol)})
 	})
 
 	now := time.Now().UTC()
@@ -108,9 +122,6 @@ previews:
 		vol := proj + "_data"
 		ctr := proj + "-web-1"
 		dir := release.AppDir(appName, dest)
-		if err := os.MkdirAll(dir, 0o700); err != nil {
-			t.Fatal(err)
-		}
 		ts := now.Add(-sp.age)
 		rec := deploy.PreviewRecord{
 			App:            appName,
@@ -127,7 +138,7 @@ previews:
 		if err != nil {
 			t.Fatal(err)
 		}
-		if err := os.WriteFile(filepath.Join(dir, "preview.json"), b, 0o600); err != nil {
+		if err := h.WriteFile(ctx, filepath.Join(dir, "preview.json"), b, 0o600, false); err != nil {
 			t.Fatal(err)
 		}
 		dockerRun("volume", "create", "--label", "com.docker.compose.project="+proj, vol)
@@ -138,8 +149,8 @@ previews:
 			"-v", vol+":/data",
 			"busybox:latest", "sleep", "300")
 		t.Cleanup(func() {
-			exec.Command("docker", "rm", "-fv", ctr).Run()
-			exec.Command("docker", "volume", "rm", "-f", vol).Run()
+			h.Run(ctx, remote.Cmd{Script: "docker rm -fv " + remote.Quote(ctr)})
+			h.Run(ctx, remote.Cmd{Script: "docker volume rm -f " + remote.Quote(vol)})
 		})
 	}
 
@@ -158,13 +169,13 @@ previews:
 	for _, removed := range []string{"pr-1", "pr-2"} {
 		dest := "preview-" + removed
 		proj := release.ProjectName(appName, dest)
-		if _, err := os.Lstat(release.AppDir(appName, dest)); !os.IsNotExist(err) {
+		if err := h.Run(ctx, remote.Cmd{Script: "test ! -e " + remote.Quote(release.AppDir(appName, dest))}); err != nil {
 			t.Errorf("%s App dir still exists: %v", removed, err)
 		}
-		if err := exec.CommandContext(ctx, "docker", "container", "inspect", proj+"-web-1").Run(); err == nil {
+		if err := h.Run(ctx, remote.Cmd{Script: "docker container inspect " + remote.Quote(proj+"-web-1")}); err == nil {
 			t.Errorf("%s container still exists", removed)
 		}
-		if err := exec.CommandContext(ctx, "docker", "volume", "inspect", proj+"_data").Run(); err == nil {
+		if err := h.Run(ctx, remote.Cmd{Script: "docker volume inspect " + remote.Quote(proj+"_data")}); err == nil {
 			t.Errorf("%s volume still exists", removed)
 		}
 	}
@@ -172,24 +183,24 @@ previews:
 	// Verify newest preview (pr-3) remains intact.
 	pr3Dest := "preview-pr-3"
 	pr3Proj := release.ProjectName(appName, pr3Dest)
-	if _, err := os.Stat(filepath.Join(release.AppDir(appName, pr3Dest), "preview.json")); err != nil {
+	if _, err := h.ReadFile(ctx, filepath.Join(release.AppDir(appName, pr3Dest), "preview.json"), false); err != nil {
 		t.Errorf("newest preview pr-3 marker missing: %v", err)
 	}
-	if err := exec.CommandContext(ctx, "docker", "container", "inspect", pr3Proj+"-web-1").Run(); err != nil {
+	if err := h.Run(ctx, remote.Cmd{Script: "docker container inspect " + remote.Quote(pr3Proj+"-web-1")}); err != nil {
 		t.Errorf("newest preview pr-3 container missing: %v", err)
 	}
-	if err := exec.CommandContext(ctx, "docker", "volume", "inspect", pr3Proj+"_data").Run(); err != nil {
+	if err := h.Run(ctx, remote.Cmd{Script: "docker volume inspect " + remote.Quote(pr3Proj+"_data")}); err != nil {
 		t.Errorf("newest preview pr-3 volume missing: %v", err)
 	}
 
 	// Verify non-preview production resources are untouched.
-	if _, err := os.Stat(prodMarker); err != nil {
+	if _, err := h.ReadFile(ctx, prodMarker, false); err != nil {
 		t.Errorf("production App dir touched: %v", err)
 	}
-	if err := exec.CommandContext(ctx, "docker", "container", "inspect", prodContainer).Run(); err != nil {
+	if err := h.Run(ctx, remote.Cmd{Script: "docker container inspect " + remote.Quote(prodContainer)}); err != nil {
 		t.Errorf("production container touched: %v", err)
 	}
-	if err := exec.CommandContext(ctx, "docker", "volume", "inspect", prodVol).Run(); err != nil {
+	if err := h.Run(ctx, remote.Cmd{Script: "docker volume inspect " + remote.Quote(prodVol)}); err != nil {
 		t.Errorf("production volume touched: %v", err)
 	}
 }

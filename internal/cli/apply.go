@@ -350,12 +350,6 @@ func (a *app) apply(ctx context.Context, o applyOptions) (err error) {
 	}
 	defer s.close()
 
-	if a.previewName != "" {
-		if err = a.checkPreviewMaxActive(ctx, s.hosts[0].Host); err != nil {
-			return err
-		}
-	}
-
 	// Fail before building or changing anything when the managed Tunnel's
 	// token cannot be resolved.
 	if _, terr := tunnelToken(s.store, a.proxyConfig().Tunnel); terr != nil {
@@ -399,7 +393,7 @@ func (a *app) apply(ctx context.Context, o applyOptions) (err error) {
 		}
 	}()
 	if a.previewName != "" {
-		if err = deploy.MarkPreview(ctx, s.hosts[0].Host, a.previewRecord(s)); err != nil {
+		if err = a.admitPreview(ctx, s.hosts[0].Host, a.previewRecord(s)); err != nil {
 			return err
 		}
 	}
