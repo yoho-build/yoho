@@ -63,11 +63,29 @@ func TestPruneKeepsFifty(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if err := Prune(ctx, h, "shop", "production", "op51"); err != nil {
+	counted := &countingHost{Host: h}
+	if err := Prune(ctx, counted, "shop", "production", "op51"); err != nil {
 		t.Fatal(err)
+	}
+	if counted.calls != 1 {
+		t.Fatalf("pruning used %d remote commands", counted.calls)
 	}
 	files, err := os.ReadDir(Dir("shop", "production"))
 	if err != nil || len(files) != 50 {
 		t.Fatalf("files=%d %v", len(files), err)
 	}
+}
+
+type countingHost struct {
+	remote.Host
+	calls int
+}
+
+func (h *countingHost) Run(ctx context.Context, c remote.Cmd) error {
+	h.calls++
+	return h.Host.Run(ctx, c)
+}
+func (h *countingHost) Output(ctx context.Context, c remote.Cmd) (string, error) {
+	h.calls++
+	return h.Host.Output(ctx, c)
 }

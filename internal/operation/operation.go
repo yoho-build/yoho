@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"path"
 	"regexp"
-	"sort"
 	"time"
 
 	"github.com/yoho-build/yoho/internal/release"
@@ -78,29 +77,14 @@ func Read(ctx context.Context, h remote.Host, app, dest, id string) (Record, err
 
 // Prune retains the newest 50 records, always retaining the current operation.
 func Prune(ctx context.Context, h remote.Host, app, dest, current string) error {
-	out, err := h.Output(ctx, remote.Cmd{Script: "set -eu\nfor f in " + remote.Quote(Dir(app, dest)) + "/*.json; do [ -f \"$f\" ] || continue; basename \"$f\"; done"})
-	if err != nil {
-		return err
+	if !ValidID(current) {
+		return fmt.Errorf("invalid operation ID")
 	}
-	var records []Record
-	for _, name := range bytes.Fields([]byte(out)) {
-		id := string(bytes.TrimSuffix(name, []byte(".json")))
-		if !ValidID(id) {
-			continue
-		}
-		r, e := Read(ctx, h, app, dest, id)
-		if e != nil {
-			return e
-		}
-		records = append(records, r)
-	}
-	sort.Slice(records, func(i, j int) bool { return records[i].Started.After(records[j].Started) })
-	for i, r := range records {
-		if i >= 50 && r.ID != current {
-			if err = h.Run(ctx, remote.Cmd{Script: "set -eu\nrm -f " + remote.Quote(path.Join(Dir(app, dest), r.ID+".json"))}); err != nil {
-				return err
-			}
-		}
-	}
-	return nil
+	dir := remote.Quote(Dir(app, dest))
+	// mtime tracks atomic updates. Paths are generated IDs, never shell input.
+	script := safepath.AppLink(app, dest) + safepath.Script("operation pruning") + "yoho_path " + dir + "\ncd " + dir + "\n" +
+		"ls -1t ./*.json 2>/dev/null | { n=0; while IFS= read -r f; do\n" +
+		"case \"$f\" in ./" + current + ".json) continue;; esac\n" +
+		"n=$((n + 1)); [ \"$n\" -lt 50 ] || rm -f -- \"$f\"\ndone; }\n"
+	return h.Run(ctx, remote.Cmd{Script: script})
 }

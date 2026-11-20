@@ -267,7 +267,18 @@ func TestReleaseCommandFailureAborts(t *testing.T) {
 		}
 		return respond(nil)(s)
 	}
-	_, err := Compose{}.Deploy(context.Background(), testDeploy(t, h, nil))
+	d := testDeploy(t, h, nil)
+	progress := map[string]string{}
+	d.OnService = func(_ context.Context, name, state string) { progress[name] = state }
+	_, err := Compose{}.Deploy(context.Background(), d)
+	if len(progress) != len(d.Project.Services) {
+		t.Fatalf("unattempted Services omitted: %v", progress)
+	}
+	for name, state := range progress {
+		if state != "unchanged" {
+			t.Errorf("prerequisite %s counted as %s", name, state)
+		}
+	}
 	if err == nil || !strings.Contains(err.Error(), "release command") {
 		t.Fatalf("err = %v", err)
 	}

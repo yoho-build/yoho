@@ -289,6 +289,7 @@ func (c Compose) Deploy(ctx context.Context, d *plan.Deploy) (_ *release.Release
 	}()
 
 	for _, sp := range plans {
+		r.report(ctx, sp.Name, "unchanged")
 		f := r.fact(sp.Name)
 		if sp.proxied() {
 			f.ProxyRoute = "not-attempted"

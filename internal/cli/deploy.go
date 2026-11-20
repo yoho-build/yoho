@@ -205,7 +205,7 @@ func (a *app) openSession(ctx context.Context, ver string, readOnly, refresh boo
 		if !hasBuild {
 			err = errors.New("nothing to refresh: no Service has build:")
 			step.Fail(err, "add build: to a Service, or deploy without --refresh")
-			return nil, &silentError{err}
+			return nil, &silentError{&validationError{err}}
 		}
 	}
 	keys, _ := a.secretKeys(r)
@@ -362,6 +362,9 @@ func (a *app) buildAndShip(ctx context.Context, s *session, o applyOptions) (map
 		for _, h := range hosts[1:] {
 			others = append(others, h.Host)
 		}
+		if err := beginOperation(ctx); err != nil {
+			return nil, err
+		}
 		shipped, serr := build.ShipFromServer(ctx, hosts[0].Host, others, built, step.Output())
 		if serr != nil {
 			step.Fail(serr, "check Docker on the other Servers, or build with builder.location=local")
@@ -374,6 +377,9 @@ func (a *app) buildAndShip(ctx context.Context, s *session, o applyOptions) (map
 		var hs []remote.Host
 		for _, h := range hosts {
 			hs = append(hs, h.Host)
+		}
+		if err := beginOperation(ctx); err != nil {
+			return nil, err
 		}
 		dres, serr := build.ShipDirect(ctx, builder, hs, built, platform, step.Output())
 		if serr != nil {
@@ -391,6 +397,9 @@ func (a *app) buildAndShip(ctx context.Context, s *session, o applyOptions) (map
 		var hs []remote.Host
 		for _, h := range hosts {
 			hs = append(hs, h.Host)
+		}
+		if err := beginOperation(ctx); err != nil {
+			return nil, err
 		}
 		shipOut := store.Redactor(step.Output())
 		res, perr := transport.Push(ctx, transport.PushOptions{
@@ -1045,6 +1054,9 @@ after pre-connect.`,
 				if err := hook(ctx, "pre-proxy-reboot"); err != nil {
 					return err
 				}
+				if err := beginOperation(ctx); err != nil {
+					return err
+				}
 				if err := proxy.Boot(ctx, h.Host, a.proxyConfig(), step.Output()); err != nil {
 					step.Fail(err, "check that the Proxy ports are free on the Server")
 					return &silentError{err}
@@ -1151,6 +1163,9 @@ func (a *app) swarmExec(cmd *cobra.Command, svc string, command []string, term t
 		if err == nil && id != "" {
 			defer h.Close()
 			script := "docker exec " + swarmExecFlags(term) + remote.Quote(id) + " " + remote.QuoteArgs(command...)
+			if err := beginOperation(ctx); err != nil {
+				return err
+			}
 			if term.attached() {
 				return commandExit(h.RunTerminal(ctx, script, term.tty, cmd.InOrStdin(), cmd.OutOrStdout(), cmd.ErrOrStderr()))
 			}
@@ -1216,4 +1231,25 @@ var _ = release.ProjectName
 
 func (a *app) transportDecision(host string, d transport.Decision) {
 	a.ui.Event("transport", d.Message(host), map[string]any{"host": host, "mode": d.Mode, "reason": d.Reason, "hint": d.Hint})
+}
+
+func (s *session) replaceStore(store *secrets.Store) {
+	values := map[string]string{}
+	if s.store != nil {
+		for _, key := range s.store.Keys() {
+			value, _ := s.store.Get(key)
+			values["previous/"+key] = value
+		}
+	}
+	for _, key := range store.Keys() {
+		value, _ := store.Get(key)
+		values["current/"+key] = value
+	}
+	combined := secrets.New(values)
+	s.store = store
+	s.a.ui.SetRedact(combined.RedactString)
+	if s.red != nil {
+		_ = s.red.Flush()
+	}
+	s.red = combined.Redactor(os.Stdout)
 }

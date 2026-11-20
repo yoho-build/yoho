@@ -62,6 +62,9 @@ func tunnelCmd(g *globals) *cobra.Command {
 			var urls []string
 			for _, h := range hosts {
 				step := a.ui.Step(h.Name, "Start %s (%s)", proxy.TunnelContainer, mode)
+				if err := beginOperation(ctx); err != nil {
+					return err
+				}
 				st, err := proxy.EnsureTunnelWith(ctx, h.Host, cfg, token, step.Output(), a.tunnelOptions())
 				if err != nil {
 					step.Fail(err, "check `yoho tunnel status`, outbound access to Cloudflare (port 7844) and that the token is valid")
@@ -132,6 +135,9 @@ func tunnelCmd(g *globals) *cobra.Command {
 			defer closeHosts()
 			for _, h := range hosts {
 				step := a.ui.Step(h.Name, "Remove %s", proxy.TunnelContainer)
+				if err := beginOperation(cmd.Context()); err != nil {
+					return err
+				}
 				if err := proxy.RemoveTunnel(cmd.Context(), h.Host, step.Output()); err != nil {
 					step.Fail(err, "check that the user can run docker on the Server")
 					return &silentError{err}

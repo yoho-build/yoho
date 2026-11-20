@@ -501,11 +501,11 @@ func (c *call) finishDeploy(ctx context.Context, s *Settings, r *composefile.Res
 
 // composeDeploy is deploy.Compose.Deploy; tests replace it to drop the client mid-rollout.
 var composeDeploy = func(ctx context.Context, d *plan.Deploy) (*release.Release, error) {
-	return deploy.Compose{}.Deploy(ctx, d)
+	return deploy.Compose{LockHeld: d.OperationID != ""}.Deploy(ctx, d)
 }
 
 var composeRollback = func(ctx context.Context, d *plan.Deploy, version string) (*release.Release, error) {
-	return deploy.Compose{}.Rollback(ctx, d, version)
+	return deploy.Compose{LockHeld: d.OperationID != ""}.Rollback(ctx, d, version)
 }
 
 // vet loads a Member's resolved compose project and checks it against the

@@ -236,3 +236,10 @@ After an operator connection drops, reconnect with `yoho status --operation ID
 Releases before retrying. Do not infer rollback from an interrupted client.
 Records retain 50 operations. Gate deploys emit a reattachable `rollout_id` (the
 operation ID) and reconnect automatically; Members can inspect `yoho releases`.
+
+A saved plan is the approval: `apply --plan FILE --json` needs no second prompt
+or `--auto-approve`. Verification comes before change events and deploy Hooks;
+a verified no-op changes nothing. App-file and Hook contents are fingerprinted.
+`plan --out` refuses an unconverged `app_dir` with exit 10. Raw command streams
+and dry-run modes have no operation envelopes. Pre-mutation failures are known;
+unknown/14 is reserved for interruption after mutation or Gate acceptance.

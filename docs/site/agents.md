@@ -88,3 +88,14 @@ A record with a held lock may still be running. Never equate an interrupted
 client with a failed or rolled-back Server mutation. Records retain the last
 50 operations. Gate deployments emit `rollout_id` and automatically reattach;
 Members can inspect `yoho releases` and ask an Operator to query operation state.
+
+Saved plan files already authorize their contents: `apply --plan FILE --json`
+verifies under the lock before change events or deploy Hooks, without another
+prompt. A verified no-op performs no reconciliation. Saved plan fingerprints
+include shipped App files and local Hooks; descriptive reasons are hashed rather
+than redacted. `plan --out` refuses an unconverged App directory with exit 10.
+Raw passthrough streams and dry-run modes contain no operation envelopes. A local
+build or pre-mutation connection failure is a known failure; only interruption
+after the mutation boundary can be unknown. Interrupted records stay running so
+status can report the live deploy lock. Gate acceptance explicitly marks that
+boundary for a Member, and Gate lock refusal remains exit 11.

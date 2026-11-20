@@ -74,12 +74,12 @@ grant.`,
 			}
 			if out != "" {
 				if err := a.savePlan(cmd.Context(), ver, out, ttl); err != nil {
-					return errors.New(err.Error())
+					return planOutputError(err)
 				}
 				if detailed {
 					p, err := readSavedPlan(out)
 					if err != nil {
-						return errors.New(err.Error())
+						return planOutputError(err)
 					}
 					if ui.HasChanges(p.Changes) {
 						exitFunc(2)
@@ -391,12 +391,12 @@ func (a *app) apply(ctx context.Context, o applyOptions) (err error) {
 		return &validationError{err}
 	}
 	if o.Refresh && a.dest.Runtime == "swarm" {
-		return a.fail(&hintError{"cannot refresh a Swarm Destination", "--refresh supports compose Destinations; on Swarm, change the Version"})
+		return a.fail(&validationError{&hintError{"cannot refresh a Swarm Destination", "--refresh supports compose Destinations; on Swarm, change the Version"}})
 	}
 	// Fail before any work when we could not ask.
-	if o.ShowPlan {
+	if o.ShowPlan && approved == nil {
 		if err = a.confirmPrecheck(o); err != nil {
-			return err
+			return &validationError{err}
 		}
 	}
 	ver, err := a.resolveDeployVersion(o.Version)
@@ -411,7 +411,7 @@ func (a *app) apply(ctx context.Context, o applyOptions) (err error) {
 	} else {
 		u.Title("Deploying %s@%s to %s", a.cfg.App, shortVersion(ver), a.destName)
 	}
-	s, err := a.openSession(ctx, ver, false, o.Refresh)
+	s, err := a.openSession(ctx, ver, approved != nil, o.Refresh)
 	if err != nil {
 		return err
 	}
@@ -421,11 +421,11 @@ func (a *app) apply(ctx context.Context, o applyOptions) (err error) {
 	// token cannot be resolved.
 	if _, terr := tunnelToken(s.store, a.proxyConfig().Tunnel); terr != nil {
 		u.Step("", "Cloudflare Tunnel").Fail(terr, "")
-		return &silentError{terr}
+		return &silentError{&validationError{terr}}
 	}
 
 	deployNeeded := true
-	if o.ShowPlan {
+	if o.ShowPlan && approved == nil {
 		var changes []plan.Change
 		if changes, deployNeeded, err = a.collectChanges(ctx, s, o.Refresh); err != nil {
 			return err
@@ -482,7 +482,7 @@ func (a *app) apply(ctx context.Context, o applyOptions) (err error) {
 		if ferr != nil {
 			return ferr
 		}
-		s.store = store
+		s.replaceStore(store)
 		changes, needed, ferr := a.collectChanges(ctx, s, false)
 		if ferr != nil {
 			return ferr
@@ -491,17 +491,29 @@ func (a *app) apply(ctx context.Context, o applyOptions) (err error) {
 		if ferr != nil {
 			return ferr
 		}
-		if err = approved.validate(a.cfg.App, a.destName, Version, time.Now()); err != nil {
-			return err
-		}
-		if err = approved.compare(current); err != nil {
-			return err
+		noop, verifyErr := a.verifyApproval(approved, current, changes)
+		if verifyErr != nil {
+			return verifyErr
 		}
 		deployNeeded = needed
-		u.Event("plan_verified", "Saved plan verified", map[string]any{"format_version": 1})
+		if noop {
+			return nil
+		}
+		if err = a.hookFunc(ver, "deploy", nil)(ctx, "pre-connect", nil); err != nil {
+			return err
+		}
 	}
-	if err = beginOperation(ctx); err != nil {
+
+	// Refuse before building: the runtime checks again.
+	if err = a.refusePendingRotations(ctx, s.hosts, nil); err != nil {
 		return err
+	}
+	// Preview admission and mesh reconciliation mutate the Server. Verified
+	// no-op plans returned above; start the operation before either mutation.
+	if a.previewName != "" || a.cfg.Network.Mesh == "wireguard" {
+		if err = beginOperation(ctx); err != nil {
+			return err
+		}
 	}
 	if a.previewName != "" {
 		if err = a.admitPreview(ctx, s.hosts[0].Host, a.previewRecord(s)); err != nil {
@@ -509,10 +521,6 @@ func (a *app) apply(ctx context.Context, o applyOptions) (err error) {
 		}
 	}
 	if err = a.reconcileMesh(ctx); err != nil {
-		return err
-	}
-	// Refuse before building: the runtime checks again.
-	if err = a.refusePendingRotations(ctx, s.hosts, nil); err != nil {
 		return err
 	}
 	// A migration cutover is decided (and its tokens resolved) before the
@@ -560,6 +568,9 @@ func (a *app) apply(ctx context.Context, o applyOptions) (err error) {
 		if co.action == migrate.Skip {
 			co = nil
 		} else {
+			if err = beginOperation(ctx); err != nil {
+				return err
+			}
 			if err = co.prepare(ctx); err != nil {
 				return err
 			}
@@ -575,6 +586,9 @@ func (a *app) apply(ctx context.Context, o applyOptions) (err error) {
 		if co != nil {
 			d.Cutover = co.j.ID
 		}
+		if err = beginOperation(ctx); err != nil {
+			return err
+		}
 		preRollout = false
 		if rel, err = a.rollout(ctx, s, d, a.lockedRuntime()); err != nil {
 			return co.failed(ctx, err)
@@ -585,6 +599,9 @@ func (a *app) apply(ctx context.Context, o applyOptions) (err error) {
 				return co.failed(ctx, err)
 			}
 		}
+	}
+	if err = beginOperation(ctx); err != nil {
+		return err
 	}
 	if co == nil || !co.j.TunnelReconciled {
 		tunnelURLs, terr := a.reconcileTunnel(ctx, s)
@@ -641,6 +658,9 @@ func (a *app) deployLock(ctx context.Context, h plan.NamedHost, ver string) (fun
 
 // confirmPrecheck rejects an unconfirmable apply before connecting anywhere.
 func (a *app) confirmPrecheck(o applyOptions) error {
+	if o.PlanFile != "" {
+		return nil
+	}
 	if o.AutoApprove {
 		return nil
 	}
@@ -695,4 +715,31 @@ func addBuildFlags(c *cobra.Command, o *applyOptions) {
 	c.Flags().BoolVar(&o.Refresh, "refresh", false, "Pull base images and rebuild without cache (build Services only; bump image-only Service tags explicitly)")
 	c.Flags().BoolVar(&o.Scan, "scan", false, "Scan locally built images with Trivy or Grype before rollout (warnings only)")
 	c.MarkFlagsMutuallyExclusive("refresh", "skip-build")
+}
+
+func planOutputError(err error) error {
+	var silent *silentError
+	var exit *exitError
+	if errors.As(err, &exit) && exit.code == 15 {
+		if errors.As(err, &silent) {
+			return &silentError{errors.New(err.Error())}
+		}
+		return errors.New(err.Error())
+	}
+	return err
+}
+
+func (a *app) verifyApproval(approved, current *savedPlan, changes []plan.Change) (bool, error) {
+	if err := approved.validate(a.cfg.App, a.destName, Version, time.Now()); err != nil {
+		return false, err
+	}
+	if err := approved.compare(current); err != nil {
+		return false, err
+	}
+	a.ui.Event("plan_verified", "Saved plan verified", map[string]any{"format_version": 1})
+	noop := !ui.HasChanges(changes)
+	if noop {
+		a.ui.Finished(nil, "No changes; saved plan verified")
+	}
+	return noop, nil
 }

@@ -305,7 +305,15 @@ func (a *app) prepareBackupFor(ctx context.Context, name, dest string, needServi
 
 func (a *app) backupLock(h remote.Host, command string) backup.LockFunc {
 	return func(ctx context.Context) (func(context.Context) error, error) {
-		return a.acquireLock(ctx, h, deploy.LockInfo{Command: command})
+		unlock, err := a.acquireLock(ctx, h, deploy.LockInfo{Command: command})
+		if err != nil {
+			return nil, err
+		}
+		if err = beginOperation(ctx); err != nil {
+			_ = unlock(context.WithoutCancel(ctx))
+			return nil, err
+		}
+		return unlock, nil
 	}
 }
 

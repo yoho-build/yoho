@@ -92,6 +92,9 @@ the routes were verified.`,
 			for _, h := range hosts {
 				hook := a.proxyHookFor("upgrade", a.serverVersion(ctx, h.Host), []plan.NamedHost{h})
 				step := a.ui.Step(h.Name, "Upgrade %s", proxy.ContainerName)
+				if err := beginOperation(ctx); err != nil {
+					return err
+				}
 				res, err := proxy.Upgrade(ctx, h.Host, cfg, step.Output(), proxy.UpgradeOptions{
 					AllowDowngrade: allowDowngrade, SkipNetwork: a.dest.Runtime == "swarm",
 					OnReboot: hook, HealthPaths: paths,

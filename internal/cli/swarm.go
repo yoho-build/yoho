@@ -166,6 +166,9 @@ func (a *app) swarmInit(cmd *cobra.Command, mgr plan.NamedHost, yes, more bool) 
 		return errors.New("aborted")
 	}
 	step = u.Step(mgr.Name, "docker swarm init --advertise-addr %s", addr)
+	if err := beginOperation(ctx); err != nil {
+		return err
+	}
 	if err := mgr.Host.Run(ctx, remote.Cmd{Script: "docker swarm init --advertise-addr " + remote.Quote(addr) + " >/dev/null", Stderr: step.Output()}); err != nil {
 		step.Fail(err, "check the address belongs to the Server (`ip addr`), or set servers."+mgr.Name+".private_address")
 		return &silentError{err}
@@ -233,6 +236,9 @@ func (a *app) swarmJoin(cmd *cobra.Command, hosts []plan.NamedHost, yes bool) er
 			continue
 		}
 		script := "docker swarm join --token \"$YOHO_SWARM_TOKEN\" --advertise-addr " + remote.Quote(addr) + " " + remote.Quote(net.JoinHostPort(strings.TrimSpace(mgrAddr), "2377")) + " >/dev/null"
+		if err := beginOperation(ctx); err != nil {
+			return err
+		}
 		if err := h.Host.Run(ctx, remote.Cmd{Script: script, Env: map[string]string{"YOHO_SWARM_TOKEN": strings.TrimSpace(token)}}); err != nil {
 			step.Fail(err, "open 2377/tcp, 7946/tcp+udp and 4789/udp between the Servers (private network / Tailscale)")
 			return &silentError{err}

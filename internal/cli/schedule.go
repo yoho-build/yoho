@@ -240,6 +240,9 @@ func (a *app) installJobs(ctx context.Context, hosts []plan.NamedHost, names []s
 			u.Warn("%v", uerr)
 		}
 	}()
+	if err = beginOperation(ctx); err != nil {
+		return err
+	}
 	if len(needKey) > 0 {
 		// Created on first use so even a never-deployed Destination records
 		// fingerprints; later plans compare against them.
@@ -657,6 +660,9 @@ func (a *app) removeJobs(ctx context.Context, hosts []plan.NamedHost, names []st
 	}
 	h := hosts[0]
 	step := a.ui.Step(h.Name, "Remove Scheduled Jobs")
+	if err := beginOperation(ctx); err != nil {
+		return err
+	}
 	removed, err := schedule.Remove(ctx, h.Host, schedule.RemoveOptions{
 		App: a.cfg.App, Destination: a.destName, Jobs: names, Mode: a.scheduleMode(),
 	})

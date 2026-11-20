@@ -481,6 +481,9 @@ func (r *tunnelRouter) run(ctx context.Context) error {
 		BeforeHash: migrate.Hash(live), AfterHash: migrate.Hash(want), Undo: undo, Performer: performer(),
 		Time: time.Now().UTC(), Status: "switching",
 	}
+	if err = beginOperation(ctx); err != nil {
+		return err
+	}
 	step = a.ui.Step(h0.Name, "Save undo record")
 	if err := deploy.WriteJSON(ctx, h0.Host, tunnelRoutePath(a.cfg.App, a.destName), rec); err != nil {
 		return r.fail(step, fmt.Errorf("nothing was changed: %w", err))

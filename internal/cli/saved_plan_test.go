@@ -91,7 +91,7 @@ func TestSavedPlanRedactsSecretValues(t *testing.T) {
 	if strings.Contains(got.Changes[0].Reasons[0], value) {
 		t.Fatal("secret leaked")
 	}
-	if !strings.Contains(got.Changes[0].Reasons[0], "***") {
-		t.Fatalf("redaction missing: %s", b)
+	if !strings.HasPrefix(got.Changes[0].Reasons[0], "sha256:") {
+		t.Fatalf("reason digest missing: %s", b)
 	}
 }

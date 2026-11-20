@@ -692,7 +692,9 @@ func (r *runner) waitServices(ctx context.Context, batch []servicePlan, ready st
 			return err
 		}
 		r.fact(batch[0].Name).Convergence = ready
-		r.report(ctx, batch[0].Name, "changed")
+		if ready != "prerequisite-ready" {
+			r.report(ctx, batch[0].Name, "changed")
+		}
 		return nil
 	}
 	waitCtx, cancel := context.WithCancel(ctx)
@@ -721,7 +723,9 @@ func (r *runner) waitServices(ctx context.Context, batch []servicePlan, ready st
 		_, _ = r.out.Write(outs[i].Bytes())
 		if errs[i] == nil {
 			r.fact(sp.Name).Convergence = ready
-			r.report(ctx, sp.Name, "changed")
+			if ready != "prerequisite-ready" {
+				r.report(ctx, sp.Name, "changed")
+			}
 		}
 	}
 	if failed >= 0 {

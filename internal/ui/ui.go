@@ -177,11 +177,15 @@ func (u *UI) paint(code, s string) string {
 }
 
 func (u *UI) event(kind string, fields map[string]any) {
-	if u.operationID != "" {
-		fields["operation_id"] = u.operationID
-	}
+	operationID := fields["operation_id"]
 	if u.redact != nil {
 		fields = redactFields(fields, u.redact).(map[string]any)
+	}
+	if operationID != nil {
+		fields["operation_id"] = operationID
+	}
+	if u.operationID != "" {
+		fields["operation_id"] = u.operationID
 	}
 	fields["schema_version"] = 1
 	fields["event"] = kind
@@ -981,4 +985,24 @@ func redactFields(v any, redact func(string) string) any {
 		return r
 	}
 	return v
+}
+
+// FinishedOutcome reports a successful query of an operation's outcome.
+func (u *UI) FinishedOutcome(outcome string, changed, unchanged []string) {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	if u.mode == JSON {
+		if changed == nil {
+			changed = []string{}
+		}
+		if unchanged == nil {
+			unchanged = []string{}
+		}
+		fields := map[string]any{"outcome": outcome, "duration_ms": time.Since(u.start).Milliseconds()}
+		if outcome == "partial" {
+			fields["changed"], fields["unchanged"] = changed, unchanged
+		}
+		u.event("finished", fields)
+	}
+	u.finished = true
 }

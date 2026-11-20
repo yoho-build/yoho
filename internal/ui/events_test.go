@@ -7,6 +7,7 @@ import (
 	"errors"
 	"os"
 	"regexp"
+	"strings"
 	"testing"
 	"time"
 )
@@ -146,5 +147,33 @@ func TestDeferredFinishAndRedaction(t *testing.T) {
 	u.Finished(nil, "")
 	if bytes.Count(b.Bytes(), []byte(`"event":"finished"`)) != 1 {
 		t.Fatal(b.String())
+	}
+}
+
+func TestReviewOperationMetadataSurvivesRedaction(t *testing.T) {
+	var b bytes.Buffer
+	u := New(&b, JSON, false)
+	u.SetRedact(func(s string) string { return strings.ReplaceAll(s, "1234", "***") })
+	u.Operation("aa1234bb")
+	u.Info("secret 1234")
+	scanner := bufio.NewScanner(&b)
+	for scanner.Scan() {
+		var event map[string]any
+		if err := json.Unmarshal(scanner.Bytes(), &event); err != nil {
+			t.Fatal(err)
+		}
+		if event["operation_id"] != "aa1234bb" {
+			t.Fatal(event)
+		}
+	}
+}
+func TestReviewQueriedOutcomeIsNotQueryFailure(t *testing.T) {
+	for _, mode := range []Mode{Human, JSON} {
+		var b bytes.Buffer
+		u := New(&b, mode, false)
+		u.FinishedOutcome("unknown", nil, nil)
+		if strings.Contains(b.String(), "Failed") || strings.Contains(b.String(), `"error"`) {
+			t.Fatal(b.String())
+		}
 	}
 }

@@ -201,6 +201,9 @@ func (a *app) remove(cmd *cobra.Command, f removeFlags) (err error) {
 	step.Done()
 	defer func() { _ = unlock(context.WithoutCancel(ctx)) }()
 
+	if err = beginOperation(ctx); err != nil {
+		return err
+	}
 	if err := a.removeJobs(ctx, hosts, nil); err != nil {
 		return err
 	}
@@ -289,6 +292,7 @@ func (a *app) remove(cmd *cobra.Command, f removeFlags) (err error) {
 	} else {
 		summary += "; Backups kept"
 	}
+	operationRemoved(ctx)
 	u.Finished(nil, summary)
 	return nil
 }

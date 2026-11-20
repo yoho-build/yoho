@@ -860,3 +860,28 @@ func TestContainerdAlreadyActive(t *testing.T) {
 		}
 	}
 }
+
+func TestReviewProvisioningCallbackRunsAfterDirectories(t *testing.T) {
+	provisioned := false
+	recorded := false
+	step := &Step{ID: "dirs", apply: func(context.Context, remote.Host) error { provisioned = true; return nil }, OnApplied: func(context.Context) error {
+		if !provisioned {
+			t.Fatal("operation wrote before privileged directory provisioning")
+		}
+		recorded = true
+		return nil
+	}}
+	if err := Apply(context.Background(), &fakeHost{}, []PlannedStep{{Step: step, Needed: true}}, func(PlannedStep) bool { return true }, nil); err != nil {
+		t.Fatal(err)
+	}
+	if !recorded {
+		t.Fatal("setup did not record operation after provisioning")
+	}
+	provisioned, recorded = false, false
+	if err := Apply(context.Background(), &fakeHost{}, []PlannedStep{{Step: step, Needed: true}}, func(PlannedStep) bool { return false }, nil); err != nil {
+		t.Fatal(err)
+	}
+	if recorded || provisioned {
+		t.Fatal("declined provisioning started an operation")
+	}
+}

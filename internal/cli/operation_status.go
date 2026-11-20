@@ -37,21 +37,10 @@ func operationStatusCmd(g *globals) *cobra.Command {
 			}
 			fields["changed"], fields["unchanged"] = r.Changed, r.Unchanged
 		}
-		a.ui.Event("operation_status", fmt.Sprintf("Operation %s: %s (%s)", id, r.Outcome, r.State), fields)
-		if r.Outcome == "success" {
-			a.ui.Finished(nil, "")
-		} else {
-			a.ui.Finished(operationStatusResult{r.Result}, "")
-		}
+		a.ui.Event("operation_status", fmt.Sprintf("Operation %s: %s (%s)", id, r.Outcome, fmt.Sprintf("%s; lock held: %t", r.State, r.LockHeld)), fields)
+		a.ui.FinishedOutcome(r.Outcome, r.Changed, r.Unchanged)
 		return nil
 	}}
 	c.Flags().StringVar(&id, "operation", "", "Operation ID emitted by a mutating command")
 	return c
-}
-
-type operationStatusResult struct{ operation.Result }
-
-func (r operationStatusResult) Error() string { return "operation outcome: " + r.Outcome }
-func (r operationStatusResult) OutcomeFields() (string, []string, []string) {
-	return r.Outcome, r.Changed, r.Unchanged
 }

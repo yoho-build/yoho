@@ -407,6 +407,9 @@ const partialMarker = "partial"
 // was not fully restored or the re-deploy fails, partialMarker is left
 // instead of claiming a state the stack is not in.
 func (r *runner) restoreStack(ctx context.Context, d *plan.Deploy, relDir string, restored bool, attempted stackPlan) {
+	onService := r.onService
+	r.onService = nil
+	defer func() { r.onService = onService }()
 	marker := path.Join(relDir, partialMarker)
 	err := errors.New("the previous record could not be restored")
 	if restored {

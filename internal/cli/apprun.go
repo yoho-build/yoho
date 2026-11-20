@@ -47,6 +47,9 @@ func (a *app) runTerminal(cmd *cobra.Command, script string, o termOptions) erro
 		return err
 	}
 	defer h.Close()
+	if err := beginOperation(cmd.Context()); err != nil {
+		return err
+	}
 	return commandExit(h.RunTerminal(cmd.Context(), script, o.tty, cmd.InOrStdin(), cmd.OutOrStdout(), cmd.ErrOrStderr()))
 }
 
@@ -138,6 +141,9 @@ runtime swarm; use ` + "`yoho app exec`" + ` or x-yoho.release_command.`,
 			if !g.json {
 				// stderr: stdout belongs to the command.
 				fmt.Fprintf(cmd.ErrOrStderr(), "one-off %s container from Release %s on %s\n", svc, shortVersion(ver), name)
+			}
+			if err := beginOperation(ctx); err != nil {
+				return err
 			}
 			if !o.attached() {
 				return commandExit(h.Run(ctx, remote.Cmd{Script: script, Stdout: cmd.OutOrStdout(), Stderr: cmd.ErrOrStderr()}))

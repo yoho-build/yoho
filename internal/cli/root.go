@@ -37,40 +37,14 @@ type globals struct {
 
 // Execute runs the CLI and returns the process exit code.
 func Execute() int {
-	g := &globals{}
-	root := &cobra.Command{
-		Use:   "yoho",
-		Short: "Deploy Docker Compose apps to your own servers with zero downtime",
-		Long: `Yoho deploys Docker Compose (or Swarm) apps to servers over SSH:
-builds images locally, ships them without a registry, switches traffic with
-kamal-proxy, keeps secrets in your password manager, and backs up volumes.`,
-		SilenceUsage:  true,
-		SilenceErrors: true,
-	}
-	pf := root.PersistentFlags()
-	pf.StringVarP(&g.configPath, "config", "c", "", "Yoho file (default: yoho.{yml,yaml,toml,json,jsonc} in the current directory)")
-	pf.StringVarP(&g.destination, "destination", "d", "", "Destination (default: $YOHO_DESTINATION, then production, then the only one)")
-	pf.BoolVar(&g.json, "json", false, "Emit NDJSON events instead of human output")
-	pf.BoolVarP(&g.verbose, "verbose", "v", false, "Stream remote command output")
-	pf.IntVar(&g.secretsRetries, "secrets-retries", -1, "Times to rerun a secrets provider call whose approval prompt timed out (default: $YOHO_SECRETS_RETRIES, then 1 on a terminal, else 0)")
-
-	root.AddCommand(
-		initCmd(g),
-		configCmd(g),
-		schemaCmd(g),
-		secretsCmd(g),
-		versionCmd(),
-	)
-	for _, add := range extraCommands {
-		root.AddCommand(add(g))
-	}
-	auditWrap(g, root)
+	g := &globals{json: jsonRequested(os.Args[1:])}
+	root := newRoot(g)
 
 	ctx, cancel := signalContext()
 	defer cancel()
 	if err := root.ExecuteContext(ctx); err != nil {
 		var silent *silentError
-		if !errors.As(err, &silent) {
+		if !g.json && !errors.As(err, &silent) {
 			fmt.Fprintln(os.Stderr, "Error:", err)
 			if ce, ok := remote.AsConnectError(err); ok {
 				fmt.Fprintln(os.Stderr, "hint:", ce.Hint)
@@ -83,6 +57,16 @@ kamal-proxy, keeps secrets in your password manager, and backs up volumes.`,
 		var ee *exitError
 		if errors.As(err, &ee) {
 			return ee.code
+		}
+		var validation *validationError
+		if errors.As(err, &validation) {
+			return 10
+		}
+		if strings.HasPrefix(err.Error(), "unknown command ") {
+			if g.json {
+				g.ui(root).Event("error", "", map[string]any{"error": err.Error(), "outcome": "failed", "exit_code": 10})
+			}
+			return 10
 		}
 		return 1
 	}
@@ -174,7 +158,7 @@ func (g *globals) load(cmd *cobra.Command) (*app, error) {
 func (g *globals) loadOperator(cmd *cobra.Command) (*app, error) {
 	a, err := g.loadApp(cmd)
 	if err != nil {
-		return nil, err
+		return nil, &validationError{err}
 	}
 	a.scoped = false
 	return a, nil
@@ -220,6 +204,11 @@ func (g *globals) loadApp(cmd *cobra.Command) (*app, error) {
 		return nil, err
 	}
 	a := &app{g: g, dir: filepath.Dir(path), path: path, overlay: overlay, cfg: cfg, destName: name, dest: dest, ui: g.ui(cmd)}
+	if ctx := cmd.Context(); ctx != nil {
+		if r, _ := ctx.Value(auditRunKey{}).(*auditRun); r != nil && r.h == nil {
+			r.a = a
+		}
+	}
 	a.operation = operationID(cmd.Context())
 	a.progress = operationProgress(cmd.Context())
 	release.Root = a.root()
@@ -358,4 +347,99 @@ func (a *app) sourceDestination() string {
 		return a.templateName
 	}
 	return a.destName
+}
+
+func newRoot(g *globals) *cobra.Command {
+	root := &cobra.Command{
+		Use:   "yoho",
+		Short: "Deploy Docker Compose apps to your own servers with zero downtime",
+		Long: `Yoho deploys Docker Compose (or Swarm) apps to servers over SSH:
+builds images locally, ships them without a registry, switches traffic with
+kamal-proxy, keeps secrets in your password manager, and backs up volumes.`,
+		SilenceUsage:  true,
+		SilenceErrors: true,
+	}
+	pf := root.PersistentFlags()
+	pf.StringVarP(&g.configPath, "config", "c", "", "Yoho file (default: yoho.{yml,yaml,toml,json,jsonc} in the current directory)")
+	pf.StringVarP(&g.destination, "destination", "d", "", "Destination (default: $YOHO_DESTINATION, then production, then the only one)")
+	pf.BoolVar(&g.json, "json", g.json, "Emit NDJSON events instead of human output")
+	pf.BoolVarP(&g.verbose, "verbose", "v", false, "Stream remote command output")
+	pf.IntVar(&g.secretsRetries, "secrets-retries", -1, "Times to rerun a secrets provider call whose approval prompt timed out (default: $YOHO_SECRETS_RETRIES, then 1 on a terminal, else 0)")
+
+	root.AddCommand(
+		initCmd(g),
+		configCmd(g),
+		schemaCmd(g),
+		secretsCmd(g),
+		versionCmd(),
+	)
+	for _, add := range extraCommands {
+		root.AddCommand(add(g))
+	}
+	configureValidation(g, root)
+	auditWrap(g, root)
+
+	return root
+}
+
+func configureValidation(g *globals, root *cobra.Command) {
+	failure := func(cmd *cobra.Command, err error) error {
+		wrapped := &validationError{err}
+		if g.json {
+			g.ui(cmd).Event("error", "", map[string]any{"error": err.Error(), "outcome": "failed", "exit_code": 10})
+			return &silentError{wrapped}
+		}
+		return wrapped
+	}
+	root.SetFlagErrorFunc(failure)
+	root.PersistentPreRunE = func(cmd *cobra.Command, _ []string) error {
+		if err := cmd.ValidateRequiredFlags(); err != nil {
+			return failure(cmd, err)
+		}
+		if err := cmd.ValidateFlagGroups(); err != nil {
+			return failure(cmd, err)
+		}
+		return nil
+	}
+	var walk func(*cobra.Command)
+	walk = func(cmd *cobra.Command) {
+		if cmd.Args != nil {
+			inner := cmd.Args
+			cmd.Args = func(c *cobra.Command, args []string) error {
+				if err := inner(c, args); err != nil {
+					return failure(c, err)
+				}
+				return nil
+			}
+		}
+		if cmd.PreRunE != nil {
+			inner := cmd.PreRunE
+			cmd.PreRunE = func(c *cobra.Command, args []string) error {
+				if err := inner(c, args); err != nil {
+					return failure(c, err)
+				}
+				return nil
+			}
+		}
+		for _, sub := range cmd.Commands() {
+			walk(sub)
+		}
+	}
+	walk(root)
+}
+
+func jsonRequested(args []string) bool {
+	requested := false
+	for _, arg := range args {
+		if arg == "--" {
+			break
+		}
+		switch arg {
+		case "--json", "--json=true":
+			requested = true
+		case "--json=false":
+			requested = false
+		}
+	}
+	return requested
 }

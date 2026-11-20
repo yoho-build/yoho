@@ -35,6 +35,7 @@ type savedPlan struct {
 	SourceRevision string                   `json:"source_revision,omitempty"`
 	Inputs         string                   `json:"build_input_digest"`
 	Remote         map[string]string        `json:"remote_state"`
+	ChangesHash    string                   `json:"changes_digest"`
 	Changes        []plan.Change            `json:"changes"`
 	Created        time.Time                `json:"created_at"`
 	Expires        time.Time                `json:"expires_at"`
@@ -94,6 +95,9 @@ func (p *savedPlan) compare(q *savedPlan) error {
 	typ := av.Type()
 	var diff []string
 	for i := 0; i < av.NumField(); i++ {
+		if typ.Field(i).Name == "Changes" {
+			continue
+		}
 		x, _ := json.Marshal(av.Field(i).Interface())
 		y, _ := json.Marshal(bv.Field(i).Interface())
 		if !bytes.Equal(x, y) {
@@ -117,7 +121,19 @@ func (a *app) snapshotPlan(ctx context.Context, s *session, changes []plan.Chang
 	}
 	p.Servers = servers
 	var err error
-	p.Config, err = digest([]any{a.cfg, s.r.Project, s.r.Ext})
+	p.ChangesHash, err = digest(changes)
+	if err != nil {
+		return nil, err
+	}
+	files, err := deploy.AppFilesDigest(s.r.Project)
+	if err != nil {
+		return nil, err
+	}
+	hooks, err := a.localHooksDigest()
+	if err != nil {
+		return nil, err
+	}
+	p.Config, err = digest([]any{a.cfg, s.r.Project, s.r.Ext, files, hooks})
 	if err != nil {
 		return nil, err
 	}
@@ -168,6 +184,9 @@ func (a *app) savePlan(ctx context.Context, ver, file string, ttl time.Duration)
 	if err != nil {
 		return err
 	}
+	if err := savedAppDirReady(changes); err != nil {
+		return err
+	}
 	a.ui.Plan(changes)
 	p, err := a.snapshotPlan(ctx, s, changes, ttl)
 	if err != nil {
@@ -212,31 +231,74 @@ func (a *app) reloadPlanConfig() error {
 	return nil
 }
 
-// Redact decoded strings before JSON encoding, preserving JSON escaping.
-func encodeSavedPlan(p *savedPlan, redact func(string) string) ([]byte, error) {
-	b, err := json.Marshal(p)
-	if err != nil {
-		return nil, err
-	}
-	var v any
-	if err = json.Unmarshal(b, &v); err != nil {
-		return nil, err
-	}
-	var scrub func(any) any
-	scrub = func(v any) any {
-		switch x := v.(type) {
-		case string:
-			return redact(x)
-		case map[string]any:
-			for k, v := range x {
-				x[k] = scrub(v)
-			}
-		case []any:
-			for i, v := range x {
-				x[i] = scrub(v)
-			}
+// Only structural metadata and hashes of descriptive values enter the artifact.
+func encodeSavedPlan(p *savedPlan, _ func(string) string) ([]byte, error) {
+	copy := *p
+	if copy.ChangesHash == "" {
+		var err error
+		copy.ChangesHash, err = digest(p.Changes)
+		if err != nil {
+			return nil, err
 		}
-		return v
 	}
-	return json.MarshalIndent(scrub(v), "", "  ")
+	copy.Changes = append([]plan.Change(nil), p.Changes...)
+	for i, c := range copy.Changes {
+		copy.Changes[i].Reasons = nil
+		for _, reason := range c.Reasons {
+			hash, err := digest(reason)
+			if err != nil {
+				return nil, err
+			}
+			copy.Changes[i].Reasons = append(copy.Changes[i].Reasons, "sha256:"+hash)
+		}
+	}
+	return json.MarshalIndent(copy, "", "  ")
+}
+func savedAppDirReady(changes []plan.Change) error {
+	for _, c := range changes {
+		if c.Kind == "app_dir" && c.Action != plan.ActionNoop {
+			return &exitError{10, fmt.Errorf("App directory is not converged; run yoho apply before saving a plan")}
+		}
+	}
+	return nil
+}
+func (a *app) localHooksDigest() (string, error) {
+	root := a.cfg.Hooks.Path
+	if root == "" {
+		root = ".yoho/hooks"
+	}
+	if !filepath.IsAbs(root) {
+		root = filepath.Join(a.dir, root)
+	}
+	values := map[string]any{}
+	err := filepath.WalkDir(root, func(p string, d os.DirEntry, err error) error {
+		if os.IsNotExist(err) && p == root {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		if d.IsDir() {
+			return nil
+		}
+		b, err := os.ReadFile(p)
+		if err != nil {
+			return err
+		}
+		st, err := os.Stat(p)
+		if err != nil {
+			return err
+		}
+		rel, err := filepath.Rel(root, p)
+		if err != nil {
+			return err
+		}
+		hash := sha256.Sum256(b)
+		values[rel] = []any{hex.EncodeToString(hash[:]), st.Mode().Perm()}
+		return nil
+	})
+	if err != nil {
+		return "", err
+	}
+	return digest(values)
 }

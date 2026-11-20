@@ -33,6 +33,10 @@ func mutationResult(err error, started bool) operation.Result {
 	if errors.As(err, &me) {
 		return me.result
 	}
+	var ge *remote.GateError
+	if errors.As(err, &ge) && ge.Outcome != "" {
+		return operation.Result{Outcome: ge.Outcome, Changed: ge.Changed, Unchanged: ge.Unchanged}
+	}
 	var jobs *jobsFailedError
 	if errors.As(err, &jobs) {
 		r.Outcome = "partial"
@@ -80,6 +84,15 @@ func mutationCode(err error, started bool) int {
 		return 13
 	case "unknown":
 		return 14
+	}
+	var ge *remote.GateError
+	if errors.As(err, &ge) {
+		switch ge.Code {
+		case "locked":
+			return 11
+		case "invalid", "denied", "unsupported":
+			return 10
+		}
 	}
 	var validation *validationError
 	if errors.As(err, &validation) {
@@ -154,3 +167,9 @@ type validationError struct{ err error }
 
 func (e *validationError) Error() string { return e.err.Error() }
 func (e *validationError) Unwrap() error { return e.err }
+
+func markScopedMutation(ctx context.Context) {
+	if r, _ := ctx.Value(auditRunKey{}).(*auditRun); r != nil {
+		r.mutated = true
+	}
+}

@@ -307,3 +307,24 @@ func byteSize(n int64) string {
 	}
 	return fmt.Sprintf("%d B", n)
 }
+
+// AppFilesDigest fingerprints the bytes shipped for configs and read-only binds.
+func AppFilesDigest(p *types.Project) (string, error) {
+	files, err := appFiles(p)
+	if err != nil {
+		return "", err
+	}
+	h := sha256.New()
+	for _, name := range sortedKeys(files) {
+		f := files[name]
+		fmt.Fprintf(h, "%s\x00", name)
+		tw := tar.NewWriter(h)
+		if _, err = writeAppFile(tw, f, ""); err != nil {
+			return "", err
+		}
+		if err = tw.Close(); err != nil {
+			return "", err
+		}
+	}
+	return hex.EncodeToString(h.Sum(nil)), nil
+}

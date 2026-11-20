@@ -159,6 +159,9 @@ deploys, rollbacks and Scheduled Backups refuse with your message until
 					step.Fail(err, hintFor(err, "check that the Server is reachable"))
 					return &silentError{err}
 				}
+				if err := beginOperation(ctx); err != nil {
+					return err
+				}
 				step.Done()
 				a.ui.Event("lock", "Locked "+a.cfg.App+"/"+a.destName+": "+message+"\n  release with `yoho lock release`",
 					withAction(lockFields(info, true), "acquire"))
@@ -206,6 +209,15 @@ deploys, rollbacks and Scheduled Backups refuse with your message until
 			}
 			return a.lockRun(cmd.Context(), func(ctx context.Context, h remote.Host) error {
 				step := a.ui.Step(a.dest.Servers[0], "Release lock")
+				infoBefore, heldBefore, e := deploy.ReadLock(ctx, h, a.cfg.App, a.destName)
+				if e != nil {
+					return e
+				}
+				if heldBefore && (force || infoBefore.Command == deploy.ManualLockCommand) {
+					if e = beginOperation(ctx); e != nil {
+						return e
+					}
+				}
 				info, held, err := deploy.ReleaseLock(ctx, h, a.cfg.App, a.destName, force)
 				var le *deploy.LockedError
 				if errors.As(err, &le) {

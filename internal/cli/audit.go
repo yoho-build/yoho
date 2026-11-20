@@ -16,6 +16,7 @@ import (
 	"github.com/yoho-build/yoho/internal/operation"
 	"github.com/yoho-build/yoho/internal/remote"
 	"github.com/yoho-build/yoho/internal/secrets"
+	"github.com/yoho-build/yoho/internal/ui"
 	"github.com/yoho-build/yoho/internal/version"
 )
 
@@ -45,63 +46,43 @@ const auditSecretsTimeout = 20 * time.Second
 
 // auditWrap wraps the RunE of every audited command below root.
 func auditWrap(g *globals, root *cobra.Command) {
-	var walk func(c *cobra.Command)
+	var walk func(*cobra.Command)
 	walk = func(c *cobra.Command) {
-		if c.HasParent() && c.RunE != nil {
-			path := strings.TrimPrefix(c.CommandPath(), root.Name()+" ")
-			for _, name := range auditedCommands {
-				if name == path {
-					inner := c.RunE
-					c.RunE = func(cmd *cobra.Command, args []string) error {
-						id := audit.NewRun()
-						cmd.SetContext(context.WithValue(cmd.Context(), operationKey{}, id))
-						g.activeUI = g.ui(cmd)
-						g.activeUI.Operation(id)
-						g.activeUI.HoldFinish()
-						defer func() { g.activeUI = nil }()
-						s := g.auditStart(cmd, args)
-						if s != nil {
-							cmd.SetContext(context.WithValue(cmd.Context(), auditRunKey{}, s))
-						}
-						if path != "apply" && path != "deploy" && path != "rollback" && path != "preview up" {
-							if err := beginOperation(cmd.Context()); err != nil {
-								err = classifyOperation(cmd.Context(), err)
-								s.finish(err)
-								g.activeUI.Complete(err)
-								return err
-							}
-						}
-						err := inner(cmd, args)
-						err = classifyOperation(cmd.Context(), err)
-						s.finish(err)
-						g.activeUI.Complete(err)
-						return err
-					}
-					break
-				}
-			}
-		}
-		// Read commands also end their NDJSON stream with an explicit outcome.
-		if c.RunE != nil && !slices.Contains(auditedCommands, strings.TrimPrefix(c.CommandPath(), root.Name()+" ")) {
+		if c.RunE != nil {
 			inner := c.RunE
 			c.RunE = func(cmd *cobra.Command, args []string) error {
 				g.activeUI = g.ui(cmd)
-				localMutation := slices.Contains(localMutations, strings.TrimPrefix(cmd.CommandPath(), root.Name()+" "))
-				if localMutation {
+				defer func() { g.activeUI = nil }()
+				path := strings.TrimPrefix(cmd.CommandPath(), root.Name()+" ")
+				audited := slices.Contains(auditedCommands, path)
+				local := slices.Contains(localMutations, path)
+				quiet := rawOutputCommand(cmd) || readOnlyMode(cmd, g.json)
+				if rawOutputCommand(cmd) {
+					mode := ui.Human
+					if g.json {
+						mode = ui.JSON
+					}
+					g.activeUI = ui.New(cmd.ErrOrStderr(), mode, g.verbose)
+				}
+				var r *auditRun
+				if audited || local {
 					id := audit.NewRun()
 					cmd.SetContext(context.WithValue(cmd.Context(), operationKey{}, id))
-					g.activeUI.Operation(id)
-					g.activeUI.HoldFinish()
+					r = &auditRun{begin: time.Now()}
+					r.loader = func() *auditRun { return g.auditStart(cmd, args) }
+					cmd.SetContext(context.WithValue(cmd.Context(), auditRunKey{}, r))
+					if !quiet {
+						g.activeUI.Operation(id)
+					}
 				}
-				defer func() { g.activeUI = nil }()
+				g.activeUI.HoldFinish()
 				err := inner(cmd, args)
-				if localMutation {
-					err = classifyMutation(err, false)
-					g.activeUI.Complete(err)
-					return err
+				if audited || local {
+					err = classifyOperation(cmd.Context(), err)
+					r.finish(err)
 				}
-				if g.json && !rawOutputCommand(cmd) {
-					g.activeUI.Finished(err, "")
+				if !quiet && (audited || local || g.json) {
+					g.activeUI.Complete(err)
 				}
 				return err
 			}
@@ -111,6 +92,22 @@ func auditWrap(g *globals, root *cobra.Command) {
 		}
 	}
 	walk(root)
+}
+
+func readOnlyMode(cmd *cobra.Command, jsonMode bool) bool {
+	for _, name := range []string{"dry-run", "list-templates"} {
+		if f := cmd.Flags().Lookup(name); f != nil && f.Value.String() == "true" {
+			return true
+		}
+	}
+	if cmd.Name() == "setup" {
+		if f := cmd.Flags().Lookup("plan"); f != nil && f.Value.String() == "true" {
+			return true
+		}
+		yes, _ := cmd.Flags().GetBool("yes")
+		return !yes && (jsonMode || !stdinIsTTY())
+	}
+	return false
 }
 
 type auditRunKey struct{}
@@ -127,6 +124,8 @@ func auditNoteVersion(ctx context.Context, v string) {
 // auditRun is one audited command: the open Server connection and the
 // record being written. A nil *auditRun does nothing.
 type auditRun struct {
+	loader  func() *auditRun
+	deleted bool
 	a       *app
 	h       remote.Host
 	rec     audit.Record
@@ -148,12 +147,21 @@ func (g *globals) auditStart(cmd *cobra.Command, args []string) *auditRun {
 		return nil // changes nothing
 	}
 	var a *app
+	if ctx := cmd.Context(); ctx != nil {
+		if r, _ := ctx.Value(auditRunKey{}).(*auditRun); r != nil {
+			a = r.a
+		}
+	}
 	var err error
-	if strings.HasPrefix(cmd.CommandPath(), cmd.Root().Name()+" preview ") {
-		name, _ := cmd.Flags().GetString("name")
-		a, err = g.loadPreview(cmd, name)
-	} else {
-		a, err = g.loadApp(cmd)
+	if a == nil {
+		if strings.HasPrefix(cmd.CommandPath(), cmd.Root().Name()+" preview ") {
+			name, _ := cmd.Flags().GetString("name")
+			a, err = g.loadPreview(cmd, name)
+		} else if strings.HasPrefix(cmd.CommandPath(), cmd.Root().Name()+" access ") {
+			a, err = g.loadOperator(cmd)
+		} else {
+			a, err = g.loadApp(cmd)
+		}
 	}
 	if err != nil || a.scoped || len(a.dest.Servers) == 0 {
 		return nil // scoped access: the Gate writes its own audit
@@ -183,7 +191,7 @@ func (g *globals) auditStart(cmd *cobra.Command, args []string) *auditRun {
 
 // finish writes the "finished" record for err and closes the connection.
 func (r *auditRun) finish(err error) {
-	if r == nil {
+	if r == nil || r.h == nil {
 		return
 	}
 	defer r.h.Close()
@@ -200,9 +208,13 @@ func (r *auditRun) finish(err error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 	r.append(ctx, rec)
-	if r.op != nil {
-		r.op.State = "finished"
+	if r.op != nil && !r.deleted {
 		r.op.Result = mutationResult(err, r.mutated)
+		if r.op.Outcome == "unknown" {
+			r.op.State = "running"
+		} else {
+			r.op.State = "finished"
+		}
 		if e := operation.Save(ctx, r.h, r.rec.App, r.rec.Destination, *r.op); e != nil {
 			r.a.ui.Warn("operation outcome could not be recorded: %s", firstLine(r.red.String(e.Error())))
 		} else {
@@ -245,6 +257,11 @@ func (a *app) auditRedactor(ctx context.Context) *audit.Redactor {
 func (a *app) auditVersion(cmd *cobra.Command, command string, args []string) string {
 	switch command {
 	case "deploy", "apply":
+		if f := cmd.Flags().Lookup("plan"); f != nil && f.Value.String() != "" {
+			if p, err := readSavedPlan(f.Value.String()); err == nil {
+				return p.Version
+			}
+		}
 		if f := cmd.Flags().Lookup("version"); f != nil && f.Value.String() != "" {
 			return f.Value.String()
 		}
@@ -490,13 +507,30 @@ func parseSince(s string, now time.Time) (time.Time, error) {
 	return time.Time{}, fmt.Errorf("cannot read --since %q", s)
 }
 
-// beginOperation runs after the deploy lock is held, before build or rollout.
+// beginOperation persists the mutation boundary after validation, confirmation,
+// connections and applicable locks. Local builds precede this boundary.
 func beginOperation(ctx context.Context) error {
 	if ctx == nil {
 		return nil
 	}
 	r, _ := ctx.Value(auditRunKey{}).(*auditRun)
 	if r == nil || r.op != nil {
+		return nil
+	}
+	if r.h == nil && r.loader != nil {
+		notedVersion := r.rec.Version
+		loaded := r.loader()
+		if loaded != nil {
+			*r = *loaded
+			if notedVersion != "" {
+				r.rec.Version = notedVersion
+			}
+		}
+	}
+	if r.h == nil {
+		if r.a != nil && !r.a.scoped {
+			return fmt.Errorf("cannot initialize Server operation record")
+		}
 		return nil
 	}
 	r.op = &operation.Record{ID: r.rec.Run, Command: r.rec.Command, Started: r.begin.UTC(), State: "running", Services: map[string]string{}}
@@ -526,5 +560,11 @@ func operationProgress(ctx context.Context) func(context.Context, string, string
 
 func rawOutputCommand(cmd *cobra.Command) bool {
 	path := strings.TrimPrefix(cmd.CommandPath(), cmd.Root().Name()+" ")
-	return slices.Contains([]string{"schema", "audit", "config show", "secrets print", "skill print"}, path)
+	return slices.Contains([]string{"schema", "audit", "config show", "secrets print", "skill print", "app exec", "app run", "app stats", "app logs", "access audit"}, path)
+}
+
+func operationRemoved(ctx context.Context) {
+	if r, _ := ctx.Value(auditRunKey{}).(*auditRun); r != nil {
+		r.deleted = true
+	}
 }
