@@ -38,12 +38,14 @@ data restore duration, full duration (setup through healthy HTTP, known rows,
 worker completion and active timer), image source and `needs_old_server: false`.
 It uses a replacement SSH user and fresh root after deleting all original App
 resources. The restic directory outside both roots represents external storage;
-the OS and Docker installation are reused. No fabricated timing is recorded in
+the OS and Docker installation are reused. Replacement paths are under root-owned
+`/srv/yoho-recovery`; Server records are read as the replacement SSH identity. No fabricated timing is recorded in
 docs; CI's step summary and `recovery-report` artifact contain the actual result.
 
 Each fault can be independently selected with `YOHO_E2E_FAULTS` (`ssh`, `lock`,
 `disk`, `docker`, `reboot`, `backup`). Faults assert final CLI outcome/exit status,
 Server health and Release JSON integrity, then repeat apply and demand a clean
-plan. The interrupted Backup also compares successful Backup inventories and
-repeats the Backup. Logs stay under the printed temporary fixture directory if a
+plan. Disk exhaustion occurs in a pre-deploy Hook after the operation and Release
+preparation. The interrupted Backup waits for the actual paused database, sends
+SIGINT, verifies unpause, compares successful inventories, then repeats Backup. Logs stay under the printed temporary fixture directory if a
 scenario fails. See the failure behavior table in `docs/site/zero-downtime.md`.

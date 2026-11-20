@@ -165,7 +165,7 @@ func RetainedImageRefs(ctx context.Context, h remote.Host, app string) (map[stri
 	script := "set -eu\numask 077\n" + safepath.Gate() +
 		"yoho_gate_info=" + remote.Quote(string(info)) + "\n" +
 		"mkdir -p " + remote.Quote(path.Join(appMeta, "d")) + "\n" +
-		"yoho_gate_take " + remote.Quote(gate) + " || { printf '%s\\t%s\\n' " + migratingLine + " " + remote.Quote("the App gate "+gate+" is held (an app_dir migration is running)") + "; exit 0; }\n" +
+		"yoho_gate_take " + remote.Quote(gate) + " || { [ \"$?\" -eq 1 ] || exit 1; printf '%s\\t%s\\n' " + migratingLine + " " + remote.Quote("the App gate "+gate+" is held (an app_dir migration is running)") + "; exit 0; }\n" +
 		"for j in " + remote.Quote(appMeta) + "/d/*/migrate.json; do if [ -e \"$j\" ] || [ -L \"$j\" ]; then d=${j%/migrate.json}; printf '%s\\tDestination %s is moving its App directory (app_dir)\\n' " + migratingLine + " \"${d##*/}\"; exit 0; fi; done\n" +
 		"for f in " + remote.Quote(appRoot) + "/*/releases/*/release.json; do [ -f \"$f\" ] && cat \"$f\"; done; true"
 	rels, err := h.Output(ctx, remote.Cmd{Script: script})

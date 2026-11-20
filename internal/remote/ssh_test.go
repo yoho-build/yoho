@@ -524,3 +524,15 @@ func TestOsExecCancelWithHeldPipes(t *testing.T) {
 		}
 	}
 }
+
+func TestSignaledSSHExitRemainsStructured(t *testing.T) {
+	f := &fakeExec{respond: func(int, call, io.Writer) error {
+		return exec.Command("sh", "-c", "kill -KILL $$").Run()
+	}}
+	s := newTestSSH(t, "example.com", false, f)
+	err := s.Run(context.Background(), Cmd{Script: "prepare-release"})
+	var ee *ExitError
+	if !errors.As(err, &ee) || ee.Code != -1 {
+		t.Fatalf("signaled SSH lost its exit code: %v", err)
+	}
+}

@@ -33,8 +33,20 @@ while [ ! -f '$WORK/go' ]; do
  sleep 1
 done
 HOOK
-chmod +x .yoho/hooks/pre-app-boot
-git add .yoho/hooks/pre-app-boot && git commit -qm 'bounded fault barrier'
+cat > .yoho/hooks/pre-deploy <<HOOK
+#!/bin/sh
+set -eu
+[ "\${YOHO_DISK_ARM:-}" = 1 ] || exit 0
+test -s '$ROOT/apps/shop/production/lock/info.json'
+test "\${YOHO_LOCK:-}" = true
+operation_id=\$(jq -ser '[.[] | select(.event == "operation_started")] | select(length == 1) | .[0].operation_id | select(type == "string" and length > 0)' '$WORK/disk.jsonl')
+jq -e --arg id "\$operation_id" '.id == \$id and .state == "running"' '$ROOT/apps/shop/production/operations/'"\$operation_id".json >/dev/null
+touch '$WORK/disk-mutated'
+# ENOSPC is the Hook failure, after real Release preparation, before rollout.
+dd if=/dev/zero of='$ROOT/full' bs=1M 2>'$WORK/disk-fill.stderr'
+HOOK
+chmod +x .yoho/hooks/pre-app-boot .yoho/hooks/pre-deploy
+git add .yoho/hooks/pre-app-boot .yoho/hooks/pre-deploy && git commit -qm 'bounded fault barrier'
 yoho apply --auto-approve
 wait_until healthy
 start_apply() {
@@ -63,10 +75,12 @@ for scenario in ssh lock disk docker reboot backup; do
  # rollout, after container creation and before the Proxy switch.
  [[ -f $WORK/source.go ]] || cp main.go "$WORK/source.go"
  cp "$WORK/source.go" main.go
- python3 - "$scenario" <<'PYWEB'
-import sys
+ python3 - <<'PYWEB'
 p="main.go"
-s=open(p).read().replace("func serve() error {\n", "func serve() error {\n\ttime.Sleep(15 * time.Second) // CI readiness window\n", 1)
+s=open(p).read()
+if s.count("func serve() error {\n") != 1:
+    raise SystemExit("readiness Hook did not match")
+s=s.replace("func serve() error {\n", "func serve() error {\n\ttime.Sleep(15 * time.Second) // CI readiness window\n", 1)
 open(p,"w").write(s)
 PYWEB
  # Force a new image and Release even when the previous scenario converged.
@@ -91,7 +105,13 @@ PYWEB
   # Kill the existing ControlMaster and reject reconnection until the command
   # exits. HTTP remains reachable so Server state is independently observable.
   sudo iptables -I OUTPUT -d 127.0.0.1 -p tcp --dport 22 -j REJECT
-  while IFS= read -r socket; do ssh -S "$socket" -O exit "$USER@127.0.0.1" 2>/dev/null || true; done < <(find "/tmp/yoho-$(id -u)" -type s)
+  sockets=$(find "/tmp/yoho-$(id -u)" -type s)
+  [[ -n $sockets ]]
+  closed=0
+  while IFS= read -r socket; do
+   if ssh -n -S "$socket" -O exit "$USER@127.0.0.1" 2>/dev/null; then closed=$((closed + 1)); fi
+  done <<< "$sockets"
+  [[ $closed -gt 0 ]]
   touch "$WORK/go"
   finish_apply
   assert_result "$WORK/$scenario.jsonl" "$RC" unknown 14
@@ -103,12 +123,14 @@ PYWEB
   yoho lock release --force
   ;;
  disk)
-  # Exhaust blocks before prepare-release; old containers/volumes live outside
-  # this mount. The existing Release must remain a complete JSON document.
-  dd if=/dev/zero of="$ROOT/full" bs=1M status=none 2>/dev/null || true
-  run_capture "$WORK/$scenario.jsonl" apply --auto-approve
+  # Fill only after the operation, secrets and Release preparation exist.
+  server_run cat "$ROOT/apps/shop/production/current/release.json" > "$WORK/disk-before-release.json"
+  YOHO_DISK_ARM=1 run_capture "$WORK/$scenario.jsonl" apply --auto-approve
   assert_result "$WORK/$scenario.jsonl" "$RC" failed 1
-  grep -Eiq 'no space left|free disk space' "$WORK/$scenario.jsonl" "$WORK/$scenario.stderr"
+  test -f "$WORK/disk-mutated"
+  server_run cat "$ROOT/apps/shop/production/current/release.json" | cmp - "$WORK/disk-before-release.json"
+  jq -se 'any(.[]; .event == "operation_started") and any(.[]; .event == "step_fail" and .failure_facts.phase == "pre-deploy")' "$WORK/$scenario.jsonl" >/dev/null
+  grep -Eiq 'no space left|free disk space' "$WORK/disk-fill.stderr" "$WORK/$scenario.jsonl.stderr"
   [[ $(readlink "$ROOT/apps/shop/production/current") == "$old" ]]
   records_valid
   wait_until healthy
@@ -124,7 +146,6 @@ PYWEB
   touch "$WORK/go"
   finish_apply
   case $RC in
-   1|12) assert_result "$WORK/$scenario.jsonl" "$RC" failed "$RC" ;;
    13) assert_result "$WORK/$scenario.jsonl" "$RC" partial 13 ;;
    14) assert_result "$WORK/$scenario.jsonl" "$RC" unknown 14 ;;
    *) echo "unexpected Docker outage exit $RC" >&2; exit 1 ;;
@@ -155,21 +176,27 @@ PYWEB
   # Make cancellation deterministic inside quiescence, before publication.
   yoho backup run nightly
   yoho backup list nightly --json > "$WORK/before.jsonl"
-  python3 - <<'PY'
-p='compose.yaml'
-s=open(p).read().replace('      backup:\n', '      backup:\n        pre_backup: ["sh", "-c", "touch /tmp/yoho-backup-barrier; sleep 120"]\n')
-open(p,'w').write(s)
-PY
+  jq -se '[.[] | select(.event == "row")] | length > 0' "$WORK/before.jsonl" >/dev/null
+  db=$(docker ps -q --filter label=com.docker.compose.project=yoho-shop-production --filter label=com.docker.compose.service=db)
+  # Incompressible data keeps the real pause/tar window observable. No
+  # pre_backup override: SIGINT must exercise the normal unpause cleanup.
+  docker exec "$db" sh -c 'dd if=/dev/urandom of=/var/lib/postgresql/data/yoho-fault-payload bs=1M count=128' >/dev/null
   "$YOHO" --json backup run nightly > "$WORK/$scenario.jsonl" 2> "$WORK/$scenario.stderr" &
   child=$!
-  db=$(docker ps -q --filter label=com.docker.compose.project=yoho-shop-production --filter label=com.docker.compose.service=db)
-  wait_until docker exec "$db" test -f /tmp/yoho-backup-barrier
+  paused=false
+  for ((attempt=0; attempt<2400; attempt++)); do
+   if [[ $(docker inspect -f '{{.State.Paused}}' "$db") == true ]]; then paused=true; break; fi
+   kill -0 "$child" # A completed Backup is not an injected interruption.
+   sleep 0.05
+  done
+  [[ $paused == true ]]
   kill -INT "$child"
   finish_apply
   assert_result "$WORK/$scenario.jsonl" "$RC" unknown 14
+  [[ $(docker inspect -f '{{.State.Paused}}' "$db") == false ]]
   yoho backup list nightly --json > "$WORK/after.jsonl"
   diff <(jq -sc '[.[] | select(.event=="row") | .id] | sort' "$WORK/before.jsonl") <(jq -sc '[.[] | select(.event=="row") | .id] | sort' "$WORK/after.jsonl")
-  git restore compose.yaml
+  docker exec "$db" rm -f /var/lib/postgresql/data/yoho-fault-payload
   yoho backup run nightly
   wait_until healthy
   ;;

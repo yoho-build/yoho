@@ -255,8 +255,9 @@ generated secrets and reinstalls Scheduled Jobs. Verify HTTP health, known rows,
 a worker job and `yoho schedule status` before reopening ingress.
 
 With `--json`, `recovery` reports the selected Backup's `recovery_point`,
-`data_restore_seconds`, `needs_old_server: false`; `full_recovery_seconds`,
+`data_restore_seconds`; `needs_old_server` is omitted because a restore cannot
+prove Backup storage and images survive losing the Server. `full_recovery_seconds`,
 `image_source`, `scheduled_jobs_reinstalled` are null until independently measured.
-The CI recovery harness measures setup through final validation and prints all
-fields. Registry-less recovery rebuilds from git; old Release images need an
+The CI recovery harness measures setup through final validation and adds
+`needs_old_server: false` after actually reconstructing without old App resources. Registry-less recovery rebuilds from git; old Release images need an
 archive or registry. Writes after the recovery point are lost.

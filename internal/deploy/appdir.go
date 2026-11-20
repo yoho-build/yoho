@@ -239,7 +239,7 @@ yoho_nested() {
 }
 yoho_app_gate() {
  [ -z "${yoho_have_appgate:-}" ] || return 0
- yoho_gate_take "$appgate" || { printf '%s\t%s\n' "$heldline" "$appgate"; cat "$appgate/info.json" 2>/dev/null || true; exit 0; }
+ yoho_gate_take "$appgate" || { [ "$?" -eq 1 ] || exit 1; printf '%s\t%s\n' "$heldline" "$appgate"; cat "$appgate/info.json" 2>/dev/null || true; exit 0; }
  yoho_have_appgate=1
 }
 yoho_journal() {
@@ -455,7 +455,7 @@ yoho_retarget() {
 `
 
 const appDirMain = `mkdir -p "$meta"
-yoho_gate_take "$gate" || { printf '%s\t%s\n' "$heldline" "$gate"; cat "$gate/info.json" 2>/dev/null || true; exit 0; }
+yoho_gate_take "$gate" || { [ "$?" -eq 1 ] || exit 1; printf '%s\t%s\n' "$heldline" "$gate"; cat "$gate/info.json" 2>/dev/null || true; exit 0; }
 yoho_resumed=
 if yoho_exists "$journal"; then yoho_resume; fi
 mkdir -p "$appparent"

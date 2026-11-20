@@ -26,6 +26,8 @@ func TestMutationExitCodes(t *testing.T) {
 		{"partial", &deploy.Failure{Services: []deploy.ServiceFailure{{Service: "web", ProxyRoute: "switched"}, {Service: "worker", Convergence: "not-attempted"}}}, true, 13},
 		{"jobs", &jobsFailedError{err: errors.New("jobs")}, true, 13},
 		{"unknown", connect, true, 14}, {"disconnect", &remote.ExitError{Code: 255}, true, 14},
+		{"killed SSH prepare-release", &deploy.Failure{Cause: &remote.ExitError{Code: -1}, Phase: "prepare-release"}, true, 14},
+		{"killed SSH before mutation", &remote.ExitError{Code: -1}, false, 1},
 		{"stale", stalePlan("config_digest changed"), false, 15},
 		{"exec passthrough", &exitError{42, errors.New("exec")}, true, 42},
 	} {

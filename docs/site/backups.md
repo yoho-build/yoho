@@ -321,15 +321,19 @@ that Backup's time, even if a newer Backup exists.
 `backup restore --report` emits a `recovery` NDJSON event with `--json` and a human
 summary otherwise. `recovery_point` is the selected Backup's UTC timestamp;
 `data_restore_seconds` covers this restore command's work (including lookup,
-confirmation, transfer and Hooks), and `needs_old_server` is `false`.
+confirmation, transfer and Hooks). `needs_old_server` is omitted: restore cannot
+prove that the Backup Target is independent storage or that images survive loss
+of the old Server. A local-looking repository path might be either a root disk
+or an external mount.
 `full_recovery_seconds`, `image_source`, and `scheduled_jobs_reinstalled` are
 `null`: restore cannot observe setup, reconstruction, later apply or ingress.
 
 Recovery is measured in CI by the integration workflow's **recovery** job. Its
 step summary and `recovery-report` artifact print the observed report, including
 full recovery seconds from setup start through healthy Proxy, restored rows,
-worker completion and active Backup timer; image source is `rebuilt from git at
-<version>`, and `scheduled_jobs_reinstalled` is `true` only after verification.
+worker completion and active Backup timer; image source is `rebuilt from git at <version>`, and `scheduled_jobs_reinstalled` is `true` only after verification. The harness
+adds `needs_old_server: false` only after destroying the old App resources and
+reconstructing from the retained git checkout and reattached external Target.
 No CI run has been measured in the implementation sandbox; use the workflow logs
 for actual numbers rather than an estimate. The fixture destroys all App
 containers, volumes, built images, Proxy state and the original Yoho root, then

@@ -36,20 +36,27 @@ sudo install -d -m 700 -o "$replacement" -g "$replacement" "/home/$replacement/.
 sudo install -m 600 -o "$replacement" -g "$replacement" "$HOME/.ssh/id_ed25519.pub" "/home/$replacement/.ssh/authorized_keys"
 printf '%s ALL=(ALL) NOPASSWD:ALL\n' "$replacement" | sudo tee "/etc/sudoers.d/$replacement" >/dev/null
 # Reattach the external disk to the replacement identity.
+trusted=/srv/yoho-recovery
+sudo test ! -e "$trusted"
+sudo install -d -m 755 -o root -g root "$trusted"
+sudo mv "$TARGET" "$trusted/target"
+TARGET=$trusted/target
 sudo chown -R "$replacement:$replacement" "$TARGET"
-chmod 755 "$WORK"
-ROOT=$WORK/replacement
+ROOT=$trusted/server
+SERVER_USER=$replacement
 sudo install -d -m 700 -o "$replacement" -g "$replacement" "$ROOT"
 write_config "$replacement"
 git add yoho.yml && git commit -qm 'point at replacement Server'
 version=$(git rev-parse HEAD)
 # Ensure a new identity has no inherited Release or generated-secret material.
-[[ ! -e $ROOT/apps ]]
+server_run test ! -e "$ROOT/apps"
 [[ ! -d $oldroot ]]
 [[ -z $(docker ps -aq --filter label=com.docker.compose.project=yoho-shop-production) ]]
 start=$(date +%s)
 yoho setup --yes --no-containerd-image-store
 yoho apply --auto-approve
+yoho backup list nightly --json > "$WORK/replacement-backups.jsonl"
+backup_id=$(jq -ser '[.[] | select(.event == "row")][0].id | select(type == "string" and length > 0)' "$WORK/replacement-backups.jsonl")
 run_capture "$WORK/restore.jsonl" backup restore latest --yes --report
 assert_result "$WORK/restore.jsonl" "$RC" success 0
 converge
@@ -62,7 +69,7 @@ yoho schedule status
 yoho app exec db -- psql -U postgres -tAc "SELECT count(*) FROM jobs WHERE payload IN ('before-loss', 'after-recovery') AND status='done'" | tee "$WORK/rows.txt"
 grep -Eq '^[[:space:]]*2[[:space:]]*$' "$WORK/rows.txt"
 full=$(( $(date +%s) - start ))
-jq -sc --argjson full "$full" --arg source "rebuilt from git at $version" '[.[] | select(.event == "recovery")][0] | .full_recovery_seconds=$full | .image_source=$source | .scheduled_jobs_reinstalled=true' "$WORK/restore.jsonl" | tee "$WORK/recovery.json"
+recovery_event "$WORK/restore.jsonl" "$backup_id" | jq -ec --argjson full "$full" --arg source "rebuilt from git at $version" '.full_recovery_seconds=$full | .image_source=$source | .scheduled_jobs_reinstalled=true | .needs_old_server=false' | tee "$WORK/recovery.json"
 if [[ -n ${GITHUB_STEP_SUMMARY:-} ]]; then
  { echo 'Recovery measured in CI (setup through healthy Proxy, restored rows, worker, active Scheduled Job):'; echo '```json'; cat "$WORK/recovery.json"; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
 fi

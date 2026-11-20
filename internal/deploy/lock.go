@@ -187,13 +187,15 @@ func AcquirePreviewLock(ctx context.Context, host remote.Host, app string, info 
 // lockDirectoryScript distinguishes a held lock from a filesystem failure.
 // If recording a newly acquired lock fails (for example ENOSPC), remove only
 // the directory this invocation created so a retry can acquire it.
+// Use mkdir's C-locale error to distinguish contention: a later directory
+// inspection would race an unlock and misclassify a vanished lock as I/O.
 func lockDirectoryScript(q string) string {
 	return "yoho_lock_write() {\n" +
 		"if cat > \"$1\"; then return 0; fi\n" +
 		"rm -f " + q + "/info.json; rmdir " + q + "\n" +
 		"echo 'cannot record Destination lock; check free disk space and permissions' >&2; return 1\n}\n" +
-		"if mkdir " + q + " 2>/dev/null; then yoho_lock_write " + q + "/info.json; echo acquired; else echo held; " +
-		"if [ ! -d " + q + " ]; then echo 'cannot create Destination lock; check free disk space and permissions' >&2; exit 1; fi; " +
+		"if yoho_lock_error=$(LC_ALL=C mkdir " + q + " 2>&1); then yoho_lock_write " + q + "/info.json; echo acquired; else echo held; " +
+		"case \"$yoho_lock_error\" in *\": File exists\") ;; *) printf '%s\\n' \"$yoho_lock_error\" >&2; echo 'cannot create Destination lock; check free disk space and permissions' >&2; exit 1 ;; esac; " +
 		"cat " + q + "/info.json 2>/dev/null || true; fi"
 }
 

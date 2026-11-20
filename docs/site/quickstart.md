@@ -32,9 +32,11 @@ Or grab just that directory from GitHub. The App is one Go binary: `web` serves 
 
 ## 3. Point it at your Server
 
-In `yoho.yml`, set `servers.primary.ssh` to `root@YOUR_SERVER` (or `you@YOUR_SERVER` if that user already has sudo). The example includes a nightly Backup. Mount external storage at
+In `yoho.yml`, set `servers.primary.ssh` to `root@YOUR_SERVER` (or `you@YOUR_SERVER` if that user already has sudo). The example includes a commented, opt-in nightly Backup. To enable it, mount external storage at
 `/mnt/off-server`, or change `backups.targets.recovery.repository` to your
-off-Server restic location. Add `RESTIC_PASSWORD=$(op read …)` (or your chosen
+off-Server restic location. Give the deploy user ownership of that repository
+(and on a replacement, reassign ownership to its deploy user). Uncomment the
+`backups:` example only after the storage is writable. Add `RESTIC_PASSWORD=$(op read …)` (or your chosen
 provider) to `.yoho/secrets`; keep this password outside the Server so recovery
 can decrypt the Backup. See [Backups](backups.md#losing-a-server).
 
@@ -192,6 +194,9 @@ Yoho does not load `compose.local.yaml`. That overlay is only for `docker compos
 - [Backups & restore](backups.md) — configure the example’s off-Server Backup Target
 
 ## Lose the Server
+
+First enable the optional Backup above and run `yoho apply --auto-approve` to
+install its Scheduled Job.
 
 After trying deploy, a failed deploy and rollback above, write a known job with
 `curl -X POST "$url/jobs" --data-binary before-loss` and wait for it to show `done`

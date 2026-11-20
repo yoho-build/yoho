@@ -23,16 +23,17 @@ proxy:
 setup:
   user: yoho
 
-# Mount an OFF-SERVER disk here, or replace repository with s3:/sftp: storage.
+# Optional Backups: uncomment after configuring a writable off-Server Target
+# and RESTIC_PASSWORD in .yoho/secrets (see docs/site/backups.md).
 # A directory on the App Server's own disk cannot survive losing that Server.
-backups:
-  targets:
-    recovery:
-      type: restic
-      repository: /mnt/off-server/yoho-backups
-      password_secret: RESTIC_PASSWORD
-  jobs:
-    nightly:
-      destination: production
-      target: recovery
-      schedule: '*-*-* 03:00:00'
+# backups:
+#   targets:
+#     recovery:
+#       type: restic
+#       repository: /mnt/off-server/yoho-backups
+#       password_secret: RESTIC_PASSWORD
+#   jobs:
+#     nightly:
+#       destination: production
+#       target: recovery
+#       schedule: '*-*-* 03:00:00'

@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/yoho-build/yoho/internal/backup"
+	"github.com/yoho-build/yoho/internal/config"
 	"github.com/yoho-build/yoho/internal/ui"
 )
 
@@ -32,8 +33,11 @@ func TestRecoveryReport(t *testing.T) {
 			if err := json.Unmarshal(out.Bytes(), &event); err != nil {
 				t.Fatal(err)
 			}
-			if event["event"] != "recovery" || event["backup_id"] != "selected" || event["data_restore_seconds"] != 1.5 || event["needs_old_server"] != false {
+			if event["event"] != "recovery" || event["backup_id"] != "selected" || event["data_restore_seconds"] != 1.5 {
 				t.Fatal(event)
+			}
+			if _, ok := event["needs_old_server"]; ok {
+				t.Fatal("restore cannot prove independence from the old Server")
 			}
 			for _, key := range []string{"full_recovery_seconds", "image_source", "scheduled_jobs_reinstalled"} {
 				if v, ok := event[key]; !ok || v != nil {
@@ -52,5 +56,15 @@ func TestRestoreReportRefusesCleanup(t *testing.T) {
 	c.SetErr(&out)
 	if err := c.Execute(); err == nil || !strings.Contains(err.Error(), "--report") {
 		t.Fatalf("cleanup/report: %v", err)
+	}
+}
+
+func TestQuickstartBackupRemainsOptIn(t *testing.T) {
+	cfg, err := config.Load("../../examples/quickstart/yoho.yml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cfg.Backups.Jobs) != 0 || len(cfg.Backups.Targets) != 0 {
+		t.Fatal("quickstart must deploy without Backup storage or RESTIC_PASSWORD")
 	}
 }

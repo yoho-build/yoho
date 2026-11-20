@@ -10,6 +10,7 @@ WORK=$(mktemp -d /tmp/yoho-resilience.XXXXXX)
 APP=$WORK/app
 ROOT=$WORK/server
 TARGET=$WORK/off-server
+SERVER_USER=$USER
 mkdir -p "$APP" "$ROOT" "$TARGET"
 echo "Resilience fixture: $WORK"
 cp -a "$REPO/examples/quickstart/." "$APP/"
@@ -83,10 +84,10 @@ run_capture() {
  yoho --json "$@" > "$file" 2> "$file.stderr" || RC=$?
  cat "$file"
 }
-records_valid() {
- local f
- while IFS= read -r f; do jq -e '.app == "shop" and .version != null' "$f" >/dev/null; done < <(find "$ROOT/apps/shop/production/releases" -name release.json)
-}
+# Inspect Server files as the SSH identity, including after replacement.
+server_run() { sudo -u "$SERVER_USER" -- "$@"; }
+# shellcheck source=test/integration/resilience-assertions.sh
+. "$REPO/test/integration/resilience-assertions.sh"
 services_healthy() {
  local ids id
  ids=$(docker ps -q --filter label=com.docker.compose.project=yoho-shop-production)
@@ -97,7 +98,7 @@ services_healthy() {
 }
 operation_status() {
  local id
- id=$(jq -r .operation_id "$ROOT/apps/shop/production/current/release.json")
+ id=$(server_run cat "$ROOT/apps/shop/production/current/release.json" | jq -er '.operation_id | select(type == "string" and length > 0)')
  yoho status --operation "$id" --json > "$WORK/status.jsonl"
  jq -se 'any(.[]; .event == "operation_status" and .outcome == "success" and .lock_held == false)' "$WORK/status.jsonl" >/dev/null
 }
