@@ -15,6 +15,7 @@ import (
 	"github.com/yoho-build/yoho/internal/plan"
 	"github.com/yoho-build/yoho/internal/release"
 	"github.com/yoho-build/yoho/internal/remote"
+	"github.com/yoho-build/yoho/internal/roles"
 	"github.com/yoho-build/yoho/internal/swarm"
 	"github.com/yoho-build/yoho/internal/ui"
 )
@@ -113,7 +114,7 @@ func (a *app) removeOptions(h plan.NamedHost, svcs []string, volumes bool) deplo
 // removeHosts are the Servers remove works on: compose runs on the first
 // Server only; swarm tasks, routes and volumes may be on every Server.
 func (a *app) removeHosts(hosts []plan.NamedHost) []plan.NamedHost {
-	if a.dest.Runtime == "swarm" {
+	if a.dest.Runtime == "swarm" || a.dest.Roles != nil {
 		return hosts
 	}
 	return hosts[:1]
@@ -193,7 +194,7 @@ func (a *app) remove(cmd *cobra.Command, f removeFlags) (err error) {
 
 	mgr := hosts[0]
 	step := u.Step(mgr.Name, "Lock %s/%s", a.cfg.App, a.destName)
-	unlock, err := deploy.AcquireLock(ctx, mgr.Host, a.cfg.App, a.destName, deploy.LockInfo{Performer: performer(), Command: "remove"})
+	unlock, err := a.operationLocks(ctx, targets, deploy.LockInfo{Performer: performer(), Command: "remove"}, false)
 	if err != nil {
 		step.Fail(err, "wait for the running deploy or Backup, or remove a stale lock as the message says")
 		return &silentError{err}
@@ -204,7 +205,11 @@ func (a *app) remove(cmd *cobra.Command, f removeFlags) (err error) {
 	if err = beginOperation(ctx); err != nil {
 		return err
 	}
-	if err := a.removeJobs(ctx, hosts, nil); err != nil {
+	jobsApp := *a
+	if a.dest.Roles != nil {
+		jobsApp.rolesLocksHeld = true
+	}
+	if err := jobsApp.removeJobs(ctx, hosts, nil); err != nil {
 		return err
 	}
 	removed := map[string]int{}
@@ -293,6 +298,13 @@ func (a *app) remove(cmd *cobra.Command, f removeFlags) (err error) {
 		summary += "; Backups kept"
 	}
 	operationRemoved(ctx)
+	if a.dest.Roles != nil {
+		for _, h := range targets {
+			if e := roles.Protect(ctx, h.Host, a.cfg.App, a.destName, nil); e != nil {
+				return e
+			}
+		}
+	}
 	u.Finished(nil, summary)
 	return nil
 }

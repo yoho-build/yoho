@@ -124,6 +124,9 @@ func checkGeneratedFlags(keys, services []string, runtime string) ([]string, err
 var secretKeyRe = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 
 func (a *app) rotateSecrets(ctx context.Context, services, generated []string, dryRun bool) (err error) {
+	if a.dest.Roles != nil {
+		return a.rotateRoles(ctx, services, generated, dryRun)
+	}
 	u := a.ui
 	start := time.Now()
 	defer func() {
@@ -622,9 +625,14 @@ func (a *app) refusePendingRotations(ctx context.Context, hosts []plan.NamedHost
 	if len(hosts) == 0 || hosts[0].Host == nil {
 		return nil
 	}
-	if err := deploy.CheckPendingRotations(ctx, hosts[0].Host, a.cfg.App, a.destName, allow); err != nil {
-		a.ui.Error(err, hintFor(err, "check that the Server is reachable"))
-		return &silentError{err}
+	for _, h := range hosts {
+		if a.dest.Roles == nil && h.Name != hosts[0].Name {
+			continue
+		}
+		if err := deploy.CheckPendingRotations(ctx, h.Host, a.cfg.App, a.destName, allow); err != nil {
+			a.ui.Error(err, hintFor(err, "check that the Server is reachable"))
+			return &silentError{err}
+		}
 	}
 	return nil
 }

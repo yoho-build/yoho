@@ -41,8 +41,16 @@ func mutationResult(err error, started bool) operation.Result {
 	if errors.As(err, &jobs) {
 		r.Outcome = "partial"
 	}
+	var rolesFailure *deploy.RolesFailure
+	if errors.As(err, &rolesFailure) {
+		r.Changed = slices.Clone(rolesFailure.Changed)
+		r.Unchanged = slices.Clone(rolesFailure.Unchanged)
+		if len(r.Changed) > 0 {
+			r.Outcome = "partial"
+		}
+	}
 	var failure *deploy.Failure
-	if errors.As(err, &failure) {
+	if rolesFailure == nil && errors.As(err, &failure) {
 		for _, s := range failure.Services {
 			if s.ProxyRoute == "switched" || (s.ProxyRoute == "not-applicable" && (s.Convergence == "complete" || s.Convergence == "ready")) {
 				r.Changed = append(r.Changed, s.Service)
@@ -139,8 +147,12 @@ func classifyOperation(ctx context.Context, err error) error {
 	started := r != nil && r.mutated
 	result := mutationResult(err, started)
 	if r != nil && r.op != nil && len(r.op.Services) > 0 && result.Outcome != "unknown" {
-		result.Changed = []string{}
-		result.Unchanged = []string{}
+		var rolesFailure *deploy.RolesFailure
+		if !errors.As(err, &rolesFailure) {
+			result.Changed = []string{}
+			result.Unchanged = []string{}
+		}
+
 		for name, state := range r.op.Services {
 			if state == "changed" {
 				result.Changed = append(result.Changed, name)
@@ -148,6 +160,7 @@ func classifyOperation(ctx context.Context, err error) error {
 				result.Unchanged = append(result.Unchanged, name)
 			}
 		}
+		result.Unchanged = slices.DeleteFunc(result.Unchanged, func(s string) bool { return slices.Contains(result.Changed, s) })
 		sort.Strings(result.Changed)
 		result.Changed = slices.Compact(result.Changed)
 		sort.Strings(result.Unchanged)

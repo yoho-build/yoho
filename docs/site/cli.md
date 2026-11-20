@@ -256,3 +256,24 @@ Members recover through the Gate's automatic rollout reattachment and `releases`
 Codes 10–15 apply to mutating commands; malformed flags/arguments and an unconverged `plan --out` also exit 10. With `--json`, Cobra validation emits one error event. Existing contracts stay unchanged:
 `plan --detailed-exitcode` uses 0/1/2 (unchanged/error/changes), `config check`
 uses 0/1/2, and `app exec` / `app run` pass through the executed command's code.
+
+## Service placement
+
+`yoho service move SERVICE --to SERVER [--plan] [--auto-approve] [--lock-wait]`
+plans or executes a stop-first Stateful Service move with a fresh Backup, an
+empty target, health checks and consumer reconciliation. It prints the Role
+config edit to commit. `--cleanup-source` is a separate explicit run removing
+retained source volumes after a successful move. See [Roles](roles.md).
+
+For Roles Destinations, apply and rollback hold all Server locks in sorted order;
+plans and operation Service state include Server placement. Mixed rollout: exit
+13; disconnected/unknown outcome: exit 14. Backups follow the volume owner.
+
+For a Roles Destination, `yoho status` shows each proxied Service’s per-Server Proxy and route state; `yoho status --operation ID` reads rollout progress. `yoho releases` includes a Server column.
+
+Roles Service commands `app run`, `app exec` and `app logs` accept `--server`.
+Without it, replicas use the first hosting Server with a note; logs for Services
+on different Servers are grouped by placement (following requires one Server).
+`remove`, maintenance locks, Backup operations and Scheduled Job installation
+coordinate all affected Servers. Status and Scheduled Job status inspect all
+Roles Servers.

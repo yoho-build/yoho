@@ -144,6 +144,9 @@ func proxyWithDefaults(p *config.ServiceProxy) *config.ServiceProxy {
 		return nil
 	}
 	c := *p
+	if c.SSL != nil {
+		c.TLS = *c.SSL
+	}
 	c.Hosts = slices.Clone(p.Hosts)
 	if p.HealthPort != nil {
 		v := *p.HealthPort

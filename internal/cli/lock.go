@@ -39,12 +39,18 @@ func (a *app) lockedRuntime() plan.Runtime {
 	if a.dest.Runtime == "swarm" && swarmRuntime != nil {
 		return swarmRuntime(true)
 	}
+	if a.dest.Roles != nil {
+		return deploy.Roles{LockHeld: true}
+	}
 	return deploy.Compose{LockHeld: true}
 }
 
 // acquireLock takes the Destination lock on h (the first Server), waiting
 // up to --lock-wait while someone else holds it.
 func (a *app) acquireLock(ctx context.Context, h remote.Host, info deploy.LockInfo) (func(context.Context) error, error) {
+	if a.rolesLocksHeld {
+		return func(context.Context) error { return nil }, nil
+	}
 	if info.Performer == "" {
 		info.Performer = performer()
 	}
@@ -152,6 +158,9 @@ deploys, rollbacks and Scheduled Backups refuse with your message until
 			if strings.TrimSpace(message) == "" {
 				return a.fail(&hintError{"a lock needs a message", "say why, e.g. `yoho lock acquire -m \"database maintenance\"`"})
 			}
+			if a.dest.Roles != nil {
+				return a.rolesManualLock(cmd.Context(), "acquire", message, false)
+			}
 			return a.lockRun(cmd.Context(), func(ctx context.Context, h remote.Host) error {
 				info := deploy.LockInfo{Performer: performer(), Command: deploy.ManualLockCommand, Message: message, Time: time.Now().UTC()}
 				step := a.ui.Step(a.dest.Servers[0], "Acquire lock")
@@ -181,6 +190,9 @@ deploys, rollbacks and Scheduled Backups refuse with your message until
 			if err != nil {
 				return err
 			}
+			if a.dest.Roles != nil {
+				return a.rolesManualLock(cmd.Context(), "status", "", false)
+			}
 			return a.lockRun(cmd.Context(), func(ctx context.Context, h remote.Host) error {
 				info, held, err := deploy.ReadLock(ctx, h, a.cfg.App, a.destName)
 				if err != nil {
@@ -206,6 +218,9 @@ deploys, rollbacks and Scheduled Backups refuse with your message until
 			a, err := g.load(cmd)
 			if err != nil {
 				return err
+			}
+			if a.dest.Roles != nil {
+				return a.rolesManualLock(cmd.Context(), "release", "", force)
 			}
 			return a.lockRun(cmd.Context(), func(ctx context.Context, h remote.Host) error {
 				step := a.ui.Step(a.dest.Servers[0], "Release lock")

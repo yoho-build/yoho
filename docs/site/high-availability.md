@@ -1,10 +1,18 @@
 # High availability & recovery
 
+[Roles](roles.md) is the opt-in multi-Server path for Compose. Replicate stateless
+Services behind a named Cloudflare Tunnel or an external TLS load balancer.
+Stateful Services remain singleton; high availability of their data still needs
+an App/database replication strategy and verified Backups. Swarm is frozen.
+
+
 Yoho deploys to Servers you own. It does not make a database highly available, and it does not pretend to. This page says what fails when a Server fails, and how you get back.
 
-## Compose: one Server per Destination
+<a id="compose-one-server-per-destination"></a>
 
-The compose runtime (the default) deploys a Destination to exactly one Server. That Server is a **single point of failure**: if it dies, the App is down until you rebuild it somewhere else. Zero-downtime deploys ([kamal-proxy](zero-downtime.md)) protect against bad releases, not against a lost machine.
+## Compose without Roles: one Server per Destination
+
+Without Roles, the compose runtime (the default) deploys a Destination to exactly one Server. That Server is a **single point of failure**: if it dies, the App is down until you rebuild it somewhere else. Zero-downtime deploys ([kamal-proxy](zero-downtime.md)) protect against bad releases, not against a lost machine.
 
 Two Destinations (production, staging) on two Servers are two independent copies of the App, not a failover pair. Yoho never moves traffic between them.
 

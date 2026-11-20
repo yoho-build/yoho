@@ -305,6 +305,23 @@ func (a *app) prepareBackupFor(ctx context.Context, name, dest string, needServi
 
 func (a *app) backupLock(h remote.Host, command string) backup.LockFunc {
 	return func(ctx context.Context) (func(context.Context) error, error) {
+		if a.dest.Roles != nil {
+			hosts, closeHosts, e := a.connect(ctx)
+			if e != nil {
+				return nil, e
+			}
+			u, e := a.operationLocks(ctx, hosts, deploy.LockInfo{Command: command}, false)
+			if e != nil {
+				closeHosts()
+				return nil, e
+			}
+			if e = beginOperation(ctx); e != nil {
+				_ = u(ctx)
+				closeHosts()
+				return nil, e
+			}
+			return func(ctx context.Context) error { defer closeHosts(); return u(ctx) }, nil
+		}
 		unlock, err := a.acquireLock(ctx, h, deploy.LockInfo{Command: command})
 		if err != nil {
 			return nil, err
@@ -380,8 +397,11 @@ func backupRunCmd(g *globals) *cobra.Command {
 				return err
 			}
 			defer closeHosts()
-			h := hosts[0]
-			if len(hosts) > 1 {
+			h, ownerErr := a.backupOwner(hosts, j)
+			if ownerErr != nil {
+				return ownerErr
+			}
+			if len(hosts) > 1 && a.dest.Roles == nil {
 				u.Info("Backup runs only on %s (the first Server of %s)", h.Name, a.destName)
 			}
 			// A half-finished rotation means the database may already use a
@@ -452,7 +472,7 @@ func backupListCmd(g *globals) *cobra.Command {
 				return err
 			}
 			ctx := cmd.Context()
-			j, err := a.prepareBackup(ctx, name, false)
+			j, err := a.prepareBackup(ctx, name, a.dest.Roles != nil)
 			if err != nil {
 				return err
 			}
@@ -461,10 +481,14 @@ func backupListCmd(g *globals) *cobra.Command {
 				return err
 			}
 			defer closeHosts()
-			step := a.ui.Step(hosts[0].Name, "List Backups in %s", j.targetName)
+			h, ownerErr := a.backupOwner(hosts, j)
+			if ownerErr != nil {
+				return ownerErr
+			}
+			step := a.ui.Step(h.Name, "List Backups in %s", j.targetName)
 			entries, err := backup.List(ctx, backup.ListOptions{
 				App: a.cfg.App, Destination: a.destName, Project: a.project(),
-				Target: j.target, Password: j.password, TargetEnv: j.env, RcloneConfig: j.rcloneConf, Host: hosts[0].Host,
+				Target: j.target, Password: j.password, TargetEnv: j.env, RcloneConfig: j.rcloneConf, Host: h.Host,
 			})
 			if err != nil {
 				step.Fail(err, backupHint(err))
@@ -700,7 +724,10 @@ Services that an interrupted restore stopped are not resumed afterwards.`,
 				return err
 			}
 			defer closeHosts()
-			h := hosts[0]
+			h, ownerErr := a.backupOwner(hosts, j)
+			if ownerErr != nil {
+				return ownerErr
+			}
 			id := args[0]
 
 			step := u.Step(h.Name, "Find Backup %s of %s in %s", id, source, j.targetName)
@@ -963,7 +990,7 @@ func backupCheckCmd(g *globals) *cobra.Command {
 				}
 			}()
 			ctx := cmd.Context()
-			j, err := a.prepareBackup(ctx, name, false)
+			j, err := a.prepareBackup(ctx, name, a.dest.Roles != nil)
 			if err != nil {
 				return err
 			}
@@ -978,7 +1005,10 @@ func backupCheckCmd(g *globals) *cobra.Command {
 				return err
 			}
 			defer closeHosts()
-			h := hosts[0]
+			h, ownerErr := a.backupOwner(hosts, j)
+			if ownerErr != nil {
+				return ownerErr
+			}
 			step := a.ui.Step(h.Name, "Check Backup integrity in %s", j.targetName)
 			res, err := backup.Check(ctx, backup.CheckOptions{
 				ListOptions: backup.ListOptions{App: a.cfg.App, Destination: a.destName, Project: a.project(), Target: j.target, Password: j.password, TargetEnv: j.env, RcloneConfig: j.rcloneConf, Host: h.Host},

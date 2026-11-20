@@ -10,6 +10,7 @@ import (
 	"os/user"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -80,12 +81,19 @@ func (a *app) connect(ctx context.Context) ([]plan.NamedHost, func(), error) {
 		step.Done()
 		hosts = append(hosts, plan.NamedHost{Name: name, Server: srv, Host: h})
 	}
+	if err := a.rolesAddresses(ctx, hosts); err != nil {
+		closeAll()
+		return nil, nil, err
+	}
 	return hosts, closeAll, nil
 }
 
 func (a *app) runtime() plan.Runtime {
 	if a.dest.Runtime == "swarm" && swarmRuntime != nil {
 		return swarmRuntime(false)
+	}
+	if a.dest.Roles != nil {
+		return deploy.Roles{}
 	}
 	return deploy.Compose{}
 }
@@ -548,6 +556,7 @@ func (a *app) newDeploy(s *session, images map[string]string, forPlan bool) (*pl
 		return nil, &validationError{err}
 	}
 	return &plan.Deploy{
+		Roles: a.dest, PrivateAddresses: privateAddresses(s.hosts),
 		App: a.cfg.App, Destination: a.destName, Version: s.ver, Performer: performer(),
 		OperationID: a.operation, OnService: a.progress,
 		Servers: s.hosts, Project: proj, Ext: s.r.Ext, Built: built,
@@ -594,7 +603,11 @@ func (a *app) reconcileTunnel(ctx context.Context, s *session) (string, error) {
 	owner := proxy.TunnelOwner(a.cfg.App, a.destName)
 	urls := ""
 	for _, h := range s.hosts {
-		if t == nil {
+		desired := t
+		if a.dest.Roles != nil && !a.serverHasProxy(h.Name, s.r.Ext) {
+			desired = nil
+		}
+		if desired == nil {
 			st, err := proxy.TunnelStatusOf(ctx, h.Host)
 			if err != nil || !st.Exists() {
 				continue
@@ -713,6 +726,11 @@ func (a *app) proxyConfig() config.ProxyConfig {
 	if a.previewName != "" {
 		p.Tunnel = nil
 	}
+	if a.dest.Roles != nil && p.Tunnel != nil {
+		zero := 0
+		p.HTTPPort = &zero
+		p.HTTPSPort = &zero
+	}
 	return p
 }
 
@@ -743,7 +761,17 @@ func (a *app) urls(r *composefile.Result, hosts []plan.NamedHost) string {
 			urls = append(urls, "http://"+proxy.ContainerName+":80 (Server-internal, e.g. Cloudflare Tunnel)")
 			continue
 		}
-		_, host, _, _ := remote.ParseTarget(hosts[0].Server.SSH)
+		endpoint := hosts[0]
+		if a.dest.Roles != nil {
+			placement := a.dest.ServiceServers(name)
+			for _, h := range hosts {
+				if slices.Contains(placement, h.Name) {
+					endpoint = h
+					break
+				}
+			}
+		}
+		_, host, _, _ := remote.ParseTarget(endpoint.Server.SSH)
 		u := "http://" + host
 		if port != 80 {
 			u += fmt.Sprintf(":%d", port)
@@ -855,7 +883,7 @@ func (a *app) rollback(ctx context.Context, v string, releaseSecrets bool) (err 
 		a.ui.Finished(err, "")
 		return err
 	}
-	d := &plan.Deploy{OperationID: a.operation, OnService: a.progress, App: a.cfg.App, Destination: a.destName, Performer: performer(), Servers: hosts,
+	d := &plan.Deploy{Roles: a.dest, PrivateAddresses: privateAddresses(hosts), OperationID: a.operation, OnService: a.progress, App: a.cfg.App, Destination: a.destName, Performer: performer(), Servers: hosts,
 		Proxy: a.proxyConfig(), Registry: a.cfg.Registry, RetainReleases: a.cfg.RetainReleases, Out: a.ui.Progress(),
 		RollbackReleaseSecrets: releaseSecrets}
 	target, err := a.resolveVersion(ctx, d, v)
@@ -866,7 +894,7 @@ func (a *app) rollback(ctx context.Context, v string, releaseSecrets bool) (err 
 	d.Hook = a.hookFunc(target, "rollback", hosts)
 	a.ui.Title("Rolling back %s on %s to %s", a.cfg.App, a.destName, shortVersion(target))
 	step := a.ui.Step(hosts[0].Name, "Acquire lock")
-	unlock, err := a.acquireLock(ctx, hosts[0].Host, deploy.LockInfo{Version: target, Command: "rollback"})
+	unlock, err := a.operationLocks(ctx, hosts, deploy.LockInfo{Version: target, Command: "rollback"}, false)
 	if err != nil {
 		step.Fail(err, hintFor(err, "check that the Server is reachable"))
 		a.ui.Finished(err, "")
@@ -918,6 +946,8 @@ func (a *app) resolveVersion(ctx context.Context, d *plan.Deploy, v string) (str
 	for i, r := range rels {
 		versions[i] = r.Version
 	}
+	sort.Strings(versions)
+	versions = slices.Compact(versions)
 	got, err := matchVersion(versions, v)
 	if err != nil {
 		return "", fmt.Errorf("%w on %s; see `yoho releases`", err, a.destName)
@@ -987,9 +1017,11 @@ func releasesCmd(g *globals) *cobra.Command {
 			for _, r := range rels {
 				cutover = cutover || r.Cutover != ""
 			}
+			marked := map[string]bool{}
 			for i, r := range rels {
 				cur := ""
-				if i == 0 && r.Status == "deployed" {
+				if (i == 0 || a.dest.Roles != nil && !marked[r.Server]) && r.Status == "deployed" {
+					marked[r.Server] = true
 					cur = "*"
 				}
 				status := r.Status
@@ -997,12 +1029,18 @@ func releasesCmd(g *globals) *cobra.Command {
 					status += " refreshed"
 				}
 				row := []string{cur, shortVersion(r.Version), status, r.DeployedAt.Local().Format("2006-01-02 15:04:05"), r.Performer, r.SecretsGeneration}
+				if a.dest.Roles != nil {
+					row = append([]string{r.Server}, row...)
+				}
 				if cutover {
 					row = append(row, r.Cutover)
 				}
 				rows = append(rows, row)
 			}
 			header := []string{"CURRENT", "VERSION", "STATUS", "DEPLOYED", "BY", "SECRETS"}
+			if a.dest.Roles != nil {
+				header = append([]string{"SERVER"}, header...)
+			}
 			if cutover {
 				header = append(header, "CUTOVER")
 			}
@@ -1042,7 +1080,18 @@ after pre-connect.`,
 				return err
 			}
 			defer closeHosts()
+			var roleExt map[string]config.ServiceExt
+			if a.dest.Roles != nil {
+				r, e := a.compose(ctx)
+				if e != nil {
+					return e
+				}
+				roleExt = r.Ext
+			}
 			for _, h := range hosts {
+				if !a.serverHasProxy(h.Name, roleExt) {
+					continue
+				}
 				hook := a.proxyHook(a.serverVersion(ctx, h.Host), []plan.NamedHost{h})
 				step := a.ui.Step(h.Name, "Boot %s", proxy.ContainerName)
 				// Pull before the Hook: a failed pull must not leave the
@@ -1109,6 +1158,12 @@ func appCmds(g *globals) *cobra.Command {
 			} else if err := checkServices(names, args[:1]); err != nil {
 				return a.fail(err)
 			}
+			if a.dest.Roles != nil {
+				a, err = a.serviceApp(cmd, args[0])
+				if err != nil {
+					return err
+				}
+			}
 			if err := execTerm.check(cmd); err != nil {
 				return a.fail(err)
 			}
@@ -1120,6 +1175,7 @@ func appCmds(g *globals) *cobra.Command {
 			return execError(err)
 		},
 	}
+	addServerFlag(execCmd)
 	addTermFlags(execCmd, &execTerm)
 	c.AddCommand(execCmd, appRunCmd(g))
 	return c
@@ -1204,6 +1260,18 @@ func (a *app) remoteRun(cmd *cobra.Command, script string) error {
 // Release has an x-yoho.check, it runs the checks once (read-only, bounded)
 // and adds a CHECK column.
 func (a *app) appPS(cmd *cobra.Command) error {
+	if a.dest.Roles != nil {
+		for _, name := range a.dest.Servers {
+			b := *a
+			b.dest.Servers = []string{name}
+			b.dest.Roles = nil
+			a.ui.Info("Server %s", name)
+			if e := b.appPS(cmd); e != nil {
+				return e
+			}
+		}
+		return nil
+	}
 	ctx := cmd.Context()
 	script := "docker compose -p " + remote.Quote(a.project()) + " ps --format 'table {{.Service}}\\t{{.Name}}\\t{{.Status}}\\t{{.Image}}'"
 	srv := a.cfg.Servers[a.dest.Servers[0]]

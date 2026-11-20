@@ -1,6 +1,11 @@
 # Swarm
 
-Set `runtime: swarm` on a Destination to deploy with `docker stack deploy`; required for more than one Server.
+> **Frozen:** Swarm receives bug fixes, security fixes and CI only. New multi-Server
+> work uses [Roles](roles.md) on the Compose runtime (ADR 0017). Deprecation waits
+> for proven migration, interrupted-rollout recovery and blank-Server restore.
+
+
+Set `runtime: swarm` on a Destination to deploy with `docker stack deploy`; the frozen Swarm runtime. New multi-Server Compose Apps use [Roles](roles.md).
 
 ```yaml
 servers:
@@ -30,3 +35,15 @@ Docker advertises the manager on its assigned [WireGuard mesh](mesh.md) address 
 - Switching a Destination between compose and swarm is a migration with downtime.
 
 With the opt-in [WireGuard mesh](mesh.md), run `yoho mesh up` before Swarm init/join. The mesh address takes precedence over `private_address` for Swarm advertising. Open Swarm ports between mesh addresses only.
+
+## Migrate from Swarm to Roles
+
+Schedule downtime and take a fresh verified Backup before changing runtime.
+Create a separate Compose Destination with Roles and private-address connections.
+Keep every Stateful Service singleton on its intended volume owner; do not start
+it beside the Swarm task against the same data. Provision and verify firewall
+protection, stop the Swarm workloads, restore into empty Yoho-owned Compose
+volumes, deploy Roles, check health and data, then switch the external load
+balancer or Tunnel. Keep the old Swarm data and Backup until verification passes.
+This is an operator-led migration; changing `runtime` alone does not migrate
+volumes, secrets, network names or routes. Rehearse on a separate Destination.

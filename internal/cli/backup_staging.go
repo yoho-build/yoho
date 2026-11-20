@@ -35,6 +35,19 @@ func restoreCleanup(cmd *cobra.Command, g *globals, jobName string) (err error) 
 	}
 	defer closeHosts()
 	h := hosts[0]
+	if a.dest.Roles != nil {
+		j, e := a.selectBackupJob(jobName)
+		if e != nil {
+			return e
+		}
+		if e = a.resolveServices(ctx, j); e != nil {
+			return e
+		}
+		h, e = a.backupOwner(hosts, j)
+		if e != nil {
+			return e
+		}
+	}
 	step := u.Step(h.Name, "Lock %s (%s)", a.cfg.App, a.destName)
 	unlock, err := a.backupLock(h.Host, "backup restore --cleanup")(ctx)
 	if err != nil {

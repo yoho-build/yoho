@@ -119,6 +119,10 @@ runtime swarm; use ` + "`yoho app exec`" + ` or x-yoho.release_command.`,
 				return a.fail(err)
 			}
 			svc, command := args[0], args[1:]
+			a, err = a.serviceApp(cmd, svc)
+			if err != nil {
+				return err
+			}
 			ctx := cmd.Context()
 			name := a.dest.Servers[0]
 			srv := a.cfg.Servers[name]
@@ -151,6 +155,7 @@ runtime swarm; use ` + "`yoho app exec`" + ` or x-yoho.release_command.`,
 			return commandExit(h.RunTerminal(ctx, script, o.tty, cmd.InOrStdin(), cmd.OutOrStdout(), cmd.ErrOrStderr()))
 		},
 	}
+	addServerFlag(c)
 	addTermFlags(c, &o)
 	c.Flags().BoolVar(&allowStateful, "allow-stateful", false, "Run a one-off container of a Stateful Service next to the running one (it shares the volume)")
 	return c

@@ -112,10 +112,11 @@ func (g *globals) ui(cmd *cobra.Command) *ui.UI {
 
 // app is a loaded App: Yoho file plus selected Destination.
 type app struct {
-	previewName   string
-	previewPR     int
-	previewBranch string
-	templateName  string
+	rolesLocksHeld bool
+	previewName    string
+	previewPR      int
+	previewBranch  string
+	templateName   string
 
 	g        *globals
 	dir      string
@@ -215,6 +216,9 @@ func (g *globals) loadApp(cmd *cobra.Command) (*app, error) {
 	if a.scoped, err = scopedAccess(dest, os.Getenv); err != nil {
 		return nil, err
 	}
+	if a.scoped && a.dest.Roles != nil {
+		return nil, fmt.Errorf("Roles are operator-only; scoped (Gate) access is not supported")
+	}
 	if f := cmd.Flags().Lookup(lockWaitFlag); f != nil {
 		a.lockWait, _ = cmd.Flags().GetDuration(lockWaitFlag)
 	}
@@ -236,6 +240,14 @@ func (a *app) compose(ctx context.Context) (*composefile.Result, error) {
 	r, err := composefile.Load(ctx, a.dir, a.cfg.Compose, a.dest.Env, a.project(), a.sourceDestination())
 	if err != nil {
 		return nil, err
+	}
+	findings := composefile.CheckRoles(r, a.dest, a.proxyConfig(), a.cfg.App)
+	if composefile.HasErrors(findings) {
+		var messages []string
+		for _, f := range findings {
+			messages = append(messages, f.String())
+		}
+		return nil, errors.New(strings.Join(messages, "\n"))
 	}
 	if a.previewName != "" {
 		if err := a.checkPreviewHostCollisions(ctx, r); err != nil {

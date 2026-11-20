@@ -118,6 +118,9 @@ func serviceSecrets(d *plan.Deploy, generated map[string]string, warn func(strin
 			m[ref.Name] = v
 		}
 		for _, name := range sortedKeys(ext.Generate) {
+			if d.StrictSecretRefs {
+				continue
+			}
 			if _, ok := m[name]; ok {
 				if m[name] != generated[name] {
 					warn("service %s: secret %s is set locally and also generated; using the local value", svc, name)

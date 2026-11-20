@@ -20,6 +20,13 @@ type HookFunc func(ctx context.Context, name string, env map[string]string) erro
 
 // Deploy is everything a Runtime needs to deploy one App to one Destination.
 type Deploy struct {
+	GeneratedOwners     map[string]string
+	StrictSecretRefs    bool
+	SkipReleaseCommands bool
+	ServiceMove         bool
+	Roles               config.Destination
+	PrivateAddresses    map[string]string
+
 	App         string
 	Destination string
 	Version     string

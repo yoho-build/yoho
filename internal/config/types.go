@@ -50,7 +50,7 @@ type Server struct {
 	// Absolute base directory for Yoho state on this Server. Default
 	// /var/lib/yoho. Use a home directory path when sudo is unavailable.
 	Root string `json:"root,omitempty"`
-	// Private address reachable from other Servers (Tailscale, VPC). Reserved for Roles.
+	// Private address reachable from other Servers (Tailscale, VPC), used by Roles.
 	PrivateAddress string `json:"private_address,omitempty"`
 	// Public WireGuard host[:port], or none for outbound-only hub access.
 	Endpoint string `json:"endpoint,omitempty"`
@@ -59,9 +59,23 @@ type Server struct {
 }
 
 // Destination is a named environment of an App.
+type Role struct {
+	Services []string `json:"services" jsonschema:"required,minItems=1"`
+	Servers  []string `json:"servers" jsonschema:"required,minItems=1"`
+}
+
+// Connection exposes a singleton Service to its declared consumers.
+type Connection struct {
+	Service   string   `json:"service" jsonschema:"required"`
+	Port      int      `json:"port" jsonschema:"required,minimum=1,maximum=65535"`
+	Consumers []string `json:"consumers" jsonschema:"required,minItems=1"`
+}
+
 type Destination struct {
-	// Servers running this Destination. v1 requires exactly one for the
-	// compose runtime; swarm may list several (first is the manager).
+	Roles       map[string]Role       `json:"roles,omitempty"`
+	Connections map[string]Connection `json:"connections,omitempty"`
+	// Servers running this Destination. Compose without Roles requires one;
+	// Swarm uses the first as manager.
 	Servers []string `json:"servers" jsonschema:"required,minItems=1"`
 	// Runtime: compose (default) or swarm. Switching requires downtime.
 	Runtime string `json:"runtime,omitempty" jsonschema:"enum=compose,enum=swarm"`
@@ -456,6 +470,8 @@ type ServiceProxy struct {
 	HealthTimeout *string `json:"health_timeout,omitempty" jsonschema:"minLength=1,description=Positive Go duration per Proxy HTTP probe (e.g. 750ms or 2s); omitted uses the pinned Proxy default; separate from deploy_timeout and Docker healthcheck"`
 	// Terminate TLS with Let's Encrypt in the Proxy. Off behind Cloudflare Tunnel.
 	TLS bool `json:"tls,omitempty"`
+	// SSL explicitly selects Proxy TLS; ssl:false is required for Roles with an external TLS load balancer.
+	SSL *bool `json:"ssl,omitempty"`
 	// Use untrusted Let's Encrypt staging certificates for trials. Requires TLS.
 	TLSStaging bool `json:"tls_staging,omitempty" jsonschema:"description=Use the Let's Encrypt staging directory for untrusted trial certificates; requires tls: true"`
 	// Customer-owned hostnames: on-demand Let's Encrypt via kamal-proxy

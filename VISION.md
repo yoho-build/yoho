@@ -26,9 +26,11 @@ Yoho is one static Go binary that covers all of that for people who already desc
 
 ## Scope
 
-**In scope (shipped in beta):** one Server per Destination on the compose runtime; Swarm runtime for multiple Servers; local, remote, or on-Server builds; kamal-proxy (including on-demand TLS for customer domains); Cloudflare Tunnel connector (including Quick Tunnels and ingress routing); secrets via op / bw / bws / any command, delivered as files; generated secrets and generated-secret rotation; release commands and Service checks; rollback; Hooks; Backups, restore, and restore drills (`yoho backup drill`); opt-in Scheduled Jobs; interactive `yoho setup` for Debian / Ubuntu; local read-only dashboards (`yoho tui` and `yoho ui`, ADR 0010); scoped team access through the Gate (ADR 0011); one-shot Migration Cutover (ADR 0012); preview environments (ADR 0015); and an agent skill with Kamal, Coolify, Dokploy, and Railway migration guides.
+**In scope (shipped in beta):** single-Server Compose and opt-in Roles for multiple Servers; the frozen Swarm runtime; local, remote, or on-Server builds; kamal-proxy (including on-demand TLS for customer domains); Cloudflare Tunnel connector (including Quick Tunnels and ingress routing); secrets via op / bw / bws / any command, delivered as files; generated secrets and generated-secret rotation; release commands and Service checks; rollback; Hooks; Backups, restore, and restore drills (`yoho backup drill`); opt-in Scheduled Jobs; interactive `yoho setup` for Debian / Ubuntu; local read-only dashboards (`yoho tui` and `yoho ui`, ADR 0010); scoped team access through the Gate (ADR 0011); one-shot Migration Cutover (ADR 0012); preview environments (ADR 0015); and an agent skill with Kamal, Coolify, Dokploy, and Railway migration guides.
 
-**Later:** multi-Server Roles (subsets of Services on subsets of Servers, [#81](https://github.com/yoho-build/yoho/issues/81)), an opt-in WireGuard mesh ([#86](https://github.com/yoho-build/yoho/issues/86)), managed Cloudflare Tunnel and DNS creation, a remote read-only dashboard API with health, metrics, and alerts, and SOPS / age.
+**Multi-Server:** opt-in Roles place subsets of Services on subsets of Servers (ADR 0017). Swarm is frozen for bug/security fixes and CI. An optional WireGuard mesh is independent of Roles.
+
+**Later:** managed Cloudflare Tunnel and DNS creation, a remote read-only dashboard API with health, metrics, and alerts, and SOPS / age.
 
 **Not planned:** a web control plane, a cluster daemon, Kubernetes.
 

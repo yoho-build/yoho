@@ -22,6 +22,7 @@ import (
 	"github.com/yoho-build/yoho/internal/proxy"
 	"github.com/yoho-build/yoho/internal/release"
 	"github.com/yoho-build/yoho/internal/remote"
+	"github.com/yoho-build/yoho/internal/roles"
 	"github.com/yoho-build/yoho/internal/schedule"
 	"github.com/yoho-build/yoho/internal/setup"
 	"github.com/yoho-build/yoho/internal/transport"
@@ -143,7 +144,23 @@ func runDoctor(cmd *cobra.Command, g *globals, opts doctorOptions) error {
 	pusshOK := transport.LocalPusshAvailable(ctx, opts.localExec)
 
 	// 2. Backup freshness and last successful restore drill (first Server).
-	if len(hosts) > 0 {
+	if a.dest.Roles != nil {
+		for _, h := range hosts {
+			b, e := a.rolesJobsApp(ctx, hosts, h)
+			if e != nil {
+				findings = append(findings, doctorFinding{Check: "roles", Severity: severityError, Subject: h.Name, Message: e.Error(), Hint: "configure Backup jobs per owning Server"})
+				continue
+			}
+			stateful := false
+			if r != nil {
+				for svc, ext := range r.Ext {
+					stateful = stateful || ext.Stateful && slices.Contains(a.dest.ServiceServers(svc), h.Name)
+				}
+			}
+			findings = append(findings, checkDoctorBackups(ctx, b, h, opts.maxAge, stateful, opts.now())...)
+			findings = append(findings, checkDoctorPendingRotations(ctx, a, h)...)
+		}
+	} else if len(hosts) > 0 {
 		h0 := hosts[0]
 		findings = append(findings, checkDoctorBackups(ctx, a, h0, opts.maxAge, hasStateful, opts.now())...)
 		findings = append(findings, checkDoctorPendingRotations(ctx, a, h0)...)
@@ -151,13 +168,26 @@ func runDoctor(cmd *cobra.Command, g *globals, opts doctorOptions) error {
 
 	// 3–7. Per-Server checks: firewall & public ports, disk, Proxy, transport.
 	for _, h := range hosts {
+		if a.dest.Roles != nil {
+			addresses := privateAddresses(hosts)
+			rules, e := roles.FirewallRules(a.cfg.App, a.destName, h.Name, a.dest, addresses)
+			if e == nil {
+				e = roles.CheckFirewall(ctx, h.Host, rules)
+			}
+			if e == nil {
+				e = roles.CheckBindings(ctx, h.Host, a.cfg.App, a.destName, h.Name, a.dest, addresses)
+			}
+			if e != nil {
+				findings = append(findings, doctorFinding{Check: "roles", Severity: severityError, Subject: h.Name, Message: e.Error(), Hint: "run yoho apply to reconcile private port bindings and Docker firewall rules"})
+			}
+		}
 		findings = append(findings, checkDoctorFirewall(ctx, a, h)...)
 		findings = append(findings, checkDoctorPublishedPorts(ctx, a, h)...)
 		findings = append(findings, checkDoctorDisk(ctx, a, h)...)
 		if r == nil {
 			findings = append(findings, doctorFinding{Check: "proxy", Severity: severityWarning, Subject: h.Name, Message: "Proxy check skipped because compose config failed", Hint: "fix config and rerun `yoho doctor`"})
 		} else {
-			findings = append(findings, checkDoctorProxy(ctx, a, h, needsProxy)...)
+			findings = append(findings, checkDoctorProxy(ctx, a, h, needsProxy && a.serverHasProxy(h.Name, r.Ext))...)
 		}
 		findings = append(findings, checkDoctorTransport(ctx, a, h, pusshOK)...)
 	}
@@ -505,7 +535,12 @@ func checkDoctorBackups(ctx context.Context, a *app, h plan.NamedHost, maxAge ti
 }
 
 func checkDoctorDrill(ctx context.Context, a *app, h plan.NamedHost, now time.Time) doctorFinding {
-	entries, err := audit.ReadCommand(ctx, h.Host, a.cfg.App, a.destName, "backup drill")
+	authority, done, err := a.authority(ctx, h)
+	if err != nil {
+		return doctorFinding{Check: "drill", Severity: severityWarning, Subject: h.Name, Message: err.Error()}
+	}
+	defer done()
+	entries, err := audit.ReadCommand(ctx, authority, a.cfg.App, a.destName, "backup drill")
 	if err != nil {
 		return doctorFinding{
 			Check:    "drill",
@@ -518,6 +553,19 @@ func checkDoctorDrill(ctx context.Context, a *app, h plan.NamedHost, now time.Ti
 	var last time.Time
 	for _, r := range audit.Pair(entries) {
 		first := r.First()
+		if dest, ok := a.cfg.Destinations[a.destName]; ok && dest.Roles != nil {
+			job := ""
+			if args, ok := first.Args["args"].([]any); ok && len(args) > 0 {
+				job, _ = args[0].(string)
+			}
+			if job != "" {
+				if _, ok := a.cfg.Backups.Jobs[job]; !ok {
+					continue
+				}
+			} else if len(a.cfg.Backups.Jobs) == 0 {
+				continue
+			}
+		}
 		if first.Command != "backup drill" || r.Finished == nil {
 			continue
 		}
@@ -608,7 +656,17 @@ func checkDoctorFirewall(ctx context.Context, a *app, h plan.NamedHost) []doctor
 			Message:  "firewall check skipped (setup.firewall: false)",
 		}}
 	}
-	needed, detail, err := setup.CheckFirewall(ctx, h.Host, h.Server.Sudo, a.setupProxyPorts(), a.cfg.Setup.AllowPorts)
+	ports := a.setupProxyPorts()
+	if a.dest.Roles != nil {
+		r, e := a.compose(ctx)
+		if e != nil {
+			return []doctorFinding{{Check: "firewall", Severity: severityError, Subject: h.Name, Message: e.Error()}}
+		}
+		if !a.serverHasProxy(h.Name, r.Ext) {
+			ports = nil
+		}
+	}
+	needed, detail, err := setup.CheckFirewall(ctx, h.Host, h.Server.Sudo, ports, a.cfg.Setup.AllowPorts)
 	if err != nil {
 		return []doctorFinding{{
 			Check:    "firewall",

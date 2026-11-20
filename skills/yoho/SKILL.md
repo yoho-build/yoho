@@ -58,7 +58,7 @@ If versions carry `_uncommitted_`, the build used local changes. Suggest committ
 |---|---|
 | `config/deploy.yml` | `yoho.yml` (where/how) + `x-yoho` on each compose Service |
 | `deploy.<dest>.yml`, `-d dest` | `destinations:` in `yoho.yml`, `-d dest` (or `YOHO_DESTINATION`; default `production`); optional overlays `yoho.<dest>.yml` and `compose.<dest>.yaml` |
-| roles | Not yet (Roles are planned); one Server per Destination, whole compose app |
+| roles | Opt-in Compose Roles place Services on subsets of Servers; operator-only |
 | accessories | Stateful Services: `x-yoho.stateful: true`, pinned to one Server |
 | `.kamal/secrets` | `.yoho/secrets` (+ `.yoho/secrets.<destination>`), same dotenv with `$(...)` |
 | `env.secret` | `x-yoho.secrets`, with `NAME:KEY` alias (container name <- secret key) |
@@ -212,8 +212,8 @@ from config, then run up to preserve surviving allocations and tombstones.
 Clean up only the removed Server using a separate config listing it alone
 (with its original root and SSH routing). Down is full teardown and deletes
 allocation state; never use it on surviving Servers during removal. Previews
-reuse the mesh without reconciling it. Roles/connections are
-reserved for a later feature.
+reuse the mesh without reconciling it. Roles/connections are available on operator Compose Destinations; mesh allocations
+must exist first (`yoho mesh up`).
 
 ### Saved approvals and mutation recovery
 
@@ -261,3 +261,26 @@ prove Backup storage and images survive losing the Server. `full_recovery_second
 The CI recovery harness measures setup through final validation and adds
 `needs_old_server: false` after actually reconstructing without old App resources. Registry-less recovery rebuilds from git; old Release images need an
 archive or registry. Writes after the recovery point are lost.
+
+## Roles Destinations
+
+Opt-in Compose `roles` assigns every Service to exactly one Role. Stateful
+Services and connection providers are singleton. `connections` declares a
+provider TCP port and consumers; Yoho renders private publications, environment
+endpoints and Compose-name extra_hosts aliases. Configure private addresses or
+an opt-in mesh, root/passwordless sudo and Docker-aware firewall tools/systemd.
+Connection allowlists live in mangle PREROUTING before DNAT/FORWARD; never
+replace them with UFW or DOCKER-USER alone. See docs/site/roles.md.
+Multi-Server ingress requires a named Cloudflare Tunnel or external TLS with
+explicit `x-yoho.proxy.ssl: false`. Named Tunnel ingress closes public Proxy ports
+and preserves TLS metadata. Swarm is frozen. Apply locks all Servers; operation
+progress uses server/service keys. On partial/unknown, inspect and rerun to
+converge. Backups and Scheduled Jobs follow the owning Server.
+Use `yoho service move SERVICE --to SERVER --plan` before a stop-first data move;
+require a fresh Backup, empty owned target volumes and health checks. Commit the
+printed config edit. Source volume cleanup is a separate `--cleanup-source` run.
+
+Generated-secret owners are pinned in Release metadata; never regenerate on a
+placement change. Release commands run before every replica. After a partial
+Service move, keep the target data and source stopped; inspect the journal and
+converge consumers instead of failing back to stale data. See ADR 0019.

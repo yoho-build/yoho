@@ -23,7 +23,7 @@ A named environment of an App, such as production or staging, with its own Serve
 _Avoid_: Environment, stage, target
 
 **Role**:
-A named subset of an App's Services placed on a subset of a Destination's Servers. Reserved for later; today a Destination has one Server running the whole App.
+A named subset of an App's Services placed on a subset of a Destination's Servers. Opt-in for the Compose runtime; colocated Roles share a Compose project on a Server.
 _Avoid_: Group, tier
 
 **Stateful Service**:

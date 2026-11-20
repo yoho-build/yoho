@@ -1,0 +1,7 @@
+services:
+  db:
+    ports:
+      - host_ip: 10.0.0.2
+        target: 5432
+        published: "5432"
+        protocol: tcp

@@ -131,6 +131,32 @@ func scheduleInstallCmd(g *globals) *cobra.Command {
 // store supplies Backup Target secrets when non-nil; otherwise they are loaded.
 // It prints steps and does not print a title or a finished line.
 func (a *app) installJobs(ctx context.Context, hosts []plan.NamedHost, names []string, binaryFlag string, store *secrets.Store) error {
+	if a.dest.Roles != nil {
+		u, e := a.operationLocks(ctx, hosts, deploy.LockInfo{Command: "schedule install"}, false)
+		if e != nil {
+			return e
+		}
+		defer func() { _ = u(context.WithoutCancel(ctx)) }()
+
+		for _, h := range hosts {
+			b, e := a.rolesJobsApp(ctx, hosts, h)
+			if e != nil {
+				return e
+			}
+			var selected []string
+			for _, n := range names {
+				if _, ok := b.cfg.Backups.Jobs[n]; ok {
+					selected = append(selected, n)
+				}
+			}
+			b.rolesLocksHeld = true
+			if e = b.installJobs(ctx, []plan.NamedHost{h}, selected, binaryFlag, store); e != nil {
+				return e
+			}
+		}
+		return nil
+	}
+
 	if len(names) == 0 {
 		return nil
 	}
@@ -230,7 +256,7 @@ func (a *app) installJobs(ctx context.Context, hosts []plan.NamedHost, names []s
 	// Every App directory write (hmac.key, scheduled/, credentials, the job
 	// spec) happens under the deploy lock, which passes through the app_dir
 	// gate, so a migration can never move the directory mid-install.
-	unlock, err := deploy.AcquireLock(ctx, h.Host, a.cfg.App, a.destName, deploy.LockInfo{Performer: performer(), Command: "schedule install"})
+	unlock, err := a.acquireLock(ctx, h.Host, deploy.LockInfo{Performer: performer(), Command: "schedule install"})
 	if err != nil {
 		step.Fail(err, appDirHint(err))
 		return &silentError{err}
@@ -515,6 +541,22 @@ func scheduleStatusCmd(g *globals) *cobra.Command {
 				return err
 			}
 			defer closeHosts()
+			if a.dest.Roles != nil {
+				var errs []error
+				for _, h := range hosts {
+					b := *a
+					b.dest.Servers = []string{h.Name}
+					sts, now, e := readScheduleStatus(ctx, h.Host, a.cfg.App, a.destName, b.scheduleMode(), maxAge)
+					if e != nil {
+						return e
+					}
+					a.ui.Info("Server %s", h.Name)
+					if len(sts) > 0 {
+						errs = append(errs, writeScheduleStatus(a.ui, sts, maxAge, now))
+					}
+				}
+				return errors.Join(errs...)
+			}
 			step := a.ui.Step(hosts[0].Name, "Read Scheduled Jobs")
 			sts, now, err := readScheduleStatus(ctx, hosts[0].Host, a.cfg.App, a.destName, a.scheduleMode(), maxAge)
 			if err != nil {
@@ -655,6 +697,25 @@ func scheduleRemoveCmd(g *globals) *cobra.Command {
 // removeJobs disables and deletes Scheduled Jobs. Empty names removes every
 // job of the Destination. It prints a step and does not print a title.
 func (a *app) removeJobs(ctx context.Context, hosts []plan.NamedHost, names []string) error {
+	if a.dest.Roles != nil {
+		if !a.rolesLocksHeld {
+			u, e := a.operationLocks(ctx, hosts, deploy.LockInfo{Command: "schedule remove"}, false)
+			if e != nil {
+				return e
+			}
+			defer func() { _ = u(context.WithoutCancel(ctx)) }()
+		}
+		for _, h := range hosts {
+			b := *a
+			b.dest.Roles = nil
+			b.dest.Servers = []string{h.Name}
+			if e := b.removeJobs(ctx, []plan.NamedHost{h}, names); e != nil {
+				return e
+			}
+		}
+		return nil
+	}
+
 	if len(hosts) == 0 {
 		return errors.New("no Servers for Scheduled Jobs")
 	}

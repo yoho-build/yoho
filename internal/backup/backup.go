@@ -99,6 +99,7 @@ type Result struct {
 
 // Manifest is written as manifest.json into every Backup.
 type Manifest struct {
+	Server      string                     `json:"server,omitempty"`
 	App         string                     `json:"app"`
 	Destination string                     `json:"destination"`
 	Project     string                     `json:"project"`
@@ -199,7 +200,7 @@ func Run(ctx context.Context, o RunOptions) (res *Result, err error) {
 	}
 
 	m := Manifest{
-		App: o.App, Destination: o.Destination, Project: o.project(),
+		App: o.App, Destination: o.Destination, Project: o.project(), Server: o.Host.Name(),
 		Version: currentVersion(ctx, o.Host, o.App, o.Destination), CreatedAt: start.UTC(),
 		YohoVersion: o.YohoVersion, Services: map[string]ManifestService{},
 	}
