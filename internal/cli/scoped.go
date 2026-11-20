@@ -457,6 +457,9 @@ func (a *app) scopedPlan(ctx context.Context, ver string) (changes []plan.Change
 		step.Fail(err, hint)
 		return nil, &silentError{err}
 	}
+	if len(built) > 0 && a.cfg.Transport.Mode != transport.MethodRegistry {
+		a.transportDecision(g.Name(), transport.Fallback("gate"))
+	}
 	step.Done()
 	u.Plan(changes)
 	return changes, nil
@@ -550,6 +553,7 @@ func (a *app) scopedShip(ctx context.Context, g *remote.Gate, built []string, pl
 		step.Done("already on the Server")
 		return nil, nil, nil
 	}
+	a.transportDecision(g.Name(), transport.Fallback("gate"))
 	pr, pw := io.Pipe()
 	go func() { pw.CloseWithError(transport.SaveArchive(ctx, missing, platform, pw)) }()
 	step.Done(fmt.Sprintf("%d streamed with the deploy", len(missing)))

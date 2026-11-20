@@ -120,6 +120,9 @@ func TestContainerEngineLoad(t *testing.T) {
 	if len(li) != 1 || fresh.scripts[li[0]] != want {
 		t.Fatalf("scripts %q", fresh.scripts)
 	}
+	if res[0].Bytes != int64(len(fresh.stdins[li[0]])) || res[0].Bytes == 0 {
+		t.Fatalf("wrong archive byte count: %d", res[0].Bytes)
+	}
 	names := map[string]string{}
 	tr := tar.NewReader(strings.NewReader(fresh.stdins[li[0]]))
 	for {

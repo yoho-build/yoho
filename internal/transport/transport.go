@@ -79,13 +79,16 @@ type PushOptions struct {
 	Engine string
 	// Exec runs local commands. Default os/exec.
 	Exec Exec
+	// OnDecision reports transport choices and fallback hints, including in JSON output.
+	OnDecision func(host string, decision Decision)
 }
 
 // Result is the outcome for one Server.
 type Result struct {
 	Host   string
 	Method string
-	// Bytes sent over the operator's link by load (the gzip stream); 0 for
+	// Bytes sent over the operator's link by load (gzip for Docker, tar for
+	// Apple container); 0 for
 	// skip, and unknown (0) for pussh and registry.
 	Bytes    int64
 	Duration time.Duration
@@ -263,7 +266,9 @@ func (p *pusher) pushHost(ctx context.Context, h remote.Host) (string, int64, er
 	}
 	mode := p.o.Mode
 	if p.o.Engine == EngineContainer {
-		return MethodLoad, 0, p.loadContainer(ctx, h, imgs)
+		p.report(h, Fallback("container"))
+		n, err := p.loadContainer(ctx, h, imgs)
+		return MethodLoad, n, err
 	}
 	var errs []error
 
@@ -275,7 +280,12 @@ func (p *pusher) pushHost(ctx context.Context, h remote.Host) (string, int64, er
 		if mode == MethodPussh {
 			return MethodPussh, 0, err
 		}
-		fmt.Fprintf(p.out, "%s: pussh unavailable (%v), falling back to docker save | docker load\n", h.Name(), err)
+		var unavailable *unavailableError
+		if errors.As(err, &unavailable) {
+			p.report(h, unavailable.decision)
+		} else {
+			p.report(h, Fallback("pussh"))
+		}
 		errs = append(errs, err)
 	}
 	if mode == "auto" || mode == MethodLoad {
@@ -286,7 +296,7 @@ func (p *pusher) pushHost(ctx context.Context, h remote.Host) (string, int64, er
 		if mode == MethodLoad || p.o.Registry == nil {
 			return MethodLoad, n, err
 		}
-		fmt.Fprintf(p.out, "%s: docker load failed (%v), falling back to registry\n", h.Name(), err)
+		p.report(h, Fallback("load"))
 		errs = append(errs, err)
 	}
 	if err := p.registry(ctx, h, imgs); err != nil {
@@ -317,23 +327,11 @@ func ServerContainerdImageStore(ctx context.Context, h remote.Host) (bool, error
 // pussh needs the local plugin, an ssh target and the containerd image store
 // on the Server (unregistry stores blobs in containerd).
 func (p *pusher) pussh(ctx context.Context, h remote.Host, imgs []string) error {
-	p.pusshOnce.Do(func() {
-		p.pusshOK = LocalPusshAvailable(ctx, p.o.Exec)
-	})
-	if !p.pusshOK {
-		return errors.New("docker pussh plugin not installed")
+	d := p.pusshDecision(ctx, h)
+	if d.Mode != MethodPussh {
+		return &unavailableError{d}
 	}
 	t := p.target(h)
-	if t == "" {
-		return PusshTarget(h)
-	}
-	ok, err := ServerContainerdImageStore(ctx, h)
-	if err != nil {
-		return err
-	}
-	if !ok {
-		return errors.New("Server Docker does not use the containerd image store")
-	}
 	for _, img := range imgs {
 		if err := p.o.Exec(ctx, Command{Argv: []string{"docker", "pussh", img, t}, Stdout: p.out, Stderr: p.out}); err != nil {
 			return fmt.Errorf("docker pussh %s: %w", img, err)
@@ -503,3 +501,8 @@ func osExec(ctx context.Context, c Command) error {
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = c.Stdin, c.Stdout, c.Stderr
 	return cmd.Run()
 }
+
+type unavailableError struct{ decision Decision }
+
+func (e *unavailableError) Error() string { return e.decision.Reason }
+func hasContainerd(status string) bool    { return strings.Contains(status, "io.containerd.snapshotter") }

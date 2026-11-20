@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
+	"runtime"
 	"strings"
 	"time"
 
@@ -18,6 +20,8 @@ import (
 	"github.com/yoho-build/yoho/internal/plan"
 	"github.com/yoho-build/yoho/internal/proxy"
 	"github.com/yoho-build/yoho/internal/release"
+	"github.com/yoho-build/yoho/internal/remote"
+	"github.com/yoho-build/yoho/internal/transport"
 	"github.com/yoho-build/yoho/internal/ui"
 	"github.com/yoho-build/yoho/internal/version"
 )
@@ -150,6 +154,20 @@ func (a *app) collectChanges(ctx context.Context, s *session, refresh bool) (cha
 	d, err := a.newDeploy(s, images, true)
 	if err != nil {
 		return nil, false, err
+	}
+	if len(images) > 0 && a.cfg.Builder.Location != "server" {
+		engine, _ := build.ResolveEngine(a.cfg.Builder, runtime.GOOS, runtime.GOARCH, exec.LookPath, nil)
+		var hosts []remote.Host
+		for _, h := range s.hosts {
+			hosts = append(hosts, h.Host)
+		}
+		choices := transport.Preview(ctx, transport.PushOptions{Hosts: hosts, Mode: a.cfg.Transport.Mode, Engine: engine})
+		for _, h := range s.hosts {
+			a.transportDecision(h.Name, choices[h.Name])
+		}
+		if a.cfg.Builder.Location == "remote" {
+			a.ui.Info("remote Builder may stream full archives directly; final transport is selected after Builder checks")
+		}
 	}
 	d.Refreshed = refresh
 	step := a.ui.Step("", "Read state of %s", s.hosts[0].Name)

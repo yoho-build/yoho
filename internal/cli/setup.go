@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 
@@ -34,7 +35,7 @@ func promptLine(w io.Writer, prompt string) (string, error) {
 }
 
 func setupCmd(g *globals) *cobra.Command {
-	var yes, planOnly, containerd bool
+	var yes, planOnly, containerd, noContainerd bool
 	c := &cobra.Command{
 		Use:   "setup",
 		Short: "Provision the Destination's Servers (Docker, deploy user, firewall, updates)",
@@ -59,12 +60,18 @@ Supports Debian and Ubuntu.`,
 				u.Warn("no TTY to ask on; showing the plan only (pass --yes to apply every step)")
 				planOnly = true
 			}
+			if exec.CommandContext(ctx, "docker", "pussh", "--help").Run() != nil {
+				u.Warn("docker pussh plugin not available locally; install docker pussh for layer-diff transport (full archives remain available)")
+			} else {
+				u.Info("docker pussh plugin available locally")
+			}
 			cfg := setup.Config{
-				Setup:                a.cfg.Setup,
-				ProxyPorts:           a.setupProxyPorts(),
-				AuthorizedKeys:       resolveAuthorizedKeys(a.cfg.Setup.AuthorizedKeys),
-				ContainerdImageStore: containerd,
-				BuildOnServer:        a.cfg.Builder.Location == "server",
+				Setup:                  a.cfg.Setup,
+				ProxyPorts:             a.setupProxyPorts(),
+				AuthorizedKeys:         resolveAuthorizedKeys(a.cfg.Setup.AuthorizedKeys),
+				ContainerdImageStore:   containerd,
+				NoContainerdImageStore: noContainerd,
+				BuildOnServer:          a.cfg.Builder.Location == "server",
 			}
 			for _, name := range a.dest.Servers {
 				srv := a.cfg.Servers[name]
@@ -108,6 +115,8 @@ Supports Debian and Ubuntu.`,
 	c.Flags().BoolVarP(&yes, "yes", "y", false, "Apply every needed step without asking")
 	c.Flags().BoolVar(&planOnly, "plan", false, "Only show the plan; change nothing")
 	c.Flags().BoolVar(&containerd, "containerd-image-store", false, "Also enable Docker's containerd image store (restarts Docker; needed for pussh)")
+	c.Flags().BoolVar(&noContainerd, "no-containerd-image-store", false, "Do not enable the containerd image store automatically on empty Servers")
+	c.MarkFlagsMutuallyExclusive("containerd-image-store", "no-containerd-image-store")
 	return c
 }
 

@@ -35,8 +35,10 @@ type Config struct {
 	ProxyPorts []int
 	// Public key lines for the deploy user (defaults resolved by the CLI).
 	AuthorizedKeys []string
-	// Opt-in: enable Docker's containerd image store (needed for pussh).
+	// Explicitly enable Docker's containerd image store, including busy Servers.
 	ContainerdImageStore bool
+	// Disable automatic enablement on Servers without running containers.
+	NoContainerdImageStore bool
 	// BuildOnServer: the Destination builds with builder.location=server,
 	// which rsyncs the source to the Server; install rsync.
 	BuildOnServer bool
@@ -312,8 +314,8 @@ func Steps(ctx context.Context, h remote.Host, cfg Config, osi OSInfo, priv bool
 		}
 		steps = append(steps, timezoneStep(sc.Timezone))
 	}
-	if cfg.ContainerdImageStore {
-		steps = append(steps, containerdStep())
+	if !cfg.NoContainerdImageStore {
+		steps = append(steps, containerdStep(cfg.ContainerdImageStore))
 	}
 	return steps, nil
 }
@@ -687,9 +689,10 @@ func timezoneStep(tz string) *Step {
 
 const daemonJSON = "/etc/docker/daemon.json"
 
-func containerdStep() *Step {
+func containerdStep(explicit bool) *Step {
 	return &Step{
-		ID: "containerd-image-store", Title: "Docker containerd image store (for pussh image transport)", checkSudo: true,
+		Needs: []string{"docker"},
+		ID:    "containerd-image-store", Title: "Docker containerd image store (for pussh image transport)", checkSudo: true,
 		check: func(ctx context.Context, h remote.Host) (bool, string, error) {
 			cur, err := readDaemonJSON(ctx, h)
 			if err != nil {
@@ -698,6 +701,12 @@ func containerdStep() *Step {
 			if f, ok := cur["features"].(map[string]any); ok && f["containerd-snapshotter"] == true {
 				return false, "ok", nil
 			}
+			if !explicit {
+				state, err := imageStoreServerState(ctx, h)
+				if enable, hint := containerdDecision(explicit, false, state, err); !enable {
+					return false, hint, nil
+				}
+			}
 			return true, "set features.containerd-snapshotter in " + daemonJSON + " and RESTART Docker: running containers restart, " +
 				"and images in the previous store are hidden until pulled or pushed again", nil
 		},
@@ -705,6 +714,17 @@ func containerdStep() *Step {
 			cur, err := readDaemonJSON(ctx, h)
 			if err != nil {
 				return err
+			}
+			if f, ok := cur["features"].(map[string]any); ok && f["containerd-snapshotter"] == true {
+				return nil
+			}
+			// Recheck immediately before changing Docker: containers may have
+			// started since the plan was shown or Docker was installed.
+			if !explicit {
+				state, err := imageStoreServerState(ctx, h)
+				if enable, hint := containerdDecision(false, false, state, err); !enable {
+					return fmt.Errorf("containerd image store: %s", hint)
+				}
 			}
 			b, err := MergeContainerdSnapshotter(cur)
 			if err != nil {
@@ -769,4 +789,23 @@ func uniqueSorted(ps []int) []int {
 	}
 	sort.Ints(out)
 	return out
+}
+
+// A failed docker ps is unknown, never an empty Server. Missing Docker is
+// safe during planning; the apply check runs again after installation.
+func imageStoreServerState(ctx context.Context, h remote.Host) (string, error) {
+	return h.Output(ctx, remote.Cmd{Script: "set -eu\nif command -v docker >/dev/null 2>&1; then\n  ids=$(docker ps -q)\n  if [ -n \"$ids\" ]; then echo busy; else echo empty; fi\nelse echo absent; fi", Sudo: true})
+}
+
+func containerdDecision(explicit, disabled bool, state string, err error) (bool, string) {
+	if disabled {
+		return false, "containerd image store automatic enablement disabled"
+	}
+	if explicit {
+		return true, "explicitly requested; restarts Docker"
+	}
+	if err == nil && (strings.TrimSpace(state) == "empty" || strings.TrimSpace(state) == "absent") {
+		return true, "no running containers; enable containerd image store (restarts Docker)"
+	}
+	return false, "running containers or unknown Docker state; run yoho setup --containerd-image-store in a maintenance window (restarts Docker)"
 }

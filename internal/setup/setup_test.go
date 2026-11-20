@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"os/exec"
 	"slices"
@@ -110,7 +111,7 @@ func TestPlanAsRoot(t *testing.T) {
 		got[p.Step.ID] = p
 		ids = append(ids, p.Step.ID)
 	}
-	if strings.Join(ids, ",") != "docker,user,linger,dirs,firewall,auto-updates,swap,timezone" {
+	if strings.Join(ids, ",") != "docker,user,linger,dirs,firewall,auto-updates,swap,timezone,containerd-image-store" {
 		t.Fatalf("steps %v", ids)
 	}
 	if !got["docker"].Needed || got["docker"].Blocked != "" {
@@ -668,5 +669,119 @@ func TestDeclinedUserBlocksDependentsWhenUserMissing(t *testing.T) {
 	}
 	if !strings.Contains(out, "needs Deploy user yoho") {
 		t.Fatalf("output:\n%s", out)
+	}
+}
+
+func TestContainerdDecision(t *testing.T) {
+	for _, tc := range []struct {
+		name, state                      string
+		explicit, disabled, failed, want bool
+	}{
+		{name: "fresh", state: "absent", want: true},
+		{name: "empty", state: "empty", want: true},
+		{name: "busy", state: "busy"},
+		{name: "unknown", state: ""},
+		{name: "probe error", state: "empty", failed: true},
+		{name: "explicit busy", state: "busy", explicit: true, want: true},
+		{name: "opt out", state: "empty", disabled: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var err error
+			if tc.failed {
+				err = fmt.Errorf("probe failed")
+			}
+			got, hint := containerdDecision(tc.explicit, tc.disabled, tc.state, err)
+			if got != tc.want || hint == "" {
+				t.Fatalf("%v %q", got, hint)
+			}
+		})
+	}
+}
+
+func TestAutomaticContainerdRechecksBeforeApply(t *testing.T) {
+	h := host(ubuntu, "root")
+	h.respond = func(s string) string {
+		if strings.Contains(s, "ids=$(docker ps -q)") {
+			return "busy"
+		}
+		return ""
+	}
+	s := containerdStep(false)
+	if err := s.apply(context.Background(), h); err == nil {
+		t.Fatal("restarted a busy Server")
+	}
+	for _, c := range h.cmds {
+		if strings.Contains(c.Script, "systemctl restart") {
+			t.Fatal("Docker restarted")
+		}
+	}
+	if len(h.files) != 1 {
+		t.Fatal("daemon config changed")
+	}
+}
+
+func TestContainerdPlanOptOut(t *testing.T) {
+	h := host(ubuntu, "root")
+	steps, err := Plan(context.Background(), h, Config{NoContainerdImageStore: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, s := range steps {
+		if s.Step.ID == "containerd-image-store" {
+			t.Fatal("opt out ignored")
+		}
+	}
+}
+
+func TestContainerdStepCheck(t *testing.T) {
+	for _, tc := range []struct {
+		state            string
+		explicit, needed bool
+	}{
+		{state: "absent", needed: true}, {state: "empty", needed: true}, {state: "busy"}, {state: ""}, {state: "busy", explicit: true, needed: true},
+	} {
+		t.Run(fmt.Sprintf("%s/explicit=%v", tc.state, tc.explicit), func(t *testing.T) {
+			h := host(ubuntu, "root")
+			h.respond = func(script string) string {
+				if strings.Contains(script, "ids=$(docker ps -q)") {
+					return tc.state
+				}
+				return ""
+			}
+			needed, detail, err := containerdStep(tc.explicit).Check(context.Background(), h)
+			if err != nil || needed != tc.needed {
+				t.Fatalf("needed=%v detail=%s err=%v", needed, detail, err)
+			}
+			if !needed && !strings.Contains(detail, "--containerd-image-store") {
+				t.Fatal(detail)
+			}
+		})
+	}
+}
+
+func TestImageStoreProbeScript(t *testing.T) {
+	h := host(ubuntu, "root")
+	_, _ = imageStoreServerState(context.Background(), h)
+	script := h.cmds[0].Script
+	for _, tc := range []struct {
+		body, want string
+		failed     bool
+	}{
+		{body: "exit 0", want: "empty"},
+		{body: "echo abc", want: "busy"},
+		{body: "exit 1", failed: true},
+	} {
+		t.Run(tc.body, func(t *testing.T) {
+			dir := t.TempDir()
+			if err := os.WriteFile(dir+"/docker", []byte("#!/bin/sh\n"+tc.body+"\n"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			cmd := exec.Command("sh", "-c", script)
+			cmd.Env = append(os.Environ(), "PATH="+dir+":"+os.Getenv("PATH"))
+			out, err := cmd.CombinedOutput()
+			if (err != nil) != tc.failed || strings.TrimSpace(string(out)) != tc.want {
+				t.Fatalf("%q %v", out, err)
+			}
+		})
 	}
 }
