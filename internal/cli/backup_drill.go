@@ -66,6 +66,19 @@ leftovers.`,
 				}
 				defer closeHosts()
 				h := hosts[0]
+				if a.dest.Roles != nil {
+					j, e := a.selectBackupJob(name)
+					if e != nil {
+						return e
+					}
+					if e = a.resolveServices(ctx, j); e != nil {
+						return e
+					}
+					h, e = a.backupOwner(hosts, j)
+					if e != nil {
+						return e
+					}
+				}
 				// A running drill holds the Destination lock; take it so
 				// cleanup never removes a drill another operator is running.
 				step := u.Step(h.Name, "Lock %s (%s)", a.cfg.App, a.destName)
@@ -134,7 +147,10 @@ leftovers.`,
 				return err
 			}
 			defer closeHosts()
-			h := hosts[0]
+			h, ownerErr := a.backupOwner(hosts, j)
+			if ownerErr != nil {
+				return ownerErr
+			}
 			step := u.Step(h.Name, "Find Backup %s in %s", id, j.targetName)
 			entries, err := backup.List(ctx, backup.ListOptions{
 				App: a.cfg.App, Destination: a.destName, Project: a.project(),

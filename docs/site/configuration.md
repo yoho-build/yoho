@@ -293,3 +293,11 @@ reuse the template's overlays, Servers and secrets, with separate App
 directories and named volumes. They exclude Migration Cutover, Backup jobs,
 tunnel management and fixed subnets. See [Preview environments](previews.md) for
 `up`, `down`, `prune`, limits and CI setup.
+
+## Roles and connections
+
+Compose Destinations may opt into `roles: {NAME: {services: [...], servers: [...]}}`
+and `connections: {NAME: {service: db, port: 5432, consumers: [web]}}`.
+Every Service must belong to one Role; Stateful Services and connection providers
+must resolve to exactly one Server. Every participating Server needs an effective
+private address. See [Roles](roles.md) for networking, ingress, ownership and moves.

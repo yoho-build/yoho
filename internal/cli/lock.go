@@ -39,6 +39,9 @@ func (a *app) lockedRuntime() plan.Runtime {
 	if a.dest.Runtime == "swarm" && swarmRuntime != nil {
 		return swarmRuntime(true)
 	}
+	if a.dest.Roles != nil {
+		return deploy.Roles{LockHeld: true}
+	}
 	return deploy.Compose{LockHeld: true}
 }
 

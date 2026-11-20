@@ -15,6 +15,9 @@ func operationStatusCmd(g *globals) *cobra.Command {
 		if err != nil {
 			return err
 		}
+		if id == "" && a.dest.Roles != nil {
+			return a.rolesStatus(cmd.Context())
+		}
 		if !operation.ValidID(id) {
 			return fmt.Errorf("--operation requires a valid operation ID")
 		}

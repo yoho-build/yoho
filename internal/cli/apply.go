@@ -15,6 +15,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/yoho-build/yoho/internal/build"
+	"github.com/yoho-build/yoho/internal/config"
 	"github.com/yoho-build/yoho/internal/deploy"
 	"github.com/yoho-build/yoho/internal/migrate"
 	"github.com/yoho-build/yoho/internal/plan"
@@ -267,9 +268,21 @@ func (a *app) collectChanges(ctx context.Context, s *session, refresh bool) (cha
 // planTunnel compares the Cloudflare Tunnel connector with config.
 func (a *app) planTunnel(ctx context.Context, hosts []plan.NamedHost, token string) ([]plan.Change, error) {
 	cfg := a.proxyConfig().Tunnel
+	var roleExt map[string]config.ServiceExt
+	if a.dest.Roles != nil {
+		r, e := a.compose(ctx)
+		if e != nil {
+			return nil, e
+		}
+		roleExt = r.Ext
+	}
 	owner := proxy.TunnelOwner(a.cfg.App, a.destName)
 	var out []plan.Change
 	for _, h := range hosts {
+		cfg := cfg
+		if !a.serverHasProxy(h.Name, roleExt) {
+			cfg = nil
+		}
 		st, err := proxy.TunnelStatusOf(ctx, h.Host)
 		if err != nil {
 			return nil, err
@@ -457,7 +470,7 @@ func (a *app) apply(ctx context.Context, o applyOptions) (err error) {
 	// Take the Destination lock before building and shipping, and hold it
 	// through the rollout: a second deploy fails fast, before it retags
 	// this Version's images on the Server under a running one.
-	unlock, err := a.deployLock(ctx, s.hosts[0], ver)
+	unlock, err := a.deployLocks(ctx, s.hosts, ver)
 	if err != nil {
 		return err
 	}

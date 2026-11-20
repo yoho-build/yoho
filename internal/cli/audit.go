@@ -29,7 +29,7 @@ var auditedCommands = []string{
 	"deploy", "apply", "rollback", "remove",
 	"app exec", "app run",
 	"backup run", "backup restore", "backup drill",
-	"secrets rotate",
+	"secrets rotate", "service move",
 	"lock acquire", "lock release",
 	"proxy boot", "proxy upgrade",
 	"schedule install", "schedule remove", "tunnel up", "tunnel down", "tunnel route",
@@ -100,6 +100,11 @@ func readOnlyMode(cmd *cobra.Command, jsonMode bool) bool {
 			return true
 		}
 	}
+	if cmd.Name() == "move" {
+		if f := cmd.Flags().Lookup("plan"); f != nil && f.Value.String() == "true" {
+			return true
+		}
+	}
 	if cmd.Name() == "setup" {
 		if f := cmd.Flags().Lookup("plan"); f != nil && f.Value.String() == "true" {
 			return true
@@ -140,7 +145,7 @@ type auditRun struct {
 // to finish. It never fails: whatever goes wrong, the command itself runs
 // (and reports its own load errors).
 func (g *globals) auditStart(cmd *cobra.Command, args []string) *auditRun {
-	if f := cmd.Flags().Lookup("plan"); cmd.Name() == "setup" && f != nil && f.Value.String() == "true" {
+	if f := cmd.Flags().Lookup("plan"); (cmd.Name() == "setup" || cmd.Name() == "move") && f != nil && f.Value.String() == "true" {
 		return nil
 	}
 	if f := cmd.Flags().Lookup("dry-run"); f != nil && f.Value.String() == "true" {

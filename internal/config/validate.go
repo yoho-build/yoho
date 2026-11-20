@@ -15,7 +15,7 @@ import (
 var appPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9-]*$`)
 
 // RolesMessage is shown when a compose Destination lists several Servers.
-const RolesMessage = "Roles are not supported yet; use runtime: swarm for several Servers"
+const RolesMessage = "multiple Compose Servers require destinations.<name>.roles; assign every Service to a Role"
 
 func sortedKeys[V any](m map[string]V) []string {
 	k := make([]string, 0, len(m))
@@ -71,6 +71,7 @@ func Validate(c *Config) []error {
 	validateTunnel("proxy.tunnel", c.Proxy.Tunnel)
 	for _, n := range sortedKeys(c.Destinations) {
 		d := c.Destinations[n]
+		errs = append(errs, validateRoles(c, n, d)...)
 		rt := d.Runtime
 		if rt != "" && rt != "compose" && rt != "swarm" {
 			add("destinations.%s.runtime %q must be compose or swarm", n, rt)
@@ -92,7 +93,7 @@ func Validate(c *Config) []error {
 		if len(roots) > 1 {
 			add("destinations.%s: all Servers must share the same root", n)
 		}
-		if (rt == "" || rt == "compose") && len(d.Servers) > 1 {
+		if (rt == "" || rt == "compose") && len(d.Servers) > 1 && d.Roles == nil {
 			add("destinations.%s: %s", n, RolesMessage)
 		}
 		if d.AppDir != "" {

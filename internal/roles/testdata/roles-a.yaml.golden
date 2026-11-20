@@ -1,0 +1,18 @@
+services:
+  web:
+    environment:
+      YOHO_CONNECTION_DATABASE_HOST: 10.0.0.2
+      YOHO_CONNECTION_DATABASE_PORT: "5432"
+    extra_hosts:
+      - db.shop.yoho.internal=10.0.0.2
+      - db=10.0.0.2
+    depends_on:
+      worker:
+        required: false
+  worker:
+    environment:
+      YOHO_CONNECTION_DATABASE_HOST: 10.0.0.2
+      YOHO_CONNECTION_DATABASE_PORT: "5432"
+    extra_hosts:
+      - db.shop.yoho.internal=10.0.0.2
+      - db=10.0.0.2

@@ -261,3 +261,19 @@ prove Backup storage and images survive losing the Server. `full_recovery_second
 The CI recovery harness measures setup through final validation and adds
 `needs_old_server: false` after actually reconstructing without old App resources. Registry-less recovery rebuilds from git; old Release images need an
 archive or registry. Writes after the recovery point are lost.
+
+## Roles Destinations
+
+Opt-in Compose `roles` assigns every Service to exactly one Role. Stateful
+Services and connection providers are singleton. `connections` declares a
+provider TCP port and consumers; Yoho renders private publications, environment
+endpoints and Compose-name extra_hosts aliases. Configure private addresses or
+an opt-in mesh, root/passwordless sudo and Docker-aware firewall tools/systemd.
+Never replace the DOCKER-USER allowlist with UFW alone. See docs/site/roles.md.
+Multi-Server ingress requires a named Cloudflare Tunnel or external TLS with
+`x-yoho.proxy.tls: false`. Swarm is frozen. Apply locks all Servers; operation
+progress uses server/service keys. On partial/unknown, inspect and rerun to
+converge. Backups and Scheduled Jobs follow the owning Server.
+Use `yoho service move SERVICE --to SERVER --plan` before a stop-first data move;
+require a fresh Backup, empty owned target volumes and health checks. Commit the
+printed config edit. Source volume cleanup is a separate `--cleanup-source` run.

@@ -4,7 +4,7 @@
 - `yoho migrate draft --estimate`: optional resource and cost estimate for a Migration Cutover; deferred from #49's Server sizing guide.
 - Seed previews from a Backup.
 - Fast-start health probes (`start_period`/`start_interval`) for every compose Service that is a `depends_on: condition: service_healthy` target, not only proxied and Stateful ones.
-- Roles: place subsets of Services on subsets of Servers (Kamal-style). Design must be ready before v1 config freezes.
+- Roles follow-up: prove Swarm migration, interrupted-rollout recovery and blank-Server restore before considering Swarm deprecation (ADR 0017).
 - Manage Cloudflare Tunnel itself: create tunnels, DNS routes, ingress rules via API. Cloudflare for SaaS custom hostnames (create/delete customer hostnames and SSL via API) for the documented alternative to kamal-proxy on-demand TLS (#25).
 - Remote API + dashboard: App health, Server metrics, on-call alerts. The local read-only `yoho ui` / `yoho tui` exist (ADR 0010); this item is the opt-in per-Server API of ADR 0003 for unattended alerting.
 - `yoho ui` actions (deploy, rollback, backup run) behind a confirmation, running the same CLI flows locally (ADR 0010 §5).

@@ -131,6 +131,25 @@ func scheduleInstallCmd(g *globals) *cobra.Command {
 // store supplies Backup Target secrets when non-nil; otherwise they are loaded.
 // It prints steps and does not print a title or a finished line.
 func (a *app) installJobs(ctx context.Context, hosts []plan.NamedHost, names []string, binaryFlag string, store *secrets.Store) error {
+	if a.dest.Roles != nil {
+		for _, h := range hosts {
+			b, e := a.rolesJobsApp(ctx, hosts, h)
+			if e != nil {
+				return e
+			}
+			var selected []string
+			for _, n := range names {
+				if _, ok := b.cfg.Backups.Jobs[n]; ok {
+					selected = append(selected, n)
+				}
+			}
+			if e = b.installJobs(ctx, []plan.NamedHost{h}, selected, binaryFlag, store); e != nil {
+				return e
+			}
+		}
+		return nil
+	}
+
 	if len(names) == 0 {
 		return nil
 	}
@@ -655,6 +674,18 @@ func scheduleRemoveCmd(g *globals) *cobra.Command {
 // removeJobs disables and deletes Scheduled Jobs. Empty names removes every
 // job of the Destination. It prints a step and does not print a title.
 func (a *app) removeJobs(ctx context.Context, hosts []plan.NamedHost, names []string) error {
+	if a.dest.Roles != nil {
+		for _, h := range hosts {
+			b := *a
+			b.dest.Roles = nil
+			b.dest.Servers = []string{h.Name}
+			if e := b.removeJobs(ctx, []plan.NamedHost{h}, names); e != nil {
+				return e
+			}
+		}
+		return nil
+	}
+
 	if len(hosts) == 0 {
 		return errors.New("no Servers for Scheduled Jobs")
 	}

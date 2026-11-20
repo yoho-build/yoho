@@ -190,7 +190,7 @@ secrets:
 	}
 	joined := strings.Join(all, "\n")
 	for _, want := range []string{
-		"app", "Roles are not supported yet; use runtime: swarm for several Servers",
+		"app", RolesMessage,
 		`unknown Server "ghost"`, "builder.remote is required",
 		`unknown Destination "nope"`, `unknown Backup Target "nowhere"`, `unknown provider "missing"`,
 	} {

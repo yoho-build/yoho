@@ -264,6 +264,7 @@ func (c Compose) Deploy(ctx context.Context, d *plan.Deploy) (_ *release.Release
 	}
 
 	rel := &release.Release{
+		Roles: d.Roles.Roles, Connections: d.Roles.Connections,
 		OperationID: d.OperationID,
 		App:         d.App, Destination: d.Destination, Server: srv.Name, Version: d.Version,
 		Runtime: "compose", Role: "all", DeployedAt: start, Performer: d.Performer,

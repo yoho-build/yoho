@@ -380,8 +380,11 @@ func backupRunCmd(g *globals) *cobra.Command {
 				return err
 			}
 			defer closeHosts()
-			h := hosts[0]
-			if len(hosts) > 1 {
+			h, ownerErr := a.backupOwner(hosts, j)
+			if ownerErr != nil {
+				return ownerErr
+			}
+			if len(hosts) > 1 && a.dest.Roles == nil {
 				u.Info("Backup runs only on %s (the first Server of %s)", h.Name, a.destName)
 			}
 			// A half-finished rotation means the database may already use a
@@ -452,7 +455,7 @@ func backupListCmd(g *globals) *cobra.Command {
 				return err
 			}
 			ctx := cmd.Context()
-			j, err := a.prepareBackup(ctx, name, false)
+			j, err := a.prepareBackup(ctx, name, a.dest.Roles != nil)
 			if err != nil {
 				return err
 			}
@@ -461,10 +464,14 @@ func backupListCmd(g *globals) *cobra.Command {
 				return err
 			}
 			defer closeHosts()
-			step := a.ui.Step(hosts[0].Name, "List Backups in %s", j.targetName)
+			h, ownerErr := a.backupOwner(hosts, j)
+			if ownerErr != nil {
+				return ownerErr
+			}
+			step := a.ui.Step(h.Name, "List Backups in %s", j.targetName)
 			entries, err := backup.List(ctx, backup.ListOptions{
 				App: a.cfg.App, Destination: a.destName, Project: a.project(),
-				Target: j.target, Password: j.password, TargetEnv: j.env, RcloneConfig: j.rcloneConf, Host: hosts[0].Host,
+				Target: j.target, Password: j.password, TargetEnv: j.env, RcloneConfig: j.rcloneConf, Host: h.Host,
 			})
 			if err != nil {
 				step.Fail(err, backupHint(err))
@@ -700,7 +707,10 @@ Services that an interrupted restore stopped are not resumed afterwards.`,
 				return err
 			}
 			defer closeHosts()
-			h := hosts[0]
+			h, ownerErr := a.backupOwner(hosts, j)
+			if ownerErr != nil {
+				return ownerErr
+			}
 			id := args[0]
 
 			step := u.Step(h.Name, "Find Backup %s of %s in %s", id, source, j.targetName)
@@ -978,7 +988,10 @@ func backupCheckCmd(g *globals) *cobra.Command {
 				return err
 			}
 			defer closeHosts()
-			h := hosts[0]
+			h, ownerErr := a.backupOwner(hosts, j)
+			if ownerErr != nil {
+				return ownerErr
+			}
 			step := a.ui.Step(h.Name, "Check Backup integrity in %s", j.targetName)
 			res, err := backup.Check(ctx, backup.CheckOptions{
 				ListOptions: backup.ListOptions{App: a.cfg.App, Destination: a.destName, Project: a.project(), Target: j.target, Password: j.password, TargetEnv: j.env, RcloneConfig: j.rcloneConf, Host: h.Host},

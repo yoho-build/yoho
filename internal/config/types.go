@@ -50,7 +50,7 @@ type Server struct {
 	// Absolute base directory for Yoho state on this Server. Default
 	// /var/lib/yoho. Use a home directory path when sudo is unavailable.
 	Root string `json:"root,omitempty"`
-	// Private address reachable from other Servers (Tailscale, VPC). Reserved for Roles.
+	// Private address reachable from other Servers (Tailscale, VPC), used by Roles.
 	PrivateAddress string `json:"private_address,omitempty"`
 	// Public WireGuard host[:port], or none for outbound-only hub access.
 	Endpoint string `json:"endpoint,omitempty"`
@@ -59,9 +59,23 @@ type Server struct {
 }
 
 // Destination is a named environment of an App.
+type Role struct {
+	Services []string `json:"services" jsonschema:"required,minItems=1"`
+	Servers  []string `json:"servers" jsonschema:"required,minItems=1"`
+}
+
+// Connection exposes a singleton Service to its declared consumers.
+type Connection struct {
+	Service   string   `json:"service" jsonschema:"required"`
+	Port      int      `json:"port" jsonschema:"required,minimum=1,maximum=65535"`
+	Consumers []string `json:"consumers" jsonschema:"required,minItems=1"`
+}
+
 type Destination struct {
-	// Servers running this Destination. v1 requires exactly one for the
-	// compose runtime; swarm may list several (first is the manager).
+	Roles       map[string]Role       `json:"roles,omitempty"`
+	Connections map[string]Connection `json:"connections,omitempty"`
+	// Servers running this Destination. Compose without Roles requires one;
+	// Swarm uses the first as manager.
 	Servers []string `json:"servers" jsonschema:"required,minItems=1"`
 	// Runtime: compose (default) or swarm. Switching requires downtime.
 	Runtime string `json:"runtime,omitempty" jsonschema:"enum=compose,enum=swarm"`

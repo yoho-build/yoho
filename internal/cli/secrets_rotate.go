@@ -124,6 +124,9 @@ func checkGeneratedFlags(keys, services []string, runtime string) ([]string, err
 var secretKeyRe = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 
 func (a *app) rotateSecrets(ctx context.Context, services, generated []string, dryRun bool) (err error) {
+	if a.dest.Roles != nil {
+		return a.rotateRoles(ctx, services, generated, dryRun)
+	}
 	u := a.ui
 	start := time.Now()
 	defer func() {

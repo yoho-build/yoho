@@ -21,6 +21,7 @@ const guide = [
   ['Object storage', 'object-storage'],
   ['Server setup', 'setup'],
   ['How big a Server?', 'sizing'],
+  ['Roles', 'roles'],
   ['Swarm', 'swarm'],
   ['WireGuard mesh', 'mesh'],
   ['High availability & recovery', 'high-availability'],

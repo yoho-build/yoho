@@ -237,6 +237,14 @@ func (a *app) compose(ctx context.Context) (*composefile.Result, error) {
 	if err != nil {
 		return nil, err
 	}
+	findings := composefile.CheckRoles(r, a.dest, a.proxyConfig(), a.cfg.App)
+	if composefile.HasErrors(findings) {
+		var messages []string
+		for _, f := range findings {
+			messages = append(messages, f.String())
+		}
+		return nil, errors.New(strings.Join(messages, "\n"))
+	}
 	if a.previewName != "" {
 		if err := a.checkPreviewHostCollisions(ctx, r); err != nil {
 			return nil, err

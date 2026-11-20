@@ -41,8 +41,16 @@ func mutationResult(err error, started bool) operation.Result {
 	if errors.As(err, &jobs) {
 		r.Outcome = "partial"
 	}
+	var rolesFailure *deploy.RolesFailure
+	if errors.As(err, &rolesFailure) {
+		r.Changed = slices.Clone(rolesFailure.Changed)
+		r.Unchanged = slices.Clone(rolesFailure.Unchanged)
+		if len(r.Changed) > 0 {
+			r.Outcome = "partial"
+		}
+	}
 	var failure *deploy.Failure
-	if errors.As(err, &failure) {
+	if rolesFailure == nil && errors.As(err, &failure) {
 		for _, s := range failure.Services {
 			if s.ProxyRoute == "switched" || (s.ProxyRoute == "not-applicable" && (s.Convergence == "complete" || s.Convergence == "ready")) {
 				r.Changed = append(r.Changed, s.Service)
