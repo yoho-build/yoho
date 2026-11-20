@@ -175,6 +175,9 @@ func (s *session) close() {
 // resolveDeployVersion returns ver, or the git version of the App directory.
 func (a *app) resolveDeployVersion(ver string) (string, error) {
 	if ver != "" {
+		if !version.Valid(ver) {
+			return "", &validationError{fmt.Errorf("invalid Version %q", ver)}
+		}
 		return ver, nil
 	}
 	v, err := version.FromGit(a.dir)
@@ -192,7 +195,7 @@ func (a *app) openSession(ctx context.Context, ver string, readOnly, refresh boo
 	r, err := a.compose(ctx)
 	if err != nil {
 		step.Fail(err, "run `yoho config check`")
-		return nil, &silentError{err}
+		return nil, &silentError{&validationError{err}}
 	}
 	if refresh {
 		hasBuild := false
@@ -215,7 +218,7 @@ func (a *app) openSession(ctx context.Context, ver string, readOnly, refresh boo
 	if composefile.HasErrors(findings) {
 		err = errors.New("compose check failed")
 		step.Fail(err, "fix the errors above, then `yoho config check`")
-		return nil, &silentError{err}
+		return nil, &silentError{&validationError{err}}
 	}
 	step.Done(ui.Count(len(r.Project.Services), "service", ""))
 
@@ -226,6 +229,7 @@ func (a *app) openSession(ctx context.Context, ver string, readOnly, refresh boo
 		return nil, &silentError{err}
 	}
 	step.Done(ui.Count(len(store.Keys()), "key", ""))
+	u.SetRedact(store.RedactString)
 	s := &session{a: a, ver: ver, r: r, store: store, red: store.Redactor(os.Stdout)}
 
 	if !readOnly {
@@ -532,10 +536,11 @@ func (a *app) newDeploy(s *session, images map[string]string, forPlan bool) (*pl
 	composefile.StripBuild(proj, images)
 	svcSecrets, refs, err := serviceSecrets(s.store, s.r)
 	if err != nil {
-		return nil, err
+		return nil, &validationError{err}
 	}
 	return &plan.Deploy{
 		App: a.cfg.App, Destination: a.destName, Version: s.ver, Performer: performer(),
+		OperationID: a.operation, OnService: a.progress,
 		Servers: s.hosts, Project: proj, Ext: s.r.Ext, Built: built,
 		ServiceSecrets: svcSecrets, SecretRefs: refs, Env: a.dest.Env, Subnet: a.dest.Subnet, Registry: a.cfg.Registry,
 		Proxy: a.proxyConfig(), RetainReleases: a.cfg.RetainReleases, Hook: s.hook,
@@ -841,7 +846,7 @@ func (a *app) rollback(ctx context.Context, v string, releaseSecrets bool) (err 
 		a.ui.Finished(err, "")
 		return err
 	}
-	d := &plan.Deploy{App: a.cfg.App, Destination: a.destName, Performer: performer(), Servers: hosts,
+	d := &plan.Deploy{OperationID: a.operation, OnService: a.progress, App: a.cfg.App, Destination: a.destName, Performer: performer(), Servers: hosts,
 		Proxy: a.proxyConfig(), Registry: a.cfg.Registry, RetainReleases: a.cfg.RetainReleases, Out: a.ui.Progress(),
 		RollbackReleaseSecrets: releaseSecrets}
 	target, err := a.resolveVersion(ctx, d, v)
@@ -864,6 +869,9 @@ func (a *app) rollback(ctx context.Context, v string, releaseSecrets bool) (err 
 			err = uerr
 		}
 	}()
+	if err = beginOperation(ctx); err != nil {
+		return err
+	}
 	a.ui.Warn("volumes and database migrations are not reverted")
 	if releaseSecrets {
 		a.ui.Warn("--with-release-secrets: the Services start with Release %s's own secret values; every secret rotated since (a replaced API key, a leaked password) comes back until the next deploy", shortVersion(target))

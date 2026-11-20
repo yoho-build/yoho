@@ -12,6 +12,7 @@ import (
 
 // AuditEntry is one line of audit.log.
 type AuditEntry struct {
+	OperationID string         `json:"operation_id,omitempty"`
 	Time        time.Time      `json:"time"`
 	Member      string         `json:"member"`
 	Key         string         `json:"key,omitempty"`    // SSH key fingerprint from the forced command

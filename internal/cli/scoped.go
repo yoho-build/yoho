@@ -175,7 +175,11 @@ var (
 // one; Gates that predate rollouts (h.Rollouts false) get neither.
 func (a *app) gateCallOrAttach(ctx context.Context, g *remote.Gate, h *gate.HelloResult, verb string, args any, payload io.Reader, out io.Writer, result any) error {
 	if h != nil && h.Rollouts {
-		id := rand.Text()
+		id := operationID(ctx)
+		if id == "" {
+			id = rand.Text()
+		}
+		a.ui.Event("rollout", "", map[string]any{"rollout_id": id})
 		switch x := args.(type) {
 		case gate.DeployArgs:
 			x.Rollout = id

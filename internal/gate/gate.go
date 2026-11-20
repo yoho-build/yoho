@@ -151,6 +151,7 @@ func Serve(ctx context.Context, o Options) int {
 	if o.RolloutWorker {
 		finishRolloutState(req.App, req.Destination, result, err)
 	}
+	entry.OperationID, _ = c.audit["operation_id"].(string)
 	entry.Exit = code
 	entry.Seconds = o.Now().Sub(start).Seconds()
 	if len(c.audit) > 0 {

@@ -30,6 +30,7 @@ type globals struct {
 	destination string
 	json        bool
 	verbose     bool
+	activeUI    *ui.UI
 	// secretsRetries is --secrets-retries; negative means unset.
 	secretsRetries int
 }
@@ -75,6 +76,10 @@ kamal-proxy, keeps secrets in your password manager, and backs up volumes.`,
 				fmt.Fprintln(os.Stderr, "hint:", ce.Hint)
 			}
 		}
+		var me *mutationError
+		if errors.As(err, &me) {
+			return me.code
+		}
 		var ee *exitError
 		if errors.As(err, &ee) {
 			return ee.code
@@ -111,6 +116,9 @@ func versionCmd() *cobra.Command {
 }
 
 func (g *globals) ui(cmd *cobra.Command) *ui.UI {
+	if g.activeUI != nil {
+		return g.activeUI
+	}
 	mode := ui.Human
 	if g.json {
 		mode = ui.JSON
@@ -134,7 +142,9 @@ type app struct {
 	dest     config.Destination
 	ui       *ui.UI
 	// scoped: the Destination is reached through the Gate (ADR 0011).
-	scoped bool
+	scoped    bool
+	operation string
+	progress  func(context.Context, string, string)
 	// lockWait is --lock-wait: how long to wait for a held Destination
 	// lock (0: refuse at once).
 	lockWait time.Duration
@@ -145,6 +155,9 @@ type app struct {
 func (g *globals) load(cmd *cobra.Command) (*app, error) {
 	a, err := g.loadApp(cmd)
 	if err != nil {
+		if operationID(cmd.Context()) != "" {
+			return nil, &exitError{10, err}
+		}
 		return nil, err
 	}
 	if a.scoped && !scopedCommand(cmd) {
@@ -207,6 +220,8 @@ func (g *globals) loadApp(cmd *cobra.Command) (*app, error) {
 		return nil, err
 	}
 	a := &app{g: g, dir: filepath.Dir(path), path: path, overlay: overlay, cfg: cfg, destName: name, dest: dest, ui: g.ui(cmd)}
+	a.operation = operationID(cmd.Context())
+	a.progress = operationProgress(cmd.Context())
 	release.Root = a.root()
 	if a.scoped, err = scopedAccess(dest, os.Getenv); err != nil {
 		return nil, err

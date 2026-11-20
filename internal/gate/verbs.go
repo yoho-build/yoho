@@ -402,6 +402,7 @@ func deployVerb(ctx context.Context, c *call) (_ any, err error) {
 			return nil, perr
 		}
 		a.Rollout = id
+		c.audit["operation_id"] = id
 		defer func() { c.abandonRollout(id, err) }()
 	}
 	s, err := c.settings()
@@ -481,12 +482,13 @@ func (c *call) finishDeploy(ctx context.Context, s *Settings, r *composefile.Res
 	defer out.Flush()
 	c.clearStaleLock()
 	d := &plan.Deploy{
-		App: c.req.App, Destination: c.req.Destination, Version: a.Version, Performer: c.performer(a.Performer),
+		App: c.req.App, Destination: c.req.Destination, Version: a.Version, Performer: c.performer(a.Performer), OperationID: a.Rollout,
 		Servers: []plan.NamedHost{c.namedHost(s)}, Project: r.Project, Ext: r.Ext, Built: slices.Sorted(slices.Values(a.Built)),
 		ServiceSecrets: svcSecrets, Registry: s.Registry, Proxy: s.Proxy, RetainReleases: s.RetainReleases, Out: out,
 		Scoped: c.scoped(nil),
 	}
-	rel, err := composeDeploy(ctx, d)
+	c.audit["operation_id"] = a.Rollout
+	rel, err := recordOperation(ctx, d, "deploy", func() (*release.Release, error) { return composeDeploy(ctx, d) })
 	if err != nil {
 		return nil, secrets.RedactError(lockedError(err), values...)
 	}
@@ -825,6 +827,7 @@ func rollbackVerb(ctx context.Context, c *call) (any, error) {
 		if err != nil {
 			return nil, err
 		}
+		c.audit["operation_id"] = id
 		if _, err := c.startRollout(VerbRollback, version, id, a); err != nil {
 			c.abandonRollout(id, err)
 			return nil, err
@@ -833,7 +836,7 @@ func rollbackVerb(ctx context.Context, c *call) (any, error) {
 	}
 	c.clearStaleLock()
 	d := &plan.Deploy{
-		App: c.req.App, Destination: c.req.Destination, Performer: c.performer(a.Performer),
+		App: c.req.App, Destination: c.req.Destination, Performer: c.performer(a.Performer), OperationID: a.Rollout,
 		Servers: []plan.NamedHost{c.namedHost(s)}, Registry: s.Registry, Proxy: s.Proxy,
 		RetainReleases: s.RetainReleases, Out: c.fw,
 		Scoped: c.scoped(func(compose []byte, rel *release.Release) error { return c.vetRollback(ctx, s, version, compose, rel) }),
@@ -841,7 +844,8 @@ func rollbackVerb(ctx context.Context, c *call) (any, error) {
 	for _, w := range deploy.RollbackWarnings(ctx, d.Servers[0].Host, d.App, d.Destination, version, false) {
 		fmt.Fprintf(c.fw, "warning: %s\n", w)
 	}
-	rel, err := composeRollback(ctx, d, version)
+	c.audit["operation_id"] = a.Rollout
+	rel, err := recordOperation(ctx, d, "rollback", func() (*release.Release, error) { return composeRollback(ctx, d, version) })
 	if err != nil {
 		return nil, lockedError(err)
 	}

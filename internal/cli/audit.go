@@ -2,8 +2,8 @@ package cli
 
 import (
 	"context"
-	"errors"
 	"fmt"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -13,6 +13,7 @@ import (
 	"github.com/spf13/pflag"
 
 	"github.com/yoho-build/yoho/internal/audit"
+	"github.com/yoho-build/yoho/internal/operation"
 	"github.com/yoho-build/yoho/internal/remote"
 	"github.com/yoho-build/yoho/internal/secrets"
 	"github.com/yoho-build/yoho/internal/version"
@@ -30,9 +31,13 @@ var auditedCommands = []string{
 	"secrets rotate",
 	"lock acquire", "lock release",
 	"proxy boot", "proxy upgrade",
+	"schedule install", "schedule remove", "tunnel up", "tunnel down", "tunnel route",
+	"app start", "app stop", "app restart", "setup", "access secrets push", "access add", "access rm", "access key add", "access key rm", "access install", "swarm init", "swarm join", "preview up", "preview down",
 }
 
 // auditSkipFlags are global flags that say nothing about the invocation.
+var localMutations = []string{"init", "upgrade", "builder setup", "skill install"}
+
 var auditSkipFlags = map[string]bool{"config": true, "destination": true, "json": true, "verbose": true, "secrets-retries": true}
 
 // auditSecretsTimeout bounds resolving secrets just to redact an exec argv.
@@ -48,16 +53,57 @@ func auditWrap(g *globals, root *cobra.Command) {
 				if name == path {
 					inner := c.RunE
 					c.RunE = func(cmd *cobra.Command, args []string) error {
+						id := audit.NewRun()
+						cmd.SetContext(context.WithValue(cmd.Context(), operationKey{}, id))
+						g.activeUI = g.ui(cmd)
+						g.activeUI.Operation(id)
+						g.activeUI.HoldFinish()
+						defer func() { g.activeUI = nil }()
 						s := g.auditStart(cmd, args)
 						if s != nil {
 							cmd.SetContext(context.WithValue(cmd.Context(), auditRunKey{}, s))
 						}
+						if path != "apply" && path != "deploy" && path != "rollback" && path != "preview up" {
+							if err := beginOperation(cmd.Context()); err != nil {
+								err = classifyOperation(cmd.Context(), err)
+								s.finish(err)
+								g.activeUI.Complete(err)
+								return err
+							}
+						}
 						err := inner(cmd, args)
+						err = classifyOperation(cmd.Context(), err)
 						s.finish(err)
+						g.activeUI.Complete(err)
 						return err
 					}
 					break
 				}
+			}
+		}
+		// Read commands also end their NDJSON stream with an explicit outcome.
+		if c.RunE != nil && !slices.Contains(auditedCommands, strings.TrimPrefix(c.CommandPath(), root.Name()+" ")) {
+			inner := c.RunE
+			c.RunE = func(cmd *cobra.Command, args []string) error {
+				g.activeUI = g.ui(cmd)
+				localMutation := slices.Contains(localMutations, strings.TrimPrefix(cmd.CommandPath(), root.Name()+" "))
+				if localMutation {
+					id := audit.NewRun()
+					cmd.SetContext(context.WithValue(cmd.Context(), operationKey{}, id))
+					g.activeUI.Operation(id)
+					g.activeUI.HoldFinish()
+				}
+				defer func() { g.activeUI = nil }()
+				err := inner(cmd, args)
+				if localMutation {
+					err = classifyMutation(err, false)
+					g.activeUI.Complete(err)
+					return err
+				}
+				if g.json && !rawOutputCommand(cmd) {
+					g.activeUI.Finished(err, "")
+				}
+				return err
 			}
 		}
 		for _, sub := range c.Commands() {
@@ -81,22 +127,34 @@ func auditNoteVersion(ctx context.Context, v string) {
 // auditRun is one audited command: the open Server connection and the
 // record being written. A nil *auditRun does nothing.
 type auditRun struct {
-	a     *app
-	h     remote.Host
-	rec   audit.Record
-	begin time.Time
-	red   *audit.Redactor
-	dead  bool // an append failed: stop trying and stop warning
+	a       *app
+	h       remote.Host
+	rec     audit.Record
+	begin   time.Time
+	red     *audit.Redactor
+	mutated bool
+	op      *operation.Record
+	dead    bool // an append failed: stop trying and stop warning
 }
 
 // auditStart loads the App, writes the "started" record and returns the run
 // to finish. It never fails: whatever goes wrong, the command itself runs
 // (and reports its own load errors).
 func (g *globals) auditStart(cmd *cobra.Command, args []string) *auditRun {
+	if f := cmd.Flags().Lookup("plan"); cmd.Name() == "setup" && f != nil && f.Value.String() == "true" {
+		return nil
+	}
 	if f := cmd.Flags().Lookup("dry-run"); f != nil && f.Value.String() == "true" {
 		return nil // changes nothing
 	}
-	a, err := g.loadApp(cmd)
+	var a *app
+	var err error
+	if strings.HasPrefix(cmd.CommandPath(), cmd.Root().Name()+" preview ") {
+		name, _ := cmd.Flags().GetString("name")
+		a, err = g.loadPreview(cmd, name)
+	} else {
+		a, err = g.loadApp(cmd)
+	}
 	if err != nil || a.scoped || len(a.dest.Servers) == 0 {
 		return nil // scoped access: the Gate writes its own audit
 	}
@@ -113,7 +171,7 @@ func (g *globals) auditStart(cmd *cobra.Command, args []string) *auditRun {
 		r.red = a.auditRedactor(cmd.Context())
 	}
 	r.rec = audit.Record{
-		Time: r.begin.UTC(), Run: audit.NewRun(), Phase: audit.Started, Performer: performer(),
+		Time: r.begin.UTC(), Run: operationID(cmd.Context()), OperationID: operationID(cmd.Context()), Phase: audit.Started, Performer: performer(),
 		Command: command, App: a.cfg.App, Destination: a.destName,
 		Version: a.auditVersion(cmd, command, args),
 		Args:    auditArgs(cmd, command, args, r.red),
@@ -133,11 +191,7 @@ func (r *auditRun) finish(err error) {
 	rec.Time, rec.Phase = time.Now().UTC(), audit.Finished
 	code := 0
 	if err != nil {
-		code = 1
-		var ee *exitError
-		if errors.As(err, &ee) {
-			code = ee.code
-		}
+		code = mutationCode(err, r.mutated)
 		rec.Error = r.red.String(err.Error())
 	}
 	rec.Exit = &code
@@ -146,6 +200,15 @@ func (r *auditRun) finish(err error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 	r.append(ctx, rec)
+	if r.op != nil {
+		r.op.State = "finished"
+		r.op.Result = mutationResult(err, r.mutated)
+		if e := operation.Save(ctx, r.h, r.rec.App, r.rec.Destination, *r.op); e != nil {
+			r.a.ui.Warn("operation outcome could not be recorded: %s", firstLine(r.red.String(e.Error())))
+		} else {
+			_ = operation.Prune(ctx, r.h, r.rec.App, r.rec.Destination, r.rec.Run)
+		}
+	}
 }
 
 // append writes rec; a failure warns once and disables the rest.
@@ -425,4 +488,43 @@ func parseSince(s string, now time.Time) (time.Time, error) {
 		return t, nil
 	}
 	return time.Time{}, fmt.Errorf("cannot read --since %q", s)
+}
+
+// beginOperation runs after the deploy lock is held, before build or rollout.
+func beginOperation(ctx context.Context) error {
+	if ctx == nil {
+		return nil
+	}
+	r, _ := ctx.Value(auditRunKey{}).(*auditRun)
+	if r == nil || r.op != nil {
+		return nil
+	}
+	r.op = &operation.Record{ID: r.rec.Run, Command: r.rec.Command, Started: r.begin.UTC(), State: "running", Services: map[string]string{}}
+	if err := operation.Save(ctx, r.h, r.rec.App, r.rec.Destination, *r.op); err != nil {
+		r.op = nil
+		return err
+	}
+	r.mutated = true
+	return nil
+}
+
+func operationProgress(ctx context.Context) func(context.Context, string, string) {
+	return func(callCtx context.Context, service, state string) {
+		if ctx == nil {
+			return
+		}
+		r, _ := ctx.Value(auditRunKey{}).(*auditRun)
+		if r == nil || r.op == nil {
+			return
+		}
+		r.op.Services[service] = state
+		if err := operation.Save(callCtx, r.h, r.rec.App, r.rec.Destination, *r.op); err != nil {
+			r.a.ui.Warn("operation progress could not be recorded: %s", firstLine(r.red.String(err.Error())))
+		}
+	}
+}
+
+func rawOutputCommand(cmd *cobra.Command) bool {
+	path := strings.TrimPrefix(cmd.CommandPath(), cmd.Root().Name()+" ")
+	return slices.Contains([]string{"schema", "audit", "config show", "secrets print", "skill print"}, path)
 }

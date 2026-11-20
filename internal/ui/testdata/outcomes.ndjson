@@ -1,0 +1,5 @@
+{"schema_version":1,"event":"operation_started","time":"2026-11-20T10:00:00Z","operation_id":"abc123"}
+{"schema_version":1,"event":"finished","time":"2026-11-20T10:00:01Z","operation_id":"abc123","duration_ms":1000,"outcome":"success"}
+{"schema_version":1,"event":"finished","time":"2026-11-20T10:00:01Z","duration_ms":1000,"outcome":"partial","changed":["web"],"unchanged":["worker"]}
+{"schema_version":1,"event":"finished","time":"2026-11-20T10:00:01Z","duration_ms":1000,"outcome":"failed","error":"validation failed"}
+{"schema_version":1,"event":"finished","time":"2026-11-20T10:00:01Z","duration_ms":1000,"outcome":"unknown"}
