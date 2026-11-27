@@ -37,12 +37,13 @@ The files are in
 1. Copy the example directory. In `yoho.yml`, set each Server's `ssh` and
    `private_address` (or use the [WireGuard mesh](mesh.md)). In `compose.yaml`,
    set the Proxy host of `web`.
-2. Create `.yoho/secrets` from `.yoho/secrets.example` with two long random
-   passwords:
+2. Create `.yoho/secrets` from `.yoho/secrets.example` with long random
+   values:
 
    ```sh
    POSTGRES_PASSWORD=...
    REPLICATOR_PASSWORD=...
+   DEMO_WRITE_TOKEN=...
    ```
 
    These are user secrets, not `x-yoho.generate`. A generated secret has one
@@ -60,6 +61,16 @@ yoho app exec db -- psql -U postgres -c "select application_name, state from pg_
 
 `db-standby` should show `streaming`.
 
+The `web` Service is a demo. It reads a row count at `/cgi-bin/read`. Its
+write endpoint accepts only a POST whose body is `DEMO_WRITE_TOKEN`:
+
+```sh
+curl --data-binary @token-file https://pg.example.com/cgi-bin/write?hello
+```
+
+Replace it with your App, and give your App its own least-privilege role
+instead of `postgres`.
+
 ## What protects the database
 
 - The Connection firewall admits only consumer Servers to port 5432 on the
@@ -68,16 +79,20 @@ yoho app exec db -- psql -U postgres -c "select application_name, state from pg_
 - `pg_hba.conf` requires `scram-sha-256` for every network login. It allows
   replication from any address, because the firewall is the network control.
   The same file then works on both nodes after a promotion.
+- The data directory is `pgdata` inside the volume. A standby clone keeps a
+  marker next to it until the clone is complete and configured. If the
+  container stops mid-clone, the next start wipes the partial data and clones
+  again.
 - The replication password is in `/var/lib/postgresql/.pgpass`, outside the
   data directory. The entrypoint rewrites it from the secret files on every
   start. `primary_conninfo` names the `passfile`; it never holds a password.
 
 ## Promote the standby
 
-Do this when the primary's Server is lost, or for a planned switchover. Do the
-steps in order.
+Do this for a planned switchover, with both Servers up. Do the steps in order.
+If Server `a` is lost, read [Server a is lost](#server-a-is-lost) first.
 
-1. **Fence the old primary.** If Server `a` is still up, stop new writes:
+1. **Fence the old primary.** Stop new writes:
 
    ```sh
    yoho app exec db -- psql -U postgres -c "ALTER SYSTEM SET default_transaction_read_only = on"
@@ -89,9 +104,6 @@ steps in order.
    Compare `select pg_current_wal_lsn()` on `db` with
    `select pg_last_wal_replay_lsn()` on `db-standby`.
 
-   If Server `a` is lost, it is already fenced. Remove `a` from the
-   Destination, and remove `db` from its Role and from `compose.yaml`. Never
-   let a lost primary come back as a primary.
 2. **Promote.**
 
    ```sh
@@ -124,12 +136,44 @@ steps in order.
 The roles are now reversed. To switch back later, repeat the steps with the
 names swapped.
 
+### Server a is lost
+
+A Server you cannot reach over SSH is not fenced. It may still run and accept
+writes from clients you cannot see. Before you promote, make sure the old
+primary cannot accept writes: power Server `a` off in your provider's console,
+or detach its network, and confirm that it stays off.
+
+Then promote `db-standby` (step 2 above) and move everything to Server `b`.
+In `yoho.yml`, remove `a` from the top-level `servers` (this also removes it
+from the mesh) and from the Destination, drop the old Role, place `web` on `b`,
+and leave `web` as the only consumer:
+
+```yaml
+servers:
+  b: {ssh: root@203.0.113.11, private_address: 10.0.0.11}
+destinations:
+  production:
+    servers: [b]
+    roles:
+      app: {services: [web], servers: [b]}
+      standby: {services: [db-standby], servers: [b]}
+    connections:
+      primary: {service: db-standby, port: 5432, consumers: [web]}
+```
+
+Delete the `db` Service from `compose.yaml`, then run `yoho apply`. The App
+now runs on one Server with no standby. To add a standby again, add a new
+Server, a Service for it, and make it a consumer of `primary`. Never start the
+old Server `a` with its data again; wipe its disk first.
+
 ## Rotate the passwords
+
+**REPLICATOR_PASSWORD** (tested in CI):
 
 1. Put the new value in `.yoho/secrets`.
 2. Run `yoho deploy`. Both database Services restart with the new secret files,
    and the entrypoint rewrites `.pgpass`.
-3. Set the new passwords on the primary:
+3. Set the new password on the primary:
 
    ```sh
    yoho app exec db -- sh /etc/yoho-pg/entrypoint.sh set-passwords
@@ -140,6 +184,19 @@ names swapped.
 
 Between steps 2 and 3, the standby cannot log in and replication waits. Run
 step 3 right after the deploy. After a promotion, run it on `db-standby`.
+
+**POSTGRES_PASSWORD** (web uses it): change it in the database first, then
+deploy, so web never holds a password the database rejects. With the new
+value in the shell variable `NEW` (hex characters only):
+
+```sh
+printf "ALTER ROLE postgres PASSWORD '%s';\n" "$NEW" | yoho app exec -i db -- psql -U postgres
+```
+
+`printf` is a shell builtin and the statement travels over stdin, so the value
+is not in a command line. Then put the value in `.yoho/secrets` and run
+`yoho deploy`. Connections that web opens before the deploy fail until it
+finishes, so do this in a quiet moment. This order is not covered by CI.
 
 ## Backups
 

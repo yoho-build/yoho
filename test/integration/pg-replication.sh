@@ -36,8 +36,10 @@ sed -i -e "s/203.0.113.10/$a_ip/; s/203.0.113.11/$b_ip/; s/10.0.0.10/$a_ip/; s/1
 sed -i -e 's/hosts: \[pg.example.com\]/hosts: [pg-ci.test]\n        ssl: false/' compose.yaml
 grep -F "ssh: root@$a_ip, private_address: $a_ip" yoho.yml >/dev/null
 grep -F 'ssl: false' compose.yaml >/dev/null
+# Secret values go through files and the printf builtin, never an exec'd argv.
 umask 077
-printf 'POSTGRES_PASSWORD=%s\nREPLICATOR_PASSWORD=%s\n' "$(openssl rand -hex 24)" "$(openssl rand -hex 24)" > .yoho/secrets
+openssl rand -hex 24 > "$work/token"
+printf 'POSTGRES_PASSWORD=%s\nREPLICATOR_PASSWORD=%s\nDEMO_WRITE_TOKEN=%s\n' "$(openssl rand -hex 24)" "$(openssl rand -hex 24)" "$(cat "$work/token")" > .yoho/secrets
 umask 022
 
 # Helpers. sql SERVER SERVICE QUERY runs psql in that Service's container over
@@ -45,6 +47,8 @@ umask 022
 cid() { docker exec "$1" docker ps -q --filter "label=com.docker.compose.project=$project" --filter "label=com.docker.compose.service=$2" | head -n1; }
 sql() { local id; id=$(cid "$1" "$2"); [[ -n "$id" ]] || { echo "no $2 container on $1" >&2; return 1; }; docker exec "$1" docker exec "$id" psql -U postgres -d app -XtAc "$3"; }
 web() { curl -sS --max-time 10 -H 'Host: pg-ci.test' "http://$a_ip/cgi-bin/$1"; }
+# write VALUE posts the demo write token from a file (never in argv).
+write() { curl -sS --max-time 10 -H 'Host: pg-ci.test' --data-binary @"$work/token" "http://$a_ip/cgi-bin/write?$1"; }
 eventually() {
   for _ in $(seq 1 60); do
     if "$@"; then return 0; fi
@@ -57,14 +61,17 @@ streaming() { [[ "$(sql "$1" "$2" "select state from pg_stat_replication where a
 clones() { local id; id=$(cid "$1" "$2"); docker exec "$1" docker logs "$id" 2>&1 | grep -c 'yoho-pg: empty data directory' || true; }
 # A file in PGDATA that a new base backup would wipe (the entrypoint clears
 # partial data before cloning): its survival proves no re-clone happened.
-mark() { docker exec "$1" docker exec "$(cid "$1" "$2")" touch /var/lib/postgresql/data/yoho-ci-marker; }
-marked() { docker exec "$1" docker exec "$(cid "$1" "$2")" test -e /var/lib/postgresql/data/yoho-ci-marker; }
+mark() { docker exec "$1" docker exec "$(cid "$1" "$2")" touch /var/lib/postgresql/data/pgdata/yoho-ci-marker; }
+marked() { docker exec "$1" docker exec "$(cid "$1" "$2")" test -e /var/lib/postgresql/data/pgdata/yoho-ci-marker; }
 
 "$yoho_bin" config check
 "$yoho_bin" deploy --version v1
 
 # Replication: a row written through web reaches the standby.
-web 'write?row1' | grep -F 'wrote row1'
+# The demo write endpoint refuses requests without the token.
+web 'write?nope' | grep -F 'POST the write token'
+curl -sS --max-time 10 -H 'Host: pg-ci.test' --data-binary wrong "http://$a_ip/cgi-bin/write?nope" | grep -F forbidden
+write row1 | grep -F 'wrote row1'
 eventually has_row "$server_b" db-standby row1
 # The standby refuses writes.
 if out=$(sql "$server_b" db-standby "insert into items(v) values ('nope')" 2>&1); then echo "standby accepted a write: $out" >&2; exit 1; fi
@@ -72,7 +79,7 @@ grep -F 'read-only transaction' <<<"$out" >/dev/null
 eventually streaming "$server_a" db db-standby
 [[ "$(sql "$server_b" db-standby 'select pg_is_in_recovery()')" == t ]]
 # No password is stored in the standby's configuration.
-if docker exec "$server_b" docker exec "$(cid "$server_b" db-standby)" grep -i 'password=' /var/lib/postgresql/data/postgresql.auto.conf; then echo 'password in primary_conninfo' >&2; exit 1; fi
+if docker exec "$server_b" docker exec "$(cid "$server_b" db-standby)" grep -i 'password=' /var/lib/postgresql/data/pgdata/postgresql.auto.conf; then echo 'password in primary_conninfo' >&2; exit 1; fi
 
 # Firewall: a permissive Tailscale/ufw-style FORWARD ACCEPT must not let an
 # unlisted host reach the primary's Connection port.
@@ -85,16 +92,19 @@ mark "$server_b" db-standby
 docker exec "$server_b" docker restart "$(cid "$server_b" db-standby)" >/dev/null
 eventually streaming "$server_a" db db-standby
 marked "$server_b" db-standby
-web 'write?row2' | grep -F 'wrote row2'
+write row2 | grep -F 'wrote row2'
 eventually has_row "$server_b" db-standby row2
 
 # Documented REPLICATOR_PASSWORD rotation: new secret, deploy, set-passwords.
-sed -i "s/^REPLICATOR_PASSWORD=.*/REPLICATOR_PASSWORD=$(openssl rand -hex 24)/" .yoho/secrets
+umask 077
+{ grep -v '^REPLICATOR_PASSWORD=' .yoho/secrets; printf 'REPLICATOR_PASSWORD=%s\n' "$(openssl rand -hex 24)"; } > "$work/secrets.new"
+mv "$work/secrets.new" .yoho/secrets
+umask 022
 "$yoho_bin" deploy --version v2
 "$yoho_bin" app exec db -- sh /etc/yoho-pg/entrypoint.sh set-passwords
 eventually streaming "$server_a" db db-standby
 marked "$server_b" db-standby
-web 'write?row3' | grep -F 'wrote row3'
+write row3 | grep -F 'wrote row3'
 eventually has_row "$server_b" db-standby row3
 
 # Promotion, steps 1-5 of the guide.
@@ -102,7 +112,7 @@ eventually has_row "$server_b" db-standby row3
 "$yoho_bin" app exec db -- psql -U postgres -c 'ALTER SYSTEM SET default_transaction_read_only = on'
 "$yoho_bin" app exec db -- psql -U postgres -c 'SELECT pg_reload_conf()'
 "$yoho_bin" app exec db -- psql -U postgres -c "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE backend_type = 'client backend' AND pid <> pg_backend_pid()"
-web 'write?fenced' | grep -F 'read-only transaction'
+write fenced | grep -F 'read-only transaction'
 lsn=$(sql "$server_a" db 'select pg_current_wal_lsn()')
 caught_up() { [[ "$(sql "$server_b" db-standby "select pg_last_wal_replay_lsn() >= '$lsn'::pg_lsn")" == t ]]; }
 eventually caught_up
@@ -115,7 +125,8 @@ sed -i 's/primary: {service: db, port: 5432, consumers: \[web, db-standby\]}/pri
 grep -F 'primary: {service: db-standby, port: 5432, consumers: [web, db]}' yoho.yml >/dev/null
 # 4. Apply.
 "$yoho_bin" apply --auto-approve --version v3
-eventually bash -c "curl -sS --max-time 10 -H 'Host: pg-ci.test' 'http://$a_ip/cgi-bin/write?row4' | grep -F 'wrote row4 id=' | grep -F 'via $b_ip'"
+wrote_via_b() { write row4 | grep -F 'wrote row4 id=' | grep -F "via $b_ip"; }
+eventually wrote_via_b
 has_row "$server_b" db-standby row1
 # The Connection firewall now protects B, and A is a permitted consumer.
 docker exec "$server_b" iptables -I FORWARD 1 -j ACCEPT
@@ -136,7 +147,8 @@ eventually has_row "$server_a" db row4
 # The new primary is not demoted by a restart.
 docker exec "$server_b" docker restart "$(cid "$server_b" db-standby)" >/dev/null
 eventually promoted
-eventually bash -c "curl -sS --max-time 10 -H 'Host: pg-ci.test' 'http://$a_ip/cgi-bin/write?row5' | grep -F 'wrote row5'"
+wrote5() { write row5 | grep -F 'wrote row5'; }
+eventually wrote5
 eventually has_row "$server_a" db row5
 
 "$yoho_bin" remove -y

@@ -103,7 +103,7 @@ print(n)'; }
 # 1. plan, before any mesh exists, on the Roles Destination itself: it reports
 # the mesh and planned Connection addresses and installs nothing.
 plan_rc=0
-"$yoho_bin" plan --json --detailed-exitcode > "$work/plan1.json" || plan_rc=$?
+"$yoho_bin" plan --version v1 --json --detailed-exitcode > "$work/plan1.json" || plan_rc=$?
 [[ "$plan_rc" == 2 ]] || { echo "plan exit $plan_rc, want 2 (changes)" >&2; cat "$work/plan1.json" >&2; exit 1; }
 before=$(mesh_changes < "$work/plan1.json")
 (( before > 0 )) || { echo 'plan reported no mesh changes before mesh up' >&2; exit 1; }
@@ -139,7 +139,7 @@ done
 # The hub allowlist names c's real egress IP (its SSH host) on the mesh port.
 docker exec "$server_a" ufw show added | grep -F "from $c_ip to any port 51820" >/dev/null
 # c is outbound-only: no ListenPort, no inbound rule; b does not peer with c.
-docker exec "$server_c" sh -ec '! grep -q ListenPort /etc/wireguard/yoho0.conf'
+if docker exec "$server_c" grep -q ListenPort /etc/wireguard/yoho0.conf; then echo 'NATed c has a ListenPort' >&2; exit 1; fi
 if docker exec "$server_c" ufw show added | grep -F yoho-mesh; then echo 'inbound mesh rule on NATed c' >&2; exit 1; fi
 c_pub=$(docker exec "$server_c" wg show yoho0 public-key)
 if docker exec "$server_b" wg show yoho0 peers | grep -qxF "$c_pub"; then echo 'b peers with NATed c directly' >&2; exit 1; fi
@@ -183,7 +183,7 @@ snap > "$work/snap1"
 "$yoho_bin" mesh up
 snap > "$work/snap2"
 diff -u "$work/snap1" "$work/snap2"
-"$yoho_bin" plan --json > "$work/plan2.json" || true
+"$yoho_bin" plan --version v1 --json > "$work/plan2.json"
 after=$(mesh_changes < "$work/plan2.json")
 [[ "$after" == 0 ]] || { echo "plan reported $after mesh changes after mesh up" >&2; exit 1; }
 # 5. Roles over the mesh: b's web/worker reach db on NATed c via hub a.
@@ -199,7 +199,7 @@ if docker exec "$server_a" nc -z -w 2 10.210.0.3 5432; then echo 'non-consumer m
 if docker exec "$server_a" nc -z -w 2 "$c_ip" 5432; then echo 'db reachable on c outer address' >&2; exit 1; fi
 # The whole Destination now matches the plan.
 plan_rc=0
-"$yoho_bin" plan --detailed-exitcode > "$work/plan3.txt" 2>&1 || plan_rc=$?
+"$yoho_bin" plan --version v1 --detailed-exitcode > "$work/plan3.txt" 2>&1 || plan_rc=$?
 [[ "$plan_rc" == 0 ]] || { echo "plan after deploy exit $plan_rc, want 0" >&2; cat "$work/plan3.txt" >&2; exit 1; }
 # 6. Key rotation: every public key changes, the mesh and the App keep working.
 pubs() { local s; for s in "${servers[@]}"; do docker exec "$s" wg show yoho0 public-key; done; }
@@ -221,15 +221,14 @@ for server in "$server_b" "$server_c"; do
 done
 "$yoho_bin" mesh down
 for server in "${servers[@]}"; do
-  docker exec "$server" sh -ec '! ip link show yoho0 >/dev/null 2>&1
-test ! -e /etc/wireguard/yoho0.conf
-test ! -e /etc/wireguard/yoho0.key
-test ! -e /etc/wireguard/yoho0.owned
-test ! -e /var/lib/yoho/mesh/state.json
-test ! -e /etc/sysctl.d/99-yoho-mesh.conf
-! iptables -S | grep -F yoho-mesh
-! ufw show added | grep -F yoho-mesh
-! systemctl is-enabled wg-quick@yoho0 >/dev/null 2>&1'
+  left() { echo "mesh down left $1 on $server" >&2; exit 1; }
+  if docker exec "$server" ip link show yoho0 >/dev/null 2>&1; then left yoho0; fi
+  for f in /etc/wireguard/yoho0.conf /etc/wireguard/yoho0.key /etc/wireguard/yoho0.owned /var/lib/yoho/mesh/state.json /etc/sysctl.d/99-yoho-mesh.conf; do
+    if docker exec "$server" test -e "$f"; then left "$f"; fi
+  done
+  if docker exec "$server" iptables -S | grep -F yoho-mesh; then left 'an iptables rule'; fi
+  if docker exec "$server" ufw show added | grep -F yoho-mesh; then left 'a ufw rule'; fi
+  if docker exec "$server" systemctl is-enabled wg-quick@yoho0 >/dev/null 2>&1; then left 'wg-quick@yoho0 enabled'; fi
 done
 echo 'PASS Mesh CLI: plan before mesh, mesh up (3 Servers, NATed c via hub), hub-only state, allowlist, idempotent rerun, status without keys, Roles db over mesh, non-consumer refused, rotate-keys, remove, mesh down'
 # 8. The package e2e test against the same Servers (fresh yoho0, own root).

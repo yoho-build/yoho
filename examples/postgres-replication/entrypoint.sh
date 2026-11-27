@@ -50,16 +50,21 @@ set_conninfo() {
   chmod 600 "$auto"
 }
 
-if [ -n "$host" ] && [ ! -s "$PGDATA/PG_VERSION" ]; then
+# The marker sits on the volume, outside PGDATA. It exists from the start of a
+# clone until the standby is fully configured, so an interrupted clone (even
+# one that already wrote PG_VERSION) is wiped and cloned again.
+marker=$(dirname "$PGDATA")/.yoho-clone-in-progress
+if [ -n "$host" ] && { [ ! -s "$PGDATA/PG_VERSION" ] || [ -e "$marker" ]; }; then
   echo "yoho-pg: empty data directory; cloning primary $host:$port" >&2
+  touch "$marker"
+  rm -rf "$PGDATA"
   mkdir -p "$PGDATA"
-  # A base backup that stopped halfway has no PG_VERSION; start clean.
-  find "$PGDATA" -mindepth 1 -delete
   chown postgres:postgres "$PGDATA"
   chmod 700 "$PGDATA"
   until as_pg pg_isready -q -h "$host" -p "$port"; do sleep 2; done
   as_pg pg_basebackup -d "$conninfo" -D "$PGDATA" -R -X stream --no-password --checkpoint=fast
   set_conninfo
+  rm -f "$marker"
 elif [ -n "$host" ] && [ -f "$PGDATA/standby.signal" ]; then
   # Follow the Connection if the primary moved.
   set_conninfo

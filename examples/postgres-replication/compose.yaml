@@ -11,6 +11,9 @@ x-postgres: &postgres
   environment:
     POSTGRES_USER: postgres
     POSTGRES_DB: app
+    # A subdirectory of the volume, so the entrypoint can keep its clone
+    # marker on the volume but outside the data directory.
+    PGDATA: /var/lib/postgresql/data/pgdata
   volumes:
     - pgdata:/var/lib/postgresql/data
     - ./entrypoint.sh:/etc/yoho-pg/entrypoint.sh:ro
@@ -27,8 +30,9 @@ services:
   web:
     image: alpine:3.22
     restart: unless-stopped
-    # busybox httpd with two CGI scripts that use psql over the Connection.
-    command: ["sh", "-c", "apk add --no-cache postgresql17-client >/dev/null && exec httpd -f -v -p 8000 -h /srv/www"]
+    # A demo: busybox httpd (from busybox-extras) runs CGI scripts that use
+    # psql over the Connection. CGI scripts inherit the container env.
+    command: ["sh", "-c", "apk add --no-cache postgresql17-client busybox-extras >/dev/null && exec busybox-extras httpd -f -v -p 8000 -h /srv/www"]
     volumes:
       - ./web:/srv/www:ro
     healthcheck:
@@ -38,7 +42,8 @@ services:
       retries: 60
       start_period: 60s
     x-yoho:
-      secrets: [POSTGRES_PASSWORD]
+      # DEMO_WRITE_TOKEN guards the demo write endpoint (POST body).
+      secrets: [POSTGRES_PASSWORD, DEMO_WRITE_TOKEN]
       proxy:
         hosts: [pg.example.com]
         port: 8000
