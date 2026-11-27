@@ -28,6 +28,10 @@ It reconciles every configured Server, even when
 `--destination` selects only one Destination. Serialize these commands across
 Apps sharing a mesh. `yoho plan` reports interface changes, peer additions and
 removals, and address assignments without installing anything.
+`yoho plan` works before the first `yoho mesh up`. On a Roles Destination it
+shows Connection addresses from the planned allocation and says they are
+planned. `yoho apply` and `yoho deploy` bring the mesh up first, then read the
+real allocation. They never fall back to `private_address`.
 
 The first public Server in sorted name order is the hub. NATed Servers initiate
 outbound connections to it every 25 seconds and route all mesh traffic through
@@ -72,9 +76,9 @@ teardown of every Server listed in its config and deletes their allocation state
 never run it on surviving Servers as part of Server removal.
 
 Swarm uses the assigned mesh address for `--advertise-addr`; run `mesh up`
-before `swarm init` or `swarm join`. Future Roles connections can use the same
-effective private address; Roles and connection configuration are not added by
-this feature.
+before `swarm init` or `swarm join`. Roles Connections use each Server's mesh
+address in place of `private_address`, and the Connection firewall matches
+traffic on those addresses.
 
 | Support | Behavior |
 | --- | --- |

@@ -25,6 +25,7 @@ const guide = [
   ['Swarm', 'swarm'],
   ['WireGuard mesh', 'mesh'],
   ['High availability & recovery', 'high-availability'],
+  ['Postgres primary & standby', 'postgres-replication'],
   ['Support matrix', 'support-matrix'],
   ['Compare', 'compare'],
   ['Dashboards (tui / ui)', 'dashboards'],

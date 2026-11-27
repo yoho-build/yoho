@@ -2,76 +2,24 @@
 # Two real SSH + Docker Servers on an isolated outer Docker network. No host
 # Docker socket is mounted; all App containers run in the nested daemons.
 set -euo pipefail
-work=$(mktemp -d)
 prefix="yoho-roles-ci-$$"
-network="$prefix-net"
 server_a="$prefix-a"
 server_b="$prefix-b"
 outsider="$prefix-outsider"
-image="$prefix-server"
-yoho_bin=${YOHO_BIN:-"$work/yoho"}
 loop_pid=
-cleanup() {
-  status=$?
+servers_extra_cleanup() {
   if [[ -n "$loop_pid" ]]; then kill "$loop_pid" 2>/dev/null || true; wait "$loop_pid" 2>/dev/null || true; fi
-  if (( status != 0 )); then
-    for server in "$server_a" "$server_b"; do
-      docker logs "$server" || true
-      docker exec "$server" docker ps -a || true
-      docker exec "$server" iptables -t mangle -S || true
-    done
-  fi
-  docker rm -fv "$server_a" "$server_b" "$outsider" >/dev/null 2>&1 || true
-  docker network rm "$network" >/dev/null 2>&1 || true
-  docker image rm "$image" >/dev/null 2>&1 || true
-  if [[ -n "${SSH_AGENT_PID:-}" ]]; then ssh-agent -k >/dev/null || true; fi
-  rm -rf "$work"
-  exit "$status"
 }
-trap cleanup EXIT
-if [[ ! -x "$yoho_bin" ]]; then go build -o "$yoho_bin" ./cmd/yoho; fi
-ssh-keygen -q -t ed25519 -N '' -f "$work/key"
-cp "$work/key.pub" "$work/authorized_keys"
-cat > "$work/Dockerfile" <<'DOCKER'
-FROM ubuntu:24.04
-ENV DEBIAN_FRONTEND=noninteractive
-RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl gnupg openssh-server iptables iproute2 netcat-openbsd util-linux systemd python3 && \
-    install -m 0755 -d /etc/apt/keyrings && \
-    curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc && \
-    echo 'deb [arch=amd64 signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu noble stable' > /etc/apt/sources.list.d/docker.list && \
-    apt-get update && apt-get install -y --no-install-recommends docker-ce docker-ce-cli containerd.io docker-compose-plugin docker-buildx-plugin && \
-    rm -rf /var/lib/apt/lists/* && mkdir -p /run/sshd /root/.ssh && ssh-keygen -A && \
-    printf '\nPasswordAuthentication no\nKbdInteractiveAuthentication no\nPermitRootLogin prohibit-password\n' >> /etc/ssh/sshd_config
-COPY authorized_keys /root/.ssh/authorized_keys
-RUN chmod 700 /root/.ssh && chmod 600 /root/.ssh/authorized_keys
-# A container has no systemd PID 1. Enable the real unit offline, but skip
-# daemon reload/boot-order execution only. Packet filtering is never stubbed.
-RUN printf '%s\n' '#!/bin/sh' 'case "$1" in' 'daemon-reload) echo "SKIP systemd boot/reload assertion: nested Server PID 1 is not systemd" >&2; exit 0;;' 'enable|is-enabled) exec /usr/bin/systemctl --root=/ "$@";;' '*) exec /usr/bin/systemctl "$@";;' 'esac' > /usr/local/bin/systemctl && chmod 755 /usr/local/bin/systemctl
-CMD ["/bin/sh", "-ec", "dockerd --host=unix:///var/run/docker.sock > /var/log/dockerd.log 2>&1 & exec /usr/sbin/sshd -D -e"]
-DOCKER
-docker build -t "$image" "$work"
-docker network create "$network" >/dev/null
-for spec in "$server_a:2222" "$server_b:2223"; do
-  name=${spec%:*}; port=${spec##*:}
-  # Keep inner image layers off the outer container's overlay filesystem.
-  docker run -d --privileged -v /var/lib/docker --network "$network" --name "$name" -p "127.0.0.1:$port:22" "$image" >/dev/null
-done
-a_ip=$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' "$server_a")
-b_ip=$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' "$server_b")
-for server in "$server_a" "$server_b"; do
-  ready=0
-  for _ in $(seq 1 90); do
-    if docker exec "$server" docker info >/dev/null 2>&1; then ready=1; break; fi
-    sleep 1
-  done
-  [[ "$ready" == 1 ]]
-done
-# Only authentication setup is local to this test's agent; no private key is
-# passed in argv, Compose, containers, logs, or App configuration.
-eval "$(ssh-agent -s)" >/dev/null
-ssh-add "$work/key" >/dev/null
-mkdir -p "$HOME/.ssh"
-for port in 2222 2223; do ssh-keyscan -p "$port" 127.0.0.1 >> "$HOME/.ssh/known_hosts"; done
+# shellcheck source=test/integration/servers.sh
+. "$(dirname "$0")/servers.sh"
+servers_setup "$prefix"
+servers_run "$server_a" 2222
+servers_run "$server_b" 2223
+servers_track "$outsider"
+a_ip=$(servers_ip "$server_a")
+b_ip=$(servers_ip "$server_b")
+servers_wait
+servers_ssh_agent 127.0.0.1:2222 127.0.0.1:2223
 mkdir "$work/app"
 python3 - "$work/app" "$a_ip" "$b_ip" <<'PY'
 import json,sys,pathlib

@@ -1,0 +1,16 @@
+# yaml-language-server: $schema=../../schema/yoho.schema.json
+app: pg
+servers:
+  a: {ssh: root@203.0.113.10, private_address: 10.0.0.10}
+  b: {ssh: root@203.0.113.11, private_address: 10.0.0.11}
+destinations:
+  production:
+    servers: [a, b]
+    roles:
+      app: {services: [web], servers: [a]}
+      primary: {services: [db], servers: [a]}
+      standby: {services: [db-standby], servers: [b]}
+    connections:
+      # The Service named here is the primary. Its consumers are web and the
+      # standby. To promote db-standby, follow docs/site/postgres-replication.md.
+      primary: {service: db, port: 5432, consumers: [web, db-standby]}

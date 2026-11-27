@@ -165,6 +165,19 @@ func (a *app) meshSSHOptions(name string) (remote.SSHOptions, error) {
 	return result, nil
 }
 
+// meshReconcile is replaceable by tests.
+var meshReconcile = func(a *app, ctx context.Context) error { return a.reconcileMesh(ctx) }
+
+// meshRolesAddresses reconciles the mesh first, then reads the real Roles
+// addresses. It never uses a planned allocation or private_address.
+func (a *app) meshRolesAddresses(ctx context.Context, hosts []plan.NamedHost) error {
+	if err := meshReconcile(a, ctx); err != nil {
+		return err
+	}
+	a.meshPlanned = false
+	return a.rolesAddresses(ctx, hosts)
+}
+
 func (a *app) reconcileMesh(ctx context.Context) error {
 	if a.previewName != "" || a.cfg.Network.Mesh != "wireguard" {
 		return nil

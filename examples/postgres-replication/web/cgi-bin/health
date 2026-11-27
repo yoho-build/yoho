@@ -1,0 +1,5 @@
+#!/bin/sh
+# shellcheck source-path=SCRIPTDIR source=common.sh
+. "$(dirname "$0")/common.sh"
+out=$(psql -XtAc 'select 1' 2>&1) || fail "$out"
+reply "ok"

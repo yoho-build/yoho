@@ -153,7 +153,9 @@ func (a *app) plan(ctx context.Context, ver string) (changes []plan.Change, err 
 		return nil, err
 	}
 	u.Title("Planning %s@%s on %s", a.cfg.App, shortVersion(ver), a.destName)
+	a.meshPlanned = true
 	s, err := a.openSession(ctx, ver, true, false)
+	a.meshPlanned = false
 	if err != nil {
 		return nil, err
 	}
@@ -428,7 +430,9 @@ func (a *app) apply(ctx context.Context, o applyOptions) (err error) {
 	} else {
 		u.Title("Deploying %s@%s to %s", a.cfg.App, shortVersion(ver), a.destName)
 	}
+	a.meshPlanned = true
 	s, err := a.openSession(ctx, ver, approved != nil, o.Refresh)
+	a.meshPlanned = false
 	if err != nil {
 		return err
 	}
@@ -555,10 +559,7 @@ func (a *app) apply(ctx context.Context, o applyOptions) (err error) {
 			return err
 		}
 	}
-	if err = a.reconcileMesh(ctx); err != nil {
-		return err
-	}
-	if err = a.rolesAddresses(ctx, s.hosts); err != nil {
+	if err = a.meshRolesAddresses(ctx, s.hosts); err != nil {
 		return err
 	}
 	// A migration cutover is decided (and its tokens resolved) before the
