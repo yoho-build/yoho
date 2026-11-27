@@ -16,5 +16,5 @@ if [ -z "$token" ] || [ "$body" != "$token" ]; then
 fi
 v=${QUERY_STRING:-}
 case "$v" in ''|*[!A-Za-z0-9-]*) fail "bad value";; esac
-out=$(psql -XtA -v ON_ERROR_STOP=1 -c "insert into items(v) values ('$v') returning id" 2>&1) || fail "$out"
+out=$(psql -XqtA -v ON_ERROR_STOP=1 -c "insert into items(v) values ('$v') returning id" 2>&1) || fail "$out"
 reply "wrote $v id=$out via $PGHOST"
