@@ -335,6 +335,8 @@ ufw route allow in on yoho0 out on yoho0 from 10.210.0.0/24 to 10.210.0.0/24 com
 ufw allow from 203.0.113.2 to any port 22 proto tcp comment 'another-app'
 RULES
 else
+ # Like real ufw: "route" goes before "delete", never after it.
+ case "$*" in '--force delete route '*) echo 'ERROR: Invalid syntax' >&2; exit 1 ;; esac
  printf '%s\n' "$*" >> "$UFW_LOG"
 fi
 `
@@ -350,7 +352,9 @@ fi
 	if e != nil {
 		t.Fatal(e)
 	}
-	if strings.Count(string(b), "--force delete") != 2 || strings.Contains(string(b), "203.0.113.2") {
+	want := "--force delete allow from 203.0.113.1 to any port 51820 proto udp\n" +
+		"--force route delete allow in on yoho0 out on yoho0 from 10.210.0.0/24 to 10.210.0.0/24\n"
+	if string(b) != want {
 		t.Fatalf("wrong rules removed: %s", b)
 	}
 }

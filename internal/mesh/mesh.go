@@ -190,9 +190,13 @@ const clearFirewall = `if command -v ufw >/dev/null 2>&1; then
   rule=${rule#ufw }
   # UFW prints these address/interface/port rules as space-delimited tokens.
   # Disable glob expansion and pass tokens as argv; never evaluate shell text.
+  # Route rules are deleted with "ufw route delete allow ...";
+  # "ufw delete route allow ..." is invalid syntax.
   set -f
-  set -- $rule
-  ufw --force delete "$@" >/dev/null
+  case "$rule" in
+   'route '*) set -- ${rule#route }; ufw --force route delete "$@" >/dev/null ;;
+   *) set -- $rule; ufw --force delete "$@" >/dev/null ;;
+  esac
  done
 fi
 `

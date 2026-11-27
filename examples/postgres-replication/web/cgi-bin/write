@@ -4,9 +4,16 @@
 # shellcheck source-path=SCRIPTDIR source=common.sh
 . "$(dirname "$0")/common.sh"
 [ "${REQUEST_METHOD:-}" = POST ] || fail "POST the write token"
-body=$(head -c "${CONTENT_LENGTH:-0}")
+# The token is 64 hex characters; refuse anything larger before reading it.
+len=${CONTENT_LENGTH:-0}
+case "$len" in ''|*[!0-9]*) fail "bad length";; esac
+[ "$len" -le 256 ] || fail "body too large"
+body=$(head -c "$len")
 token=$(cat /run/secrets/DEMO_WRITE_TOKEN)
-[ -n "$token" ] && [ "$body" = "$token" ] || { printf 'Status: 403 Forbidden\r\nContent-Type: text/plain\r\n\r\nforbidden\n'; exit 0; }
+if [ -z "$token" ] || [ "$body" != "$token" ]; then
+  printf 'Status: 403 Forbidden\r\nContent-Type: text/plain\r\n\r\nforbidden\n'
+  exit 0
+fi
 v=${QUERY_STRING:-}
 case "$v" in ''|*[!A-Za-z0-9-]*) fail "bad value";; esac
 out=$(psql -XtA -v ON_ERROR_STOP=1 -c "insert into items(v) values ('$v') returning id" 2>&1) || fail "$out"

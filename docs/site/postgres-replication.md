@@ -140,8 +140,10 @@ names swapped.
 
 A Server you cannot reach over SSH is not fenced. It may still run and accept
 writes from clients you cannot see. Before you promote, make sure the old
-primary cannot accept writes: power Server `a` off in your provider's console,
-or detach its network, and confirm that it stays off.
+primary cannot accept writes: power Server `a` off in your provider's console
+and confirm that it stays off. Detaching only its external network is not
+enough, because `web` and the old primary may still write to each other on
+Server `a`.
 
 Then promote `db-standby` (step 2 above) and move everything to Server `b`.
 In `yoho.yml`, remove `a` from the top-level `servers` (this also removes it
@@ -161,8 +163,10 @@ destinations:
       primary: {service: db-standby, port: 5432, consumers: [web]}
 ```
 
-Delete the `db` Service from `compose.yaml`, then run `yoho apply`. The App
-now runs on one Server with no standby. To add a standby again, add a new
+Delete the `db` Service from `compose.yaml`, then run `yoho apply` (add
+`--version` if the App directory is not a Git checkout). If DNS, a Cloudflare
+Tunnel or a load balancer still sends traffic to Server `a`, point it at
+Server `b`. The App now runs on one Server with no standby. To add a standby again, add a new
 Server, a Service for it, and make it a consumer of `primary`. Never start the
 old Server `a` with its data again; wipe its disk first.
 
@@ -190,11 +194,12 @@ deploy, so web never holds a password the database rejects. With the new
 value in the shell variable `NEW` (hex characters only):
 
 ```sh
-printf "ALTER ROLE postgres PASSWORD '%s';\n" "$NEW" | yoho app exec -i db -- psql -U postgres
+printf "ALTER ROLE postgres PASSWORD '%s';\n" "$NEW" | yoho app exec -i db -- psql -U postgres -v ON_ERROR_STOP=1
 ```
 
 `printf` is a shell builtin and the statement travels over stdin, so the value
-is not in a command line. Then put the value in `.yoho/secrets` and run
+is not in a command line. If psql reports an error, stop: do not change
+`.yoho/secrets`. Then put the value in `.yoho/secrets` and run
 `yoho deploy`. Connections that web opens before the deploy fail until it
 finishes, so do this in a quiet moment. This order is not covered by CI.
 
