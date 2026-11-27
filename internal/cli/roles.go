@@ -49,8 +49,28 @@ func (a *app) rolesAddresses(ctx context.Context, hosts []plan.NamedHost) error 
 			allocations[name] = addr
 		}
 	}
+	var planned map[string]string
 	for i, h := range hosts {
 		addr := allocations[h.Name]
+		if addr == "" && a.meshPlanned {
+			// Never private_address: the same deterministic allocation that
+			// `yoho mesh up` will assign, from the configured Servers and state.
+			if planned == nil {
+				names := make([]string, 0, len(all))
+				for _, m := range all {
+					names = append(names, m.Name)
+				}
+				s, e := mesh.Allocate(mesh.Defaults(a.cfg.Network).Subnet, names, copies)
+				if e != nil {
+					return e
+				}
+				planned = s.Addresses
+			}
+			addr = planned[h.Name]
+			if addr != "" {
+				a.ui.Info("Server %s mesh address %s is planned; apply or `yoho mesh up` assigns it", h.Name, addr)
+			}
+		}
 		if addr == "" {
 			return fmt.Errorf("Server %s has no mesh allocation; run yoho mesh up", h.Name)
 		}

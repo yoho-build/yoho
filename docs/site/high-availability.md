@@ -35,6 +35,11 @@ Replicated or clustered databases (PostgreSQL streaming replication with Patroni
 
 Yoho's job then is deploying the stateless Services against it.
 
+Yoho does not fail over. For a hot standby that you promote by hand, the
+[Postgres primary and standby](postgres-replication.md) recipe runs streaming
+replication across two Servers with Roles. It documents and CI-tests a fenced
+manual promotion, the rebuild of the old primary, and password rotation.
+
 ## Off-Server Backups are the recovery path
 
 For a database Yoho runs, recovery after losing its Server is **restore from a Backup**. That only works if the Backup is not on the lost Server:

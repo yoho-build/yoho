@@ -113,10 +113,14 @@ func (g *globals) ui(cmd *cobra.Command) *ui.UI {
 // app is a loaded App: Yoho file plus selected Destination.
 type app struct {
 	rolesLocksHeld bool
-	previewName    string
-	previewPR      int
-	previewBranch  string
-	templateName   string
+	// meshPlanned lets plan and apply read Roles addresses from the planned
+	// mesh allocation before the first `yoho mesh up`; apply reconciles the
+	// mesh and re-reads the real allocation before any rollout.
+	meshPlanned   bool
+	previewName   string
+	previewPR     int
+	previewBranch string
+	templateName  string
 
 	g        *globals
 	dir      string

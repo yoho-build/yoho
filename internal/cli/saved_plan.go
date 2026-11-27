@@ -175,7 +175,9 @@ func (a *app) savePlan(ctx context.Context, ver, file string, ttl time.Duration)
 		return err
 	}
 	a.ui.Title("Planning %s@%s on %s", a.cfg.App, shortVersion(ver), a.destName)
+	a.meshPlanned = true
 	s, err := a.openSession(ctx, ver, true, false)
+	a.meshPlanned = false
 	if err != nil {
 		return err
 	}

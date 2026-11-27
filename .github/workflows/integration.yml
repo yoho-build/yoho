@@ -545,8 +545,44 @@ jobs:
       - name: Build Yoho
         run: go build -o "$RUNNER_TEMP/yoho" ./cmd/yoho
       - name: Shellcheck Roles harness
-        run: shellcheck test/integration/roles.sh
+        run: shellcheck -x test/integration/servers.sh test/integration/roles.sh test/integration/mesh.sh test/integration/pg-replication.sh
       - name: Roles across two SSH Docker Servers
         env:
           YOHO_BIN: ${{ runner.temp }}/yoho
         run: bash test/integration/roles.sh
+  mesh:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+      - name: Build Yoho
+        run: go build -o "$RUNNER_TEMP/yoho" ./cmd/yoho
+      - name: Shellcheck mesh harness
+        run: shellcheck -x test/integration/servers.sh test/integration/roles.sh test/integration/mesh.sh test/integration/pg-replication.sh
+      - name: Load the WireGuard kernel module
+        run: sudo modprobe wireguard
+      - name: WireGuard mesh and Roles across three SSH Docker Servers
+        env:
+          YOHO_BIN: ${{ runner.temp }}/yoho
+        run: bash test/integration/mesh.sh
+  pg-replication:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+      - name: Build Yoho
+        run: go build -o "$RUNNER_TEMP/yoho" ./cmd/yoho
+      - name: Shellcheck harnesses and the recipe scripts
+        run: |
+          shellcheck -x test/integration/servers.sh test/integration/roles.sh test/integration/mesh.sh test/integration/pg-replication.sh
+          cd examples/postgres-replication && shellcheck -s sh -x entrypoint.sh initdb/10-replication.sh web/cgi-bin/common.sh web/cgi-bin/health web/cgi-bin/write web/cgi-bin/read
+      - name: Postgres primary/standby recipe across two SSH Docker Servers
+        env:
+          YOHO_BIN: ${{ runner.temp }}/yoho
+        run: bash test/integration/pg-replication.sh
