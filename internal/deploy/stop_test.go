@@ -612,6 +612,9 @@ func TestRunningContainersIncludesOneOffs(t *testing.T) {
 // Round 6: a failed start keeps the Service stopped with a new record
 // (fresh at), and removes containers even when the record cannot be written.
 func TestStartServiceRefenceWritesNewRecord(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root ignores directory permissions")
+	}
 	h, appDir := stopRelease(t)
 	ctx := context.Background()
 	at := time.Date(2026, 11, 27, 10, 0, 0, 0, time.UTC)
@@ -657,6 +660,9 @@ func TestStartServiceRefenceWritesNewRecord(t *testing.T) {
 // Round 6: clearing the record after a successful up fails: reported as a
 // Service that runs but is still marked stopped.
 func TestStartServiceClearRecordFailureReported(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root ignores directory permissions")
+	}
 	h, appDir := stopRelease(t)
 	ctx := context.Background()
 	if _, err := StopService(ctx, h, "shop", "production", "db", StoppedEntry{By: "alice"}); err != nil {
