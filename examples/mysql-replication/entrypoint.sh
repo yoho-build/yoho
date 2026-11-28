@@ -132,7 +132,7 @@ fi
 if [ -d "$datadir/mysql" ]; then
   ap=$(q < /run/secrets/MARIADB_PASSWORD)
   rootp=$(q < /run/secrets/MARIADB_ROOT_PASSWORD)
-  { printf "SET SESSION sql_log_bin = 0;\nSET PASSWORD FOR 'app'@'%%' = PASSWORD('%s');\nSET PASSWORD FOR 'root'@'localhost' = PASSWORD('%s');\nSET SESSION sql_log_bin = 1;\n" "$ap" "$rootp"
+  { printf "SET SESSION sql_log_bin = 0;\nALTER USER IF EXISTS 'app'@'%%' IDENTIFIED BY '%s';\nALTER USER IF EXISTS 'root'@'localhost' IDENTIFIED BY '%s';\nSET SESSION sql_log_bin = 1;\n" "$ap" "$rootp"
     cat "$run/init.sql"; } > "$run/init.sql.new"
   mv "$run/init.sql.new" "$run/init.sql"
 fi
