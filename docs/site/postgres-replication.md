@@ -2,7 +2,8 @@
 
 This recipe runs a Postgres primary on one Server and a streaming standby on
 another, with [Roles](roles.md). It is a recipe, not a Yoho feature. Yoho does
-not fail over. You promote the standby by hand, with the steps below. CI runs
+not fail over. You promote the standby when you decide to, with
+`yoho db promote`. CI runs
 this exact example and every step on this page
 (`test/integration/pg-replication.sh`).
 
@@ -89,52 +90,76 @@ instead of `postgres`.
 
 ## Promote the standby
 
-Do this for a planned switchover, with both Servers up. Do the steps in order.
-If Server `a` is lost, read [Server a is lost](#server-a-is-lost) first.
+`yoho db promote` does a planned switchover, with both Servers up. It is
+config first: you edit the Connection, and it does the rest.
 
-1. **Fence the old primary.** Stop new writes:
-
-   ```sh
-   yoho app exec db -- psql -U postgres -c "ALTER SYSTEM SET default_transaction_read_only = on"
-   yoho app exec db -- psql -U postgres -c "SELECT pg_reload_conf()"
-   yoho app exec db -- psql -U postgres -c "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE backend_type = 'client backend' AND pid <> pg_backend_pid()"
-   ```
-
-   For a planned switchover, wait until the standby has replayed everything.
-   Compare `select pg_current_wal_lsn()` on `db` with
-   `select pg_last_wal_replay_lsn()` on `db-standby`.
-
-2. **Promote.**
-
-   ```sh
-   yoho app exec db-standby -- psql -U postgres -c "SELECT pg_promote()"
-   ```
-
-   Do not run `pg_ctl promote`: it cannot run as root.
-3. **Switch the Connection.** In `yoho.yml`:
+1. **Switch the Connection.** In `yoho.yml`, make the standby the provider and
+   the old primary a consumer:
 
    ```yaml
    primary: {service: db-standby, port: 5432, consumers: [web, db]}
    ```
 
-4. **Apply.** Run `yoho apply`. `web` now connects to `db-standby`. The
-   firewall now protects port 5432 on Server `b`. The old `db` restarts
-   read-only: its entrypoint sees that it is a consumer with old primary data.
-5. **Rebuild the old primary as a standby.** Yoho never deletes volumes, so
-   remove the old data by hand on Server `a`:
+   Do not run `yoho apply` yet: `yoho plan` names `yoho db promote` for this
+   change.
+
+2. **Promote.**
 
    ```sh
-   id=$(docker ps -q --filter label=com.docker.compose.project=yoho-pg-production --filter label=com.docker.compose.service=db)
-   docker rm -f "$id"
+   yoho db promote
+   ```
+
+   It reads the old primary (`db`) from the current Release and checks,
+   read-only, that `db-standby` is streaming and at most `--max-lag` (16MiB)
+   behind. It shows the plan and asks `yes` (`--auto-approve` skips the
+   question, `--plan` stops there). Then it:
+
+   - records `pg_current_wal_lsn()` on `db` and fences it with
+     `yoho app stop db`: its container is stopped and removed, and it stays
+     stopped through every deploy until `yoho app start db`;
+   - waits until `db-standby` has replayed that position and everything it
+     received;
+   - runs `SELECT pg_promote(true, 60)` on `db-standby`;
+   - runs `yoho deploy`. `web` now connects to `db-standby`, and the
+     firewall now protects port 5432 on Server `b`.
+
+   If it stops before the promotion, nothing was promoted and `db` is
+   stopped: `yoho app start db` restores the old primary, or rerun
+   `yoho db promote` to continue. Every step is journaled on Server `b`; a
+   rerun resumes and a rerun after success does nothing.
+
+3. **Rebuild the old primary as a standby.** Yoho never deletes volumes, so
+   remove the old data by hand on Server `a` (`yoho db promote` prints the
+   volume name; check it with `docker volume ls`):
+
+   ```sh
    docker volume rm yoho-pg-production_pgdata
    ```
 
-   Check the volume name with `docker volume ls` first. Then run `yoho apply`
-   again. `db` starts with an empty data directory as a consumer, and clones
-   `db-standby`.
+   Then run `yoho app start db`. `db` starts with an empty data directory as
+   a consumer, and clones `db-standby`.
 
 The roles are now reversed. To switch back later, repeat the steps with the
 names swapped.
+
+Replication is asynchronous. The fence is a clean shutdown of `db`, which
+sends its last WAL to the standby before it exits; a container that does not
+exit 0 stops the promotion, because its last writes may not have reached the
+standby. psql runs in the containers over the local socket as `POSTGRES_USER`
+(or `--user`), so `pg_hba.conf` needs a `local` rule for that role, as the
+example's has.
+
+### By hand
+
+Without `yoho db promote` (CI tests the command, not these steps):
+
+1. Fence: `yoho app stop db`. For a planned switchover, first compare
+   `select pg_current_wal_lsn()` on `db` with
+   `select pg_last_wal_replay_lsn()` on `db-standby`.
+2. Promote: `yoho app exec db-standby -- psql -U postgres -c "SELECT pg_promote()"`.
+   Do not run `pg_ctl promote`: it cannot run as root.
+3. Switch the Connection as above and run `yoho apply`. `db` stays stopped.
+4. Rebuild: remove the volume and `yoho app start db`, as above.
 
 ### Server a is lost
 
@@ -145,10 +170,10 @@ and confirm that it stays off. Detaching only its external network is not
 enough, because `web` and the old primary may still write to each other on
 Server `a`.
 
-Then promote `db-standby` (step 2 above) and move everything to Server `b`.
-In `yoho.yml`, remove `a` from the top-level `servers` (this also removes it
-from the mesh) and from the Destination, drop the old Role, place `web` on `b`,
-and leave `web` as the only consumer:
+Then move everything to Server `b`. In `yoho.yml`, remove `a` from the
+top-level `servers` (this also removes it from the mesh) and from the
+Destination, drop the old Role, place `web` on `b`, and leave `web` as the
+only consumer:
 
 ```yaml
 servers:
@@ -163,12 +188,20 @@ destinations:
       primary: {service: db-standby, port: 5432, consumers: [web]}
 ```
 
-Delete the `db` Service from `compose.yaml`, then run `yoho apply` (add
-`--version` if the App directory is not a Git checkout). If DNS, a Cloudflare
-Tunnel or a load balancer still sends traffic to Server `a`, point it at
-Server `b`. The App now runs on one Server with no standby. To add a standby again, add a new
-Server, a Service for it, and make it a consumer of `primary`. Never start the
-old Server `a` with its data again; wipe its disk first.
+Delete the `db` Service from `compose.yaml`, then run:
+
+```sh
+yoho db promote --old-primary-down
+```
+
+Add `--version` if the App directory is not a Git checkout. There is no fence:
+`db-standby` is promoted at the position it received, and writes it did not
+receive are lost. Without `--old-primary-down`, a promotion whose old primary
+is not on a Server of the Destination is refused. If DNS, a Cloudflare Tunnel
+or a load balancer still sends traffic to Server `a`, point it at Server `b`.
+The App now runs on one Server with no standby. To add a standby again, add a
+new Server, a Service for it, and make it a consumer of `primary`. Never start
+the old Server `a` with its data again; wipe its disk first.
 
 ## Rotate the passwords
 
@@ -217,4 +250,5 @@ the Backup job to the Service that is now the primary.
   rules out.
 - One standby. More standbys work the same way: add a Service, a Role and a
   consumer.
-- A planned helper (`yoho db promote`) is in the backlog.
+- `yoho db promote` supports Postgres only, and rebuilds the old primary with a
+  full base backup (no pg_rewind).

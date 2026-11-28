@@ -279,6 +279,12 @@ converge. Backups and Scheduled Jobs follow the owning Server.
 Use `yoho service move SERVICE --to SERVER --plan` before a stop-first data move;
 require a fresh Backup, empty owned target volumes and health checks. Commit the
 printed config edit. Source volume cleanup is a separate `--cleanup-source` run.
+`yoho app stop SERVICE [--reason TEXT]` keeps a non-proxied Service down through
+deploy, apply and rollback (volumes kept) until `yoho app start SERVICE`. For a
+Postgres switchover, edit the Connection (standby as `service`, old primary in
+`consumers`), then `yoho db promote [--plan]`: it fences the old primary with
+`app stop`, waits for replay, runs `pg_promote()` and applies. Never pass
+`--old-primary-down` unless the old Server is powered off. See ADR 0021.
 
 Generated-secret owners are pinned in Release metadata; never regenerate on a
 placement change. Release commands run before every replica. After a partial

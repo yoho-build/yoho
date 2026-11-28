@@ -259,6 +259,18 @@ func (c Compose) Diff(ctx context.Context, d *plan.Deploy) ([]plan.Change, error
 	if err := checkOwnership(ctx, h, d.App, d.Destination, plans); err != nil {
 		return nil, err
 	}
+	// Stopped Services stay down on apply (ADR 0021). Read-only here.
+	stoppedState, err := ReadStopped(ctx, h, d.App, d.Destination)
+	if err != nil {
+		return nil, err
+	}
+	stoppedSet := map[string]bool{}
+	for _, sp := range plans {
+		if _, ok := stoppedState[sp.Name]; ok {
+			stoppedSet[sp.Name] = true
+		}
+	}
+	plans = applyStopped(plans, stoppedSet)
 	want, err := serviceEntries(composeYAML)
 	if err != nil {
 		return nil, err
@@ -328,6 +340,16 @@ func (c Compose) Diff(ctx context.Context, d *plan.Deploy) ([]plan.Change, error
 				if ct.State.Running {
 					running++
 				}
+			}
+			if stoppedSet[sp.Name] {
+				why := "stopped by `yoho app stop` (" + stoppedState[sp.Name].Describe() + "); `yoho app start " + sp.Name + "` runs it"
+				if running > 0 {
+					add("service", sp.Name, plan.ActionUpdate, false, fmt.Sprintf("replicas %d → 0 (stopped)", running), why)
+				} else {
+					add("service", sp.Name, plan.ActionNoop, false, why)
+				}
+				changes[len(changes)-1].Stopped = true
+				continue
 			}
 			if running > 0 {
 				add("service", sp.Name, plan.ActionUpdate, false, fmt.Sprintf("replicas %d → 0", running))

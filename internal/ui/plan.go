@@ -54,11 +54,27 @@ func (u *UI) Plan(changes []plan.Change) {
 			if ch.Downtime {
 				f["downtime"] = true
 			}
+			if ch.Stopped {
+				f["stopped"] = true
+			}
 			u.event("change", f)
 		}
 		u.event("plan_summary", map[string]any{"add": c.Add, "change": c.Change, "replace": c.Replace, "destroy": c.Destroy, "noop": c.Noop})
 		u.stamp()
 		return
+	}
+	// Stopped Services are noops, but say so: apply keeps them down.
+	for _, ch := range changes {
+		if ch.Stopped && ch.Action == plan.ActionNoop {
+			name := ch.Kind + " " + ch.Name
+			if ch.Server != "" {
+				name += " [" + ch.Server + "]"
+			}
+			fmt.Fprintln(u.w, u.paint(dim, fmt.Sprintf("  %-3s %s: stopped", "=", name)))
+			for _, r := range ch.Reasons {
+				fmt.Fprintln(u.w, u.paint(dim, "        "+strings.TrimSpace(r)))
+			}
+		}
 	}
 	if !HasChanges(changes) {
 		fmt.Fprintln(u.w, u.paint(green+bold, "No changes. Your Servers match the configuration."))

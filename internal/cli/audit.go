@@ -29,7 +29,7 @@ var auditedCommands = []string{
 	"deploy", "apply", "rollback", "remove",
 	"app exec", "app run",
 	"backup run", "backup restore", "backup drill",
-	"secrets rotate", "service move",
+	"secrets rotate", "service move", "db promote",
 	"lock acquire", "lock release",
 	"proxy boot", "proxy upgrade",
 	"schedule install", "schedule remove", "tunnel up", "tunnel down", "tunnel route",

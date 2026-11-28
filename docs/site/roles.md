@@ -99,6 +99,17 @@ Independent Let's Encrypt HTTP-01 issuance across Servers is refused without a
 named Tunnel. DNS-01 and shared certificates are not implemented. `ssl` is an explicit TLS selection; existing `tls` configuration remains valid.
 A Quick Tunnel is refused for multi-Server ingress.
 
+## Stop a Service, promote a standby
+
+`yoho app stop SERVICE` stops a Service on every Server hosting it (or the
+one named with `--server`) and keeps it stopped through deploy, apply and
+rollback until `yoho app start SERVICE`; volumes are kept. A consumer whose
+Connection provider is stopped fails its deploy with a message naming the stopped
+provider. For a Postgres primary and standby, `yoho db promote` fences the old
+primary with `app stop`, promotes the standby and applies the edited
+Connection; see [Postgres primary and standby](postgres-replication.md) and the
+[CLI](cli.md#database).
+
 ## Move a Stateful Service
 
 Configure `x-yoho.stateful`, a Docker healthcheck, and `x-yoho.backup.volumes` covering **every** named volume,

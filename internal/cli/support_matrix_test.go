@@ -119,6 +119,24 @@ previews:
 			want: "`yoho app run` is not available with scoped access to shop/production",
 		},
 		{
+			name: "app stop on swarm",
+			yaml: swarmYAML,
+			args: []string{"app", "stop", "web"},
+			want: "app stop is not available on runtime swarm",
+		},
+		{
+			name: "app stop with scoped access",
+			yaml: scopedYAML,
+			args: []string{"app", "stop", "web"},
+			want: "`yoho app stop` is not available with scoped access to shop/production",
+		},
+		{
+			name: "db promote without Roles",
+			yaml: swarmYAML,
+			args: []string{"db", "promote"},
+			want: "db promote requires a Roles Destination with a Connection",
+		},
+		{
 			name: "preview up with YOHO_ACCESS=scoped",
 			yaml: previewScopedYAML,
 			env:  map[string]string{"YOHO_ACCESS": "scoped"},
@@ -135,7 +153,7 @@ previews:
 			path := writeApp(t, tc.yaml)
 			g := &globals{configPath: path}
 			root := &cobra.Command{Use: "yoho", SilenceUsage: true, SilenceErrors: true}
-			for _, add := range []func(*globals) *cobra.Command{appCmds, backupCmd, secretsCmd, scheduleCmd, previewCmd} {
+			for _, add := range []func(*globals) *cobra.Command{appCmds, backupCmd, secretsCmd, scheduleCmd, previewCmd, dbCmd} {
 				root.AddCommand(add(g))
 			}
 			var out bytes.Buffer

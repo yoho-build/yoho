@@ -149,6 +149,9 @@ type Change struct {
 	Reasons []string `json:"reasons,omitempty"` // e.g. "image yoho/web:f4e6 → d459", "secrets changed"
 	// Downtime is true when apply interrupts this resource (replace of a non-proxied Service).
 	Downtime bool `json:"downtime,omitempty"`
+	// Stopped marks a Service `yoho app stop` keeps down; apply leaves it
+	// down until `yoho app start`.
+	Stopped bool `json:"stopped,omitempty"`
 }
 
 // Planner computes changes without modifying the Server (read-only).

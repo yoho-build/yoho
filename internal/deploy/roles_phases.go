@@ -82,6 +82,9 @@ func prepareRoleCommands(ctx context.Context, d *plan.Deploy) (*runner, []servic
 		return nil, nil, e
 	}
 	r := newRunner(d, path.Join(prep, "compose.yaml"))
+	if plans, e = enforceStopped(ctx, r, plans); e != nil {
+		return nil, nil, e
+	}
 	for _, m := range values {
 		for _, v := range m {
 			r.secretVals = append(r.secretVals, v)

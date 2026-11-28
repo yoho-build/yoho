@@ -364,7 +364,7 @@ func (r Roles) Deploy(ctx context.Context, d *plan.Deploy) (rel *release.Release
 			}
 			return nil
 		}
-		for _, c := range d.Roles.Connections {
+		for cn, c := range d.Roles.Connections {
 			provider := d.Roles.ServiceServers(c.Service)[0]
 			if provider == name {
 				continue
@@ -372,7 +372,7 @@ func (r Roles) Deploy(ctx context.Context, d *plan.Deploy) (rel *release.Release
 			for _, svc := range c.Consumers {
 				if _, ok := p.Project.Services[svc]; ok {
 					if e := roles.Ready(ctx, p.Servers[0].Host, d.PrivateAddresses[provider], c.Port); e != nil {
-						return fail(fmt.Errorf("connection %s from %s: %w", c.Service, name, e))
+						return fail(stoppedOr(ctx, partHost(parts, provider), d, cn, c.Service, provider, fmt.Errorf("connection %s from %s: %w", c.Service, name, e)))
 					}
 					break
 				}
@@ -466,7 +466,7 @@ func (Roles) Diff(ctx context.Context, d *plan.Deploy) ([]plan.Change, error) {
 			out = append(out, plan.Change{Kind: "firewall", Name: d.App + "/" + d.Destination, Server: name, Action: action, Reasons: reasons})
 		}
 	}
-	return out, nil
+	return annotateProviderSwitch(ctx, d, out)
 }
 
 func (r Roles) Rollback(ctx context.Context, d *plan.Deploy, version string) (rel *release.Release, err error) {
@@ -611,7 +611,7 @@ func (r Roles) Rollback(ctx context.Context, d *plan.Deploy, version string) (re
 		return &RolesFailure{Err: e, Changed: slices.Clone(changed), Unchanged: unchanged}
 	}
 	for _, name := range order {
-		for _, c := range previous.Connections {
+		for cn, c := range previous.Connections {
 			provider := previous.ServiceServers(c.Service)[0]
 			if provider == name {
 				continue
@@ -619,7 +619,7 @@ func (r Roles) Rollback(ctx context.Context, d *plan.Deploy, version string) (re
 			for _, svc := range c.Consumers {
 				if slices.Contains(previous.ServiceServers(svc), name) {
 					if e := roles.Ready(ctx, hosts[name].Host, d.PrivateAddresses[provider], c.Port); e != nil {
-						return nil, failure(e)
+						return nil, failure(stoppedOr(ctx, hosts[provider].Host, d, cn, c.Service, provider, e))
 					}
 					break
 				}
