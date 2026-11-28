@@ -299,3 +299,29 @@ func TestDerivePromotionFromFlagUsesJournalPlacement(t *testing.T) {
 		t.Fatal("placement taken from another promotion's journal")
 	}
 }
+
+// A stale journal never overrides the placement the current Release records:
+// the primary moved from a to c since that journal was written.
+func TestDerivePromotionReleaseBeatsStaleJournal(t *testing.T) {
+	dest := config.Destination{
+		Servers: []string{"b", "c"},
+		Roles: map[string]config.Role{
+			"app":     {Services: []string{"web"}, Servers: []string{"b"}},
+			"primary": {Services: []string{"db"}, Servers: []string{"c"}},
+			"standby": {Services: []string{"db-standby"}, Servers: []string{"b"}},
+		},
+		Connections: map[string]config.Connection{"primary": {Service: "db-standby", Port: 5432, Consumers: []string{"web", "db"}}},
+	}
+	relRoles := map[string]config.Role{
+		"app":     dest.Roles["app"],
+		"primary": dest.Roles["primary"],
+		"standby": dest.Roles["standby"],
+	}
+	relConns := map[string]config.Connection{"primary": {Service: "db", Port: 5432, Consumers: []string{"web", "db-standby"}}}
+	rels := map[string]*release.Release{"b": {Roles: relRoles, Connections: relConns}, "c": {Roles: relRoles, Connections: relConns}}
+	j := &pgpromote.Journal{Connection: "primary", From: "db", To: "db-standby", FromServer: "a", ToServer: "b", State: "promoted"}
+	got, err := derivePromotion(dest, rels, map[string]*pgpromote.Journal{"primary": j}, "primary", "db")
+	if err != nil || got.FromServer != "c" {
+		t.Fatalf("FromServer = %q (%v), want c from the Release", got.FromServer, err)
+	}
+}

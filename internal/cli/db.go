@@ -208,14 +208,6 @@ func derivePromotion(dest config.Destination, rels map[string]*release.Release, 
 		return t, fmt.Errorf("new primary %s must run on exactly one Server, not %d", t.To, len(to))
 	}
 	t.ToServer = to[0]
-	// A promoted journal knows the old primary's Server even when neither
-	// the Release nor the config places it any more (lost Server, apply
-	// failed after recording the new Release).
-	// Same with --from, when the journal is of this very promotion.
-	if j := journals[name]; j != nil && j.Promoted() && j.Connection == name && j.From == t.From && j.To == t.To && j.FromServer != "" {
-		t.FromServer = j.FromServer
-		return t, nil
-	}
 	for _, server := range sortedKeys(rels) {
 		if rel := rels[server]; rel != nil && rel.Roles != nil {
 			if hs := (config.Destination{Roles: rel.Roles}).ServiceServers(t.From); len(hs) == 1 {
@@ -228,6 +220,13 @@ func derivePromotion(dest config.Destination, rels map[string]*release.Release, 
 		if hs := dest.ServiceServers(t.From); len(hs) == 1 {
 			t.FromServer = hs[0]
 		}
+	}
+	// Only when neither the Release nor the config places the old primary
+	// any more (lost Server, apply failed after recording the new Release)
+	// does a promoted journal of this very promotion name its Server. It
+	// never overrides a placement the current state still records.
+	if j := journals[name]; t.FromServer == "" && j != nil && j.Promoted() && j.Connection == name && j.From == t.From && j.To == t.To && j.FromServer != "" {
+		t.FromServer = j.FromServer
 	}
 	if t.FromServer == "" {
 		return t, fmt.Errorf("cannot tell which Server runs the old primary %s", t.From)
