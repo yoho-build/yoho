@@ -19,8 +19,6 @@
 - Docker address pools: `yoho plan` warning when the Server has no free default pool (Docker does not expose its pools; a probe needs a throwaway network); an automatic picker from a Yoho-reserved range, stable across deploys; `destinations.<name>.subnet` for the Swarm runtime (compose only today).
 - Migration cutover (ADR 0012) follow-ups: label defaults per `migrate.from` (today `stop` selectors are explicit), DNS-record cutovers, the Swarm runtime, and an e2e test under `YOHO_E2E=1`.
 - `yoho plan` does not compare top-level networks: an operator deploy after a Gate deploy moves the App's proxied Services from `yoho-<app>-<destination>-proxy` back to the shared `yoho` network (and a Gate deploy after an operator one the other way), and the plan does not name that switch. The Services already show as changed in the operator plan (Gate hardening reason), so the gap is the explanation, not a hidden restart (#65).
-- Per-Server instance aliases (`<server>.m.<service>`) so a consumer can address one instance of a Service on a given Server.
-- Kamal-style per-Server tags and env, so one Service definition can differ per Server without a second Service.
 - `yoho app stop` for proxied Services (remove the route, keep it down through deploys) and on runtime swarm (ADR 0021).
 - `yoho db promote` for MySQL/MariaDB, and a pg_rewind option that rejoins the old primary without a full base backup (ADR 0021).
 - After ADR 0020: per-tag secrets and labels, peer clusters (Instances that consume each other), and a `nearest.<service>` alias.
