@@ -19,8 +19,7 @@
 - Docker address pools: `yoho plan` warning when the Server has no free default pool (Docker does not expose its pools; a probe needs a throwaway network); an automatic picker from a Yoho-reserved range, stable across deploys; `destinations.<name>.subnet` for the Swarm runtime (compose only today).
 - Migration cutover (ADR 0012) follow-ups: label defaults per `migrate.from` (today `stop` selectors are explicit), DNS-record cutovers, the Swarm runtime, and an e2e test under `YOHO_E2E=1`.
 - `yoho plan` does not compare top-level networks: an operator deploy after a Gate deploy moves the App's proxied Services from `yoho-<app>-<destination>-proxy` back to the shared `yoho` network (and a Gate deploy after an operator one the other way), and the plan does not name that switch. The Services already show as changed in the operator plan (Gate hardening reason), so the gap is the explanation, not a hidden restart (#65).
-- `yoho db promote`: a switchover helper for the [Postgres primary/standby recipe](site/postgres-replication.md) that fences, waits for replay, promotes, switches the Connection and applies. Manual and still no automatic failover (ADR 0003).
+- `yoho db promote`: a switchover helper for the [Postgres primary/standby](site/postgres-replication.md) and [MariaDB primary/replica](site/mysql-replication.md) recipes that fences, waits for replay, promotes, switches the Connection and applies. Manual and still no automatic failover (ADR 0003).
 - Per-Server instance aliases (`<server>.m.<service>`) so a consumer can address one instance of a Service on a given Server.
 - Kamal-style per-Server tags and env, so one Service definition can differ per Server without a second Service.
 - `yoho app stop SERVICE` for fencing a Service without editing compose (today: `ALTER SYSTEM` in the recipe, or `docker stop` on the Server).
-- MySQL/MariaDB primary/replica recipe, tested in CI like the Postgres one.

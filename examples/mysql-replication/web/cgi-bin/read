@@ -1,0 +1,5 @@
+#!/bin/sh
+# shellcheck source-path=SCRIPTDIR source=common.sh
+. "$(dirname "$0")/common.sh"
+out=$(db 'select count(*) from items' 2>&1) || fail "$out"
+reply "items=$out via $DBHOST"
