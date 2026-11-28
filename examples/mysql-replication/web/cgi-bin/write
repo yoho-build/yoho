@@ -16,5 +16,5 @@ if [ -z "$token" ] || [ "$body" != "$token" ]; then
 fi
 v=${QUERY_STRING:-}
 case "$v" in ''|*[!A-Za-z0-9-]*) fail "bad value";; esac
-out=$(db "insert into items(v) values ('$v'); select last_insert_id()" 2>&1) || fail "$out"
+query "insert into items(v) values ('$v'); select last_insert_id()"
 reply "wrote $v id=$out via $DBHOST"

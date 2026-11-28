@@ -35,6 +35,19 @@ q() { sed -e 's/\\/\\\\/g' -e "s/'/\\\\'/g"; }
 # root@localhost over the socket; the client reads the password from MYSQL_PWD.
 root_pw() { MYSQL_PWD=$(cat /run/secrets/MARIADB_ROOT_PASSWORD); export MYSQL_PWD; }
 sql() { root_pw; mariadb --protocol=socket -uroot -N -B "$@"; }
+# Passwords go into SQL and the init file, one statement per line: refuse a
+# secret with a newline or carriage return inside, without printing it.
+nl='
+'
+cr=$(printf '\r')
+one_line() {
+  for name in "$@"; do
+    v=$(cat "/run/secrets/$name")
+    case "$v" in
+    *"$nl"*|*"$cr"*) echo "yoho-mariadb: $name must be one line (no newline or carriage return)" >&2; exit 1;;
+    esac
+  done
+}
 # Runs SQL from stdin. On failure, prints only LABEL and the exit code: the
 # client may echo the statement, with its passwords, to stderr.
 run_sql() {
@@ -54,6 +67,7 @@ mariadb)
   root_pw
   exec mariadb --protocol=socket -uroot "$@";;
 set-passwords)
+  one_line REPLICATOR_PASSWORD MARIADB_PASSWORD
   rp=$(q < /run/secrets/REPLICATOR_PASSWORD)
   ap=$(q < /run/secrets/MARIADB_PASSWORD)
   # Binary logged, so the replica gets the same passwords.
@@ -89,6 +103,7 @@ promote)
   exit 0;;
 esac
 
+one_line MARIADB_PASSWORD MARIADB_ROOT_PASSWORD REPLICATOR_PASSWORD
 umask 077
 mkdir -p "$run"
 cp /run/secrets/REPLICATOR_PASSWORD "$run/replicator-password"

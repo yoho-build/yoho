@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -13,6 +14,7 @@ import (
 	"time"
 
 	"github.com/yoho-build/yoho/internal/deploy"
+	"github.com/yoho-build/yoho/internal/plan"
 	"github.com/yoho-build/yoho/internal/release"
 	"github.com/yoho-build/yoho/internal/remote"
 )
@@ -38,6 +40,7 @@ type pgHost struct {
 	tli          string // pg_control_checkpoint().timeline_id
 	recvTLI      string // pg_stat_wal_receiver.received_tli
 	failCheck    error  // the stop script's after-stop check fails (containers kept)
+	failUp       error  // compose up of `yoho app start` fails
 	failQuery    error
 	log          []string
 	writes       int
@@ -81,6 +84,8 @@ func (h *pgHost) Output(ctx context.Context, c remote.Cmd) (string, error) {
 		}
 		h.running = ""
 		return out, nil
+	case strings.Contains(s, "'up' '-d' '--no-deps'"):
+		return "", h.failUp
 	case strings.Contains(s, "docker ps -q "):
 		return h.running, nil
 	case strings.Contains(s, "'psql'"):
@@ -742,5 +747,29 @@ func TestSecretUserWrapperRefusesEmptyRole(t *testing.T) {
 	}
 	if out, err := run(UserFromFile, ""); err == nil || strings.Contains(out, "psql as") || !strings.Contains(out, "cannot read /run/secrets/POSTGRES_USER") {
 		t.Fatalf("%q %v", out, err)
+	}
+}
+
+// Round 6: a failed `yoho app start` re-fences with a new stop record, so a
+// promotion retry does not reuse the target taken before the restart.
+func TestFailedAppStartInvalidatesFence(t *testing.T) {
+	a, b, o := fixture(t)
+	b.replay = []string{"0/3000000"}
+	b.receive = "0/3000000"
+	o.Timeout = 20 * time.Millisecond
+	if err := Run(context.Background(), o); err == nil {
+		t.Fatal("wait should time out")
+	}
+	a.failUp = errors.New("compose up failed")
+	a.stopOut = ""
+	d := &plan.Deploy{App: "pg", Destination: "production", Servers: []plan.NamedHost{{Name: "a", Host: a}}, Out: io.Discard}
+	if _, err := deploy.StartService(context.Background(), d, "db"); err == nil {
+		t.Fatal("start succeeded")
+	}
+	b.replay = []string{"0/3000080"}
+	b.receive = "0/3000080"
+	err := Run(context.Background(), o)
+	if err == nil || !strings.Contains(err.Error(), "did not shut down cleanly") || b.promoteCalls != 0 {
+		t.Fatalf("pre-restart target reused: %v, promotes %d", err, b.promoteCalls)
 	}
 }

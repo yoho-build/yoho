@@ -270,9 +270,11 @@ func serviceFilters(app, dest, service string) string {
 }
 
 // RunningContainers are the IDs of service's running containers of this
-// App Destination on h. Read-only.
+// App Destination on h, one-off runs included. Read-only.
 func RunningContainers(ctx context.Context, h remote.Host, app, dest, service string) ([]string, error) {
-	out, err := h.Output(ctx, remote.Cmd{Script: "set -eu\ndocker ps -q " + serviceFilters(app, dest, service) + " --filter label=com.docker.compose.oneoff=False"})
+	// One-off containers count: `app run --allow-stateful` can run the
+	// database on the same volume, and the promotion fence relies on this.
+	out, err := h.Output(ctx, remote.Cmd{Script: "set -eu\ndocker ps -q " + serviceFilters(app, dest, service)})
 	if err != nil {
 		return nil, fmt.Errorf("list running containers of %s: %w", service, err)
 	}
@@ -407,19 +409,27 @@ func StartService(ctx context.Context, d *plan.Deploy, service string) (changed 
 	// refence keeps a Service that was stopped fenced after a failed
 	// start: compose may have created containers a restart policy would
 	// revive, so restore the record and the override and remove them.
+	// The record is a new stop, not the original one: the Service may have
+	// run (and a database accepted writes) in between, so a fence that
+	// relied on the original record must not match it.
 	refence := func(cause error) error {
 		if !changed {
 			return &StartError{Service: service, Err: cause}
 		}
 		ctx := context.WithoutCancel(ctx)
-		e := writeStopped(ctx, h, d.App, d.Destination, s)
-		if e == nil {
-			_, _, e = syncStopped(ctx, h, d.App, d.Destination, plans)
+		prev := s[service]
+		s[service] = StoppedEntry{By: prev.By, At: time.Now().UTC(), Reason: "kept stopped after a failed `yoho app start`"}
+		var errs []error
+		if e := writeStopped(ctx, h, d.App, d.Destination, s); e != nil {
+			errs = append(errs, e)
+		} else if _, _, e := syncStopped(ctx, h, d.App, d.Destination, plans); e != nil {
+			errs = append(errs, e)
 		}
-		if e == nil {
-			_, e = h.Output(ctx, remote.Cmd{Script: StopScript(d.App, d.Destination, service)})
+		// Remove the containers even when the record could not be written.
+		if _, e := h.Output(ctx, remote.Cmd{Script: StopScript(d.App, d.Destination, service)}); e != nil {
+			errs = append(errs, e)
 		}
-		if e != nil {
+		if e := errors.Join(errs...); e != nil {
 			return &StartError{Service: service, Err: fmt.Errorf("%w; keeping it stopped failed too: %w", cause, e)}
 		}
 		r.logf("%s did not start; removed its containers and kept it stopped", service)
@@ -431,7 +441,7 @@ func StartService(ctx context.Context, d *plan.Deploy, service string) (changed 
 	}
 	if changed {
 		if err := writeStopped(ctx, h, d.App, d.Destination, rest); err != nil {
-			return changed, err
+			return changed, &StartError{Service: service, StillStopped: true, Err: fmt.Errorf("%s started, but clearing its stopped record failed: %w; it runs but is still marked stopped", service, err)}
 		}
 	}
 	r.phase = "plain-readiness"

@@ -89,7 +89,9 @@ func (a *app) stopTargets(ctx context.Context, verb, service, chosen string) ([]
 		}
 		names = hs
 		if chosen != "" {
-			if !slices.Contains(hs, chosen) {
+			// start reaches a Destination Server that no longer places the
+			// Service, to clear an orphaned stopped entry there.
+			if !slices.Contains(hs, chosen) && !(verb == "start" && slices.Contains(a.dest.Servers, chosen)) {
 				return nil, nil, &hintError{fmt.Sprintf("Service %s is not placed on Server %s", service, chosen), "Servers: " + strings.Join(hs, ", ")}
 			}
 			names = []string{chosen}

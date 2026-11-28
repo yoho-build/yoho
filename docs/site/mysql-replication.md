@@ -65,6 +65,9 @@ recipe carries over, but CI tests only MariaDB.
    After a promotion that owner would be a read-only replica, and rotation
    would fail. Both database Services receive all three passwords as files.
    `MARIADB_PASSWORD` is the password of the `app` user that `web` uses.
+   Each password must be one line: the entrypoint writes them into SQL, one
+   statement per line, and refuses to start (naming the secret, never its
+   value) if one contains a newline or carriage return.
 3. Run `yoho deploy`. Yoho starts `db` first, then `db-replica` (provider
    before consumer). The replica copies the primary and starts replicating.
 

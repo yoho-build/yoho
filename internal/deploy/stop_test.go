@@ -593,13 +593,87 @@ func TestStopServiceRevalidatesTarget(t *testing.T) {
 	}
 }
 
-// G15: running containers exclude one-offs, like the stop script.
-func TestRunningContainersExcludesOneOffs(t *testing.T) {
+// Round 6: one-off containers count as running for the promotion fence
+// (`app run --allow-stateful` can run the database on the same volume);
+// the stop script itself still leaves one-offs alone.
+func TestRunningContainersIncludesOneOffs(t *testing.T) {
 	h := &dockerHost{local: &remote.Local{}, respond: func(string) (string, error) { return "", nil }}
 	if _, err := RunningContainers(context.Background(), h, "shop", "production", "db"); err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(h.all(), "--filter label=com.docker.compose.oneoff=False") {
-		t.Fatal(h.all())
+	if strings.Contains(h.all(), "oneoff") {
+		t.Fatalf("one-offs excluded: %s", h.all())
+	}
+	if !strings.Contains(StopScript("shop", "production", "db"), "--filter label=com.docker.compose.oneoff=False") {
+		t.Fatal("stop script must keep excluding one-offs")
+	}
+}
+
+// Round 6: a failed start keeps the Service stopped with a new record
+// (fresh at), and removes containers even when the record cannot be written.
+func TestStartServiceRefenceWritesNewRecord(t *testing.T) {
+	h, appDir := stopRelease(t)
+	ctx := context.Background()
+	at := time.Date(2026, 11, 27, 10, 0, 0, 0, time.UTC)
+	if _, err := StopService(ctx, h, "shop", "production", "db", StoppedEntry{By: "alice", At: at}); err != nil {
+		t.Fatal(err)
+	}
+	h.respond = func(s string) (string, error) {
+		if strings.Contains(s, "'up' '-d' '--no-deps' 'db'") {
+			return "", errors.New("compose up failed")
+		}
+		return "", nil
+	}
+	d := &plan.Deploy{App: "shop", Destination: "production", Servers: []plan.NamedHost{{Name: "s1", Host: h}}, Out: io.Discard}
+	if _, err := StartService(ctx, d, "db"); err == nil {
+		t.Fatal("start succeeded")
+	}
+	s, _ := ReadStopped(ctx, h, "shop", "production")
+	if s["db"].At.Equal(at) || s["db"].At.IsZero() || !strings.Contains(s["db"].Reason, "failed `yoho app start`") {
+		t.Fatalf("record not renewed: %+v", s["db"])
+	}
+
+	// The record cannot be written: the containers are still removed and
+	// both failures are reported.
+	h.scripts = nil
+	h.respond = func(s string) (string, error) {
+		if strings.Contains(s, "'up' '-d' '--no-deps' 'db'") {
+			os.Chmod(appDir, 0o500)
+			return "", errors.New("compose up failed")
+		}
+		return "", nil
+	}
+	t.Cleanup(func() { os.Chmod(appDir, 0o700) })
+	_, err := StartService(ctx, d, "db")
+	os.Chmod(appDir, 0o700)
+	if err == nil || !strings.Contains(err.Error(), "compose up failed") || !strings.Contains(err.Error(), "keeping it stopped failed too") {
+		t.Fatal(err)
+	}
+	if !strings.Contains(h.all(), StopScript("shop", "production", "db")) {
+		t.Fatal("containers not removed when the record could not be written")
+	}
+}
+
+// Round 6: clearing the record after a successful up fails: reported as a
+// Service that runs but is still marked stopped.
+func TestStartServiceClearRecordFailureReported(t *testing.T) {
+	h, appDir := stopRelease(t)
+	ctx := context.Background()
+	if _, err := StopService(ctx, h, "shop", "production", "db", StoppedEntry{By: "alice"}); err != nil {
+		t.Fatal(err)
+	}
+	h.respond = func(s string) (string, error) {
+		if strings.Contains(s, "'up' '-d' '--no-deps' 'db'") {
+			os.Chmod(appDir, 0o500)
+		}
+		return "", nil
+	}
+	t.Cleanup(func() { os.Chmod(appDir, 0o700) })
+	d := &plan.Deploy{App: "shop", Destination: "production", Servers: []plan.NamedHost{{Name: "s1", Host: h}}, Out: io.Discard}
+	_, err := StartService(ctx, d, "db")
+	os.Chmod(appDir, 0o700)
+	var se *StartError
+	if !errors.As(err, &se) || !strings.Contains(err.Error(), "runs but is still marked stopped") || !strings.Contains(se.Hint(), "rerun `yoho app start db`") {
+		t.Fatal(err)
 	}
 }

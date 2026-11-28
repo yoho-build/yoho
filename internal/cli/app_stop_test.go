@@ -11,6 +11,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/yoho-build/yoho/internal/config"
 	"github.com/yoho-build/yoho/internal/deploy"
 	"github.com/yoho-build/yoho/internal/release"
 	"github.com/yoho-build/yoho/internal/remote"
@@ -197,5 +198,43 @@ func TestAppStartClearsOrphanedEntry(t *testing.T) {
 	}
 	if out, err = runAppStop(t, g, "app", "start", "gone"); err == nil {
 		t.Fatalf("unknown Service accepted: %s", out)
+	}
+}
+
+// Round 6: `app start SVC --server A` reaches a Destination Server that no
+// longer places SVC, to clear its orphaned entry.
+func TestStartTargetsUnplacedServerForOrphan(t *testing.T) {
+	old := release.Root
+	release.Root = t.TempDir()
+	t.Cleanup(func() { release.Root = old })
+	h := &stopHost{}
+	previous := connectServer
+	connectServer = func(string, string, bool, remote.SSHOptions) (remote.Host, error) { return h, nil }
+	t.Cleanup(func() { connectServer = previous })
+	appDir := release.AppDir("shop", "production")
+	rel := filepath.Join(appDir, "releases", "v1")
+	os.MkdirAll(rel, 0o700)
+	os.WriteFile(filepath.Join(rel, "plan.json"), []byte(`[{"name":"web","replicas":1}]`), 0o600)
+	os.Symlink("releases/v1", filepath.Join(appDir, "current"))
+	os.WriteFile(filepath.Join(appDir, deploy.StoppedFile), []byte(`{"db":{"by":"bob"}}`), 0o600)
+	a := &app{
+		cfg:      &config.Config{App: "shop", Servers: map[string]config.Server{"a": {SSH: "root@a"}, "b": {SSH: "root@b"}}},
+		destName: "production",
+		dest: config.Destination{Servers: []string{"a", "b"}, Roles: map[string]config.Role{
+			"app":  {Services: []string{"web"}, Servers: []string{"a"}},
+			"data": {Services: []string{"db"}, Servers: []string{"b"}},
+		}},
+		orphans: map[string]bool{},
+	}
+	hosts, done, err := a.stopTargets(context.Background(), "start", "db", "a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer done()
+	if len(hosts) != 1 || hosts[0].Name != "a" || !a.orphans["a"] {
+		t.Fatalf("%+v %v", hosts, a.orphans)
+	}
+	if _, _, err := a.stopTargets(context.Background(), "stop", "db", "a"); err == nil {
+		t.Fatal("stop on an unplaced Server accepted")
 	}
 }

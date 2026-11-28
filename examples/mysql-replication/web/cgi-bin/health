@@ -1,5 +1,5 @@
 #!/bin/sh
 # shellcheck source-path=SCRIPTDIR source=common.sh
 . "$(dirname "$0")/common.sh"
-out=$(db 'select 1' 2>&1) || fail "$out"
+query 'select 1'
 reply "ok"
