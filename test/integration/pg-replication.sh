@@ -113,7 +113,7 @@ eventually has_row "$server_b" db-standby row3
 absent() { [[ -z "$(docker exec "$1" docker ps -aq --filter "label=com.docker.compose.project=$project" --filter "label=com.docker.compose.service=$2")" ]]; }
 "$yoho_bin" app stop db-standby --reason ci
 absent "$server_b" db-standby
-"$yoho_bin" app stop db-standby | grep -F 'already stopped'
+"$yoho_bin" app stop db-standby 2>&1 | grep -F 'already stopped'
 "$yoho_bin" app ps | grep -F 'db-standby: stopped by'
 "$yoho_bin" plan --version v2 | tee "$work/plan.out"
 grep -F 'service db-standby [b]: stopped' "$work/plan.out" >/dev/null
@@ -130,7 +130,7 @@ sleep 5
 absent "$server_b" db-standby
 write row-stopped | grep -F 'wrote row-stopped'
 "$yoho_bin" app start db-standby
-"$yoho_bin" app start db-standby | grep -F 'it is running'
+"$yoho_bin" app start db-standby 2>&1 | grep -F 'it is running'
 eventually streaming "$server_a" db db-standby
 # The volume was kept: no new base backup, and the standby catches up.
 marked "$server_b" db-standby

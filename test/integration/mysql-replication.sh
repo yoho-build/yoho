@@ -61,7 +61,8 @@ eventually() {
 }
 has_row() { [[ "$(sql "$1" "$2" "select count(*) from items where v='$3'" 2>/dev/null)" == 1 ]]; }
 # replicating SERVER SERVICE: both replication threads of that replica run.
-replicating() { [[ "$(sql "$1" "$2" 'SHOW REPLICA STATUS\G' 2>/dev/null | grep -cE '^ *Slave_(IO|SQL)_Running: Yes$')" == 2 ]]; }
+# Not through sql: -N drops the field names from \G output.
+replicating() { local id; id=$(cid "$1" "$2"); [[ -n "$id" && "$(docker exec "$1" docker exec "$id" sh /etc/yoho-mariadb/entrypoint.sh mariadb -e 'SHOW REPLICA STATUS\G' 2>/dev/null | grep -cE '^ *Slave_(IO|SQL)_Running: Yes$')" == 2 ]]; }
 read_only() { [[ "$(sql "$1" "$2" 'select @@read_only')" == 1 ]]; }
 writable() { [[ "$(sql "$1" "$2" 'select @@read_only')" == 0 ]]; }
 clones() { local id; id=$(cid "$1" "$2"); docker exec "$1" docker logs "$id" 2>&1 | grep -c 'yoho-mariadb: empty data directory' || true; }
