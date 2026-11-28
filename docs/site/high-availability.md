@@ -37,8 +37,14 @@ Yoho's job then is deploying the stateless Services against it.
 
 Yoho does not fail over. For a hot standby that you promote by hand, the
 [Postgres primary and standby](postgres-replication.md) recipe runs streaming
-replication across two Servers with Roles. It documents and CI-tests a fenced
-manual promotion, the rebuild of the old primary, and password rotation.
+replication across two Servers with Roles. It documents and CI-tests
+`yoho db promote` (a manual, fenced promotion after you point the Connection
+at the standby), the rebuild of the old primary, and password rotation.
+`yoho db promote` runs only when you run it; nothing watches the primary.
+`yoho app stop SERVICE` keeps a Service down through deploys, applies and
+rollbacks until `yoho app start SERVICE` ([CLI](cli.md#app-stop-and-app-start)).
+The [MariaDB primary and replica](mysql-replication.md) recipe runs GTID
+replication the same way, with a documented manual promotion.
 
 ## Off-Server Backups are the recovery path
 

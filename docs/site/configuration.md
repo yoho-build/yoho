@@ -18,6 +18,7 @@ Validate with `yoho config check`; print the resolved file with `yoho config sho
 | `servers.<name>.root` | State directory on the Server. Default `/var/lib/yoho`. |
 | `servers.<name>.private_address`, `labels` | Private Roles/Swarm address and placement labels; mesh address takes precedence when enabled. |
 | `servers.<name>.endpoint` | Mesh public `host[:port]`, defaults to SSH host and mesh port; `none` for NATed Servers. |
+| `servers.<name>.tags` | Tags that select per-Server environment from `x-yoho.tags`. See [Per-Server tags](#per-server-tags). |
 | `network.mesh`, `network.subnet`, `network.port` | Opt-in [WireGuard mesh](mesh.md): `none` (default) or `wireguard`, `10.210.0.0/24`, UDP `51820`. |
 | `destinations.<name>.servers` | Required. Exactly one for Compose without Roles; several with Roles or Swarm (first is the manager; all share one `root`). |
 | `destinations.<name>.runtime` | `compose` (default) or `swarm`. Switching causes downtime. |
@@ -203,6 +204,7 @@ The Cloudflare API token needs Account > Cloudflare Tunnel > Edit. It is resolve
 | `backup.verify` | Command run in the restored copy by `yoho backup drill` after it is healthy; nonzero exit fails the drill. |
 | `strict_drain` | Swarm only: Proxy routes to tasks instead of the service VIP. |
 | `endpoint` | Legacy reserved field; use Destination `connections` for remote Service endpoints. |
+| `tags.<tag or Server>.env` | Per-Server environment. See [Per-Server tags](#per-server-tags). |
 
 Stateful rule: a Service with volumes deployed to several Servers without `stateful: true` is an error.
 
@@ -300,5 +302,40 @@ tunnel management and fixed subnets. See [Preview environments](previews.md) for
 Compose Destinations may opt into `roles: {NAME: {services: [...], servers: [...]}}`
 and `connections: {NAME: {service: db, port: 5432, consumers: [web]}}`.
 Every Service must belong to one Role; Stateful Services and connection providers
-must resolve to exactly one Server. Every participating Server needs an effective
-private address. See [Roles](roles.md) for networking, ingress, ownership and moves.
+must resolve to exactly one Server. A connection with `instances: true` lifts that
+for its provider: consumers address each Server's copy as `<server>.m.<service>`
+(see [Instance connections](roles.md#instance-connections)). Every participating
+Server needs an effective private address. See [Roles](roles.md) for networking,
+ingress, ownership and moves.
+
+## Per-Server tags
+
+```yaml
+servers:
+  a: {ssh: root@a, tags: [eu, canary]}
+  b: {ssh: root@b}
+```
+
+```yaml
+services:
+  web:
+    environment: {REGION: us}
+    x-yoho:
+      tags:
+        eu: {env: {REGION: eu}}
+        canary: {env: {FEATURE_X: "1"}}
+        b: {env: {NODE_NAME: beta}}   # a Server name selects that Server
+```
+
+`servers.<name>.tags` lists lowercase tags (`^[a-z0-9][a-z0-9-]*$`, no repeats,
+never a Server name). Each Server's name is also an implicit tag. On each Server,
+Yoho starts from the Compose `environment`, then applies every matching tag in the
+Server's `tags` order, then the Server's own name; a later value wins. In the example
+`web` gets `REGION=eu FEATURE_X=1` on `a` and `REGION=us NODE_NAME=beta` on `b`.
+Tags only set environment: no secrets, labels or other keys. Keys must match
+`^[A-Za-z_][A-Za-z0-9_]*$` and may not start with `YOHO_`; a selector that is
+neither a Server name nor a tag is an error naming the known ones. `yoho plan`
+shows `config changed: environment` on each Server whose value changes.
+Tags work with and without Roles; they need the Compose runtime and operator
+access (`x-yoho.tags supports the compose runtime only` / `x-yoho.tags requires
+operator access`).

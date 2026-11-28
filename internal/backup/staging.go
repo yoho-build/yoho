@@ -74,7 +74,9 @@ case "$t" in *[!0-9a-f]*|'') yoho_bad "$m";; esac
 
 // ListStaging lists the drill or restore staging directories (kind) of
 // app/dest. Directories that do not match the naming or cannot be proven
-// Yoho-owned are never returned (and never removed). Read-only.
+// Yoho-owned are never returned (and never removed). Read-only. The mtime
+// comes from GNU/BusyBox stat -c %Y, else BSD stat -f %m (a macOS Server
+// or Local host).
 func ListStaging(ctx context.Context, h remote.Host, app, dest, kind string) ([]StagingDir, error) {
 	untimed := kind == StagingRun || kind == StagingCheck
 	if kind != StagingDrill && kind != StagingRestore && !untimed {
@@ -92,7 +94,8 @@ func ListStaging(ctx context.Context, h remote.Host, app, dest, kind string) ([]
 		"  [ -d \"$d\" ] && [ ! -L \"$d\" ] || continue\n" +
 		"  (\n" + stagingProof + "  ) >/dev/null 2>&1 || continue\n" +
 		"  p=no; if [ -f \"$d/" + priorStateFile + "\" ] && [ ! -L \"$d/" + priorStateFile + "\" ]; then p=yes; fi\n" +
-		"  printf 'yoho-staging %s %s %s\\n' \"${d##*/}\" \"$p\" \"$(stat -c %Y \"$d\")\"\n" +
+		"  m=$(stat -c %Y \"$d\" 2>/dev/null || stat -f %m \"$d\") || continue\n" +
+		"  printf 'yoho-staging %s %s %s\\n' \"${d##*/}\" \"$p\" \"$m\"\n" +
 		"done\n"
 	out, err := h.Output(ctx, remote.Cmd{Script: script})
 	if err != nil {

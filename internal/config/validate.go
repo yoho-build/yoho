@@ -53,6 +53,7 @@ func Validate(c *Config) []error {
 		if r := c.Servers[n].Root; r != "" && !strings.HasPrefix(r, "/") {
 			add("servers.%s.root %q must be an absolute path", n, r)
 		}
+		errs = append(errs, validateServerTags(c, n)...)
 	}
 	if len(c.Destinations) == 0 {
 		add("destinations: at least one Destination is required")

@@ -30,6 +30,9 @@ func (Compose) Preflight(ctx context.Context, d *plan.Deploy) error {
 	if e = checkOwnership(ctx, h.Host, d.App, d.Destination, plans); e != nil {
 		return e
 	}
+	if e = checkStoppedProxy(ctx, h.Host, d.App, d.Destination, plans); e != nil {
+		return e
+	}
 	subnet, exists, e := currentSubnet(ctx, h.Host, d.App, d.Destination)
 	if e != nil {
 		return e
@@ -82,6 +85,9 @@ func prepareRoleCommands(ctx context.Context, d *plan.Deploy) (*runner, []servic
 		return nil, nil, e
 	}
 	r := newRunner(d, path.Join(prep, "compose.yaml"))
+	if plans, e = enforceStopped(ctx, r, plans); e != nil {
+		return nil, nil, e
+	}
 	for _, m := range values {
 		for _, v := range m {
 			r.secretVals = append(r.secretVals, v)
@@ -155,11 +161,12 @@ func rolesReleasePhase(ctx context.Context, d *plan.Deploy, parts map[string]*pl
 			if !slices.Contains(c.Consumers, svc) {
 				continue
 			}
-			provider := d.Roles.ServiceServers(c.Service)[0]
-			for _, consumer := range hosts {
-				if provider != consumer {
-					if e := roles.Ready(ctx, parts[consumer].Servers[0].Host, d.PrivateAddresses[provider], c.Port); e != nil {
-						return e
+			for _, provider := range d.Roles.ServiceServers(c.Service) {
+				for _, consumer := range hosts {
+					if provider != consumer {
+						if e := roles.Ready(ctx, parts[consumer].Servers[0].Host, d.PrivateAddresses[provider], c.Port); e != nil {
+							return e
+						}
 					}
 				}
 			}

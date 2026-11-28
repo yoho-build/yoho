@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Deploys examples/postgres-replication as shipped (only Server addresses, the
 # secrets and the Proxy host are filled in) to two nested SSH + Docker Servers,
-# then walks the documented procedures: password rotation and promotion.
+# then walks the documented procedures: password rotation, app stop/start
+# and promotion with yoho db promote.
 # See docs/site/postgres-replication.md.
 set -euo pipefail
 repo=$(pwd)
@@ -107,39 +108,75 @@ marked "$server_b" db-standby
 write row3 | grep -F 'wrote row3'
 eventually has_row "$server_b" db-standby row3
 
-# Promotion, steps 1-5 of the guide.
-# 1. Fence the old primary.
-"$yoho_bin" app exec db -- psql -U postgres -c 'ALTER SYSTEM SET default_transaction_read_only = on'
-"$yoho_bin" app exec db -- psql -U postgres -c 'SELECT pg_reload_conf()'
-"$yoho_bin" app exec db -- psql -U postgres -c "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE backend_type = 'client backend' AND pid <> pg_backend_pid()"
-write fenced | grep -F 'read-only transaction'
-lsn=$(sql "$server_a" db 'select pg_current_wal_lsn()')
-caught_up() { [[ "$(sql "$server_b" db-standby "select pg_last_wal_replay_lsn() >= '$lsn'::pg_lsn")" == t ]]; }
-eventually caught_up
-# 2. Promote the standby.
-"$yoho_bin" app exec db-standby -- psql -U postgres -c 'SELECT pg_promote()'
-promoted() { [[ "$(sql "$server_b" db-standby 'select pg_is_in_recovery()')" == f ]]; }
-eventually promoted
-# 3. Switch the Connection and its consumers.
-sed -i 's/primary: {service: db, port: 5432, consumers: \[web, db-standby\]}/primary: {service: db-standby, port: 5432, consumers: [web, db]}/' yoho.yml
+# yoho app stop: the standby stays down through deploy, rollback and a Docker
+# restart, keeps its volume, and comes back with yoho app start.
+absent() { [[ -z "$(docker exec "$1" docker ps -aq --filter "label=com.docker.compose.project=$project" --filter "label=com.docker.compose.service=$2")" ]]; }
+"$yoho_bin" app stop db-standby --reason ci
+absent "$server_b" db-standby
+"$yoho_bin" app stop db-standby 2>&1 | grep -F 'already stopped'
+"$yoho_bin" app ps | grep -F 'db-standby: stopped by'
+"$yoho_bin" plan --version v2 | tee "$work/plan.out"
+grep -F 'service db-standby [b]: stopped' "$work/plan.out" >/dev/null
+"$yoho_bin" deploy --version v2-stop
+absent "$server_b" db-standby
+"$yoho_bin" rollback v2
+absent "$server_b" db-standby
+# Restart the nested Server's Docker daemon: nothing revives the Service.
+docker exec "$server_b" sh -c 'pkill -x dockerd; while pgrep -x dockerd >/dev/null; do sleep 1; done'
+docker exec -d "$server_b" sh -c 'dockerd --host=unix:///var/run/docker.sock > /var/log/dockerd.log 2>&1'
+docker_up() { docker exec "$server_b" docker info >/dev/null 2>&1; }
+eventually docker_up
+sleep 5
+absent "$server_b" db-standby
+write row-stopped | grep -F 'wrote row-stopped'
+"$yoho_bin" app start db-standby
+"$yoho_bin" app start db-standby 2>&1 | grep -F 'it is running'
+eventually streaming "$server_a" db db-standby
+# The volume was kept: no new base backup, and the standby catches up.
+marked "$server_b" db-standby
+# app stop removed the old container, so the new one's log shows no clone.
+[[ "$(clones "$server_b" db-standby)" == 0 ]]
+eventually has_row "$server_b" db-standby row-stopped
+
+# yoho db promote, config first. Without a config edit it refuses and says
+# what to edit; without the old primary as a consumer it refuses too.
+if out=$("$yoho_bin" db promote --auto-approve --version v3 2>&1); then echo "promote ran without a config edit: $out" >&2; exit 1; fi
+grep -F 'connections.primary.service' <<<"$out" | grep -F 'to the standby' >/dev/null
+sed -i 's/primary: {service: db, port: 5432, consumers: \[web, db-standby\]}/primary: {service: db-standby, port: 5432, consumers: [web]}/' yoho.yml
+if out=$("$yoho_bin" db promote --auto-approve --version v3 2>&1); then echo "promote accepted a second primary: $out" >&2; exit 1; fi
+grep -F 'never as a second primary' <<<"$out" >/dev/null
+# Nothing was changed by the refusals.
+[[ "$(sql "$server_b" db-standby 'select pg_is_in_recovery()')" == t ]]
+[[ "$(sql "$server_a" db 'select pg_is_in_recovery()')" == f ]]
+# Switch the Connection and its consumers, then promote.
+sed -i 's/primary: {service: db-standby, port: 5432, consumers: \[web\]}/primary: {service: db-standby, port: 5432, consumers: [web, db]}/' yoho.yml
 grep -F 'primary: {service: db-standby, port: 5432, consumers: [web, db]}' yoho.yml >/dev/null
-# 4. Apply.
-"$yoho_bin" apply --auto-approve --version v3
+"$yoho_bin" db promote --auto-approve --version v3 2>&1 | tee "$work/promote.out"
+grep -F "docker volume rm ${project}_pgdata" "$work/promote.out" >/dev/null
+promoted() { [[ "$(sql "$server_b" db-standby 'select pg_is_in_recovery()')" == f ]]; }
+promoted
+# The old primary is fenced: stopped, removed, and kept down.
+absent "$server_a" db
 wrote_via_b() { write row4 | grep -F 'wrote row4 id=' | grep -F "via $b_ip"; }
 eventually wrote_via_b
 has_row "$server_b" db-standby row1
+has_row "$server_b" db-standby row-stopped
 # The Connection firewall now protects B, and A is a permitted consumer.
 docker exec "$server_b" iptables -I FORWARD 1 -j ACCEPT
 if docker exec "$outsider" nc -z -w 2 "$b_ip" 5432; then echo 'outsider reached db-standby on B' >&2; exit 1; fi
 docker exec "$server_a" nc -z -w 2 "$b_ip" 5432
 if docker exec "$outsider" nc -z -w 2 "$a_ip" 5432; then echo 'old primary port still published on A' >&2; exit 1; fi
-# 5. Rebuild the old db as a standby: remove its volume by hand, apply again.
-old=$(cid "$server_a" db)
-volume=$(docker exec "$server_a" docker inspect -f '{{range .Mounts}}{{if eq .Destination "/var/lib/postgresql/data"}}{{.Name}}{{end}}{{end}}' "$old")
-[[ -n "$volume" ]]
-docker exec "$server_a" docker rm -f "$old" >/dev/null
-docker exec "$server_a" docker volume rm "$volume" >/dev/null
-"$yoho_bin" apply --auto-approve --version v3
+# The journal is gone after the apply: a rerun has nothing to resume, refuses
+# (no Connection changed) and changes nothing.
+if out=$("$yoho_bin" db promote --auto-approve --version v3 2>&1); then echo "rerun after a finished promotion did not refuse: $out" >&2; exit 1; fi
+grep -F 'no Connection changed its provider' <<<"$out" >/dev/null
+docker exec "$server_b" test ! -e /var/lib/yoho/apps/pg/production/promotions/primary.json
+promoted
+absent "$server_a" db
+# Rebuild the old db as a standby: remove its volume by hand, then start it.
+docker exec "$server_a" docker volume inspect "${project}_pgdata" >/dev/null
+docker exec "$server_a" docker volume rm "${project}_pgdata" >/dev/null
+"$yoho_bin" app start db
 eventually streaming "$server_b" db-standby db
 eventually has_row "$server_a" db row4
 [[ "$(sql "$server_a" db 'select pg_is_in_recovery()')" == t ]]
@@ -156,4 +193,4 @@ for server in "$server_a" "$server_b"; do
   test -z "$(docker exec "$server" docker ps -aq --filter "label=com.docker.compose.project=$project")"
   docker exec "$server" test ! -d /var/lib/yoho/apps/pg/production
 done
-echo 'PASS Postgres replication recipe: example deployed as shipped, streaming, read-only standby, firewall bypass resistance, restart without re-clone, password rotation, fenced promotion, rebuild from new primary, no demotion on restart, removal on both Servers'
+echo 'PASS Postgres replication recipe: example deployed as shipped, streaming, read-only standby, firewall bypass resistance, restart without re-clone, password rotation, app stop kept through deploy/rollback/Docker restart and app start without re-clone, db promote refusals, fenced promotion and refused rerun, rebuild from new primary, no demotion on restart, removal on both Servers'

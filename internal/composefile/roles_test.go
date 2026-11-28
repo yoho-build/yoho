@@ -67,3 +67,30 @@ func TestRolesServiceValidation(t *testing.T) {
 }
 
 func boolPointer(v bool) *bool { return &v }
+
+// Connection ports are keyed by (Server, port): a1:234 and a:1234 differ.
+func TestRolesConnectionPortKeyIsNotAmbiguous(t *testing.T) {
+	r := &Result{Project: &types.Project{Name: "shop", Services: types.Services{"web": {Name: "web"}, "db": {Name: "db"}, "cache": {Name: "cache"}}}, Ext: map[string]config.ServiceExt{"db": {Stateful: true}}}
+	d := config.Destination{Servers: []string{"a", "a1"}, Roles: map[string]config.Role{
+		"app":   {Services: []string{"web"}, Servers: []string{"a"}},
+		"data":  {Services: []string{"db"}, Servers: []string{"a1"}},
+		"cache": {Services: []string{"cache"}, Servers: []string{"a"}},
+	}, Connections: map[string]config.Connection{
+		"database": {Service: "db", Port: 234, Consumers: []string{"web"}},
+		"kv":       {Service: "cache", Port: 1234, Consumers: []string{"web"}},
+	}}
+	for _, f := range CheckRoles(r, d, config.ProxyConfig{}) {
+		if strings.Contains(f.Message, "same port") {
+			t.Fatalf("a1:234 and a:1234 reported as the same port: %s", f.Message)
+		}
+	}
+	d.Connections["kv"] = config.Connection{Service: "cache", Port: 234, Consumers: []string{"web"}}
+	d.Roles["cache"] = config.Role{Services: []string{"cache"}, Servers: []string{"a1"}}
+	found := false
+	for _, f := range CheckRoles(r, d, config.ProxyConfig{}) {
+		found = found || strings.Contains(f.Message, "same port")
+	}
+	if !found {
+		t.Fatal("same Server and port not reported")
+	}
+}

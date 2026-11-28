@@ -87,6 +87,18 @@ func (a *app) moveService(ctx context.Context, service, target string, yes, clea
 	if err != nil {
 		return &validationError{err}
 	}
+	for _, h := range s.hosts {
+		if h.Name != m.Source {
+			continue
+		}
+		stopped, e := deploy.ReadStopped(ctx, h.Host, a.cfg.App, a.destName)
+		if e != nil {
+			return e
+		}
+		if _, ok := stopped[service]; ok {
+			return &validationError{fmt.Errorf("Service %s is stopped on %s (`yoho app stop`); run `yoho app start %s` before moving it", service, m.Source, service)}
+		}
+	}
 	j, err := a.moveBackupJob(ctx, s, service)
 	if err != nil {
 		return &validationError{err}

@@ -1,0 +1,65 @@
+# MariaDB primary (db on Server a) and GTID replica (db-replica on Server b).
+# Both use the same image, entrypoint and server config; the Connection
+# `primary` in yoho.yml decides which one is the primary. See
+# docs/site/mysql-replication.md.
+x-mariadb: &mariadb
+  image: mariadb:11.4
+  restart: unless-stopped
+  stop_grace_period: 30s
+  entrypoint: ["sh", "/etc/yoho-mariadb/entrypoint.sh"]
+  command: ["mariadbd"]
+  environment:
+    # The image reads MARIADB_ROOT_PASSWORD_FILE and MARIADB_PASSWORD_FILE,
+    # which Yoho sets for the secrets below.
+    MARIADB_DATABASE: app
+    MARIADB_USER: app
+    MARIADB_ROOT_HOST: localhost
+  volumes:
+    - mariadb:/var/lib/mysql
+    - ./entrypoint.sh:/etc/yoho-mariadb/entrypoint.sh:ro
+    - ./replication.cnf:/etc/mysql/conf.d/yoho-replication.cnf:ro
+    - ./initdb/10-replication.sh:/docker-entrypoint-initdb.d/10-replication.sh:ro
+  healthcheck:
+    test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
+    interval: 2s
+    timeout: 3s
+    retries: 60
+    start_period: 120s
+
+services:
+  web:
+    image: alpine:3.22
+    restart: unless-stopped
+    # A demo: busybox httpd (from busybox-extras) runs CGI scripts that use
+    # the mariadb client over the Connection. CGI scripts inherit the env.
+    command: ["sh", "-c", "apk add --no-cache mariadb-client busybox-extras >/dev/null && exec busybox-extras httpd -f -v -p 8000 -h /srv/www"]
+    volumes:
+      - ./web:/srv/www:ro
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8000/cgi-bin/health"]
+      interval: 2s
+      timeout: 5s
+      retries: 60
+      start_period: 60s
+    x-yoho:
+      # DEMO_WRITE_TOKEN guards the demo write endpoint (POST body).
+      secrets: [MARIADB_PASSWORD, DEMO_WRITE_TOKEN]
+      proxy:
+        hosts: [mariadb.example.com]
+        port: 8000
+        health_path: /cgi-bin/health
+
+  db:
+    <<: *mariadb
+    x-yoho:
+      stateful: true
+      secrets: [MARIADB_ROOT_PASSWORD, MARIADB_PASSWORD, REPLICATOR_PASSWORD]
+
+  db-replica:
+    <<: *mariadb
+    x-yoho:
+      stateful: true
+      secrets: [MARIADB_ROOT_PASSWORD, MARIADB_PASSWORD, REPLICATOR_PASSWORD]
+
+volumes:
+  mariadb:

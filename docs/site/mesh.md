@@ -78,7 +78,9 @@ never run it on surviving Servers as part of Server removal.
 Swarm uses the assigned mesh address for `--advertise-addr`; run `mesh up`
 before `swarm init` or `swarm join`. Roles Connections use each Server's mesh
 address in place of `private_address`, and the Connection firewall matches
-traffic on those addresses.
+traffic on those addresses. An [instance connection](roles.md#instance-connections)
+points `<server>.m.<service>` at that Server's mesh address, so a consumer on a
+NATed Server reaches every Instance through the hub.
 
 | Support | Behavior |
 | --- | --- |

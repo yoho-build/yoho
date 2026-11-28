@@ -1,0 +1,7 @@
+services:
+  echo:
+    ports:
+      - host_ip: 10.0.0.1
+        target: 8000
+        published: "8000"
+        protocol: tcp

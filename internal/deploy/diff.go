@@ -259,6 +259,21 @@ func (c Compose) Diff(ctx context.Context, d *plan.Deploy) ([]plan.Change, error
 	if err := checkOwnership(ctx, h, d.App, d.Destination, plans); err != nil {
 		return nil, err
 	}
+	if err := checkStoppedProxy(ctx, h, d.App, d.Destination, plans); err != nil {
+		return nil, err
+	}
+	// Stopped Services stay down on apply (ADR 0021). Read-only here.
+	stoppedState, err := ReadStopped(ctx, h, d.App, d.Destination)
+	if err != nil {
+		return nil, err
+	}
+	stoppedSet := map[string]bool{}
+	for _, sp := range plans {
+		if _, ok := stoppedState[sp.Name]; ok {
+			stoppedSet[sp.Name] = true
+		}
+	}
+	plans = applyStopped(plans, stoppedSet)
 	want, err := serviceEntries(composeYAML)
 	if err != nil {
 		return nil, err
@@ -328,6 +343,32 @@ func (c Compose) Diff(ctx context.Context, d *plan.Deploy) ([]plan.Change, error
 				if ct.State.Running {
 					running++
 				}
+			}
+			if stoppedSet[sp.Name] {
+				why := "stopped by `yoho app stop` (" + stoppedState[sp.Name].Describe() + "); `yoho app start " + sp.Name + "` runs it"
+				// A config change still records a new Release, so `app
+				// start` runs the new config; the Service stays stopped.
+				var changed []string
+				if cur != nil {
+					if op, ok := cur.plans[sp.Name]; ok && sp.Image != "" && op.Image != sp.Image {
+						changed = append(changed, "image "+op.Image+" → "+sp.Image)
+					}
+					if old, ok := cur.services[sp.Name]; !ok {
+						changed = append(changed, "config changed: service is new in the current Release")
+					} else if keys := changedKeys(old, want[sp.Name]); len(keys) > 0 {
+						changed = append(changed, "config changed: "+strings.Join(keys, ", "))
+					}
+				}
+				switch {
+				case running > 0:
+					add("service", sp.Name, plan.ActionUpdate, false, append([]string{fmt.Sprintf("replicas %d → 0 (stopped)", running)}, append(changed, why)...)...)
+				case len(changed) > 0:
+					add("service", sp.Name, plan.ActionUpdate, false, append(changed, "stays stopped", why)...)
+				default:
+					add("service", sp.Name, plan.ActionNoop, false, why)
+				}
+				changes[len(changes)-1].Stopped = true
+				continue
 			}
 			if running > 0 {
 				add("service", sp.Name, plan.ActionUpdate, false, fmt.Sprintf("replicas %d → 0", running))

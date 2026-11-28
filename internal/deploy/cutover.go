@@ -25,10 +25,16 @@ type composeCLI struct {
 	project string
 	dir     string // project directory (the App Destination dir)
 	file    string
+	// overrides are extra -f files after file (StoppedOverrideFile).
+	overrides []string
 }
 
 func (c composeCLI) cmd(args ...string) string {
-	return "docker compose " + remote.QuoteArgs(append([]string{"-p", c.project, "--project-directory", c.dir, "-f", c.file}, args...)...)
+	base := []string{"-p", c.project, "--project-directory", c.dir, "-f", c.file}
+	for _, o := range c.overrides {
+		base = append(base, "-f", o)
+	}
+	return "docker compose " + remote.QuoteArgs(append(base, args...)...)
 }
 
 // containerIDs excludes compose run one-offs from every readiness/candidate
@@ -115,13 +121,18 @@ func (r *runner) startDependencies(ctx context.Context, plans []servicePlan) err
 	}
 	var deps []string
 	hasRelease := false
+	scaledZero := map[string]bool{}
+	for _, sp := range plans {
+		scaledZero[sp.Name] = sp.Replicas == 0
+	}
 	for _, sp := range plans {
 		if len(sp.ReleaseCommand) == 0 {
 			continue
 		}
 		hasRelease = true
 		for _, dep := range sp.DependsOn {
-			if !slices.Contains(deps, dep) {
+			// A scaled-zero (or stopped) dependency has nothing to start.
+			if !slices.Contains(deps, dep) && !scaledZero[dep] {
 				deps = append(deps, dep)
 			}
 		}
@@ -130,7 +141,7 @@ func (r *runner) startDependencies(ctx context.Context, plans []servicePlan) err
 	// Stateful Services are started (never recreated) before release commands.
 	if hasRelease {
 		for _, sp := range plans {
-			if sp.Stateful && !slices.Contains(deps, sp.Name) {
+			if sp.Stateful && sp.Replicas > 0 && !slices.Contains(deps, sp.Name) {
 				deps = append(deps, sp.Name)
 			}
 		}

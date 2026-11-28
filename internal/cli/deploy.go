@@ -174,6 +174,7 @@ type session struct {
 func (s *session) close() {
 	if s.closeHosts != nil {
 		s.closeHosts()
+		s.closeHosts = nil
 	}
 	if s.red != nil {
 		s.red.Flush()
@@ -1177,7 +1178,7 @@ func appCmds(g *globals) *cobra.Command {
 	}
 	addServerFlag(execCmd)
 	addTermFlags(execCmd, &execTerm)
-	c.AddCommand(execCmd, appRunCmd(g))
+	c.AddCommand(execCmd, appRunCmd(g), appStopCmd(g), appStartCmd(g))
 	return c
 }
 
@@ -1285,14 +1286,29 @@ func (a *app) appPS(cmd *cobra.Command) error {
 		a.ui.Warn("cannot run the Service checks: %v", err)
 	}
 	if st == nil {
-		return h.Run(ctx, remote.Cmd{Script: script, Stdout: cmd.OutOrStdout(), Stderr: cmd.ErrOrStderr()})
+		err = h.Run(ctx, remote.Cmd{Script: script, Stdout: cmd.OutOrStdout(), Stderr: cmd.ErrOrStderr()})
+	} else {
+		var out string
+		if out, err = h.Output(ctx, remote.Cmd{Script: script, Stderr: cmd.ErrOrStderr()}); err == nil {
+			_, err = io.WriteString(cmd.OutOrStdout(), servicecheck.AppendColumn(out, st))
+		}
 	}
-	out, err := h.Output(ctx, remote.Cmd{Script: script, Stderr: cmd.ErrOrStderr()})
 	if err != nil {
 		return err
 	}
-	_, err = io.WriteString(cmd.OutOrStdout(), servicecheck.AppendColumn(out, st))
-	return err
+	// Services `yoho app stop` keeps down have no containers to list.
+	if stopped, e := deploy.ReadStopped(ctx, h, a.cfg.App, a.destName); e == nil {
+		var inRelease func(string) bool
+		if _, svcs, e := deploy.CurrentServices(ctx, h, a.cfg.App, a.destName); e == nil {
+			inRelease = func(name string) bool {
+				return slices.ContainsFunc(svcs, func(s deploy.CurrentService) bool { return s.Name == name })
+			}
+		}
+		for _, l := range stoppedLines(stopped, inRelease) {
+			fmt.Fprintln(cmd.OutOrStdout(), l)
+		}
+	}
+	return nil
 }
 
 var _ = release.ProjectName

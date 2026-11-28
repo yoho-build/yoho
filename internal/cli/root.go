@@ -112,6 +112,9 @@ func (g *globals) ui(cmd *cobra.Command) *ui.UI {
 
 // app is a loaded App: Yoho file plus selected Destination.
 type app struct {
+	// orphans marks the Servers where `app start` clears a stopped entry of
+	// a Service no longer in the current Release.
+	orphans        map[string]bool
 	rolesLocksHeld bool
 	// meshPlanned lets plan and apply read Roles addresses from the planned
 	// mesh allocation before the first `yoho mesh up`; apply reconciles the
@@ -246,6 +249,13 @@ func (a *app) compose(ctx context.Context) (*composefile.Result, error) {
 		return nil, err
 	}
 	findings := composefile.CheckRoles(r, a.dest, a.proxyConfig(), a.cfg.App)
+	// Tags follow the resolved access (YOHO_ACCESS wins), not the file's.
+	tagDest := a.dest
+	tagDest.Access = "operator"
+	if a.scoped {
+		tagDest.Access = "scoped"
+	}
+	findings = append(findings, composefile.CheckTags(r, a.cfg.Servers, tagDest)...)
 	if composefile.HasErrors(findings) {
 		var messages []string
 		for _, f := range findings {

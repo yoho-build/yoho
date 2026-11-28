@@ -177,6 +177,9 @@ func (c Compose) Deploy(ctx context.Context, d *plan.Deploy) (_ *release.Release
 	if err := checkOwnership(ctx, h, d.App, d.Destination, preflightPlans); err != nil {
 		return nil, err
 	}
+	if err := checkStoppedProxy(ctx, h, d.App, d.Destination, preflightPlans); err != nil {
+		return nil, err
+	}
 	curSubnet, hasCurrent, err := currentSubnet(ctx, h, d.App, d.Destination)
 	if err != nil {
 		return nil, err
@@ -289,6 +292,10 @@ func (c Compose) Deploy(ctx context.Context, d *plan.Deploy) (_ *release.Release
 		}
 	}()
 
+	// Stopped Services stay down (ADR 0021); plan.json keeps their replicas.
+	if plans, err = enforceStopped(ctx, r, plans); err != nil {
+		return nil, err
+	}
 	for _, sp := range plans {
 		r.report(ctx, sp.Name, "unchanged")
 		f := r.fact(sp.Name)
@@ -516,6 +523,13 @@ func (c Compose) Rollback(ctx context.Context, d *plan.Deploy, version string) (
 		return nil, fmt.Errorf("release %s: readiness metadata: %w", version, err)
 	}
 	if err := checkOwnership(ctx, h, d.App, d.Destination, plans); err != nil {
+		return nil, err
+	}
+	if err := checkStoppedProxy(ctx, h, d.App, d.Destination, plans); err != nil {
+		return nil, err
+	}
+	// Stopped Services stay down through a rollback too (ADR 0021).
+	if plans, err = enforceStopped(ctx, r, plans); err != nil {
 		return nil, err
 	}
 	for _, f := range rel.Files {

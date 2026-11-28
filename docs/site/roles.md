@@ -26,7 +26,8 @@ Scheduled Jobs run on the owning Server.
 
 ## Connections and private networking
 
-A connection provider must be singleton. Yoho publishes its TCP port only on the
+A connection provider must be singleton, unless the connection sets
+`instances: true` (see [Instance connections](#instance-connections)). Yoho publishes its TCP port only on the
 Server's effective private address: the WireGuard allocation when the optional
 [mesh](mesh.md) is enabled, otherwise `private_address`. Every participating
 Server needs a reachable address, and provider addresses must exist on an interface.
@@ -53,6 +54,54 @@ setup**, attempts every policy despite individual failures and fails at the end
 if any failed. `yoho doctor` checks relative policy content and actual bindings.
 Explicit loopback publications are preserved; non-loopback connection traffic
 must use the protected private endpoint.
+
+## Instance connections
+
+An **Instance** is the containers of one Service on one Server. Set
+`instances: true` on a connection to run its provider on several Servers and let
+consumers pick an Instance by name:
+
+```yaml
+destinations:
+  production:
+    servers: [a, b, c]
+    roles:
+      api: {services: [api], servers: [a, b]}
+      edge: {services: [lb], servers: [c]}
+    connections:
+      upstream: {service: api, port: 8000, consumers: [lb], instances: true}
+```
+
+Consumers get two names per provider Server: `a.m.api` and
+`a.m.api.<app>.yoho.internal` (likewise `b.m.api`), so `lb` can list
+`a.m.api:8000` and `b.m.api:8000` as upstreams. An Instance on another Server
+is an `extra_hosts` entry for that Server's effective private address (the mesh
+address when the [mesh](mesh.md) is on). An Instance on the consumer's own Server
+is a Compose network alias on the provider, because traffic from a container to
+its own Server's private address would not pass the firewall allowlist. There is
+no DNS server: names change only when apply rewrites the Compose files.
+
+`YOHO_CONNECTION_UPSTREAM_PORT` is always set. `YOHO_CONNECTION_UPSTREAM_HOST`,
+the bare Service name and `api.<app>.yoho.internal` exist only while the provider
+has exactly one Server. Each provider Server publishes the port on its own private
+address with the same consumer allowlist, and `yoho plan` shows a firewall change
+per provider Server (`connection upstream: publish 10.0.0.1:8000:8000/tcp (instance a.m.api)`).
+Ordering, readiness probes and `yoho doctor` binding checks cover every Instance:
+consumers start only after every remote Instance answers.
+
+Instance connections refuse a proxied provider (route it through the Proxy
+instead), more than one container per Server (`replicas: 1`), and the provider
+as its own consumer. Server names must be valid DNS labels. Providers deploy
+before consumers, so a consumer on every provider Server forms a cycle; colocate
+or split the Role. A connection without `instances: true` keeps the singleton
+rule: `connection upstream target Service api must resolve to exactly one Server,
+or set instances: true to address each Server as <server>.m.api`.
+
+## Per-Server tags
+
+`servers.<name>.tags` and `x-yoho.tags.<tag or Server>.env` give one Service a
+different environment per Server without a second Service, for example a region
+or a canary flag. See [Per-Server tags](configuration.md#per-server-tags).
 
 ## Rollouts and recovery
 
@@ -98,6 +147,17 @@ For a proxied Service on several Servers, use one of:
 Independent Let's Encrypt HTTP-01 issuance across Servers is refused without a
 named Tunnel. DNS-01 and shared certificates are not implemented. `ssl` is an explicit TLS selection; existing `tls` configuration remains valid.
 A Quick Tunnel is refused for multi-Server ingress.
+
+## Stop a Service, promote a standby
+
+`yoho app stop SERVICE` stops a Service on every Server hosting it (or the
+one named with `--server`) and keeps it stopped through deploy, apply and
+rollback until `yoho app start SERVICE`; volumes are kept. A consumer whose
+Connection provider is stopped fails its deploy with a message naming the stopped
+provider. For a Postgres primary and standby, `yoho db promote` fences the old
+primary with `app stop`, promotes the standby and applies the edited
+Connection; see [Postgres primary and standby](postgres-replication.md) and the
+[CLI](cli.md#database).
 
 ## Move a Stateful Service
 

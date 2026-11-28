@@ -1,0 +1,20 @@
+#!/bin/sh
+# Demo only. POST /cgi-bin/write?VALUE with the DEMO_WRITE_TOKEN secret as the
+# request body inserts VALUE ([A-Za-z0-9-] only) on the primary.
+# shellcheck source-path=SCRIPTDIR source=common.sh
+. "$(dirname "$0")/common.sh"
+[ "${REQUEST_METHOD:-}" = POST ] || fail "POST the write token"
+# The token is 64 hex characters; refuse anything larger before reading it.
+len=${CONTENT_LENGTH:-0}
+case "$len" in ''|*[!0-9]*) fail "bad length";; esac
+[ "$len" -le 256 ] || fail "body too large"
+body=$(head -c "$len")
+token=$(cat /run/secrets/DEMO_WRITE_TOKEN)
+if [ -z "$token" ] || [ "$body" != "$token" ]; then
+  printf 'Status: 403 Forbidden\r\nContent-Type: text/plain\r\n\r\nforbidden\n'
+  exit 0
+fi
+v=${QUERY_STRING:-}
+case "$v" in ''|*[!A-Za-z0-9-]*) fail "bad value";; esac
+query "insert into items(v) values ('$v'); select last_insert_id()"
+reply "wrote $v id=$out via $DBHOST"

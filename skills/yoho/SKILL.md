@@ -267,7 +267,10 @@ archive or registry. Writes after the recovery point are lost.
 Opt-in Compose `roles` assigns every Service to exactly one Role. Stateful
 Services and connection providers are singleton. `connections` declares a
 provider TCP port and consumers; Yoho renders private publications, environment
-endpoints and Compose-name extra_hosts aliases. Configure private addresses or
+endpoints and Compose-name extra_hosts aliases. `instances: true` lets a
+non-proxied, one-container-per-Server provider run on several Servers; consumers
+address each as `<server>.m.<service>`. Per-Server environment goes in
+`servers.<name>.tags` plus `x-yoho.tags.<tag or Server>.env` (ADR 0020). Configure private addresses or
 an opt-in mesh, root/passwordless sudo and Docker-aware firewall tools/systemd.
 Connection allowlists live in mangle PREROUTING before DNAT/FORWARD; never
 replace them with UFW or DOCKER-USER alone. See docs/site/roles.md.
@@ -279,6 +282,12 @@ converge. Backups and Scheduled Jobs follow the owning Server.
 Use `yoho service move SERVICE --to SERVER --plan` before a stop-first data move;
 require a fresh Backup, empty owned target volumes and health checks. Commit the
 printed config edit. Source volume cleanup is a separate `--cleanup-source` run.
+`yoho app stop SERVICE [--reason TEXT]` keeps a non-proxied Service down through
+deploy, apply and rollback (volumes kept) until `yoho app start SERVICE`. For a
+Postgres switchover, edit the Connection (standby as `service`, old primary in
+`consumers`), then `yoho db promote [--plan]`: it fences the old primary with
+`app stop`, waits for replay, runs `pg_promote()` and applies. Never pass
+`--old-primary-down` unless the old Server is powered off. See ADR 0021.
 
 Generated-secret owners are pinned in Release metadata; never regenerate on a
 placement change. Release commands run before every replica. After a partial

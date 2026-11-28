@@ -3,6 +3,7 @@ package cli
 import (
 	"context"
 	"fmt"
+	"maps"
 	"os/exec"
 	"path"
 	"runtime"
@@ -175,7 +176,7 @@ func runDoctor(cmd *cobra.Command, g *globals, opts doctorOptions) error {
 				e = roles.CheckFirewall(ctx, h.Host, rules)
 			}
 			if e == nil {
-				e = roles.CheckBindings(ctx, h.Host, a.cfg.App, a.destName, h.Name, a.dest, addresses)
+				e = roles.CheckBindings(ctx, h.Host, a.cfg.App, a.destName, h.Name, a.doctorBindingDest(ctx, h, &findings), addresses)
 			}
 			if e != nil {
 				findings = append(findings, doctorFinding{Check: "roles", Severity: severityError, Subject: h.Name, Message: e.Error(), Hint: "run yoho apply to reconcile private port bindings and Docker firewall rules"})
@@ -1140,4 +1141,24 @@ func formatBytes(b uint64) string {
 	default:
 		return fmt.Sprintf("%d KiB", b/1024)
 	}
+}
+
+// doctorBindingDest is the Destination whose Connection bindings doctor
+// checks on h: a provider `yoho app stop` stopped there has none, so it is
+// a warning instead of a binding error.
+func (a *app) doctorBindingDest(ctx context.Context, h plan.NamedHost, findings *[]doctorFinding) config.Destination {
+	stopped, e := deploy.ReadStopped(ctx, h.Host, a.cfg.App, a.destName)
+	if e != nil || len(stopped) == 0 {
+		return a.dest
+	}
+	d := a.dest
+	d.Connections = maps.Clone(a.dest.Connections)
+	for _, n := range sortedKeys(d.Connections) {
+		c := d.Connections[n]
+		if _, ok := stopped[c.Service]; ok && slices.Contains(d.ServiceServers(c.Service), h.Name) {
+			delete(d.Connections, n)
+			*findings = append(*findings, doctorFinding{Check: "roles", Severity: severityWarning, Subject: h.Name, Message: fmt.Sprintf("connection %s provider %s is stopped (`yoho app stop`): %s", n, c.Service, stopped[c.Service].Describe()), Hint: "`yoho app start " + c.Service + "` runs it, or switch the Connection"})
+		}
+	}
+	return d
 }

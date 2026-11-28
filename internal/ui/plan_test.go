@@ -74,3 +74,19 @@ func TestPlanJSON(t *testing.T) {
 		t.Errorf("%v", last)
 	}
 }
+
+func TestPlanShowsStoppedService(t *testing.T) {
+	stopped := plan.Change{Kind: "service", Name: "db", Server: "a", Action: plan.ActionNoop, Stopped: true, Reasons: []string{"stopped by `yoho app stop` (alice); `yoho app start db` runs it"}}
+	var b bytes.Buffer
+	New(&b, Human, false).Plan([]plan.Change{{Kind: "service", Name: "web", Action: plan.ActionNoop}, stopped})
+	out := b.String()
+	i, j := strings.Index(out, "  =   service db [a]: stopped"), strings.Index(out, "No changes.")
+	if i < 0 || j < 0 || i > j || !strings.Contains(out, "`yoho app start db` runs it") {
+		t.Fatalf("%q", out)
+	}
+	b.Reset()
+	New(&b, JSON, false).Plan([]plan.Change{stopped})
+	if !strings.Contains(b.String(), `"stopped":true`) {
+		t.Fatalf("%s", b.String())
+	}
+}

@@ -32,6 +32,9 @@ Global flags (every command): `-c, --config FILE`, `-d, --destination NAME` (def
 | `app stats [SERVICE...] [--no-stream]` | CPU, memory, network and block I/O of the App's containers (default: every Service) on the Destination's first Server. Live view in a terminal; one snapshot with `--no-stream`, without a terminal, or when `CI` is set or `TERM=dumb` (use this from scripts and coding agents); `--json` prints docker's JSON object per container. Swarm: only tasks on the first Server. |
 | `app exec SERVICE [-i] [-t] -- COMMAND...` | Run a command in a running Service container. Default: no stdin, no pseudo-terminal (`docker compose exec -T`), for scripts. `-i` passes this terminal's stdin; `-t` allocates a pseudo-terminal (`ssh -t`, `docker compose exec` without `-T`; swarm `docker exec -it`) and needs a terminal; `-it` for consoles and shells (`yoho app exec web -it -- bin/rails console`). An unknown SERVICE fails before connecting, with the list of Services. The command's output and exit code are passed through: a failing command (or `service "web" is not running`) prints only its own stderr and exits with its code. |
 | `app run SERVICE [-i] [-t] [--allow-stateful] -- COMMAND...` | One-off container from the current Release of SERVICE: `docker compose run --rm --no-deps` with the Release's compiled compose, so the same image, secrets files and env, networks and volumes, but no published ports, no Proxy route and no dependency started; labelled `yoho.oneoff=run` (and compose's one-off label) and removed when the command exits. Serving containers are untouched. For migrations and consoles: `yoho app run web -- bin/rails db:migrate`, `yoho app run web -it -- bin/rails console`. The command's exit status is yoho's. A Stateful Service is refused unless `--allow-stateful` (a second container on its data, ADR 0005). Compose only: on swarm use `app exec` or `x-yoho.release_command`. |
+| `app stop SERVICE [--server S] [--reason TEXT] [--lock-wait[=D]]` | Stop and remove SERVICE's containers and keep it stopped: deploy, apply and rollback leave it down and `plan` shows it as stopped until `app start`. Volumes are kept. See [app stop and app start](#app-stop-and-app-start). |
+| `app start SERVICE [--server S] [--lock-wait[=D]]` | Start a Service stopped by `app stop` from the current Release and wait until it is ready. |
+| `db promote [CONNECTION] [--from SERVICE] [--old-primary-down] [--user ROLE] [--max-lag 16MiB] [--timeout 5m] [--version V] [--skip-build] [--plan] [--auto-approve] [--lock-wait[=D]]` | Promote a Postgres standby after you point the Connection at it: fence the old primary, wait for replay, `pg_promote()`, apply. See [Database](#database). |
 | `tui [--interval 5s] [-n LINES]` | Live, read-only terminal dashboard: every Server of the Destination (load, memory, disk, Docker), the App's containers with health, CPU and memory, the Proxy, Releases, and container logs. Keys: `tab`/`←→` Server, `↑↓` select, `d` Service details (CPU, memory, network/disk I/O, PIDs), `enter` logs (`/` filters them), `r` refresh, `q` quit. Needs a terminal. See [Dashboards](dashboards.md). |
 | `ui [--port 0] [--no-open] [--interval 5s]` | The same view in the browser, served on `127.0.0.1` from this machine with a one-time login link. Read-only; nothing runs on the Servers. See [Dashboards](dashboards.md). |
 | `access install [--binary PATH]` | Operator: set up the Gate on the Server (yoho-gate user, sudoers rule, root-owned `/usr/local/bin/yoho`). Idempotent; needs root or sudo. See [Sharing one App with a team](team-access.md). |
@@ -256,6 +259,136 @@ Members recover through the Gate's automatic rollout reattachment and `releases`
 Codes 10–15 apply to mutating commands; malformed flags/arguments and an unconverged `plan --out` also exit 10. With `--json`, Cobra validation emits one error event. Existing contracts stay unchanged:
 `plan --detailed-exitcode` uses 0/1/2 (unchanged/error/changes), `config check`
 uses 0/1/2, and `app exec` / `app run` pass through the executed command's code.
+
+## app stop and app start
+
+`yoho app stop SERVICE` stops and removes the Service's containers (only
+those labeled with this App and Destination, so
+`restart: always` and a Docker restart cannot revive them) and records the
+Service as stopped in `stopped.json` in the App directory on each Server. The
+next deploy, apply or rollback passes a derived Compose override that scales
+it to zero: it is never started, its release command does not run, and nothing
+waits for it. Release files do not change. A config change of a stopped
+Service (image, environment, any compose key) is still a change: apply records
+the new Release, the Service stays stopped, and `app start` runs the new
+config. `yoho plan` shows it:
+
+```text
+  =   service db [a]: stopped
+        stopped by `yoho app stop` (alice@laptop, 2026-11-27 10:00 UTC: maintenance); `yoho app start db` runs it
+No changes. Your Servers match the configuration.
+```
+
+`yoho app ps` lists stopped Services after the containers. `yoho app start
+SERVICE` checks, as deploy does, that no other App Destination's containers
+use the compose project, starts the Service from the current Release's
+compiled compose without its dependencies, removes the record once Compose
+started it, and waits for its healthcheck and `x-yoho.check`. If Compose fails
+to start it or it does not become ready, its containers are removed again and
+it stays marked stopped, so no restart policy revives it; read `yoho app logs
+SERVICE` and rerun `yoho app start`. For a Service no longer in the current
+Release, `yoho app start` only clears its stopped entry (`yoho app ps` marks
+such entries "not in the current Release"), so it cannot stop a future Service
+of that name.
+
+- Volumes are never removed.
+- With Roles, both act on every Server hosting the Service; `--server` picks one.
+- Rerunning either on a Service already in that state exits 0 and changes nothing.
+- `app stop` checks the current Release again under the lock, and acts only on
+  containers that are not one-off runs.
+- deploy, apply, plan and rollback refuse a Release that adds `x-yoho.proxy`
+  to a stopped Service: run `yoho app start SERVICE` first.
+- Refused before any change: runtime swarm, scoped access, no current Release,
+  a Service not in the current Release, and a proxied Service (set
+  `deploy.replicas: 0` and deploy instead).
+- A Connection consumer whose provider is stopped fails its deploy with
+  ``connection X provider db is stopped on a (`yoho app stop`)``. `yoho doctor`
+  warns about it instead of checking that provider's bindings. `yoho service
+  move` refuses a stopped Service.
+- `--json` emits `service_stop` (`service`, `server`, `changed`, `containers`,
+  `exit_codes`) and `service_start` (`service`, `server`, `changed`, `ready`);
+  plan `change` events of stopped Services carry `stopped: true`.
+
+## Database
+
+`yoho db promote [CONNECTION]` promotes a streaming Postgres standby. It is
+config first: edit the Connection so its `service` is the standby and the old
+primary is one of its `consumers`, then run it. CONNECTION is optional when
+exactly one Connection's provider differs between the current Release and the
+Yoho file; `--from SERVICE` names the old primary when the Release already
+matches. Both Services must be `x-yoho.stateful`, and the Destination must use
+Roles, the compose runtime and operator access.
+
+1. Read-only checks: the standby is in recovery and streaming, the old primary
+   is not, both have the same `system_identifier` (one cluster), the standby
+   receives the old primary's current timeline, and the standby's replay lags
+   at most `--max-lag` (default 16MiB). With the locks held, they run again
+   right before the fence.
+2. The plan: the old primary's fence, `pg_promote()` on the standby, then what
+   apply changes. `--plan` stops here; otherwise it asks `yes` unless
+   `--auto-approve`.
+3. With every Server locked, it fences the old primary with `yoho app stop`
+   (reason `db promote CONNECTION`). Before the stopped container is removed,
+   it runs `pg_controldata` on its data directory (`PGDATA`, default
+   `/var/lib/postgresql/data`): the cluster must be `shut down` on the same
+   timeline, and its latest checkpoint location (the shutdown checkpoint) is
+   the target. If an earlier attempt already removed the containers before
+   that check was recorded, the shutdown cannot be verified and counts as
+   unclean. A container
+   that does not exit 0, or a cluster not shut down, stops the promotion and
+   is recorded in the journal: a rerun refuses it until you either
+   `yoho app start` the old primary or pass `--old-primary-down` to accept
+   losing what the standby did not receive.
+4. It waits (up to `--timeout`, default 5m) until the standby has replayed the
+   target. Without a target (`--old-primary-down`), it waits until replay is
+   stable for two polls and either matches what was received or the WAL
+   receiver no longer streams.
+5. `SELECT pg_promote(true, 60)` on the standby.
+6. It releases the locks and runs `yoho deploy` with the Yoho file, which moves
+   the Connection, its firewall and its consumers. The old primary stays stopped.
+
+It then prints the next steps: remove the old primary's volume by hand (Yoho
+never deletes volumes), `yoho app start` it to clone the new primary as a
+standby, and move the Backup job. Every step is journaled in
+`promotions/CONNECTION.json` in the App directory on the new primary's Server;
+rerun the command to resume. The journal is a retry marker only:
+
+- Every run re-reads the fence from the old primary's Server: its
+  `stopped.json` entry must be the one the journal recorded, with no running
+  container. If you ran `yoho app start` on the old primary after a failure,
+  the rerun fences it again and takes a fresh target; if you started and
+  stopped it again, its shutdown cannot be verified and counts as unclean.
+- A promoted journal whose new primary is back in recovery is stale and
+  ignored.
+- If the promotion succeeded but the apply did not, a rerun resumes at the
+  apply, as long as the old primary is still stopped (or its Server is gone).
+  The journal also supplies the old primary when neither the Release nor the
+  Yoho file places it any more.
+- The journal is deleted once the apply succeeds, so a rerun after success
+  refuses with "no Connection changed its provider" and changes nothing.
+
+psql runs in the containers over the local socket as `--user`, else
+`POSTGRES_USER` as the Service sees it on its Server (its `x-yoho.tags`
+environment, then its Compose environment), else `postgres`; no password is
+passed. An `x-yoho.secrets` entry named `POSTGRES_USER` is read inside the
+container (`$POSTGRES_USER` with `secrets_as_env`, else
+`/run/secrets/POSTGRES_USER`) into `PGUSER`, so it is never in a command
+line.
+pg_hba needs a `local` rule for that role; a psql connection or authentication
+failure in the checks says so. LSNs are validated before use.
+
+When the old primary's Server is lost, power it off, remove it from `servers`
+and the Destination, remove the old primary from compose and from the
+Connection's consumers, and pass `--old-primary-down`: there is no fence, and
+the standby is promoted at the position it received, so writes it did not
+receive are lost. With the old primary's Server still in the Destination,
+`--old-primary-down` is refused, except to accept the loss after an unclean
+fence while nothing of the old primary runs.
+
+`--json` emits `db_promote` events (`connection`, `from`, `to`, `step`,
+`state`, `target_lsn`). Plain `yoho plan` names `yoho db promote` when a
+Connection's provider moves between two Stateful Services. See
+[Postgres primary and standby](postgres-replication.md) and ADR 0021.
 
 ## Service placement
 
