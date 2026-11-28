@@ -26,6 +26,7 @@ const guide = [
   ['WireGuard mesh', 'mesh'],
   ['High availability & recovery', 'high-availability'],
   ['Postgres primary & standby', 'postgres-replication'],
+  ['MariaDB primary & replica', 'mysql-replication'],
   ['Support matrix', 'support-matrix'],
   ['Compare', 'compare'],
   ['Dashboards (tui / ui)', 'dashboards'],

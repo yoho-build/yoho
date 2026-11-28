@@ -1,0 +1,16 @@
+# yaml-language-server: $schema=../../schema/yoho.schema.json
+app: mariadb
+servers:
+  a: {ssh: root@203.0.113.10, private_address: 10.0.0.10}
+  b: {ssh: root@203.0.113.11, private_address: 10.0.0.11}
+destinations:
+  production:
+    servers: [a, b]
+    roles:
+      app: {services: [web], servers: [a]}
+      primary: {services: [db], servers: [a]}
+      replica: {services: [db-replica], servers: [b]}
+    connections:
+      # The Service named here is the primary. Its consumers are web and the
+      # replica. To promote db-replica, follow docs/site/mysql-replication.md.
+      primary: {service: db, port: 3306, consumers: [web, db-replica]}

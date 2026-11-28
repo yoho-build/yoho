@@ -1,0 +1,9 @@
+# One file for primary and replica, so it stays correct after a promotion.
+# server_id comes from the entrypoint (one per Service).
+[mariadbd]
+log_bin = mariadb-bin
+log_slave_updates = ON
+binlog_format = ROW
+gtid_strict_mode = ON
+# Keep a week of binary logs: a replica that was down longer must be rebuilt.
+binlog_expire_logs_seconds = 604800

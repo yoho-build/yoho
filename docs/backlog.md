@@ -23,4 +23,3 @@
 - Kamal-style per-Server tags and env, so one Service definition can differ per Server without a second Service.
 - `yoho app stop` for proxied Services (remove the route, keep it down through deploys) and on runtime swarm (ADR 0021).
 - `yoho db promote` for MySQL/MariaDB, and a pg_rewind option that rejoins the old primary without a full base backup (ADR 0021).
-- MySQL/MariaDB primary/replica recipe, tested in CI like the Postgres one.
