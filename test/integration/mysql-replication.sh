@@ -14,6 +14,8 @@ servers_extra_diagnose() {
   local id
   for id in $(docker exec "$1" docker ps -aq --filter "label=com.docker.compose.project=$project"); do
     docker exec "$1" docker logs --tail 40 "$id" 2>&1 || true
+    echo "--- replication state of $id"
+    docker exec "$1" docker exec "$id" sh /etc/yoho-mariadb/entrypoint.sh mariadb -e 'SHOW REPLICA STATUS\G SELECT @@gtid_current_pos, @@gtid_slave_pos, @@read_only; SELECT * FROM app.items' 2>&1 || true
   done
 }
 # shellcheck source=test/integration/servers.sh
