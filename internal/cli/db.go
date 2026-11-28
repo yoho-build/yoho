@@ -208,6 +208,13 @@ func derivePromotion(dest config.Destination, rels map[string]*release.Release, 
 		return t, fmt.Errorf("new primary %s must run on exactly one Server, not %d", t.To, len(to))
 	}
 	t.ToServer = to[0]
+	// A promoted journal knows the old primary's Server even when neither
+	// the Release nor the config places it any more (lost Server, apply
+	// failed after recording the new Release).
+	if j := journals[name]; t.FromJournal && j != nil && j.Promoted() && j.FromServer != "" {
+		t.FromServer = j.FromServer
+		return t, nil
+	}
 	for _, server := range sortedKeys(rels) {
 		if rel := rels[server]; rel != nil && rel.Roles != nil {
 			if hs := (config.Destination{Roles: rel.Roles}).ServiceServers(t.From); len(hs) == 1 {
@@ -227,36 +234,30 @@ func derivePromotion(dest config.Destination, rels map[string]*release.Release, 
 	return t, nil
 }
 
-// secretGetter reads a secret by key (*secrets.Store).
-type secretGetter interface {
-	Get(key string) (string, bool)
-}
-
 // postgresUser is --user, else POSTGRES_USER as the Service on server sees
-// it: its per-Server x-yoho.tags environment, its Compose environment, its
-// x-yoho.secrets, else postgres. fromSecret marks a value read from the
-// secrets: callers never print it.
-func postgresUser(flag string, svc types.ServiceConfig, ext config.ServiceExt, server string, srv config.Server, store secretGetter) (user string, fromSecret bool) {
+// it: its per-Server x-yoho.tags environment, its Compose environment, else
+// postgres. An x-yoho.secrets entry named POSTGRES_USER is never read here:
+// secret names how psql resolves it inside the container
+// (pgpromote.UserFromEnv or UserFromFile), so it is never in argv.
+func postgresUser(flag string, svc types.ServiceConfig, ext config.ServiceExt, server string, srv config.Server) (user, secret string) {
 	if flag != "" {
-		return flag, false
+		return flag, ""
 	}
 	if v := config.ServerEnv(ext, server, srv)["POSTGRES_USER"]; v != "" {
-		return v, false
+		return v, ""
 	}
 	if v, ok := svc.Environment["POSTGRES_USER"]; ok && v != nil && *v != "" {
-		return *v, false
+		return *v, ""
 	}
-	if store != nil {
-		for _, ref := range ext.Secrets {
-			if ref.Name != "POSTGRES_USER" {
-				continue
+	for _, ref := range ext.Secrets {
+		if ref.Name == "POSTGRES_USER" {
+			if ext.SecretsAsEnv {
+				return "", pgpromote.UserFromEnv
 			}
-			if v, ok := store.Get(ref.Key); ok && v != "" {
-				return v, true
-			}
+			return "", pgpromote.UserFromFile
 		}
 	}
-	return "postgres", false
+	return "postgres", ""
 }
 
 // serviceVolumeNames are the Docker names of svc's named volumes.
@@ -338,12 +339,12 @@ func (a *app) dbPromote(ctx context.Context, conn string, o promoteOptions) (err
 		return err
 	}
 	project := release.ProjectName(a.cfg.App, a.destName)
-	newUser, _ := postgresUser(o.User, s.r.Project.Services[t.To], s.r.Ext[t.To], t.ToServer, a.cfg.Servers[t.ToServer], s.store)
-	oldUser, _ := postgresUser(o.User, s.r.Project.Services[t.From], s.r.Ext[t.From], t.FromServer, a.cfg.Servers[t.FromServer], s.store)
+	newUser, newSecret := postgresUser(o.User, s.r.Project.Services[t.To], s.r.Ext[t.To], t.ToServer, a.cfg.Servers[t.ToServer])
+	oldUser, oldSecret := postgresUser(o.User, s.r.Project.Services[t.From], s.r.Ext[t.From], t.FromServer, a.cfg.Servers[t.FromServer])
 	popts := pgpromote.Options{
 		App: a.cfg.App, Destination: a.destName, Connection: t.Connection,
-		New:            pgpromote.Node{Server: t.ToServer, Service: t.To, Project: project, User: newUser, Host: hosts[t.ToServer].Host},
-		Old:            pgpromote.Node{Server: t.FromServer, Service: t.From, Project: project, User: oldUser},
+		New:            pgpromote.Node{Server: t.ToServer, Service: t.To, Project: project, User: newUser, UserSecret: newSecret, Host: hosts[t.ToServer].Host},
+		Old:            pgpromote.Node{Server: t.FromServer, Service: t.From, Project: project, User: oldUser, UserSecret: oldSecret},
 		OldPrimaryDown: o.OldPrimaryDown,
 		MaxLag:         maxLag,
 		Timeout:        o.Timeout,

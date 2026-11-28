@@ -313,16 +313,21 @@ matches. Both Services must be `x-yoho.stateful`, and the Destination must use
 Roles, the compose runtime and operator access.
 
 1. Read-only checks: the standby is in recovery and streaming, the old primary
-   is not, both have the same `system_identifier` (one cluster), and the
-   standby's replay lags at most `--max-lag` (default 16MiB).
+   is not, both have the same `system_identifier` (one cluster), the standby
+   receives the old primary's current timeline, and the standby's replay lags
+   at most `--max-lag` (default 16MiB). With the locks held, they run again
+   right before the fence.
 2. The plan: the old primary's fence, `pg_promote()` on the standby, then what
    apply changes. `--plan` stops here; otherwise it asks `yes` unless
    `--auto-approve`.
 3. With every Server locked, it fences the old primary with `yoho app stop`
    (reason `db promote CONNECTION`). Before the stopped container is removed,
    it runs `pg_controldata` on its data directory (`PGDATA`, default
-   `/var/lib/postgresql/data`): the cluster must be `shut down`, and its latest
-   checkpoint location (the shutdown checkpoint) is the target. A container
+   `/var/lib/postgresql/data`): the cluster must be `shut down` on the same
+   timeline, and its latest checkpoint location (the shutdown checkpoint) is
+   the target. If an earlier attempt already removed the containers before
+   that check was recorded, the shutdown cannot be verified and counts as
+   unclean. A container
    that does not exit 0, or a cluster not shut down, stops the promotion and
    is recorded in the journal: a rerun refuses it until you either
    `yoho app start` the old primary or pass `--old-primary-down` to accept
@@ -341,20 +346,27 @@ standby, and move the Backup job. Every step is journaled in
 `promotions/CONNECTION.json` in the App directory on the new primary's Server;
 rerun the command to resume. The journal is a retry marker only:
 
-- Every run re-reads the fence from the old primary's Server (`stopped.json`
-  and no running container). If you ran `yoho app start` on the old primary
-  after a failure, the rerun fences it again and takes a fresh target.
+- Every run re-reads the fence from the old primary's Server: its
+  `stopped.json` entry must be the one the journal recorded, with no running
+  container. If you ran `yoho app start` on the old primary after a failure,
+  the rerun fences it again and takes a fresh target; if you started and
+  stopped it again, its shutdown cannot be verified and counts as unclean.
 - A promoted journal whose new primary is back in recovery is stale and
   ignored.
 - If the promotion succeeded but the apply did not, a rerun resumes at the
-  apply.
+  apply, as long as the old primary is still stopped (or its Server is gone).
+  The journal also supplies the old primary when neither the Release nor the
+  Yoho file places it any more.
 - The journal is deleted once the apply succeeds, so a rerun after success
   refuses with "no Connection changed its provider" and changes nothing.
 
 psql runs in the containers over the local socket as `--user`, else
 `POSTGRES_USER` as the Service sees it on its Server (its `x-yoho.tags`
-environment, then its Compose environment, then an `x-yoho.secrets` entry named
-`POSTGRES_USER`, never printed), else `postgres`; no password is passed.
+environment, then its Compose environment), else `postgres`; no password is
+passed. An `x-yoho.secrets` entry named `POSTGRES_USER` is read inside the
+container (`$POSTGRES_USER` with `secrets_as_env`, else
+`/run/secrets/POSTGRES_USER`) into `PGUSER`, so it is never in a command
+line.
 pg_hba needs a `local` rule for that role; a psql connection or authentication
 failure in the checks says so. LSNs are validated before use.
 

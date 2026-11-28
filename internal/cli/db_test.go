@@ -109,7 +109,7 @@ func TestPostgresUserAndVolumes(t *testing.T) {
 	user := "app"
 	svc := types.ServiceConfig{ContainerSpec: types.ContainerSpec{Environment: types.MappingWithEquals{"POSTGRES_USER": &user}}}
 	user1 := func(flag string, svc types.ServiceConfig) string {
-		u, _ := postgresUser(flag, svc, config.ServiceExt{}, "a", config.Server{}, nil)
+		u, _ := postgresUser(flag, svc, config.ServiceExt{}, "a", config.Server{})
 		return u
 	}
 	if user1("", svc) != "app" || user1("admin", svc) != "admin" || user1("", types.ServiceConfig{}) != "postgres" {
@@ -171,31 +171,30 @@ func TestCheckPromotionRefusals(t *testing.T) {
 	}
 }
 
-// postgresUser reads POSTGRES_USER from the Server's tag environment and
-// the Service's secrets too, marking a secret-sourced value.
+// postgresUser reads POSTGRES_USER from the Server's tag environment; a
+// secret-sourced one is never read, only where the container has it.
 func TestPostgresUserFromTagsAndSecrets(t *testing.T) {
 	compose := "app"
 	svc := types.ServiceConfig{ContainerSpec: types.ContainerSpec{Environment: types.MappingWithEquals{"POSTGRES_USER": &compose}}}
 	ext := config.ServiceExt{Tags: map[string]config.ServiceTag{"eu": {Env: map[string]string{"POSTGRES_USER": "eu_admin"}}}}
-	if u, sec := postgresUser("", svc, ext, "a", config.Server{Tags: []string{"eu"}}, nil); u != "eu_admin" || sec {
+	if u, sec := postgresUser("", svc, ext, "a", config.Server{Tags: []string{"eu"}}); u != "eu_admin" || sec != "" {
 		t.Fatal(u)
 	}
-	if u, _ := postgresUser("", svc, ext, "b", config.Server{}, nil); u != "app" {
+	if u, _ := postgresUser("", svc, ext, "b", config.Server{}); u != "app" {
 		t.Fatal(u)
 	}
-	store := mapStore{"PG_USER": "secret_admin"}
 	ext = config.ServiceExt{Secrets: config.SecretRefs{{Name: "POSTGRES_USER", Key: "PG_USER"}}}
-	if u, sec := postgresUser("", types.ServiceConfig{}, ext, "a", config.Server{}, store); u != "secret_admin" || !sec {
+	if u, sec := postgresUser("", types.ServiceConfig{}, ext, "a", config.Server{}); u != "" || sec != pgpromote.UserFromFile {
 		t.Fatal(u, sec)
 	}
-	if u, sec := postgresUser("ops", types.ServiceConfig{}, ext, "a", config.Server{}, store); u != "ops" || sec {
+	ext.SecretsAsEnv = true
+	if u, sec := postgresUser("", types.ServiceConfig{}, ext, "a", config.Server{}); u != "" || sec != pgpromote.UserFromEnv {
+		t.Fatal(u, sec)
+	}
+	if u, sec := postgresUser("ops", types.ServiceConfig{}, ext, "a", config.Server{}); u != "ops" || sec != "" {
 		t.Fatal(u)
 	}
 }
-
-type mapStore map[string]string
-
-func (m mapStore) Get(k string) (string, bool) { v, ok := m[k]; return v, ok }
 
 // The socket/pg_hba hint is for psql failures only.
 func TestPreflightHintOnlyForPsqlErrors(t *testing.T) {
@@ -255,5 +254,25 @@ func TestDbPromoteRefusesWithoutRoles(t *testing.T) {
 	a.dest.Runtime = ""
 	if err = a.dbPromote(context.Background(), "", promoteOptions{MaxLag: "lots"}); err == nil || !strings.Contains(err.Error(), "byte size") {
 		t.Fatal(err)
+	}
+}
+
+// S7: a lost-Server promotion whose new Release was recorded before a later
+// apply step failed resumes from its promoted journal: neither the Release
+// nor the config places the old primary any more.
+func TestDerivePromotionResumesLostServerFromJournal(t *testing.T) {
+	dest := config.Destination{
+		Servers: []string{"b"},
+		Roles: map[string]config.Role{
+			"app":     {Services: []string{"web"}, Servers: []string{"b"}},
+			"standby": {Services: []string{"db-standby"}, Servers: []string{"b"}},
+		},
+		Connections: map[string]config.Connection{"primary": {Service: "db-standby", Port: 5432, Consumers: []string{"web"}}},
+	}
+	rels := map[string]*release.Release{"b": {Roles: dest.Roles, Connections: dest.Connections}}
+	j := &pgpromote.Journal{Connection: "primary", From: "db", To: "db-standby", FromServer: "a", ToServer: "b", State: "promoted"}
+	got, err := derivePromotion(dest, rels, map[string]*pgpromote.Journal{"primary": j}, "", "")
+	if err != nil || got.From != "db" || got.To != "db-standby" || got.FromServer != "a" || !got.Done {
+		t.Fatalf("%+v %v", got, err)
 	}
 }

@@ -111,7 +111,9 @@ config first: you edit the Connection, and it does the rest.
 
    It reads the old primary (`db`) from the current Release and checks,
    read-only, that `db-standby` is streaming from the same cluster (same
-   `system_identifier`) and at most `--max-lag` (16MiB) behind. It shows the plan and asks `yes` (`--auto-approve` skips the
+   `system_identifier`) on `db`'s current timeline and at most `--max-lag`
+   (16MiB) behind. It repeats these checks with the locks held, right before
+   the fence. It shows the plan and asks `yes` (`--auto-approve` skips the
    question, `--plan` stops there). Then it:
 
    - fences `db` with `yoho app stop db`: its container is stopped and
@@ -129,7 +131,8 @@ config first: you edit the Connection, and it does the rest.
    stopped: `yoho app start db` restores the old primary, or rerun
    `yoho db promote` to continue. Every step is journaled on Server `b`, and
    a rerun resumes. A rerun checks `db`'s Server again: if you started `db`,
-   it is fenced again. If the promotion worked but the deploy failed, a
+   it is fenced again; if you started and stopped it again, its shutdown can
+   no longer be verified and the rerun refuses as below. If the promotion worked but the deploy failed, a
    rerun resumes at the deploy. The journal is deleted once the deploy
    succeeds.
 

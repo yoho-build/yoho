@@ -34,6 +34,9 @@ type pgHost struct {
 	sysid        string
 	running      string // docker ps -q answer
 	noReceive    bool   // pg_last_wal_receive_lsn() is NULL
+	tli          string // pg_control_checkpoint().timeline_id
+	recvTLI      string // pg_stat_wal_receiver.received_tli
+	failCheck    error  // the stop script's after-stop check fails (containers kept)
 	failQuery    error
 	log          []string
 	writes       int
@@ -64,6 +67,10 @@ func (h *pgHost) Output(ctx context.Context, c remote.Cmd) (string, error) {
 	switch {
 	case strings.Contains(s, "docker stop $ids"):
 		h.log = append(h.log, "stop")
+		if h.failCheck != nil && strings.Contains(s, "pg_controldata") {
+			h.running = ""
+			return "", h.failCheck
+		}
 		out := h.stopOut
 		if strings.Contains(s, "pg_controldata") && h.controlData != "" && out != "" {
 			id, _, _ := strings.Cut(out, " ")
@@ -87,6 +94,13 @@ func (h *pgHost) Output(ctx context.Context, c remote.Cmd) (string, error) {
 			return h.promoteOut, nil
 		case strings.Contains(s, "pg_is_in_recovery()"):
 			return map[bool]string{true: "t", false: "f"}[h.recovery], nil
+		case strings.Contains(s, "received_tli"):
+			if h.receiver == "" {
+				return "", nil
+			}
+			return or(h.recvTLI, "1"), nil
+		case strings.Contains(s, "pg_control_checkpoint()"):
+			return or(h.tli, "1"), nil
 		case strings.Contains(s, "pg_stat_wal_receiver"):
 			return h.receiver, nil
 		case strings.Contains(s, "pg_control_system()"):
@@ -120,7 +134,7 @@ func fixture(t *testing.T) (*pgHost, *pgHost, Options) {
 	old := release.Root
 	release.Root = t.TempDir()
 	t.Cleanup(func() { release.Root = old })
-	a := &pgHost{name: "a", recovery: false, current: "0/3000060", stopOut: "c1 0", controlData: "Database system identifier:           7000000000000000001\nDatabase cluster state:               shut down\nLatest checkpoint location:           0/3000080", running: "c1", receive: "0/3000000", replay: []string{"0/3000000"}}
+	a := &pgHost{name: "a", recovery: false, current: "0/3000060", stopOut: "c1 0", controlData: "Database system identifier:           7000000000000000001\nDatabase cluster state:               shut down\nLatest checkpoint location:           0/3000080\nLatest checkpoint's TimeLineID:       1", running: "c1", receive: "0/3000000", replay: []string{"0/3000000"}}
 	b := &pgHost{name: "b", recovery: true, receiver: "streaming", replay: []string{"0/3000000", "0/3000060", "0/3000100"}, promoteOut: "t"}
 	o := Options{
 		App: "pg", Destination: "production", Connection: "primary",
@@ -195,9 +209,10 @@ func TestRunFencesWaitsAndPromotesInOrder(t *testing.T) {
 	if err := Run(context.Background(), o); err != nil {
 		t.Fatal(err)
 	}
-	// The target is the shutdown checkpoint read after the clean stop,
-	// not pg_current_wal_lsn() of the still-writable primary.
-	if got := strings.Join(a.log, ","); got != "stop" {
+	// Replication is rechecked under the locks (current), then the old
+	// primary is stopped. The target is the shutdown checkpoint (0/3000080)
+	// read after the clean stop, not pg_current_wal_lsn() (0/3000060).
+	if got := strings.Join(a.log, ","); got != "current,stop" {
 		t.Fatalf("old primary: %s", got)
 	}
 	if b.promoteCalls != 1 || b.recovery {
@@ -361,7 +376,7 @@ func TestPromotedJournalIsNotReusedForANewSwitchover(t *testing.T) {
 	if err := Run(context.Background(), o); err != nil {
 		t.Fatal(err)
 	}
-	if strings.Join(a.log, ",") != "stop" || b.promoteCalls != 2 {
+	if strings.Join(a.log, ",") != "current,stop" || b.promoteCalls != 2 {
 		t.Fatalf("second switchover skipped: old %v, promotes %d", a.log, b.promoteCalls)
 	}
 	if err := DeleteJournal(context.Background(), b, "pg", "production", "primary"); err != nil {
@@ -395,7 +410,7 @@ func TestResumeRefencesAfterOldPrimaryStarted(t *testing.T) {
 		t.Fatal(err)
 	}
 	j, _ := ReadJournal(context.Background(), b, "pg", "production", "primary")
-	if strings.Join(a.log, ",") != "stop" || j.TargetLSN != "0/3000090" || b.promoteCalls != 1 {
+	if strings.Join(a.log, ",") != "current,stop" || j.TargetLSN != "0/3000090" || b.promoteCalls != 1 {
 		t.Fatalf("no re-fence: old %v, %+v", a.log, j)
 	}
 }
@@ -497,5 +512,150 @@ func TestPreflightRefusesAnotherCluster(t *testing.T) {
 	a.controlData = strings.Replace(a.controlData, "7000000000000000001", "7000000000000000002", 1)
 	if err := Run(context.Background(), o); err == nil || !strings.Contains(err.Error(), "different clusters") || b.promoteCalls != 0 {
 		t.Fatal(err)
+	}
+}
+
+// S2: a fence is identified by its stop record. Started and stopped again
+// after a failed promotion, the old primary has another record: the old
+// target predates the restart, and with its containers gone no fresh one
+// can be read, so the retry refuses as unclean.
+func TestFenceIdentityMismatchIsNotReused(t *testing.T) {
+	a, b, o := fixture(t)
+	b.replay = []string{"0/3000000"}
+	b.receive = "0/3000000"
+	o.Timeout = 20 * time.Millisecond
+	if err := Run(context.Background(), o); err == nil {
+		t.Fatal("wait should time out")
+	}
+	j, _ := ReadJournal(context.Background(), b, "pg", "production", "primary")
+	if j.FenceAt.IsZero() || !j.FenceStarted {
+		t.Fatalf("fence identity not journaled: %+v", j)
+	}
+	// `yoho app start db`, writes, then `yoho app stop db`.
+	freshStart(t, a)
+	a.stopOut = "c2 0"
+	if _, err := deploy.StopService(context.Background(), a, "pg", "production", "db", deploy.StoppedEntry{By: "bob", At: time.Now().Add(time.Hour)}); err != nil {
+		t.Fatal(err)
+	}
+	a.stopOut, a.log = "", nil
+	b.replay = []string{"0/3000080"}
+	b.receive = "0/3000080"
+	if st, err := Preflight(context.Background(), o); err != nil || st.Fenced {
+		t.Fatalf("another stop record trusted as the journal's fence: %+v %v", st, err)
+	}
+	err := Run(context.Background(), o)
+	if err == nil || !strings.Contains(err.Error(), "did not shut down cleanly") || !strings.Contains(err.Error(), "removed by an earlier attempt") || b.promoteCalls != 0 {
+		t.Fatalf("%v, promotes %d", err, b.promoteCalls)
+	}
+}
+
+// S2: a promoted journal resumes at apply only while the old primary stays
+// fenced.
+func TestPromotedJournalChecksFence(t *testing.T) {
+	a, _, o := fixture(t)
+	if err := Run(context.Background(), o); err != nil {
+		t.Fatal(err)
+	}
+	freshStart(t, a)
+	if _, err := Preflight(context.Background(), o); err == nil || !strings.Contains(err.Error(), "runs again") {
+		t.Fatal(err)
+	}
+	if err := Run(context.Background(), o); err == nil || !strings.Contains(err.Error(), "runs again") {
+		t.Fatal(err)
+	}
+	o.Old.Host = nil // the old Server is gone
+	if err := Run(context.Background(), o); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// S3: an attempt that died after docker rm but before journaling the
+// result leaves no container and no target: the retry is unclean.
+func TestFenceStartedWithoutContainersIsUnclean(t *testing.T) {
+	a, b, o := fixture(t)
+	if _, err := deploy.StopService(context.Background(), a, "pg", "production", "db", deploy.StoppedEntry{By: "yoho", At: time.Now()}); err != nil {
+		t.Fatal(err)
+	}
+	j := &Journal{Connection: "primary", From: "db", To: "db-standby", FenceStarted: true, Steps: map[string]string{StepFence: "running"}, State: "running"}
+	if err := writeJournal(context.Background(), b, "pg", "production", j); err != nil {
+		t.Fatal(err)
+	}
+	a.stopOut = ""
+	err := Run(context.Background(), o)
+	if err == nil || !strings.Contains(err.Error(), "removed by an earlier attempt") || b.promoteCalls != 0 {
+		t.Fatalf("%v, promotes %d", err, b.promoteCalls)
+	}
+	if j, _ = ReadJournal(context.Background(), b, "pg", "production", "primary"); j.Steps[StepFence] != "unclean" || j.TargetLSN != "" {
+		t.Fatalf("%+v", j)
+	}
+	// --old-primary-down accepts the loss.
+	o.OldPrimaryDown = true
+	b.receiver = ""
+	if err := Run(context.Background(), o); err != nil || b.promoteCalls != 1 {
+		t.Fatalf("%v, promotes %d", err, b.promoteCalls)
+	}
+}
+
+// S3: a failed pg_controldata check keeps the stopped containers, so the
+// retry reads the shutdown checkpoint.
+func TestFailedControlDataCheckKeepsContainers(t *testing.T) {
+	a, b, o := fixture(t)
+	a.failCheck = errors.New("check of stopped container c1 failed; containers kept")
+	if err := Run(context.Background(), o); err == nil || b.promoteCalls != 0 {
+		t.Fatal(err)
+	}
+	j, _ := ReadJournal(context.Background(), b, "pg", "production", "primary")
+	if j.Steps[StepFence] != "failed" || j.TargetLSN != "" {
+		t.Fatalf("%+v", j)
+	}
+	a.failCheck = nil // c1 is still there, stopped
+	if err := Run(context.Background(), o); err != nil {
+		t.Fatal(err)
+	}
+	if j, _ = ReadJournal(context.Background(), b, "pg", "production", "primary"); j.TargetLSN != "0/3000080" || b.promoteCalls != 1 {
+		t.Fatalf("%+v", j)
+	}
+}
+
+// S4: the standby must receive the old primary's timeline; Run rechecks
+// replication under the locks; the stopped data directory must still be
+// on that timeline.
+func TestTimelineChecks(t *testing.T) {
+	a, b, o := fixture(t)
+	a.tli = "2"
+	if _, err := Preflight(context.Background(), o); err == nil || !strings.Contains(err.Error(), "receives timeline 1, but db is on timeline 2") {
+		t.Fatal(err)
+	}
+	if err := Run(context.Background(), o); err == nil || strings.Contains(strings.Join(a.log, ","), "stop") {
+		t.Fatalf("Run fenced without rechecking: %v %v", err, a.log)
+	}
+
+	a, b, o = fixture(t)
+	if _, err := Preflight(context.Background(), o); err != nil {
+		t.Fatal(err)
+	}
+	b.receiver = "" // stopped streaming after the unlocked preflight
+	if err := Run(context.Background(), o); err == nil || !strings.Contains(err.Error(), "not streaming") || strings.Contains(strings.Join(a.log, ","), "stop") {
+		t.Fatalf("%v %v", err, a.log)
+	}
+
+	a, b, o = fixture(t)
+	a.controlData = strings.Replace(a.controlData, "TimeLineID:       1", "TimeLineID:       3", 1)
+	if err := Run(context.Background(), o); err == nil || !strings.Contains(err.Error(), "timeline 3, but it was on timeline 1") || b.promoteCalls != 0 {
+		t.Fatal(err)
+	}
+}
+
+// P2: a secret role never reaches argv; it is resolved in the container.
+func TestPsqlScriptSecretUser(t *testing.T) {
+	n := Node{Service: "db", Project: "yoho-pg-production", UserSecret: UserFromFile}
+	want := "set -eu\ndocker compose '-p' 'yoho-pg-production' 'exec' '-T' 'db' 'sh' '-c' 'PGUSER=\"$(cat /run/secrets/POSTGRES_USER)\" exec psql -X -At -v ON_ERROR_STOP=1 -d postgres -c \"$1\"' 'sh' 'SELECT 1'"
+	if got := n.PsqlScript("SELECT 1"); got != want {
+		t.Fatalf("got %s\nwant %s", got, want)
+	}
+	n.UserSecret = UserFromEnv
+	want = "set -eu\ndocker compose '-p' 'yoho-pg-production' 'exec' '-T' 'db' 'sh' '-c' 'PGUSER=\"$POSTGRES_USER\" exec psql -X -At -v ON_ERROR_STOP=1 -d postgres -c \"$1\"' 'sh' 'SELECT 1'"
+	if got := n.PsqlScript("SELECT 1"); got != want || strings.Contains(got, "-U") {
+		t.Fatalf("got %s\nwant %s", got, want)
 	}
 }

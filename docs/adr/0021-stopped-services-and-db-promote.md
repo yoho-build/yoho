@@ -36,8 +36,9 @@ hand with `ALTER SYSTEM`, `pg_promote()` and an edited Connection.
    the standby is its provider and the old primary a consumer; promote reads
    the old primary from the current Release. It is Postgres only and manual:
    it runs only when the operator runs it. Preflight checks that the standby
-   streams from the old primary and belongs to its cluster (same
-   `system_identifier`). It refuses to promote without a fence: the old
+   streams from the old primary, belongs to its cluster (same
+   `system_identifier`) and receives its current timeline; the checks run
+   again under the locks before the fence. It refuses to promote without a fence: the old
    primary is stopped with `yoho app stop`, then, before its container is
    removed, `pg_controldata` on its data directory must report `shut down`;
    its latest checkpoint (the shutdown checkpoint, the end of its WAL) is the
@@ -47,9 +48,11 @@ hand with `ALTER SYSTEM`, `pg_promote()` and an edited Connection.
    `--old-primary-down`. Otherwise `--old-primary-down` is only for a Server
    the operator powered off and removed from the Destination. Each step is
    journaled on the new primary's Server, so a rerun resumes; the fence is
-   re-verified from Server state on every run (a restarted old primary is
-   fenced again), and a promoted journal whose new primary is in recovery is
-   stale. The journal is only a retry marker: it is deleted after the
+   re-verified from Server state on every run against the stop record the
+   journal recorded (a restarted old primary is fenced again; one started
+   and stopped again, or whose containers an earlier attempt removed before
+   the check was journaled, is unclean), and a promoted journal whose new
+   primary is in recovery is stale. The journal is only a retry marker: it is deleted after the
    follow-up apply succeeds, and a rerun of a promoted journal resumes at the
    apply. It never deletes volumes and never rewrites the Yoho file. It ends
    with the ordinary deploy of the Yoho file, which moves the Connection, its
