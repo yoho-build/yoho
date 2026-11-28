@@ -211,7 +211,8 @@ func derivePromotion(dest config.Destination, rels map[string]*release.Release, 
 	// A promoted journal knows the old primary's Server even when neither
 	// the Release nor the config places it any more (lost Server, apply
 	// failed after recording the new Release).
-	if j := journals[name]; t.FromJournal && j != nil && j.Promoted() && j.FromServer != "" {
+	// Same with --from, when the journal is of this very promotion.
+	if j := journals[name]; j != nil && j.Promoted() && j.Connection == name && j.From == t.From && j.To == t.To && j.FromServer != "" {
 		t.FromServer = j.FromServer
 		return t, nil
 	}

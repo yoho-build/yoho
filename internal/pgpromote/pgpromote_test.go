@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -285,12 +286,13 @@ func TestRunTimesOutThenResumesFromJournal(t *testing.T) {
 
 func TestRunResumesAfterPromoteBeforeJournalCompleted(t *testing.T) {
 	a, b, o := fixture(t)
-	j := &Journal{Connection: "primary", From: "db", To: "db-standby", Steps: map[string]string{StepFence: "complete", StepWait: "complete", StepPromote: "running"}, State: "running"}
+	at := time.Date(2026, 11, 27, 10, 0, 0, 0, time.UTC)
+	j := &Journal{Connection: "primary", From: "db", To: "db-standby", FenceAt: at, Steps: map[string]string{StepFence: "complete", StepWait: "complete", StepPromote: "running"}, State: "running"}
 	if err := writeJournal(context.Background(), b, "pg", "production", j); err != nil {
 		t.Fatal(err)
 	}
 	b.recovery = false // pg_promote ran, the journal did not record it
-	if _, err := deploy.StopService(context.Background(), a, "pg", "production", "db", deploy.StoppedEntry{By: "alice"}); err != nil {
+	if _, err := deploy.StopService(context.Background(), a, "pg", "production", "db", deploy.StoppedEntry{By: "alice", At: at}); err != nil {
 		t.Fatal(err)
 	}
 	a.log = nil
@@ -649,13 +651,87 @@ func TestTimelineChecks(t *testing.T) {
 // P2: a secret role never reaches argv; it is resolved in the container.
 func TestPsqlScriptSecretUser(t *testing.T) {
 	n := Node{Service: "db", Project: "yoho-pg-production", UserSecret: UserFromFile}
-	want := "set -eu\ndocker compose '-p' 'yoho-pg-production' 'exec' '-T' 'db' 'sh' '-c' 'PGUSER=\"$(cat /run/secrets/POSTGRES_USER)\" exec psql -X -At -v ON_ERROR_STOP=1 -d postgres -c \"$1\"' 'sh' 'SELECT 1'"
+	inner := `PGUSER=$(cat /run/secrets/POSTGRES_USER) || { echo "yoho: cannot read /run/secrets/POSTGRES_USER" >&2; exit 1; }; [ -n "$PGUSER" ] || { echo "yoho: POSTGRES_USER is empty in the container" >&2; exit 1; }; export PGUSER; exec psql -X -At -v ON_ERROR_STOP=1 -d postgres -c "$1"`
+	want := "set -eu\ndocker compose '-p' 'yoho-pg-production' 'exec' '-T' 'db' 'sh' '-c' " + remote.Quote(inner) + " 'sh' 'SELECT 1'"
 	if got := n.PsqlScript("SELECT 1"); got != want {
 		t.Fatalf("got %s\nwant %s", got, want)
 	}
 	n.UserSecret = UserFromEnv
-	want = "set -eu\ndocker compose '-p' 'yoho-pg-production' 'exec' '-T' 'db' 'sh' '-c' 'PGUSER=\"$POSTGRES_USER\" exec psql -X -At -v ON_ERROR_STOP=1 -d postgres -c \"$1\"' 'sh' 'SELECT 1'"
+	inner = `PGUSER=${POSTGRES_USER:-}; [ -n "$PGUSER" ] || { echo "yoho: POSTGRES_USER is empty in the container" >&2; exit 1; }; export PGUSER; exec psql -X -At -v ON_ERROR_STOP=1 -d postgres -c "$1"`
+	want = "set -eu\ndocker compose '-p' 'yoho-pg-production' 'exec' '-T' 'db' 'sh' '-c' " + remote.Quote(inner) + " 'sh' 'SELECT 1'"
 	if got := n.PsqlScript("SELECT 1"); got != want || strings.Contains(got, "-U") {
 		t.Fatalf("got %s\nwant %s", got, want)
+	}
+}
+
+// Round 3: a completed fence without FenceAt is unverified, never a match.
+func TestFenceWithoutIdentityIsUnverified(t *testing.T) {
+	a, b, o := fixture(t)
+	if _, err := deploy.StopService(context.Background(), a, "pg", "production", "db", deploy.StoppedEntry{By: "bob", At: time.Now()}); err != nil {
+		t.Fatal(err)
+	}
+	j := &Journal{Connection: "primary", From: "db", To: "db-standby", TargetLSN: "0/3000080", Steps: map[string]string{StepFence: "complete"}, State: "failed"}
+	if err := writeJournal(context.Background(), b, "pg", "production", j); err != nil {
+		t.Fatal(err)
+	}
+	a.stopOut = ""
+	b.replay = []string{"0/3000080"}
+	if st, err := Preflight(context.Background(), o); err != nil || st.Fenced {
+		t.Fatalf("fence without identity matched: %+v %v", st, err)
+	}
+	if err := Run(context.Background(), o); err == nil || !strings.Contains(err.Error(), "did not shut down cleanly") || b.promoteCalls != 0 {
+		t.Fatalf("%v, promotes %d", err, b.promoteCalls)
+	}
+}
+
+// Round 3: an incomplete fence step (running or failed) is an attempted
+// stop even without FenceStarted.
+func TestIncompleteFenceIsAnAttemptedStop(t *testing.T) {
+	for _, state := range []string{"running", "failed"} {
+		t.Run(state, func(t *testing.T) {
+			a, b, o := fixture(t)
+			at := time.Now().UTC().Truncate(time.Second)
+			if _, err := deploy.StopService(context.Background(), a, "pg", "production", "db", deploy.StoppedEntry{By: "yoho", At: at}); err != nil {
+				t.Fatal(err)
+			}
+			j := &Journal{Connection: "primary", From: "db", To: "db-standby", FenceAt: at, Steps: map[string]string{StepFence: state}, State: "failed"}
+			if err := writeJournal(context.Background(), b, "pg", "production", j); err != nil {
+				t.Fatal(err)
+			}
+			a.stopOut = ""
+			if err := Run(context.Background(), o); err == nil || !strings.Contains(err.Error(), "removed by an earlier attempt") || b.promoteCalls != 0 {
+				t.Fatalf("%v, promotes %d", err, b.promoteCalls)
+			}
+		})
+	}
+}
+
+// Round 3: the secret-role wrapper fails without running psql when the role
+// cannot be read or is empty, and exports it otherwise.
+func TestSecretUserWrapperRefusesEmptyRole(t *testing.T) {
+	dir := t.TempDir()
+	os.WriteFile(filepath.Join(dir, "psql"), []byte("#!/bin/sh\necho \"psql as [$PGUSER]: $*\"\n"), 0o755)
+	run := func(secret, env string) (string, error) {
+		cmd := exec.Command("sh", "-c", psqlInner(secret), "sh", "SELECT 1")
+		cmd.Env = []string{"PATH=" + dir + ":/usr/bin:/bin"}
+		if env != "" {
+			cmd.Env = append(cmd.Env, env)
+		}
+		out, err := cmd.CombinedOutput()
+		return string(out), err
+	}
+	if out, err := run(UserFromEnv, "POSTGRES_USER=app"); err != nil || out != "psql as [app]: -X -At -v ON_ERROR_STOP=1 -d postgres -c SELECT 1\n" {
+		t.Fatalf("%q %v", out, err)
+	}
+	for _, env := range []string{"", "POSTGRES_USER="} {
+		if out, err := run(UserFromEnv, env); err == nil || strings.Contains(out, "psql as") || !strings.Contains(out, "POSTGRES_USER is empty") {
+			t.Fatalf("%q: %q %v", env, out, err)
+		}
+	}
+	if _, err := os.Stat("/run/secrets/POSTGRES_USER"); err == nil {
+		t.Skip("host has /run/secrets/POSTGRES_USER")
+	}
+	if out, err := run(UserFromFile, ""); err == nil || strings.Contains(out, "psql as") || !strings.Contains(out, "cannot read /run/secrets/POSTGRES_USER") {
+		t.Fatalf("%q %v", out, err)
 	}
 }

@@ -74,5 +74,10 @@ hand with `ALTER SYSTEM`, `pg_promote()` and an edited Connection.
 - Replication stays asynchronous. The fence relies on a clean shutdown sending
   the last WAL to the standby; `--old-primary-down` loses what the standby did
   not receive.
+- Promote checks `system_identifier` and timeline, but not the standby's
+  upstream host or full WAL history, so a standby following a different
+  branch with the same timeline ID (two copies promoted independently) is not
+  detected; the recipe's single Connection makes that require manual
+  misconfiguration.
 - Stopping a proxied Service (removing its route and keeping it down) and
   stop on runtime swarm are future work; today they use `deploy.replicas: 0`.

@@ -273,3 +273,8 @@ the Backup job to the Service that is now the primary.
   consumer.
 - `yoho db promote` supports Postgres only, and rebuilds the old primary with a
   full base backup (no pg_rewind).
+- `yoho db promote` checks the standby's `system_identifier` and timeline,
+  but not its upstream host or full WAL history. A standby that follows a
+  different branch with the same timeline ID (two copies promoted
+  independently) is not detected; with this recipe's single Connection, that
+  takes a manual misconfiguration.

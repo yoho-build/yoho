@@ -276,3 +276,26 @@ func TestDerivePromotionResumesLostServerFromJournal(t *testing.T) {
 		t.Fatalf("%+v %v", got, err)
 	}
 }
+
+// Round 3: an explicit --from uses a matching promoted journal's placement.
+func TestDerivePromotionFromFlagUsesJournalPlacement(t *testing.T) {
+	dest := config.Destination{
+		Servers: []string{"b"},
+		Roles: map[string]config.Role{
+			"app":     {Services: []string{"web"}, Servers: []string{"b"}},
+			"standby": {Services: []string{"db-standby"}, Servers: []string{"b"}},
+		},
+		Connections: map[string]config.Connection{"primary": {Service: "db-standby", Port: 5432, Consumers: []string{"web"}}},
+	}
+	rels := map[string]*release.Release{"b": {Roles: dest.Roles, Connections: dest.Connections}}
+	j := &pgpromote.Journal{Connection: "primary", From: "db", To: "db-standby", FromServer: "a", ToServer: "b", State: "promoted"}
+	got, err := derivePromotion(dest, rels, map[string]*pgpromote.Journal{"primary": j}, "primary", "db")
+	if err != nil || got.FromServer != "a" {
+		t.Fatalf("%+v %v", got, err)
+	}
+	// A journal of another switchover is not used.
+	j.From = "other"
+	if _, err = derivePromotion(dest, rels, map[string]*pgpromote.Journal{"primary": j}, "primary", "db"); err == nil {
+		t.Fatal("placement taken from another promotion's journal")
+	}
+}

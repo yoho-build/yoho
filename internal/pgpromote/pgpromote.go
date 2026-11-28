@@ -49,18 +49,24 @@ const (
 // secret role is resolved inside the container into PGUSER, so it is never
 // in argv.
 func (n Node) PsqlScript(sql string) string {
-	psql := []string{"psql", "-X", "-At", "-v", "ON_ERROR_STOP=1"}
-	var user string
-	switch n.UserSecret {
-	case UserFromEnv:
-		user = `PGUSER="$POSTGRES_USER"`
-	case UserFromFile:
-		user = `PGUSER="$(cat /run/secrets/POSTGRES_USER)"`
-	default:
-		return "set -eu\ndocker compose " + remote.QuoteArgs(append(append([]string{"-p", n.Project, "exec", "-T", n.Service}, psql...), "-U", n.User, "-d", "postgres", "-c", sql)...)
+	if n.UserSecret == "" {
+		return "set -eu\ndocker compose " + remote.QuoteArgs(append(append([]string{"-p", n.Project, "exec", "-T", n.Service}, psqlArgs...), "-U", n.User, "-d", "postgres", "-c", sql)...)
 	}
-	inner := user + " exec " + strings.Join(psql, " ") + ` -d postgres -c "$1"`
-	return "set -eu\ndocker compose " + remote.QuoteArgs("-p", n.Project, "exec", "-T", n.Service, "sh", "-c", inner, "sh", sql)
+	return "set -eu\ndocker compose " + remote.QuoteArgs("-p", n.Project, "exec", "-T", n.Service, "sh", "-c", psqlInner(n.UserSecret), "sh", sql)
+}
+
+var psqlArgs = []string{"psql", "-X", "-At", "-v", "ON_ERROR_STOP=1"}
+
+// psqlInner is the in-container script that runs psql as the secret role
+// ($1 is the SQL).
+func psqlInner(secret string) string {
+	user := `PGUSER=${POSTGRES_USER:-}; `
+	if secret == UserFromFile {
+		user = `PGUSER=$(cat /run/secrets/POSTGRES_USER) || { echo "yoho: cannot read /run/secrets/POSTGRES_USER" >&2; exit 1; }; `
+	}
+	// Never run psql with an empty role: it would fall back to the OS user.
+	return user + `[ -n "$PGUSER" ] || { echo "yoho: POSTGRES_USER is empty in the container" >&2; exit 1; }; export PGUSER; exec ` +
+		strings.Join(psqlArgs, " ") + ` -d postgres -c "$1"`
 }
 
 // PsqlError is a psql run that failed: it could not connect or
@@ -387,7 +393,9 @@ func journalFenced(ctx context.Context, o Options, j *Journal) (bool, error) {
 	if err != nil || !ok {
 		return false, err
 	}
-	return j.FenceAt.IsZero() || e.At.Equal(j.FenceAt), nil
+	// A fence without a recorded identity is unverified: it matches no
+	// stop record.
+	return !j.FenceAt.IsZero() && e.At.Equal(j.FenceAt), nil
 }
 
 // promotedButNotFenced refuses to resume a promoted journal while the old
@@ -591,8 +599,9 @@ func Run(ctx context.Context, o Options) (err error) {
 			return e
 		}
 		if !fenced {
-			// FenceStarted stays: a container gone without a verified
+			// A fence was attempted: a container gone without a verified
 			// shutdown is unclean.
+			j.FenceStarted = true
 			delete(j.Steps, StepFence)
 			delete(j.Steps, StepWait)
 			j.TargetLSN, j.Unclean, j.FenceAt, j.Timeline = "", nil, time.Time{}, ""
@@ -636,6 +645,11 @@ func Run(ctx context.Context, o Options) (err error) {
 		j.Steps[name] = state
 		report(name, j.Steps[name])
 		return errors.Join(e, save(context.WithoutCancel(ctx)))
+	}
+	// An incomplete fence step (running or failed) attempted a stop, even
+	// when FenceStarted was never journaled.
+	if f := j.Steps[StepFence]; f == "running" || f == "failed" {
+		j.FenceStarted = true
 	}
 	stopAttempted := false
 	if err = step(StepFence, func() (string, error) {
