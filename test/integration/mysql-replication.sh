@@ -129,7 +129,7 @@ sed -i 's/primary: {service: db, port: 3306, consumers: \[web, db-replica\]}/pri
 grep -F 'primary: {service: db-replica, port: 3306, consumers: [web, db]}' yoho.yml >/dev/null
 # 4. Apply.
 "$yoho_bin" apply --auto-approve --version v3
-wrote_via_b() { write row4 | grep -F 'wrote row4 id=' | grep -F "via $b_ip"; }
+wrote_via_b() { local out; out=$(write row4); echo "write row4: $out" >&2; grep -F 'wrote row4 id=' <<<"$out" | grep -F "via $b_ip"; }
 eventually wrote_via_b
 has_row "$server_b" db-replica row1
 # The old primary restarted read-only, fenced and a consumer with old data.

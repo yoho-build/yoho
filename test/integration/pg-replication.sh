@@ -134,7 +134,8 @@ write row-stopped | grep -F 'wrote row-stopped'
 eventually streaming "$server_a" db db-standby
 # The volume was kept: no new base backup, and the standby catches up.
 marked "$server_b" db-standby
-[[ "$(clones "$server_b" db-standby)" == 1 ]]
+# app stop removed the old container, so the new one's log shows no clone.
+[[ "$(clones "$server_b" db-standby)" == 0 ]]
 eventually has_row "$server_b" db-standby row-stopped
 
 # yoho db promote, config first. Without a config edit it refuses and says
