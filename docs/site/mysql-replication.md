@@ -66,8 +66,8 @@ recipe carries over, but CI tests only MariaDB.
    would fail. Both database Services receive all three passwords as files.
    `MARIADB_PASSWORD` is the password of the `app` user that `web` uses.
    Each password must be one line: the entrypoint writes them into SQL, one
-   statement per line. A single trailing newline in a secret file is ignored
-   (the shell and the image's `*_FILE` reading strip it the same way); any
+   statement per line. Trailing newlines in a secret file are ignored (the
+   shell and the image's `*_FILE` reading strip them the same way); any
    other newline or a carriage return makes the entrypoint refuse to start,
    naming the secret but never its value.
 3. Run `yoho deploy`. Yoho starts `db` first, then `db-replica` (provider

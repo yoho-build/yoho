@@ -35,10 +35,10 @@ q() { sed -e 's/\\/\\\\/g' -e "s/'/\\\\'/g"; }
 # root@localhost over the socket; the client reads the password from MYSQL_PWD.
 root_pw() { MYSQL_PWD=$(cat /run/secrets/MARIADB_ROOT_PASSWORD); export MYSQL_PWD; }
 sql() { root_pw; mariadb --protocol=socket -uroot -N -B "$@"; }
-# Passwords go into SQL and the init file, one statement per line. A single
-# trailing newline in a secret file is ignored (command substitution strips
-# it, as the image's *_FILE reading does); any other newline or carriage
-# return is refused, without printing the secret.
+# Passwords go into SQL and the init file, one statement per line. Trailing
+# newlines in a secret file are ignored (command substitution strips them,
+# as the image's *_FILE reading does); any other newline or carriage return
+# is refused, without printing the secret.
 nl='
 '
 cr=$(printf '\r')
