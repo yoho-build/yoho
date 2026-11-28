@@ -255,6 +255,12 @@ func compile(d *plan.Deploy, server, generationDir string, svcSecrets map[string
 		if s.Environment == nil {
 			s.Environment = types.MappingWithEquals{}
 		}
+		// Per-Server x-yoho.tags environment overrides Compose environment.
+		if len(d.Servers) > 0 {
+			for k, v := range config.ServerEnv(ext, d.Servers[0].Name, d.Servers[0].Server) {
+				s.Environment[k] = &v
+			}
+		}
 		setEnv := func(k, v string) {
 			if _, ok := s.Environment[k]; !ok {
 				s.Environment[k] = &v

@@ -267,7 +267,10 @@ archive or registry. Writes after the recovery point are lost.
 Opt-in Compose `roles` assigns every Service to exactly one Role. Stateful
 Services and connection providers are singleton. `connections` declares a
 provider TCP port and consumers; Yoho renders private publications, environment
-endpoints and Compose-name extra_hosts aliases. Configure private addresses or
+endpoints and Compose-name extra_hosts aliases. `instances: true` lets a
+non-proxied, one-container-per-Server provider run on several Servers; consumers
+address each as `<server>.m.<service>`. Per-Server environment goes in
+`servers.<name>.tags` plus `x-yoho.tags.<tag or Server>.env` (ADR 0020). Configure private addresses or
 an opt-in mesh, root/passwordless sudo and Docker-aware firewall tools/systemd.
 Connection allowlists live in mangle PREROUTING before DNAT/FORWARD; never
 replace them with UFW or DOCKER-USER alone. See docs/site/roles.md.

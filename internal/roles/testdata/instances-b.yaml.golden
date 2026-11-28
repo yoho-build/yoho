@@ -1,0 +1,18 @@
+services:
+  echo:
+    networks:
+      default:
+        aliases:
+          - b.m.echo
+          - b.m.echo.shop.yoho.internal
+    ports:
+      - host_ip: 10.0.0.2
+        target: 8000
+        published: "8000"
+        protocol: tcp
+  worker:
+    environment:
+      YOHO_CONNECTION_UPSTREAM_PORT: "8000"
+    extra_hosts:
+      - a.m.echo.shop.yoho.internal=10.0.0.1
+      - a.m.echo=10.0.0.1

@@ -4,7 +4,8 @@
 |---|---|
 | `config/deploy.yml` | `yoho.yml` + `x-yoho` in `compose.yaml` |
 | `-d dest`, `deploy.<dest>.yml` | `destinations:`, `-d dest` |
-| roles | not yet; one Server per Destination |
+| roles | `destinations.<name>.roles` ([Roles](roles.md)) |
+| host tags (`hosts: [{1.2.3.4: [eu]}]`) and `env.tags` | `servers.<name>.tags` and `x-yoho.tags.<tag>.env`; a Server name also works as a tag ([Per-Server tags](configuration.md#per-server-tags)) |
 | accessories | Services with `x-yoho.stateful: true` |
 | `.kamal/secrets` | `.yoho/secrets` (same dotenv and `$(...)`) |
 | `env.secret` | `x-yoho.secrets` (`NAME:KEY` aliases) |

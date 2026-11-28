@@ -77,11 +77,22 @@ func CheckRoles(r *Result, d config.Destination, proxy config.ProxyConfig, app .
 		if svc.NetworkMode != "" {
 			add(conn.Service, "connection %s target must use Compose networking", name)
 		}
-		key := fmt.Sprint(d.ServiceServers(conn.Service), conn.Port)
-		if prev, ok := ports[key]; ok {
-			add(conn.Service, "connections %s and %s publish the same port on one Server", prev, name)
+		providers := d.ServiceServers(conn.Service)
+		for _, h := range providers {
+			key := fmt.Sprint(h, conn.Port)
+			if prev, ok := ports[key]; ok && prev != name {
+				add(conn.Service, "connections %s and %s publish the same port on one Server", prev, name)
+			}
+			ports[key] = name
 		}
-		ports[key] = name
+		if conn.Instances {
+			if r.Ext[conn.Service].Proxy != nil {
+				add(conn.Service, "instance connection %s provider cannot be proxied; consumers address each Server's container directly", name)
+			}
+			if svc.GetScale() != 1 {
+				add(conn.Service, "instance connection %s provider must run exactly one container per Server (replicas: 1)", name)
+			}
+		}
 		for _, p := range svc.Ports {
 			if p.Published == strconv.Itoa(conn.Port) && (p.Target != uint32(conn.Port) || p.Protocol != "" && p.Protocol != "tcp") {
 				add(conn.Service, "connection %s conflicts with existing publication on port %d", name, conn.Port)
@@ -102,10 +113,16 @@ func CheckRoles(r *Result, d config.Destination, proxy config.ProxyConfig, app .
 				add(consumer, "connection %s consumer must use Compose networking", name)
 			}
 			for _, h := range d.ServiceServers(consumer) {
-				if slices.Contains(d.ServiceServers(conn.Service), h) {
-					continue
+				var names []string
+				if len(providers) == 1 && providers[0] != h {
+					names = append(names, conn.Service, conn.Service+"."+appName+".yoho.internal")
 				}
-				for _, alias := range []string{conn.Service, conn.Service + "." + appName + ".yoho.internal"} {
+				if conn.Instances {
+					for _, p := range providers {
+						names = append(names, roles.InstanceNames(appName, p, conn.Service)...)
+					}
+				}
+				for _, alias := range names {
 					if _, ok := cs.ExtraHosts[alias]; ok {
 						add(consumer, "connection %s name collision in extra_hosts: %s", name, alias)
 					}
@@ -115,7 +132,7 @@ func CheckRoles(r *Result, d config.Destination, proxy config.ProxyConfig, app .
 						continue
 					}
 					for _, net := range r.Project.Services[local].Networks {
-						if net != nil && (slices.Contains(net.Aliases, conn.Service) || slices.Contains(net.Aliases, conn.Service+"."+appName+".yoho.internal")) {
+						if net != nil && slices.ContainsFunc(names, func(n string) bool { return slices.Contains(net.Aliases, n) }) {
 							add(consumer, "connection %s name collides with local Service %s network alias", name, local)
 						}
 					}

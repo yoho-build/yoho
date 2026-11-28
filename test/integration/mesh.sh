@@ -3,7 +3,8 @@
 # Yoho's opt-in WireGuard mesh (ADR 0018), then a Roles App (ADR 0017/0019)
 # whose database connection runs over mesh addresses. Server c is NATed
 # (`endpoint: none`): it drops inbound new UDP, so every mesh packet to it must
-# ride the tunnel it opened to the hub (a, first public Server by name).
+# ride the tunnel it opened to the hub (a, first public Server by name). The
+# same App checks per-Server tags env and an instance Connection (ADR 0020).
 # Requires a Linux host with the wireguard kernel module loaded and SSH access
 # to Docker bridge IPs (GitHub ubuntu runners). No host Docker socket is mounted.
 set -euo pipefail
@@ -79,16 +80,33 @@ class Handler(BaseHTTPRequestHandler):
  def log_message(self,*args):pass
 HTTPServer(('0.0.0.0',8000),Handler).serve_forever()
 '''
+echo='''import os
+from http.server import BaseHTTPRequestHandler,HTTPServer
+class Handler(BaseHTTPRequestHandler):
+ def do_GET(self):
+  self.send_response(200);self.end_headers();self.wfile.write(('echo '+os.environ['YOHO_SERVER']+' '+os.environ.get('ECHO_NAME','')).encode())
+ def log_message(self,*args):pass
+HTTPServer(('0.0.0.0',9000),Handler).serve_forever()
+'''
 worker="import socket,time\nwhile True:\n s=socket.create_connection(('db',5432),3);s.close();print('db reachable',flush=True);time.sleep(1)"
 compose={'services':{
  'web':{'image':'python:3.13-alpine','command':['python','-u','-c',web],'restart':'unless-stopped','healthcheck':{'test':['CMD','python','-c',"import urllib.request;urllib.request.urlopen('http://127.0.0.1:8000/')"],'interval':'1s','timeout':'5s'},'x-yoho':{'proxy':{'hosts':['mesh-ci.test'],'ssl':False,'port':8000,'health_path':'/'}}},
- 'worker':{'image':'python:3.13-alpine','command':['python','-u','-c',worker],'restart':'unless-stopped'},
+ # worker env differs per Server through x-yoho.tags (ADR 0020): tag eu and
+ # its own Server name b.
+ 'worker':{'image':'python:3.13-alpine','command':['python','-u','-c',worker],'restart':'unless-stopped','environment':{'REGION':'us'},
+   'x-yoho':{'tags':{'eu':{'env':{'REGION':'eu'}},'b':{'env':{'NODE_NAME':'beta'}}}}},
+ # One non-proxied echo Instance on a and on b, each naming its Server.
+ 'echo':{'image':'python:3.13-alpine','command':['python','-u','-c',echo],'restart':'unless-stopped',
+   'x-yoho':{'tags':{'a':{'env':{'ECHO_NAME':'alpha'}},'b':{'env':{'ECHO_NAME':'beta'}}}}},
  'db':{'image':'postgres:17-alpine','restart':'unless-stopped','environment':{'POSTGRES_HOST_AUTH_METHOD':'trust'},'volumes':['data:/var/lib/postgresql/data'],'healthcheck':{'test':['CMD','pg_isready','-h','127.0.0.1'],'interval':'1s'},'x-yoho':{'stateful':True}}},'volumes':{'data':{}}}
 config={'app':'mesh-ci','network':{'mesh':'wireguard'},
- 'servers':{'a':{'ssh':'root@'+sys.argv[2]},'b':{'ssh':'root@'+sys.argv[3]},'c':{'ssh':'root@'+sys.argv[4],'endpoint':'none'}},
+ 'servers':{'a':{'ssh':'root@'+sys.argv[2]},'b':{'ssh':'root@'+sys.argv[3],'tags':['eu']},'c':{'ssh':'root@'+sys.argv[4],'endpoint':'none'}},
  'destinations':{
   # web on b, db on NATed c: the connection b -> c is forwarded by hub a.
-  'production':{'servers':['b','c'],'roles':{'app':{'services':['web','worker'],'servers':['b']},'data':{'services':['db'],'servers':['c']}},'connections':{'database':{'service':'db','port':5432,'consumers':['web','worker']}}}}}
+  # echo Instances on a and b: worker on b reaches a.m.echo over the mesh and
+  # b.m.echo as a local network alias.
+  'production':{'servers':['a','b','c'],'roles':{'app':{'services':['web','worker'],'servers':['b']},'data':{'services':['db'],'servers':['c']},'echo':{'services':['echo'],'servers':['a','b']}},
+   'connections':{'database':{'service':'db','port':5432,'consumers':['web','worker']},'upstream':{'service':'echo','port':9000,'consumers':['worker'],'instances':True}}}}}
 (p/'compose.yaml').write_text(json.dumps(compose));(p/'yoho.json').write_text(json.dumps(config))
 PY
 cd "$work/app"
@@ -197,6 +215,27 @@ curl -fsS --max-time 5 -H 'Host: mesh-ci.test' "http://$b_ip/" | grep -F 'mesh d
 if docker exec "$server_a" nc -z -w 2 10.210.0.3 5432; then echo 'non-consumer mesh peer reached db' >&2; exit 1; fi
 # db is published only on c's mesh address, not its outer interface.
 if docker exec "$server_a" nc -z -w 2 "$c_ip" 5432; then echo 'db reachable on c outer address' >&2; exit 1; fi
+# Per-Server tags: worker on b gets tag eu and its Server-name env.
+worker=$(docker exec "$server_b" docker ps -q --filter "label=com.docker.compose.project=$project" --filter label=com.docker.compose.service=worker | head -n1)
+[[ -n "$worker" ]]
+got=$(docker exec "$server_b" docker exec "$worker" printenv REGION)
+[[ "$got" == eu ]] || { echo "worker REGION=$got, want eu (tag eu over compose us)" >&2; exit 1; }
+got=$(docker exec "$server_b" docker exec "$worker" printenv NODE_NAME)
+[[ "$got" == beta ]] || { echo "worker NODE_NAME=$got, want beta (Server-name selector)" >&2; exit 1; }
+# Instance connection: a.m.echo over the mesh, b.m.echo as b's local alias,
+# each answering with its own Server and tag env.
+echo_from_worker() {
+  docker exec "$server_b" docker exec "$worker" python -c "import urllib.request;print(urllib.request.urlopen('http://$1:9000/',timeout=5).read().decode())"
+}
+resolved=$(docker exec "$server_b" docker exec "$worker" python -c "import socket;print(socket.gethostbyname('a.m.echo'))")
+[[ "$resolved" == 10.210.0.1 ]] || { echo "a.m.echo resolves to $resolved, want mesh address 10.210.0.1" >&2; exit 1; }
+got=$(echo_from_worker a.m.echo); [[ "$got" == 'echo a alpha' ]] || { echo "a.m.echo answered '$got'" >&2; exit 1; }
+got=$(echo_from_worker a.m.echo.mesh-ci.yoho.internal); [[ "$got" == 'echo a alpha' ]] || { echo "qualified a.m.echo answered '$got'" >&2; exit 1; }
+got=$(echo_from_worker b.m.echo); [[ "$got" == 'echo b beta' ]] || { echo "b.m.echo answered '$got'" >&2; exit 1; }
+if docker exec "$server_b" docker exec "$worker" printenv YOHO_CONNECTION_UPSTREAM_HOST; then echo 'HOST set for a multi-Server provider' >&2; exit 1; fi
+[[ "$(docker exec "$server_b" docker exec "$worker" printenv YOHO_CONNECTION_UPSTREAM_PORT)" == 9000 ]]
+# NATed c is not a consumer: refused at a's echo port.
+if docker exec "$server_c" nc -z -w 2 10.210.0.1 9000; then echo 'non-consumer c reached a.m.echo' >&2; exit 1; fi
 # The whole Destination now matches the plan.
 plan_rc=0
 "$yoho_bin" plan --version v1 --detailed-exitcode > "$work/plan3.txt" 2>&1 || plan_rc=$?
@@ -213,9 +252,10 @@ for _ in $(seq 1 20); do
   sleep 1
 done
 curl -fsS --max-time 5 -H 'Host: mesh-ci.test' "http://$b_ip/" | grep -F 'mesh db=42 via 10.210.0.3'
+[[ "$(echo_from_worker a.m.echo)" == 'echo a alpha' ]]
 # 7. Teardown.
 "$yoho_bin" remove -y
-for server in "$server_b" "$server_c"; do
+for server in "${servers[@]}"; do
   test -z "$(docker exec "$server" docker ps -aq --filter "label=com.docker.compose.project=$project")"
   docker exec "$server" test ! -d /var/lib/yoho/apps/mesh-ci/production
 done
@@ -230,7 +270,7 @@ for server in "${servers[@]}"; do
   if docker exec "$server" ufw show added | grep -F yoho-mesh; then left 'a ufw rule'; fi
   if docker exec "$server" systemctl is-enabled wg-quick@yoho0 >/dev/null 2>&1; then left 'wg-quick@yoho0 enabled'; fi
 done
-echo 'PASS Mesh CLI: plan before mesh, mesh up (3 Servers, NATed c via hub), hub-only state, allowlist, idempotent rerun, status without keys, Roles db over mesh, non-consumer refused, rotate-keys, remove, mesh down'
+echo 'PASS Mesh CLI: plan before mesh, mesh up (3 Servers, NATed c via hub), hub-only state, allowlist, idempotent rerun, status without keys, Roles db over mesh, non-consumer refused, per-Server tags env, instance Connection a.m.echo over mesh and local b.m.echo, NATed non-consumer refused, rotate-keys, remove, mesh down'
 # 8. The package e2e test against the same Servers (fresh yoho0, own root).
 # Its NAT deny uses `ufw insert 1`, which needs an existing rule on c.
 docker exec "$server_c" ufw allow 22/tcp >/dev/null

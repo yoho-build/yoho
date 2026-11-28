@@ -133,6 +133,9 @@ func (pol Policy) Check(p *types.Project, ext map[string]config.ServiceExt) erro
 		}
 		pol.checkDeployResources(s, svc)
 		pol.checkRoutes(ext[name], svc)
+		if len(ext[name].Tags) > 0 {
+			svc("x-yoho.tags requires operator access; the Gate refuses per-Server environment")
+		}
 	}
 	if n := replicas(p); n > pol.Limits.MaxContainers {
 		add("the project runs %d containers, above the limit of %d", n, pol.Limits.MaxContainers)

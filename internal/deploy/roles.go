@@ -11,6 +11,7 @@ import (
 	"path"
 	"slices"
 
+	"github.com/yoho-build/yoho/internal/config"
 	"github.com/yoho-build/yoho/internal/plan"
 	"github.com/yoho-build/yoho/internal/release"
 	"github.com/yoho-build/yoho/internal/remote"
@@ -365,16 +366,20 @@ func (r Roles) Deploy(ctx context.Context, d *plan.Deploy) (rel *release.Release
 			return nil
 		}
 		for cn, c := range d.Roles.Connections {
-			provider := d.Roles.ServiceServers(c.Service)[0]
-			if provider == name {
+			consumes := false
+			for _, svc := range c.Consumers {
+				_, ok := p.Project.Services[svc]
+				consumes = consumes || ok
+			}
+			if !consumes {
 				continue
 			}
-			for _, svc := range c.Consumers {
-				if _, ok := p.Project.Services[svc]; ok {
-					if e := roles.Ready(ctx, p.Servers[0].Host, d.PrivateAddresses[provider], c.Port); e != nil {
-						return fail(stoppedOr(ctx, partHost(parts, provider), d, cn, c.Service, provider, fmt.Errorf("connection %s from %s: %w", c.Service, name, e)))
-					}
-					break
+			for _, provider := range d.Roles.ServiceServers(c.Service) {
+				if provider == name {
+					continue
+				}
+				if e := roles.Ready(ctx, p.Servers[0].Host, d.PrivateAddresses[provider], c.Port); e != nil {
+					return fail(stoppedOr(ctx, partHost(parts, provider), d, cn, c.Service, provider, fmt.Errorf("connection %s from %s: %w", c.Service, name, e)))
 				}
 			}
 		}
@@ -459,7 +464,10 @@ func (Roles) Diff(ctx context.Context, d *plan.Deploy) ([]plan.Change, error) {
 			for _, n := range sortedKeys(d.Roles.Connections) {
 				c := d.Roles.Connections[n]
 				hs := d.Roles.ServiceServers(c.Service)
-				if len(hs) == 1 && hs[0] == name {
+				switch {
+				case c.Instances && slices.Contains(hs, name):
+					reasons = append(reasons, fmt.Sprintf("connection %s: publish %s:%d:%d/tcp (instance %s)", n, d.PrivateAddresses[name], c.Port, c.Port, config.InstanceName(name, c.Service)))
+				case len(hs) == 1 && hs[0] == name:
 					reasons = append(reasons, fmt.Sprintf("connection %s: publish %s:%d:%d/tcp", n, d.PrivateAddresses[name], c.Port, c.Port))
 				}
 			}
@@ -612,16 +620,19 @@ func (r Roles) Rollback(ctx context.Context, d *plan.Deploy, version string) (re
 	}
 	for _, name := range order {
 		for cn, c := range previous.Connections {
-			provider := previous.ServiceServers(c.Service)[0]
-			if provider == name {
+			consumes := false
+			for _, svc := range c.Consumers {
+				consumes = consumes || slices.Contains(previous.ServiceServers(svc), name)
+			}
+			if !consumes {
 				continue
 			}
-			for _, svc := range c.Consumers {
-				if slices.Contains(previous.ServiceServers(svc), name) {
-					if e := roles.Ready(ctx, hosts[name].Host, d.PrivateAddresses[provider], c.Port); e != nil {
-						return nil, failure(stoppedOr(ctx, hosts[provider].Host, d, cn, c.Service, provider, e))
-					}
-					break
+			for _, provider := range previous.ServiceServers(c.Service) {
+				if provider == name {
+					continue
+				}
+				if e := roles.Ready(ctx, hosts[name].Host, d.PrivateAddresses[provider], c.Port); e != nil {
+					return nil, failure(stoppedOr(ctx, hosts[provider].Host, d, cn, c.Service, provider, e))
 				}
 			}
 		}

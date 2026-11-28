@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/netip"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -17,7 +18,7 @@ import (
 func CheckBindings(ctx context.Context, h remote.Host, app, dest, server string, d config.Destination, addresses map[string]string) error {
 	for _, c := range d.Connections {
 		hs := d.ServiceServers(c.Service)
-		if len(hs) != 1 || hs[0] != server {
+		if !slices.Contains(hs, server) || len(hs) > 1 && !c.Instances {
 			continue
 		}
 		ids, err := h.Output(ctx, remote.Cmd{Script: "set -eu\ndocker ps -q --filter " + remote.Quote("label=com.docker.compose.project="+release.ProjectName(app, dest)) + " --filter " + remote.Quote("label=com.docker.compose.service="+c.Service)})

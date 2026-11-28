@@ -23,3 +23,4 @@
 - Kamal-style per-Server tags and env, so one Service definition can differ per Server without a second Service.
 - `yoho app stop` for proxied Services (remove the route, keep it down through deploys) and on runtime swarm (ADR 0021).
 - `yoho db promote` for MySQL/MariaDB, and a pg_rewind option that rejoins the old primary without a full base backup (ADR 0021).
+- After ADR 0020: per-tag secrets and labels, peer clusters (Instances that consume each other), and a `nearest.<service>` alias.

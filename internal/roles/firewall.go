@@ -34,11 +34,11 @@ func FirewallRules(app, dest, server string, d config.Destination, addresses map
 	var out []Rule
 	for _, name := range sortedKeys(d.Connections) {
 		c := d.Connections[name]
-		providers := d.ServiceServers(c.Service)
-		if len(providers) != 1 {
-			return nil, fmt.Errorf("connection %s must be singleton", name)
+		providers, e := Providers(d, c)
+		if e != nil {
+			return nil, e
 		}
-		if providers[0] != server {
+		if !slices.Contains(providers, server) {
 			continue
 		}
 		addr, e := netip.ParseAddr(addresses[server])
