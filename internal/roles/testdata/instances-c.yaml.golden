@@ -1,0 +1,9 @@
+services:
+  lb:
+    environment:
+      YOHO_CONNECTION_UPSTREAM_PORT: "8000"
+    extra_hosts:
+      - a.m.echo.shop.yoho.internal=10.0.0.1
+      - a.m.echo=10.0.0.1
+      - b.m.echo.shop.yoho.internal=10.0.0.2
+      - b.m.echo=10.0.0.2

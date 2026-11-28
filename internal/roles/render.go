@@ -22,19 +22,23 @@ func Order(d config.Destination) ([]string, error) {
 		degree[h] = 0
 		edges[h] = map[string]bool{}
 	}
+	instances := false
 	for _, c := range d.Connections {
-		p := d.ServiceServers(c.Service)
-		if len(p) != 1 {
-			return nil, fmt.Errorf("connection target %s must be singleton", c.Service)
+		providers, err := Providers(d, c)
+		if err != nil {
+			return nil, err
 		}
-		for _, svc := range c.Consumers {
-			for _, h := range d.ServiceServers(svc) {
-				if edges[p[0]] == nil || edges[h] == nil {
-					return nil, fmt.Errorf("connection placement references Server absent from Destination; retain all previous Servers before rollback")
-				}
-				if h != p[0] && !edges[p[0]][h] {
-					edges[p[0]][h] = true
-					degree[h]++
+		instances = instances || c.Instances
+		for _, p := range providers {
+			for _, svc := range c.Consumers {
+				for _, h := range d.ServiceServers(svc) {
+					if edges[p] == nil || edges[h] == nil {
+						return nil, fmt.Errorf("connection placement references Server absent from Destination; retain all previous Servers before rollback")
+					}
+					if h != p && !edges[p][h] {
+						edges[p][h] = true
+						degree[h]++
+					}
 				}
 			}
 		}
@@ -49,6 +53,9 @@ func Order(d config.Destination) ([]string, error) {
 		}
 		slices.Sort(ready)
 		if len(ready) == 0 {
+			if instances {
+				return nil, fmt.Errorf("Roles connections form a cycle across Servers; colocate dependencies or remove the cycle. Hint: instance Connections order Servers provider-first; a consumer on every provider Server forms a cycle. Colocate or split the Role")
+			}
 			return nil, fmt.Errorf("Roles connections form a cycle across Servers; colocate dependencies or remove the cycle")
 		}
 		for _, h := range ready {
@@ -124,20 +131,27 @@ func Render(d *plan.Deploy, dest config.Destination, server string, addresses ma
 		}
 		for _, connName := range sortedKeys(dest.Connections) {
 			c := dest.Connections[connName]
-			providers := dest.ServiceServers(c.Service)
-			if len(providers) != 1 {
-				return nil, fmt.Errorf("connection %s is not singleton", connName)
-			}
-			addr := addresses[providers[0]]
-			if addr == "" {
-				return nil, fmt.Errorf("connection %s Server %s has no effective private address", connName, providers[0])
-			}
-			ip, e := netip.ParseAddr(addr)
+			providers, e := Providers(dest, c)
 			if e != nil {
-				return nil, fmt.Errorf("connection %s requires a private IP address", connName)
+				return nil, e
 			}
-			addr = ip.String()
+			addrOf := func(h string) (netip.Addr, error) {
+				if addresses[h] == "" {
+					return netip.Addr{}, fmt.Errorf("connection %s Server %s has no effective private address", connName, h)
+				}
+				ip, e := netip.ParseAddr(addresses[h])
+				if e != nil {
+					return netip.Addr{}, fmt.Errorf("connection %s requires a private IP address", connName)
+				}
+				return ip, nil
+			}
 			if name == c.Service {
+				// Each provider Server publishes on its own address.
+				ip, e := addrOf(server)
+				if e != nil {
+					return nil, e
+				}
+				addr := ip.String()
 				for _, p := range svc.Ports {
 					if p.Target != uint32(c.Port) || p.Protocol != "" && p.Protocol != "tcp" {
 						continue
@@ -163,18 +177,42 @@ func Render(d *plan.Deploy, dest config.Destination, server string, addresses ma
 				svc.Environment = types.MappingWithEquals{}
 			}
 			port := strconv.Itoa(c.Port)
-			host := addr
-			if providers[0] == server {
-				host = c.Service
-			}
-			svc.Environment[config.ConnectionEnvName(connName)+"_HOST"] = &host
 			svc.Environment[config.ConnectionEnvName(connName)+"_PORT"] = &port
 			if svc.ExtraHosts == nil {
 				svc.ExtraHosts = types.HostsList{}
 			}
-			if providers[0] != server {
-				svc.ExtraHosts[c.Service] = []string{addr}
-				svc.ExtraHosts[c.Service+"."+d.App+".yoho.internal"] = []string{addr}
+			// The bare and qualified Service names exist only for one provider Server.
+			if len(providers) == 1 {
+				ip, e := addrOf(providers[0])
+				if e != nil {
+					return nil, e
+				}
+				host := ip.String()
+				if providers[0] == server {
+					host = c.Service
+				} else {
+					svc.ExtraHosts[c.Service] = []string{host}
+					svc.ExtraHosts[c.Service+"."+d.App+".yoho.internal"] = []string{host}
+				}
+				svc.Environment[config.ConnectionEnvName(connName)+"_HOST"] = &host
+			}
+			if !c.Instances {
+				continue
+			}
+			// A same-Server instance is a network alias on the provider instead:
+			// mangle PREROUTING would drop container traffic to the Server's
+			// own private address (its source is a container address).
+			for _, h := range providers {
+				if h == server {
+					continue
+				}
+				ip, e := addrOf(h)
+				if e != nil {
+					return nil, e
+				}
+				for _, alias := range InstanceNames(d.App, h, c.Service) {
+					svc.ExtraHosts[alias] = []string{ip.String()}
+				}
 			}
 		}
 		p.Services[name] = svc
@@ -194,6 +232,16 @@ func Render(d *plan.Deploy, dest config.Destination, server string, addresses ma
 		if !local {
 			continue
 		}
+		var aliases []string
+		if len(dest.ServiceServers(c.Service)) == 1 {
+			aliases = append(aliases, c.Service+"."+d.App+".yoho.internal")
+		}
+		if c.Instances {
+			aliases = append(aliases, InstanceNames(d.App, server, c.Service)...)
+		}
+		if len(aliases) == 0 {
+			continue
+		}
 		if provider.Networks == nil {
 			provider.Networks = map[string]*types.ServiceNetworkConfig{"default": {}}
 		}
@@ -201,9 +249,10 @@ func Render(d *plan.Deploy, dest config.Destination, server string, addresses ma
 			if nc == nil {
 				nc = &types.ServiceNetworkConfig{}
 			}
-			alias := c.Service + "." + d.App + ".yoho.internal"
-			if !slices.Contains(nc.Aliases, alias) {
-				nc.Aliases = append(nc.Aliases, alias)
+			for _, alias := range aliases {
+				if !slices.Contains(nc.Aliases, alias) {
+					nc.Aliases = append(nc.Aliases, alias)
+				}
 			}
 			provider.Networks[n] = nc
 		}
@@ -253,6 +302,22 @@ func Render(d *plan.Deploy, dest config.Destination, server string, addresses ma
 	}
 	slices.Sort(out.Built)
 	return &out, nil
+}
+
+// Providers returns the Servers hosting a Connection's provider: exactly one,
+// or one or more for an instance Connection.
+func Providers(d config.Destination, c config.Connection) ([]string, error) {
+	p := d.ServiceServers(c.Service)
+	if len(p) == 0 || len(p) > 1 && !c.Instances {
+		return nil, fmt.Errorf("connection target %s must be singleton unless the connection sets instances: true", c.Service)
+	}
+	return p, nil
+}
+
+// InstanceNames are the two names of a provider's copy on one Server.
+func InstanceNames(app, server, service string) []string {
+	n := config.InstanceName(server, service)
+	return []string{n, n + "." + app + ".yoho.internal"}
 }
 
 func sortedKeys[V any](m map[string]V) []string {

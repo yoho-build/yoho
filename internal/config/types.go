@@ -56,6 +56,9 @@ type Server struct {
 	Endpoint string `json:"endpoint,omitempty"`
 	// Arbitrary labels, reserved for Roles / Swarm placement.
 	Labels map[string]string `json:"labels,omitempty"`
+	// Tags select per-Server environment from x-yoho.tags. Later tags win;
+	// the Server's own name is an implicit tag that wins over all of them.
+	Tags []string `json:"tags,omitempty" jsonschema:"uniqueItems=true,pattern=^[a-z0-9][a-z0-9-]*$"`
 }
 
 // Destination is a named environment of an App.
@@ -69,6 +72,11 @@ type Connection struct {
 	Service   string   `json:"service" jsonschema:"required"`
 	Port      int      `json:"port" jsonschema:"required,minimum=1,maximum=65535"`
 	Consumers []string `json:"consumers" jsonschema:"required,minItems=1"`
+	// Instances names each provider Server's copy <server>.m.<service> (and
+	// <server>.m.<service>.<app>.yoho.internal), so the provider may run on
+	// several Servers. Non-proxied providers with one container per Server
+	// only; a provider cannot consume its own instance Connection.
+	Instances bool `json:"instances,omitempty"`
 }
 
 type Destination struct {
@@ -417,6 +425,16 @@ type ServiceExt struct {
 	StrictDrain bool `json:"strict_drain,omitempty"`
 	// Reserved for Roles: address other Servers use to reach this Service.
 	Endpoint string `json:"endpoint,omitempty"`
+	// Per-Server environment keyed by Server tag or Server name, applied in
+	// the Server's tag order, then its name; later wins, and both win over
+	// Compose environment. Compose runtime and operator access only.
+	Tags map[string]ServiceTag `json:"tags,omitempty"`
+}
+
+// ServiceTag is the per-Server override for one tag or Server name.
+type ServiceTag struct {
+	// Environment set on this Service on matching Servers.
+	Env map[string]string `json:"env,omitempty"`
 }
 
 // ServiceCheck is a post-deploy readiness check of a Service the Proxy does

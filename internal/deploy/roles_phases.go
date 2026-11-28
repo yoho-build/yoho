@@ -155,11 +155,12 @@ func rolesReleasePhase(ctx context.Context, d *plan.Deploy, parts map[string]*pl
 			if !slices.Contains(c.Consumers, svc) {
 				continue
 			}
-			provider := d.Roles.ServiceServers(c.Service)[0]
-			for _, consumer := range hosts {
-				if provider != consumer {
-					if e := roles.Ready(ctx, parts[consumer].Servers[0].Host, d.PrivateAddresses[provider], c.Port); e != nil {
-						return e
+			for _, provider := range d.Roles.ServiceServers(c.Service) {
+				for _, consumer := range hosts {
+					if provider != consumer {
+						if e := roles.Ready(ctx, parts[consumer].Servers[0].Host, d.PrivateAddresses[provider], c.Port); e != nil {
+							return e
+						}
 					}
 				}
 			}

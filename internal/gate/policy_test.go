@@ -141,6 +141,7 @@ func TestPolicyRefuses(t *testing.T) {
 		{"total containers", "services: {a: {image: x, scale: 4}, b: {image: x, scale: 4}, c: {image: x, scale: 4}, d: {image: x, scale: 4}, e: {image: x, scale: 1}}", "17 containers"},
 		{"reserved prefix uppercase host", "services: {a: {image: GHCR.IO/acme/other-production-web:v1}}", "Yoho-built image"},
 		{"reserved prefix docker.io", "services: {a: {image: docker.io/yoho/other-production-web:v1}}", "Yoho-built image"},
+		{"x-yoho tags", "services: {a: {image: x, x-yoho: {tags: {eu: {env: {REGION: eu}}}}}}", "x-yoho.tags requires operator access; the Gate refuses per-Server environment"},
 		{"reservation devices", "services: {a: {image: x, deploy: {resources: {reservations: {devices: [{capabilities: [gpu]}]}}}}}", "deploy.resources devices"},
 	}
 	for _, c := range cases {

@@ -93,8 +93,23 @@ func validateRoles(c *Config, name string, d Destination) []error {
 			add("connection %s port must be 1..65535", n)
 		}
 		providers := d.ServiceServers(conn.Service)
-		if len(providers) != 1 {
+		switch {
+		case conn.Instances && len(providers) == 0:
+			add("connection %s target Service %s must resolve to at least one Server", n, conn.Service)
+		case !conn.Instances && len(providers) == 0:
 			add("connection %s target Service %s must resolve to exactly one Server", n, conn.Service)
+		case !conn.Instances && len(providers) > 1:
+			add("connection %s target Service %s must resolve to exactly one Server, or set instances: true to address each Server as `<server>.m.%s`", n, conn.Service, conn.Service)
+		}
+		if conn.Instances {
+			for _, h := range providers {
+				if !appPattern.MatchString(h) {
+					add("connection %s instance name needs Server name %q to match %s (it becomes %s.m.%s)", n, h, appPattern, h, conn.Service)
+				}
+			}
+			if slices.Contains(conn.Consumers, conn.Service) {
+				add("connection %s provider %s cannot consume its own instance Connection; split the consumer into another Service", n, conn.Service)
+			}
 		}
 		if len(conn.Consumers) == 0 {
 			add("connection %s requires consumers", n)
@@ -116,6 +131,58 @@ func validateRoles(c *Config, name string, d Destination) []error {
 				add("connection %s Server %s requires a private_address (unicast IP)", n, h)
 			}
 		}
+	}
+	return errs
+}
+
+// InstanceName is the name consumers of an instance Connection use for the
+// provider's copy on one Server.
+func InstanceName(server, service string) string { return server + ".m." + service }
+
+// ServerEnv returns the x-yoho.tags environment for one Server: each of the
+// Server's tags in its tags order, then the Server's own name. Later wins.
+func ServerEnv(ext ServiceExt, name string, s Server) map[string]string {
+	if len(ext.Tags) == 0 {
+		return nil
+	}
+	out := map[string]string{}
+	for _, sel := range append(slices.Clone(s.Tags), name) {
+		for k, v := range ext.Tags[sel].Env {
+			out[k] = v
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+// TagSelectors lists every valid x-yoho.tags key: Server names and tags.
+func TagSelectors(servers map[string]Server) []string {
+	var out []string
+	for name, s := range servers {
+		out = append(out, name)
+		out = append(out, s.Tags...)
+	}
+	slices.Sort(out)
+	return slices.Compact(out)
+}
+
+func validateServerTags(c *Config, name string) []error {
+	var errs []error
+	seen := map[string]bool{}
+	for _, tag := range c.Servers[name].Tags {
+		switch {
+		case !appPattern.MatchString(tag):
+			errs = append(errs, fmt.Errorf("servers.%s.tags: tag %q must match %s", name, tag, appPattern))
+		case seen[tag]:
+			errs = append(errs, fmt.Errorf("servers.%s.tags: tag %s is repeated", name, tag))
+		default:
+			if _, ok := c.Servers[tag]; ok {
+				errs = append(errs, fmt.Errorf("servers.%s.tags: tag %s is also a Server name; the name already selects that Server, so use a tag that names a group", name, tag))
+			}
+		}
+		seen[tag] = true
 	}
 	return errs
 }

@@ -105,6 +105,40 @@ destinations:
 `,
 			want: "destinations.production.subnet supports the compose runtime only; remove it or pin the subnet in the compose file's networks.default.ipam",
 		},
+		{
+			name: "connection provider on several Servers without instances",
+			yaml: `
+app: shop
+servers:
+  a: {ssh: yoho@10.0.0.1, private_address: 10.0.0.1}
+  b: {ssh: yoho@10.0.0.2, private_address: 10.0.0.2}
+destinations:
+  production:
+    servers: [a, b]
+    roles:
+      api: {services: [api], servers: [a, b]}
+    connections:
+      upstream: {service: api, port: 8000, consumers: [api]}
+`,
+			want: "connection upstream target Service api must resolve to exactly one Server, or set instances: true to address each Server as `<server>.m.api`",
+		},
+		{
+			name: "instance connection provider consuming itself",
+			yaml: `
+app: shop
+servers:
+  a: {ssh: yoho@10.0.0.1, private_address: 10.0.0.1}
+  b: {ssh: yoho@10.0.0.2, private_address: 10.0.0.2}
+destinations:
+  production:
+    servers: [a, b]
+    roles:
+      api: {services: [api], servers: [a, b]}
+    connections:
+      upstream: {service: api, port: 8000, consumers: [api], instances: true}
+`,
+			want: "connection upstream provider api cannot consume its own instance Connection; split the consumer into another Service",
+		},
 	}
 
 	for _, tc := range cases {

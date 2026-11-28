@@ -246,6 +246,11 @@ func (a *app) compose(ctx context.Context) (*composefile.Result, error) {
 		return nil, err
 	}
 	findings := composefile.CheckRoles(r, a.dest, a.proxyConfig(), a.cfg.App)
+	tagDest := a.dest
+	if a.scoped {
+		tagDest.Access = "scoped"
+	}
+	findings = append(findings, composefile.CheckTags(r, a.cfg.Servers, tagDest)...)
 	if composefile.HasErrors(findings) {
 		var messages []string
 		for _, f := range findings {

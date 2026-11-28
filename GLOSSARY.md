@@ -26,6 +26,14 @@ _Avoid_: Environment, stage, target
 A named subset of an App's Services placed on a subset of a Destination's Servers. Opt-in for the Compose runtime; colocated Roles share a Compose project on a Server.
 _Avoid_: Group, tier
 
+**Tag**:
+A label on a Server (`servers.<name>.tags`) that selects per-Server environment from `x-yoho.tags`. A Server's name is an implicit Tag.
+_Avoid_: Label (Server `labels` are separate), group
+
+**Instance**:
+The containers of one Service on one Server. Consumers of an instance Connection address each one as `<server>.m.<service>`.
+_Avoid_: Replica, task, node
+
 **Stateful Service**:
 A Service that owns persistent data and is pinned to exactly one Server.
 _Avoid_: Accessory, database service, singleton
