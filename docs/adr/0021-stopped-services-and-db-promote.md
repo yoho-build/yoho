@@ -19,27 +19,41 @@ hand with `ALTER SYSTEM`, `pg_promote()` and an edited Connection.
    Service in `stopped.json` in the App directory on each Server hosting it
    (who, when, why), then stops and removes its containers. Removal, not only
    stop, keeps `restart: always` and a Docker restart from reviving them.
-   Volumes are kept. Deploy, apply and rollback leave a stopped Service down:
+   It touches only containers labeled with this App and Destination. Volumes
+   are kept. Deploy, apply and rollback leave a stopped Service down:
    they pass a derived Compose override (`stopped.compose.yaml`, zero
    replicas, only Services of the Release being run) and skip its release
    command and readiness wait. Release files never change. `yoho plan` shows
-   the Service as stopped, with who stopped it. Only `yoho app start SERVICE`
-   ends the state: it removes the record and starts the Service from the
-   current Release. Stop and start cover Services without `x-yoho.proxy` on
-   the compose runtime, with operator access.
+   the Service as stopped, with who stopped it; a config change of a stopped
+   Service is still a change, so apply records the new Release and the
+   Service stays stopped. Only `yoho app start SERVICE` ends the state: after
+   the same ownership check as deploy, it starts the Service from the current
+   Release and removes the record once Compose started it. Stop and start
+   cover Services without `x-yoho.proxy` on the compose runtime, with
+   operator access.
 
 2. **`yoho db promote` is config first.** The operator edits the Connection so
    the standby is its provider and the old primary a consumer; promote reads
    the old primary from the current Release. It is Postgres only and manual:
-   it runs only when the operator runs it. It refuses to promote without a
-   fence: the old primary is stopped with `yoho app stop` after its WAL
-   position is recorded, and a container that does not exit 0 stops the
-   promotion. The only way past the fence is `--old-primary-down`, for a
-   Server the operator powered off and removed from the Destination. Each
-   step is journaled on the new primary's Server, so a rerun resumes and a
-   rerun after success is a no-op. It never deletes volumes and never
-   rewrites the Yoho file. It ends with the ordinary deploy of the Yoho file,
-   which moves the Connection, its firewall and its consumers.
+   it runs only when the operator runs it. Preflight checks that the standby
+   streams from the old primary and belongs to its cluster (same
+   `system_identifier`). It refuses to promote without a fence: the old
+   primary is stopped with `yoho app stop`, then, before its container is
+   removed, `pg_controldata` on its data directory must report `shut down`;
+   its latest checkpoint (the shutdown checkpoint, the end of its WAL) is the
+   position the standby must replay. A container that does not exit 0 or a
+   cluster not shut down stops the promotion, and the journal remembers it:
+   a rerun refuses until the operator accepts the loss with
+   `--old-primary-down`. Otherwise `--old-primary-down` is only for a Server
+   the operator powered off and removed from the Destination. Each step is
+   journaled on the new primary's Server, so a rerun resumes; the fence is
+   re-verified from Server state on every run (a restarted old primary is
+   fenced again), and a promoted journal whose new primary is in recovery is
+   stale. The journal is only a retry marker: it is deleted after the
+   follow-up apply succeeds, and a rerun of a promoted journal resumes at the
+   apply. It never deletes volumes and never rewrites the Yoho file. It ends
+   with the ordinary deploy of the Yoho file, which moves the Connection, its
+   firewall and its consumers.
 
 ## Consequences
 

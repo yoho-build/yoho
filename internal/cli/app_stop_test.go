@@ -104,7 +104,7 @@ func TestAppStopAndStart(t *testing.T) {
 	if err != nil || json.Unmarshal(b, &stopped) != nil || stopped["db"].Reason != "maintenance" {
 		t.Fatalf("%s %v", b, err)
 	}
-	if !strings.Contains(strings.Join(h.scripts, "\n"), deploy.StopScript("yoho-shop-staging", "db")) {
+	if !strings.Contains(strings.Join(h.scripts, "\n"), deploy.StopScript("shop", "staging", "db")) {
 		t.Fatalf("no stop script:\n%s", strings.Join(h.scripts, "\n---\n"))
 	}
 	if strings.Contains(strings.Join(h.scripts, "\n"), "volume") {

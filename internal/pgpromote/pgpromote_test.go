@@ -30,6 +30,10 @@ type pgHost struct {
 	replay       []string // successive pg_last_wal_replay_lsn answers
 	promoteOut   string
 	stopOut      string
+	controlData  string // pg_controldata output after the stop
+	sysid        string
+	running      string // docker ps -q answer
+	noReceive    bool   // pg_last_wal_receive_lsn() is NULL
 	failQuery    error
 	log          []string
 	writes       int
@@ -60,7 +64,17 @@ func (h *pgHost) Output(ctx context.Context, c remote.Cmd) (string, error) {
 	switch {
 	case strings.Contains(s, "docker stop $ids"):
 		h.log = append(h.log, "stop")
-		return h.stopOut, nil
+		out := h.stopOut
+		if strings.Contains(s, "pg_controldata") && h.controlData != "" && out != "" {
+			id, _, _ := strings.Cut(out, " ")
+			for _, l := range strings.Split(h.controlData, "\n") {
+				out += "\n" + id + "| " + l
+			}
+		}
+		h.running = ""
+		return out, nil
+	case strings.Contains(s, "docker ps -q "):
+		return h.running, nil
 	case strings.Contains(s, "'psql'"):
 		if h.failQuery != nil {
 			return "", h.failQuery
@@ -75,6 +89,11 @@ func (h *pgHost) Output(ctx context.Context, c remote.Cmd) (string, error) {
 			return map[bool]string{true: "t", false: "f"}[h.recovery], nil
 		case strings.Contains(s, "pg_stat_wal_receiver"):
 			return h.receiver, nil
+		case strings.Contains(s, "pg_control_system()"):
+			if h.sysid == "" {
+				return "7000000000000000001", nil
+			}
+			return h.sysid, nil
 		case strings.Contains(s, "pg_current_wal_lsn()"):
 			h.log = append(h.log, "current")
 			return h.current, nil
@@ -85,10 +104,12 @@ func (h *pgHost) Output(ctx context.Context, c remote.Cmd) (string, error) {
 				h.replay = h.replay[1:]
 			}
 			recv := h.receive
-			if recv == "" {
+			if h.noReceive {
+				recv = ""
+			} else if recv == "" {
 				recv = r // streaming: replay keeps up with what arrived
 			}
-			return recv + " " + r, nil
+			return strings.TrimSpace(recv + "|" + r), nil
 		}
 	}
 	return "", nil
@@ -99,7 +120,7 @@ func fixture(t *testing.T) (*pgHost, *pgHost, Options) {
 	old := release.Root
 	release.Root = t.TempDir()
 	t.Cleanup(func() { release.Root = old })
-	a := &pgHost{name: "a", recovery: false, current: "0/3000060", stopOut: "c1 0", receive: "0/3000000", replay: []string{"0/3000000"}}
+	a := &pgHost{name: "a", recovery: false, current: "0/3000060", stopOut: "c1 0", controlData: "Database system identifier:           7000000000000000001\nDatabase cluster state:               shut down\nLatest checkpoint location:           0/3000080", running: "c1", receive: "0/3000000", replay: []string{"0/3000000"}}
 	b := &pgHost{name: "b", recovery: true, receiver: "streaming", replay: []string{"0/3000000", "0/3000060", "0/3000100"}, promoteOut: "t"}
 	o := Options{
 		App: "pg", Destination: "production", Connection: "primary",
@@ -174,7 +195,9 @@ func TestRunFencesWaitsAndPromotesInOrder(t *testing.T) {
 	if err := Run(context.Background(), o); err != nil {
 		t.Fatal(err)
 	}
-	if got := strings.Join(a.log, ","); got != "current,stop" {
+	// The target is the shutdown checkpoint read after the clean stop,
+	// not pg_current_wal_lsn() of the still-writable primary.
+	if got := strings.Join(a.log, ","); got != "stop" {
 		t.Fatalf("old primary: %s", got)
 	}
 	if b.promoteCalls != 1 || b.recovery {
@@ -184,14 +207,14 @@ func TestRunFencesWaitsAndPromotesInOrder(t *testing.T) {
 		t.Fatal(got)
 	}
 	j, err := ReadJournal(context.Background(), b, "pg", "production", "primary")
-	if err != nil || j.State != "complete" || j.TargetLSN != "0/3000060" || j.From != "db" || j.To != "db-standby" || j.FromServer != "a" {
+	if err != nil || j.State != "promoted" || j.TargetLSN != "0/3000080" || j.From != "db" || j.To != "db-standby" || j.FromServer != "a" {
 		t.Fatalf("%+v %v", j, err)
 	}
 	stopped, _ := deploy.ReadStopped(context.Background(), a, "pg", "production")
 	if !strings.HasPrefix(stopped["db"].Reason, "db promote") {
 		t.Fatalf("fence did not record app stop: %+v", stopped)
 	}
-	// A rerun after a complete promotion changes nothing.
+	// A rerun before the caller's apply deleted the journal changes nothing.
 	a.log, b.log = nil, nil
 	if err := Run(context.Background(), o); err != nil || len(a.log)+len(b.log) != 0 {
 		t.Fatalf("rerun: %v %v %v", err, a.log, b.log)
@@ -212,7 +235,7 @@ func TestRunRefusesUncleanShutdown(t *testing.T) {
 		t.Fatal("promoted after an unclean shutdown")
 	}
 	j, _ := ReadJournal(context.Background(), b, "pg", "production", "primary")
-	if j.Steps[StepFence] != "failed" || j.State != "failed" {
+	if j.Steps[StepFence] != "unclean" || j.State != "failed" || len(j.Unclean) != 1 || j.Unclean[0] != "c1 exited 137" {
 		t.Fatalf("%+v", j)
 	}
 }
@@ -230,13 +253,13 @@ func TestRunTimesOutThenResumesFromJournal(t *testing.T) {
 		t.Fatal("promoted before replay caught up")
 	}
 	j, _ := ReadJournal(context.Background(), b, "pg", "production", "primary")
-	if j.Steps[StepFence] != "complete" || j.Steps[StepWait] != "failed" || j.TargetLSN != "0/3000060" {
+	if j.Steps[StepFence] != "complete" || j.Steps[StepWait] != "failed" || j.TargetLSN != "0/3000080" {
 		t.Fatalf("%+v", j)
 	}
 	// Resume: no second fence (the old primary is down), wait, promote.
 	a.log = nil
-	b.replay = []string{"0/3000060"}
-	b.receive = "0/3000060"
+	b.replay = []string{"0/3000080"}
+	b.receive = "0/3000080"
 	if err := Run(context.Background(), o); err != nil {
 		t.Fatal(err)
 	}
@@ -252,6 +275,10 @@ func TestRunResumesAfterPromoteBeforeJournalCompleted(t *testing.T) {
 		t.Fatal(err)
 	}
 	b.recovery = false // pg_promote ran, the journal did not record it
+	if _, err := deploy.StopService(context.Background(), a, "pg", "production", "db", deploy.StoppedEntry{By: "alice"}); err != nil {
+		t.Fatal(err)
+	}
+	a.log = nil
 	if err := Run(context.Background(), o); err != nil {
 		t.Fatal(err)
 	}
@@ -302,6 +329,173 @@ func TestQueryErrorsAreReported(t *testing.T) {
 	_, err := Preflight(context.Background(), o)
 	var ee *remote.ExitError
 	if !errors.As(err, &ee) || !strings.Contains(fmt.Sprint(err), "db-standby on b") {
+		t.Fatal(err)
+	}
+}
+
+func freshStart(t *testing.T, a *pgHost) {
+	t.Helper()
+	// `yoho app start db`: the record is gone and the container runs.
+	if err := os.Remove(filepath.Join(release.AppDir("pg", "production"), deploy.StoppedFile)); err != nil {
+		t.Fatal(err)
+	}
+	a.running = "c2"
+}
+
+// Item: a journal is a retry marker. A promoted journal left behind must
+// not swallow a later switchover with the same from/to: when the new
+// primary is in recovery again, the journal is stale.
+func TestPromotedJournalIsNotReusedForANewSwitchover(t *testing.T) {
+	a, b, o := fixture(t)
+	if err := Run(context.Background(), o); err != nil {
+		t.Fatal(err)
+	}
+	// B → A by hand, then A → B again: b is a standby, a runs.
+	freshStart(t, a)
+	a.recovery, b.recovery = false, true
+	b.replay = []string{"0/3000080"}
+	if st, err := Preflight(context.Background(), o); err != nil || st.Journal != nil || st.Promoted || st.Fenced {
+		t.Fatalf("stale journal trusted: %+v %v", st, err)
+	}
+	a.log = nil
+	if err := Run(context.Background(), o); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(a.log, ",") != "stop" || b.promoteCalls != 2 {
+		t.Fatalf("second switchover skipped: old %v, promotes %d", a.log, b.promoteCalls)
+	}
+	if err := DeleteJournal(context.Background(), b, "pg", "production", "primary"); err != nil {
+		t.Fatal(err)
+	}
+	if j, err := ReadJournal(context.Background(), b, "pg", "production", "primary"); err != nil || j != nil {
+		t.Fatalf("journal kept: %+v %v", j, err)
+	}
+}
+
+// Item: the fence is re-verified from Server state on every run. After
+// `yoho app start db` the journal's fence=complete is not trusted: fence
+// again and take a fresh target.
+func TestResumeRefencesAfterOldPrimaryStarted(t *testing.T) {
+	a, b, o := fixture(t)
+	b.replay = []string{"0/3000000"}
+	b.receive = "0/3000000"
+	o.Timeout = 20 * time.Millisecond
+	if err := Run(context.Background(), o); err == nil {
+		t.Fatal("wait should time out")
+	}
+	freshStart(t, a)
+	if st, err := Preflight(context.Background(), o); err != nil || st.Fenced {
+		t.Fatalf("journal fence trusted over Server state: %+v %v", st, err)
+	}
+	a.log = nil
+	a.controlData = strings.Replace(a.controlData, "0/3000080", "0/3000090", 1)
+	b.replay = []string{"0/3000090"}
+	b.receive = "0/3000090"
+	if err := Run(context.Background(), o); err != nil {
+		t.Fatal(err)
+	}
+	j, _ := ReadJournal(context.Background(), b, "pg", "production", "primary")
+	if strings.Join(a.log, ",") != "stop" || j.TargetLSN != "0/3000090" || b.promoteCalls != 1 {
+		t.Fatalf("no re-fence: old %v, %+v", a.log, j)
+	}
+}
+
+// Item: an unclean shutdown is remembered: the retry refuses it unless
+// --old-primary-down accepts the loss.
+func TestUncleanFenceIsRememberedOnRetry(t *testing.T) {
+	a, b, o := fixture(t)
+	a.stopOut = "c1 137"
+	if err := Run(context.Background(), o); err == nil {
+		t.Fatal("unclean accepted")
+	}
+	a.log = nil
+	if _, err := Preflight(context.Background(), o); err == nil || !strings.Contains(err.Error(), "did not shut down cleanly (c1 exited 137)") || !strings.Contains(err.Error(), "--old-primary-down") {
+		t.Fatal(err)
+	}
+	if err := Run(context.Background(), o); err == nil || !strings.Contains(err.Error(), "did not shut down cleanly") {
+		t.Fatal(err)
+	}
+	if len(a.log) != 0 || b.promoteCalls != 0 {
+		t.Fatalf("retry went on: old %v, promotes %d", a.log, b.promoteCalls)
+	}
+	o.OldPrimaryDown = true
+	b.receiver = ""
+	if _, err := Preflight(context.Background(), o); err != nil {
+		t.Fatal(err)
+	}
+	if err := Run(context.Background(), o); err != nil {
+		t.Fatal(err)
+	}
+	j, _ := ReadJournal(context.Background(), b, "pg", "production", "primary")
+	if b.promoteCalls != 1 || len(a.log) != 0 || j.Steps[StepFence] != "skipped" || !j.OldPrimaryDown || j.TargetLSN != "" {
+		t.Fatalf("old %v, %+v", a.log, j)
+	}
+}
+
+// Item: the target is the stopped old primary's shutdown checkpoint, which
+// must exist; a cluster that is not "shut down" is unclean.
+func TestFenceReadsShutdownCheckpoint(t *testing.T) {
+	a, b, o := fixture(t)
+	a.controlData = strings.Replace(a.controlData, "shut down", "in production", 1)
+	if err := Run(context.Background(), o); err == nil || !strings.Contains(err.Error(), `cluster state "in production"`) {
+		t.Fatal(err)
+	}
+	a, b, o = fixture(t)
+	a.controlData = strings.Replace(a.controlData, "0/3000080", "0/30;x", 1)
+	if err := Run(context.Background(), o); err == nil || !strings.Contains(err.Error(), "invalid LSN") || b.promoteCalls != 0 {
+		t.Fatal(err)
+	}
+	cd := ParseControlData("pg_control version number:            1700\nDatabase system identifier:           7\nDatabase cluster state:               shut down\nLatest checkpoint location:           0/1A2B3C")
+	if cd != (ControlData{State: "shut down", Checkpoint: "0/1A2B3C", SystemID: "7"}) {
+		t.Fatalf("%+v", cd)
+	}
+	if !strings.Contains(ControlDataScript, "--volumes-from \"$id\"") || !strings.Contains(ControlDataScript, "/var/lib/postgresql/data") {
+		t.Fatal(ControlDataScript)
+	}
+}
+
+// Item: with a target only replay counts; receive may be NULL.
+func TestWaitReplayTargetIgnoresNullReceive(t *testing.T) {
+	_, b, o := fixture(t)
+	b.noReceive = true
+	b.replay = []string{"0/3000080"}
+	if err := waitReplay(context.Background(), o, "0/3000080"); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// Item: without a target, wait until replay is stable for two polls and
+// receive == replay or the WAL receiver is not streaming.
+func TestWaitReplayWithoutTarget(t *testing.T) {
+	_, b, o := fixture(t)
+	o.Timeout = 20 * time.Millisecond
+	b.receive = "0/3000100"
+	b.replay = []string{"0/3000060"}
+	b.receiver = "streaming"
+	if err := waitReplay(context.Background(), o, ""); err == nil {
+		t.Fatal("returned while still streaming behind")
+	}
+	b.receiver = ""
+	if err := waitReplay(context.Background(), o, ""); err != nil {
+		t.Fatal(err)
+	}
+	b.receiver = "streaming"
+	b.noReceive = true
+	if err := waitReplay(context.Background(), o, ""); err == nil {
+		t.Fatal("NULL receive while streaming accepted")
+	}
+}
+
+// Item: the standby must belong to the old primary's cluster.
+func TestPreflightRefusesAnotherCluster(t *testing.T) {
+	a, b, o := fixture(t)
+	a.sysid = "7000000000000000002"
+	if _, err := Preflight(context.Background(), o); err == nil || !strings.Contains(err.Error(), "different clusters") {
+		t.Fatal(err)
+	}
+	a.sysid = ""
+	a.controlData = strings.Replace(a.controlData, "7000000000000000001", "7000000000000000002", 1)
+	if err := Run(context.Background(), o); err == nil || !strings.Contains(err.Error(), "different clusters") || b.promoteCalls != 0 {
 		t.Fatal(err)
 	}
 }

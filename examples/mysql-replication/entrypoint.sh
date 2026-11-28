@@ -27,6 +27,18 @@ q() { sed -e 's/\\/\\\\/g' -e "s/'/\\\\'/g"; }
 # root@localhost over the socket; the client reads the password from MYSQL_PWD.
 root_pw() { MYSQL_PWD=$(cat /run/secrets/MARIADB_ROOT_PASSWORD); export MYSQL_PWD; }
 sql() { root_pw; mariadb --protocol=socket -uroot -N -B "$@"; }
+# Runs SQL from stdin. On failure, prints only LABEL and the exit code: the
+# client may echo the statement, with its passwords, to stderr.
+run_sql() {
+  err=$(mktemp)
+  rc=0
+  sql 2>"$err" || rc=$?
+  rm -f "$err"
+  if [ "$rc" -ne 0 ]; then
+    echo "yoho-mariadb: $1 failed (exit $rc)" >&2
+    exit "$rc"
+  fi
+}
 
 case "${1:-}" in
 mariadb)
@@ -37,7 +49,7 @@ set-passwords)
   rp=$(q < /run/secrets/REPLICATOR_PASSWORD)
   ap=$(q < /run/secrets/MARIADB_PASSWORD)
   # Binary logged, so the replica gets the same passwords.
-  printf "ALTER USER 'replicator'@'%%' IDENTIFIED BY '%s';\nALTER USER 'app'@'%%' IDENTIFIED BY '%s';\n" "$rp" "$ap" | sql
+  printf "ALTER USER 'replicator'@'%%' IDENTIFIED BY '%s';\nALTER USER 'app'@'%%' IDENTIFIED BY '%s';\n" "$rp" "$ap" | run_sql "set passwords"
   exit 0;;
 fence)
   touch "$fenced"

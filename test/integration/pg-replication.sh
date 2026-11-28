@@ -115,7 +115,7 @@ absent() { [[ -z "$(docker exec "$1" docker ps -aq --filter "label=com.docker.co
 absent "$server_b" db-standby
 "$yoho_bin" app stop db-standby | grep -F 'already stopped'
 "$yoho_bin" app ps | grep -F 'db-standby: stopped by'
-"$yoho_bin" plan | tee "$work/plan.out"
+"$yoho_bin" plan --version v2 | tee "$work/plan.out"
 grep -F 'service db-standby [b]: stopped' "$work/plan.out" >/dev/null
 "$yoho_bin" deploy --version v2-stop
 absent "$server_b" db-standby
@@ -165,8 +165,12 @@ docker exec "$server_b" iptables -I FORWARD 1 -j ACCEPT
 if docker exec "$outsider" nc -z -w 2 "$b_ip" 5432; then echo 'outsider reached db-standby on B' >&2; exit 1; fi
 docker exec "$server_a" nc -z -w 2 "$b_ip" 5432
 if docker exec "$outsider" nc -z -w 2 "$a_ip" 5432; then echo 'old primary port still published on A' >&2; exit 1; fi
-# A rerun is a successful no-op.
-"$yoho_bin" db promote --auto-approve --version v3 2>&1 | grep -F 'already the primary'
+# The journal is gone after the apply: a rerun has nothing to resume, refuses
+# (no Connection changed) and changes nothing.
+if out=$("$yoho_bin" db promote --auto-approve --version v3 2>&1); then echo "rerun after a finished promotion did not refuse: $out" >&2; exit 1; fi
+grep -F 'no Connection changed its provider' <<<"$out" >/dev/null
+docker exec "$server_b" test ! -e /var/lib/yoho/apps/pg/production/promotions/primary.json
+promoted
 absent "$server_a" db
 # Rebuild the old db as a standby: remove its volume by hand, then start it.
 docker exec "$server_a" docker volume inspect "${project}_pgdata" >/dev/null
@@ -188,4 +192,4 @@ for server in "$server_a" "$server_b"; do
   test -z "$(docker exec "$server" docker ps -aq --filter "label=com.docker.compose.project=$project")"
   docker exec "$server" test ! -d /var/lib/yoho/apps/pg/production
 done
-echo 'PASS Postgres replication recipe: example deployed as shipped, streaming, read-only standby, firewall bypass resistance, restart without re-clone, password rotation, app stop kept through deploy/rollback/Docker restart and app start without re-clone, db promote refusals, fenced promotion and no-op rerun, rebuild from new primary, no demotion on restart, removal on both Servers'
+echo 'PASS Postgres replication recipe: example deployed as shipped, streaming, read-only standby, firewall bypass resistance, restart without re-clone, password rotation, app stop kept through deploy/rollback/Docker restart and app start without re-clone, db promote refusals, fenced promotion and refused rerun, rebuild from new primary, no demotion on restart, removal on both Servers'

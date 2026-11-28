@@ -17,7 +17,6 @@ import (
 	"github.com/yoho-build/yoho/internal/pgpromote"
 	"github.com/yoho-build/yoho/internal/plan"
 	"github.com/yoho-build/yoho/internal/release"
-	"github.com/yoho-build/yoho/internal/remote"
 	"github.com/yoho-build/yoho/internal/ui"
 )
 
@@ -118,8 +117,9 @@ type promoteTarget struct {
 	From, To           string
 	FromServer         string
 	ToServer           string
-	Done               bool // the journal says it finished and the Release matches
+	Done               bool // the journal says promoted and the Release matches: resume at apply
 	FromJournal, Moved bool
+	Unclean            bool // the journal records an unclean fence
 }
 
 // derivePromotion finds which Connection's provider the operator moved:
@@ -185,7 +185,7 @@ func derivePromotion(dest config.Destination, rels map[string]*release.Release, 
 				name = resumable[0]
 				j := journals[name]
 				from, t.FromJournal = j.From, true
-				t.Done = j.State == "complete"
+				t.Done = j.Promoted()
 			}
 		}
 		if from == "" {
@@ -227,15 +227,36 @@ func derivePromotion(dest config.Destination, rels map[string]*release.Release, 
 	return t, nil
 }
 
-// postgresUser is --user, else the Service's POSTGRES_USER, else postgres.
-func postgresUser(flag string, svc types.ServiceConfig) string {
+// secretGetter reads a secret by key (*secrets.Store).
+type secretGetter interface {
+	Get(key string) (string, bool)
+}
+
+// postgresUser is --user, else POSTGRES_USER as the Service on server sees
+// it: its per-Server x-yoho.tags environment, its Compose environment, its
+// x-yoho.secrets, else postgres. fromSecret marks a value read from the
+// secrets: callers never print it.
+func postgresUser(flag string, svc types.ServiceConfig, ext config.ServiceExt, server string, srv config.Server, store secretGetter) (user string, fromSecret bool) {
 	if flag != "" {
-		return flag
+		return flag, false
+	}
+	if v := config.ServerEnv(ext, server, srv)["POSTGRES_USER"]; v != "" {
+		return v, false
 	}
 	if v, ok := svc.Environment["POSTGRES_USER"]; ok && v != nil && *v != "" {
-		return *v
+		return *v, false
 	}
-	return "postgres"
+	if store != nil {
+		for _, ref := range ext.Secrets {
+			if ref.Name != "POSTGRES_USER" {
+				continue
+			}
+			if v, ok := store.Get(ref.Key); ok && v != "" {
+				return v, true
+			}
+		}
+	}
+	return "postgres", false
 }
 
 // serviceVolumeNames are the Docker names of svc's named volumes.
@@ -310,36 +331,38 @@ func (a *app) dbPromote(ctx context.Context, conn string, o promoteOptions) (err
 	if err != nil {
 		return &validationError{err}
 	}
-	if t.Done {
-		a.ui.Info("%s is already the primary of Connection %s (promoted from %s); nothing to do", t.To, t.Connection, t.From)
-		a.ui.Finished(nil, t.To+" is already the primary")
-		return nil
+	if j := journals[t.Connection]; j != nil && j.From == t.From && j.To == t.To && j.Steps[pgpromote.StepFence] == "unclean" {
+		t.Unclean = true
 	}
 	if err = a.checkPromotion(ctx, s, t, o); err != nil {
 		return err
 	}
 	project := release.ProjectName(a.cfg.App, a.destName)
+	newUser, _ := postgresUser(o.User, s.r.Project.Services[t.To], s.r.Ext[t.To], t.ToServer, a.cfg.Servers[t.ToServer], s.store)
+	oldUser, _ := postgresUser(o.User, s.r.Project.Services[t.From], s.r.Ext[t.From], t.FromServer, a.cfg.Servers[t.FromServer], s.store)
 	popts := pgpromote.Options{
 		App: a.cfg.App, Destination: a.destName, Connection: t.Connection,
-		New:            pgpromote.Node{Server: t.ToServer, Service: t.To, Project: project, User: postgresUser(o.User, s.r.Project.Services[t.To]), Host: hosts[t.ToServer].Host},
-		Old:            pgpromote.Node{Server: t.FromServer, Service: t.From, Project: project, User: postgresUser(o.User, s.r.Project.Services[t.From])},
+		New:            pgpromote.Node{Server: t.ToServer, Service: t.To, Project: project, User: newUser, Host: hosts[t.ToServer].Host},
+		Old:            pgpromote.Node{Server: t.FromServer, Service: t.From, Project: project, User: oldUser},
 		OldPrimaryDown: o.OldPrimaryDown,
 		MaxLag:         maxLag,
 		Timeout:        o.Timeout,
 		Performer:      performer(),
 	}
-	if h, ok := hosts[t.FromServer]; ok && !o.OldPrimaryDown {
+	// A connected old Server is always verified, even with
+	// --old-primary-down (allowed there only after an unclean fence).
+	if h, ok := hosts[t.FromServer]; ok {
 		popts.Old.Host = h.Host
 	}
 	step := a.ui.Step(t.ToServer, "Check %s replicates %s", t.To, t.From)
 	st, err := pgpromote.Preflight(ctx, popts)
 	if err != nil {
-		step.Fail(err, "promote uses the container's local socket; pg_hba needs a `local` rule for the role, or pass `--user`")
+		step.Fail(err, preflightHint(err))
 		return &silentError{err}
 	}
 	switch {
 	case st.Promoted:
-		step.Done(t.To + " is already primary")
+		step.Done(t.To + " is already primary; resuming at apply")
 	case st.Fenced:
 		step.Done(t.From + " is already stopped")
 	case o.OldPrimaryDown:
@@ -377,11 +400,36 @@ func (a *app) dbPromote(ctx context.Context, conn string, o promoteOptions) (err
 
 	applying = true
 	if err = a.apply(ctx, applyOptions{Version: ver, SkipBuild: o.SkipBuild, AutoApprove: true}); err != nil {
-		a.ui.Warn("%s is primary and %s is stopped; rerun `yoho apply` (or `yoho db promote %s`)", t.To, t.From, t.Connection)
+		a.ui.Warn("%s is primary and %s is stopped; rerun `yoho db promote %s` (it resumes at apply)", t.To, t.From, t.Connection)
 		return err
+	}
+	// The journal is only a retry marker: once applied, a later switchover
+	// with the same Services starts fresh.
+	if e := a.deletePromotionJournal(ctx, t); e != nil {
+		a.ui.Warn("could not delete the promotion journal on %s (%v); delete %s by hand", t.ToServer, e, pgpromote.JournalPath(a.cfg.App, a.destName, t.Connection))
 	}
 	a.promoteNextSteps(s, t, project)
 	return nil
+}
+
+// deletePromotionJournal removes the journal after the follow-up apply.
+func (a *app) deletePromotionJournal(ctx context.Context, t promoteTarget) error {
+	srv := a.cfg.Servers[t.ToServer]
+	h, err := connectServer(t.ToServer, srv.SSH, srv.Sudo, a.sshOptions())
+	if err != nil {
+		return err
+	}
+	defer h.Close()
+	return pgpromote.DeleteJournal(ctx, h, a.cfg.App, a.destName, t.Connection)
+}
+
+// preflightHint names the socket and pg_hba only for psql failures.
+func preflightHint(err error) string {
+	var pe *pgpromote.PsqlError
+	if errors.As(err, &pe) {
+		return "promote uses the container's local socket; pg_hba needs a `local` rule for the role, or pass `--user`"
+	}
+	return ""
 }
 
 // checkPromotion refuses, before any change, a promotion that could leave
@@ -394,7 +442,9 @@ func (a *app) checkPromotion(ctx context.Context, s *session, t promoteTarget, o
 	if !s.r.Ext[t.To].Stateful {
 		return &validationError{fmt.Errorf("new primary %s must be marked x-yoho.stateful", t.To)}
 	}
-	if _, ok := s.r.Project.Services[t.From]; ok {
+	// Only an old primary still placed in the Destination restarts and
+	// must come back as a standby; a lost Server's is gone from compose.
+	if _, ok := s.r.Project.Services[t.From]; ok && len(a.dest.ServiceServers(t.From)) > 0 {
 		if !s.r.Ext[t.From].Stateful {
 			return &validationError{fmt.Errorf("old primary %s must be marked x-yoho.stateful", t.From)}
 		}
@@ -412,16 +462,21 @@ func (a *app) checkPromotion(ctx context.Context, s *session, t promoteTarget, o
 	if !inDest {
 		return nil
 	}
-	// --old-primary-down with a reachable Server: only when nothing runs.
+	// --old-primary-down needs the old Server out of the Destination; the
+	// one exception is accepting the loss after an unclean fence, when
+	// nothing may run.
+	if !t.Unclean {
+		return &validationError{fmt.Errorf("--old-primary-down, but Server %s of the old primary %s is still in the Destination\nhint: if Server %s is lost, power it off and remove it from `servers` and the Destination (see \"Server a is lost\" in the Postgres replication guide); otherwise drop --old-primary-down so promote fences %s", t.FromServer, t.From, t.FromServer, t.From)}
+	}
 	for _, h := range s.hosts {
 		if h.Name != t.FromServer {
 			continue
 		}
-		ids, e := h.Host.Output(ctx, remote.Cmd{Script: "set -eu\ndocker ps -q --filter " + remote.Quote("label=com.docker.compose.project="+release.ProjectName(a.cfg.App, a.destName)) + " --filter " + remote.Quote("label=com.docker.compose.service="+t.From)})
+		ids, e := deploy.RunningContainers(ctx, h.Host, a.cfg.App, a.destName, t.From)
 		if e != nil {
 			return e
 		}
-		if strings.TrimSpace(ids) != "" {
+		if len(ids) > 0 {
 			return &validationError{fmt.Errorf("Server %s is reachable and %s is running; --old-primary-down would leave two primaries\nhint: drop --old-primary-down so promote fences %s", t.FromServer, t.From, t.From)}
 		}
 	}
@@ -459,9 +514,9 @@ func (a *app) runPromotion(ctx context.Context, s *session, t promoteTarget, pop
 				st.Done(state)
 				delete(steps, name)
 			}
-		case "failed":
+		case "failed", "unclean":
 			if st := steps[name]; st != nil {
-				st.Fail(errors.New(name+" failed"), "")
+				st.Fail(errors.New(name+" "+state), "")
 				delete(steps, name)
 			}
 		}

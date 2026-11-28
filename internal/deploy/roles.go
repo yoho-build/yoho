@@ -374,13 +374,8 @@ func (r Roles) Deploy(ctx context.Context, d *plan.Deploy) (rel *release.Release
 			if !consumes {
 				continue
 			}
-			for _, provider := range d.Roles.ServiceServers(c.Service) {
-				if provider == name {
-					continue
-				}
-				if e := roles.Ready(ctx, p.Servers[0].Host, d.PrivateAddresses[provider], c.Port); e != nil {
-					return fail(stoppedOr(ctx, partHost(parts, provider), d, cn, c.Service, provider, fmt.Errorf("connection %s from %s: %w", c.Service, name, e)))
-				}
+			if e := connectionReady(ctx, d, p.Servers[0].Host, func(s string) remote.Host { return partHost(parts, s) }, cn, c, d.Roles.ServiceServers(c.Service), name); e != nil {
+				return fail(e)
 			}
 		}
 
@@ -627,13 +622,14 @@ func (r Roles) Rollback(ctx context.Context, d *plan.Deploy, version string) (re
 			if !consumes {
 				continue
 			}
-			for _, provider := range previous.ServiceServers(c.Service) {
-				if provider == name {
-					continue
+			hostOf := func(s string) remote.Host {
+				if h, ok := hosts[s]; ok {
+					return h.Host
 				}
-				if e := roles.Ready(ctx, hosts[name].Host, d.PrivateAddresses[provider], c.Port); e != nil {
-					return nil, failure(stoppedOr(ctx, hosts[provider].Host, d, cn, c.Service, provider, e))
-				}
+				return nil
+			}
+			if e := connectionReady(ctx, d, hosts[name].Host, hostOf, cn, c, previous.ServiceServers(c.Service), name); e != nil {
+				return nil, failure(e)
 			}
 		}
 		p := *d

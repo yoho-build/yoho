@@ -14,9 +14,11 @@ import (
 
 	"go.yaml.in/yaml/v3"
 
+	"github.com/yoho-build/yoho/internal/config"
 	"github.com/yoho-build/yoho/internal/plan"
 	"github.com/yoho-build/yoho/internal/release"
 	"github.com/yoho-build/yoho/internal/remote"
+	"github.com/yoho-build/yoho/internal/roles"
 )
 
 // StoppedFile records the Services `yoho app stop` stopped on a Server. It is
@@ -116,6 +118,11 @@ func syncStopped(ctx context.Context, h remote.Host, app, dest string, plans []s
 	if err != nil {
 		return nil, "", err
 	}
+	return writeStoppedOverride(ctx, h, app, dest, s, plans)
+}
+
+// writeStoppedOverride writes (or removes) the override of s for plans.
+func writeStoppedOverride(ctx context.Context, h remote.Host, app, dest string, s Stopped, plans []servicePlan) (map[string]bool, string, error) {
 	override := stoppedOverride(s, plans)
 	p := stoppedOverridePath(app, dest)
 	if override == nil {
@@ -156,7 +163,16 @@ func applyStopped(plans []servicePlan, stopped map[string]bool) []servicePlan {
 
 // enforceStopped syncs the override for plans and points r at it.
 func enforceStopped(ctx context.Context, r *runner, plans []servicePlan) ([]servicePlan, error) {
-	stopped, override, err := syncStopped(ctx, r.h, r.app, r.dest, plans)
+	s, err := ReadStopped(ctx, r.h, r.app, r.dest)
+	if err != nil {
+		return nil, err
+	}
+	return enforceStoppedSet(ctx, r, s, plans)
+}
+
+// enforceStoppedSet is enforceStopped for the stopped set s.
+func enforceStoppedSet(ctx context.Context, r *runner, s Stopped, plans []servicePlan) ([]servicePlan, error) {
+	stopped, override, err := writeStoppedOverride(ctx, r.h, r.app, r.dest, s, plans)
 	if err != nil {
 		return nil, err
 	}
@@ -196,6 +212,8 @@ type StopResult struct {
 	// ExitCodes are the removed containers' exit codes after docker stop,
 	// by container ID. A clean Postgres shutdown exits 0.
 	ExitCodes map[string]int `json:"exit_codes"`
+	// AfterStop is StopOptions.AfterStop's output by container ID.
+	AfterStop map[string]string `json:"-"`
 }
 
 // Clean reports whether every stopped container exited 0.
@@ -208,25 +226,68 @@ func (r StopResult) Clean() bool {
 	return true
 }
 
+// StopOptions change how StopService stops a Service; the zero value is
+// plain `yoho app stop`.
+type StopOptions struct {
+	// AfterStop is a POSIX sh snippet run once per stopped container, with
+	// its ID in $id, after docker stop and before docker rm, while the
+	// container's volumes are still attached to it. Its stdout is returned
+	// in StopResult.AfterStop. When it fails, no container is removed and
+	// the stop fails.
+	AfterStop string
+}
+
 // StopScript stops and removes the Service's containers (never one-offs or
 // volumes) and prints "<id> <exit code>" per container. Removal, not only
 // stop, keeps `restart: always` and a Docker restart from reviving them.
-func StopScript(project, service string) string {
-	return "set -eu\nids=$(docker ps -aq --filter " + remote.Quote("label=com.docker.compose.project="+project) +
-		" --filter " + remote.Quote("label=com.docker.compose.service="+service) +
+// The yoho.app and yoho.destination labels keep it to this App
+// Destination's containers: two of them can share a compose project name.
+func StopScript(app, dest, service string) string {
+	return stopScript(app, dest, service, "")
+}
+
+func stopScript(app, dest, service, afterStop string) string {
+	s := "set -eu\nids=$(docker ps -aq " + serviceFilters(app, dest, service) +
 		" --filter label=com.docker.compose.oneoff=False)\n" +
 		`[ -n "$ids" ] || exit 0
 docker stop $ids >/dev/null
 for id in $ids; do printf '%s %s\n' "$id" "$(docker inspect -f '{{.State.ExitCode}}' "$id")"; done
-docker rm $ids >/dev/null
 `
+	if afterStop != "" {
+		s += "for id in $ids; do\n  out=$(\n" + afterStop + "\n) || { echo \"check of stopped container $id failed; containers kept\" >&2; exit 1; }\n" +
+			"  printf '%s\\n' \"$out\" | sed \"s/^/$id| /\"\ndone\n"
+	}
+	return s + "docker rm $ids >/dev/null\n"
+}
+
+// serviceFilters are the docker ps filters of service's containers of this
+// App Destination.
+func serviceFilters(app, dest, service string) string {
+	return "--filter " + remote.Quote("label=com.docker.compose.project="+release.ProjectName(app, dest)) +
+		" --filter " + remote.Quote("label=com.docker.compose.service="+service) +
+		" --filter " + remote.Quote("label="+LabelApp+"="+app) +
+		" --filter " + remote.Quote("label="+LabelDestination+"="+dest)
+}
+
+// RunningContainers are the IDs of service's running containers of this
+// App Destination on h. Read-only.
+func RunningContainers(ctx context.Context, h remote.Host, app, dest, service string) ([]string, error) {
+	out, err := h.Output(ctx, remote.Cmd{Script: "set -eu\ndocker ps -q " + serviceFilters(app, dest, service)})
+	if err != nil {
+		return nil, fmt.Errorf("list running containers of %s: %w", service, err)
+	}
+	return lines(out), nil
 }
 
 // StopService records service as stopped on h, then stops and removes its
 // containers. The record comes first, so an interrupted stop still keeps
 // the Service down on the next deploy. Callers hold the Destination lock.
-func StopService(ctx context.Context, h remote.Host, app, dest, service string, info StoppedEntry) (StopResult, error) {
-	res := StopResult{Containers: []string{}, ExitCodes: map[string]int{}}
+func StopService(ctx context.Context, h remote.Host, app, dest, service string, info StoppedEntry, opts ...StopOptions) (StopResult, error) {
+	var o StopOptions
+	if len(opts) > 0 {
+		o = opts[0]
+	}
+	res := StopResult{Containers: []string{}, ExitCodes: map[string]int{}, AfterStop: map[string]string{}}
 	s, err := ReadStopped(ctx, h, app, dest)
 	if err != nil {
 		return res, err
@@ -243,11 +304,18 @@ func StopService(ctx context.Context, h remote.Host, app, dest, service string, 
 			return res, err
 		}
 	}
-	out, err := h.Output(ctx, remote.Cmd{Script: StopScript(release.ProjectName(app, dest), service)})
+	out, err := h.Output(ctx, remote.Cmd{Script: stopScript(app, dest, service, o.AfterStop)})
 	if err != nil {
 		return res, fmt.Errorf("stop %s: %w", service, err)
 	}
 	for _, l := range lines(out) {
+		if id, text, ok := strings.Cut(l, "| "); ok && !strings.Contains(id, " ") {
+			if res.AfterStop[id] != "" {
+				res.AfterStop[id] += "\n"
+			}
+			res.AfterStop[id] += text
+			continue
+		}
 		id, code, ok := strings.Cut(l, " ")
 		if !ok {
 			continue
@@ -263,11 +331,13 @@ func StopService(ctx context.Context, h remote.Host, app, dest, service string, 
 	return res, nil
 }
 
-// StartError is a started Service that did not become ready. Its entry is
-// already gone from StoppedFile.
+// StartError is a started Service that did not come up or did not become
+// ready. StillStopped says its entry is still in StoppedFile (compose up
+// failed); otherwise the entry is gone.
 type StartError struct {
-	Service string
-	Err     error
+	Service      string
+	StillStopped bool
+	Err          error
 }
 
 func (e *StartError) Error() string { return e.Err.Error() }
@@ -275,13 +345,16 @@ func (e *StartError) Unwrap() error { return e.Err }
 
 // Hint is the next step after a failed start.
 func (e *StartError) Hint() string {
+	if e.StillStopped {
+		return "`yoho app logs " + e.Service + "`; the Service stays marked stopped; rerun `yoho app start " + e.Service + "`"
+	}
 	return "`yoho app logs " + e.Service + "`; the Service stays marked started; rerun `yoho app start " + e.Service + "`"
 }
 
-// StartService removes service's stopped entry on d's Server, starts it from
-// the current Release's compiled compose (other stopped Services stay down)
-// and waits for its readiness. changed is false when it was not stopped.
-// Callers hold the Destination lock.
+// StartService starts service from the current Release's compiled compose
+// on d's Server (other stopped Services stay down), removes its stopped
+// entry once compose up succeeded, and waits for its readiness. changed is
+// false when it was not stopped. Callers hold the Destination lock.
 func StartService(ctx context.Context, d *plan.Deploy, service string) (changed bool, err error) {
 	h := d.Servers[0].Host
 	ver, plans, err := currentPlans(ctx, h, d.App, d.Destination)
@@ -297,24 +370,33 @@ func StartService(ctx context.Context, d *plan.Deploy, service string) (changed 
 	if sp == nil {
 		return false, fmt.Errorf("Service %s is not in the current Release %s", service, ver)
 	}
+	if err := checkOwnership(ctx, h, d.App, d.Destination, []servicePlan{*sp}); err != nil {
+		return false, err
+	}
 	s, err := ReadStopped(ctx, h, d.App, d.Destination)
 	if err != nil {
 		return false, err
 	}
-	if _, changed = s[service]; changed {
-		delete(s, service)
-		if err := writeStopped(ctx, h, d.App, d.Destination, s); err != nil {
-			return false, err
+	_, changed = s[service]
+	rest := Stopped{}
+	for name, e := range s {
+		if name != service {
+			rest[name] = e
 		}
 	}
 	r := newRunner(d, path.Join(release.Dir(d.App, d.Destination, ver), "compose.yaml"))
 	r.phase = "service-start"
-	if _, err := enforceStopped(ctx, r, plans); err != nil {
-		return changed, err
+	if _, err := enforceStoppedSet(ctx, r, rest, plans); err != nil {
+		return false, err
 	}
 	r.logf("starting %s from Release %s", service, ver)
 	if err := h.Run(ctx, remote.Cmd{Script: r.cc.cmd("up", "-d", "--no-deps", service)}); err != nil {
-		return changed, &StartError{Service: service, Err: fmt.Errorf("compose up %s: %w", service, err)}
+		return false, &StartError{Service: service, StillStopped: changed, Err: fmt.Errorf("compose up %s: %w", service, err)}
+	}
+	if changed {
+		if err := writeStopped(ctx, h, d.App, d.Destination, rest); err != nil {
+			return changed, err
+		}
 	}
 	r.phase = "plain-readiness"
 	if err := r.waitServices(ctx, []servicePlan{*sp}, "complete"); err != nil {
@@ -346,6 +428,25 @@ func stoppedOr(ctx context.Context, h remote.Host, d *plan.Deploy, connection, p
 		return fmt.Errorf("%w: %w", se, err)
 	}
 	return err
+}
+
+// connectionReady checks Connection cn's providers from Server name. A
+// stopped provider fails with StoppedProviderError, a same-Server one too
+// (checked before it is skipped); a cross-Server provider must accept TCP
+// on its private address.
+func connectionReady(ctx context.Context, d *plan.Deploy, from remote.Host, hostOf func(string) remote.Host, cn string, c config.Connection, providers []string, name string) error {
+	for _, provider := range providers {
+		if provider == name {
+			if se := StoppedProviderError(ctx, hostOf(provider), d.App, d.Destination, cn, c.Service, provider); se != nil {
+				return se
+			}
+			continue
+		}
+		if e := roles.Ready(ctx, from, d.PrivateAddresses[provider], c.Port); e != nil {
+			return stoppedOr(ctx, hostOf(provider), d, cn, c.Service, provider, fmt.Errorf("connection %s from %s: %w", c.Service, name, e))
+		}
+	}
+	return nil
 }
 
 func partHost(parts map[string]*plan.Deploy, server string) remote.Host {

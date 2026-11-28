@@ -66,7 +66,11 @@ func CheckRoles(r *Result, d config.Destination, proxy config.ProxyConfig, app .
 			}
 		}
 	}
-	ports := map[string]string{}
+	type serverPort struct {
+		server string
+		port   int
+	}
+	ports := map[serverPort]string{}
 	for _, name := range sortedMapKeys(d.Connections) {
 		conn := d.Connections[name]
 		svc, ok := r.Project.Services[conn.Service]
@@ -79,7 +83,7 @@ func CheckRoles(r *Result, d config.Destination, proxy config.ProxyConfig, app .
 		}
 		providers := d.ServiceServers(conn.Service)
 		for _, h := range providers {
-			key := fmt.Sprint(h, conn.Port)
+			key := serverPort{h, conn.Port}
 			if prev, ok := ports[key]; ok && prev != name {
 				add(conn.Service, "connections %s and %s publish the same port on one Server", prev, name)
 			}

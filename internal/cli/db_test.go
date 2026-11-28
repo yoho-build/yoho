@@ -2,6 +2,8 @@ package cli
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"io"
 	"strings"
 	"testing"
@@ -61,8 +63,8 @@ func TestDerivePromotion(t *testing.T) {
 	if got, err = derivePromotion(edited, same, nil, "", "db"); err != nil || got.From != "db" || got.FromServer != "a" {
 		t.Fatalf("%+v %v", got, err)
 	}
-	// A finished promotion with a matching Release is a no-op; an
-	// unfinished one resumes from its journal.
+	// A promoted journal with a matching Release resumes at apply (Done);
+	// an unfinished one resumes from its journal.
 	j := &pgpromote.Journal{Connection: "primary", From: "db", To: "db-standby", State: "complete"}
 	if got, err = derivePromotion(edited, same, map[string]*pgpromote.Journal{"primary": j}, "", ""); err != nil || !got.Done || got.From != "db" {
 		t.Fatalf("%+v %v", got, err)
@@ -106,7 +108,11 @@ func TestParseBytes(t *testing.T) {
 func TestPostgresUserAndVolumes(t *testing.T) {
 	user := "app"
 	svc := types.ServiceConfig{ContainerSpec: types.ContainerSpec{Environment: types.MappingWithEquals{"POSTGRES_USER": &user}}}
-	if postgresUser("", svc) != "app" || postgresUser("admin", svc) != "admin" || postgresUser("", types.ServiceConfig{}) != "postgres" {
+	user1 := func(flag string, svc types.ServiceConfig) string {
+		u, _ := postgresUser(flag, svc, config.ServiceExt{}, "a", config.Server{}, nil)
+		return u
+	}
+	if user1("", svc) != "app" || user1("admin", svc) != "admin" || user1("", types.ServiceConfig{}) != "postgres" {
 		t.Fatal("user default")
 	}
 	p := &types.Project{
@@ -151,10 +157,86 @@ func TestCheckPromotionRefusals(t *testing.T) {
 	if err := check(gone, ext, promoteOptions{OldPrimaryDown: true}, ""); err != nil {
 		t.Fatal(err)
 	}
+	// --old-primary-down needs the old Server out of the Destination ...
+	if err := check(pgDest("db-standby", "web", "db"), ext, promoteOptions{OldPrimaryDown: true}, ""); err == nil || !strings.Contains(err.Error(), "still in the Destination") {
+		t.Fatal(err)
+	}
+	// ... except to accept the loss after an unclean fence, with nothing running.
+	target.Unclean = true
 	if err := check(pgDest("db-standby", "web", "db"), ext, promoteOptions{OldPrimaryDown: true}, "abc123"); err == nil || !strings.Contains(err.Error(), "two primaries") {
 		t.Fatal(err)
 	}
 	if err := check(pgDest("db-standby", "web", "db"), ext, promoteOptions{OldPrimaryDown: true}, ""); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// postgresUser reads POSTGRES_USER from the Server's tag environment and
+// the Service's secrets too, marking a secret-sourced value.
+func TestPostgresUserFromTagsAndSecrets(t *testing.T) {
+	compose := "app"
+	svc := types.ServiceConfig{ContainerSpec: types.ContainerSpec{Environment: types.MappingWithEquals{"POSTGRES_USER": &compose}}}
+	ext := config.ServiceExt{Tags: map[string]config.ServiceTag{"eu": {Env: map[string]string{"POSTGRES_USER": "eu_admin"}}}}
+	if u, sec := postgresUser("", svc, ext, "a", config.Server{Tags: []string{"eu"}}, nil); u != "eu_admin" || sec {
+		t.Fatal(u)
+	}
+	if u, _ := postgresUser("", svc, ext, "b", config.Server{}, nil); u != "app" {
+		t.Fatal(u)
+	}
+	store := mapStore{"PG_USER": "secret_admin"}
+	ext = config.ServiceExt{Secrets: config.SecretRefs{{Name: "POSTGRES_USER", Key: "PG_USER"}}}
+	if u, sec := postgresUser("", types.ServiceConfig{}, ext, "a", config.Server{}, store); u != "secret_admin" || !sec {
+		t.Fatal(u, sec)
+	}
+	if u, sec := postgresUser("ops", types.ServiceConfig{}, ext, "a", config.Server{}, store); u != "ops" || sec {
+		t.Fatal(u)
+	}
+}
+
+type mapStore map[string]string
+
+func (m mapStore) Get(k string) (string, bool) { v, ok := m[k]; return v, ok }
+
+// The socket/pg_hba hint is for psql failures only.
+func TestPreflightHintOnlyForPsqlErrors(t *testing.T) {
+	if preflightHint(errors.New("db-standby is 96 bytes behind db")) != "" {
+		t.Fatal("hint for a lag error")
+	}
+	if !strings.Contains(preflightHint(fmt.Errorf("check: %w", &pgpromote.PsqlError{Err: errors.New("FATAL: role")})), "pg_hba") {
+		t.Fatal("no hint for a psql error")
+	}
+}
+
+// The documented lost-Server flow: Server a removed from the Destination,
+// db removed from compose and from the consumers, --old-primary-down. The
+// derivation and the checks let it through.
+func TestDerivePromotionLostServer(t *testing.T) {
+	dest := config.Destination{
+		Servers: []string{"b"},
+		Roles: map[string]config.Role{
+			"app":     {Services: []string{"web"}, Servers: []string{"b"}},
+			"standby": {Services: []string{"db-standby"}, Servers: []string{"b"}},
+		},
+		Connections: map[string]config.Connection{"primary": {Service: "db-standby", Port: 5432, Consumers: []string{"web"}}},
+	}
+	rels := map[string]*release.Release{"b": pgRelease("db")}
+	got, err := derivePromotion(dest, rels, nil, "", "")
+	if err != nil || got.From != "db" || got.To != "db-standby" || got.FromServer != "a" || got.ToServer != "b" {
+		t.Fatalf("%+v %v", got, err)
+	}
+	ext := map[string]config.ServiceExt{"db-standby": {Stateful: true}}
+	proj := &types.Project{Services: types.Services{"db-standby": {Name: "db-standby"}, "web": {Name: "web"}}}
+	a := &app{cfg: &config.Config{App: "pg"}, destName: "production", dest: dest, ui: ui.New(io.Discard, ui.Human, false)}
+	s := &session{r: &composefile.Result{Project: proj, Ext: ext}, hosts: []plan.NamedHost{{Name: "b", Host: runningHost{}}}}
+	if err := a.checkPromotion(context.Background(), s, got, promoteOptions{OldPrimaryDown: true}); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.checkPromotion(context.Background(), s, got, promoteOptions{}); err == nil || !strings.Contains(err.Error(), "power it off") {
+		t.Fatal(err)
+	}
+	// db still in compose but no longer placed: not required as a consumer.
+	proj.Services["db"] = types.ServiceConfig{Name: "db"}
+	if err := a.checkPromotion(context.Background(), s, got, promoteOptions{OldPrimaryDown: true}); err != nil {
 		t.Fatal(err)
 	}
 }

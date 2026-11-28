@@ -246,7 +246,9 @@ func (a *app) compose(ctx context.Context) (*composefile.Result, error) {
 		return nil, err
 	}
 	findings := composefile.CheckRoles(r, a.dest, a.proxyConfig(), a.cfg.App)
+	// Tags follow the resolved access (YOHO_ACCESS wins), not the file's.
 	tagDest := a.dest
+	tagDest.Access = "operator"
 	if a.scoped {
 		tagDest.Access = "scoped"
 	}

@@ -20,13 +20,13 @@ import (
 
 func TestStopScriptIsExact(t *testing.T) {
 	want := `set -eu
-ids=$(docker ps -aq --filter 'label=com.docker.compose.project=yoho-shop-production' --filter 'label=com.docker.compose.service=db' --filter label=com.docker.compose.oneoff=False)
+ids=$(docker ps -aq --filter 'label=com.docker.compose.project=yoho-shop-production' --filter 'label=com.docker.compose.service=db' --filter 'label=yoho.app=shop' --filter 'label=yoho.destination=production' --filter label=com.docker.compose.oneoff=False)
 [ -n "$ids" ] || exit 0
 docker stop $ids >/dev/null
 for id in $ids; do printf '%s %s\n' "$id" "$(docker inspect -f '{{.State.ExitCode}}' "$id")"; done
 docker rm $ids >/dev/null
 `
-	if got := StopScript("yoho-shop-production", "db"); got != want {
+	if got := StopScript("shop", "production", "db"); got != want {
 		t.Fatalf("got\n%s\nwant\n%s", got, want)
 	}
 	if strings.Contains(want, "volume") || strings.Contains(want, "down") {
@@ -105,7 +105,7 @@ func TestStopServiceRecordsFirstAndIsIdempotent(t *testing.T) {
 	if err != nil || !strings.Contains(string(override), "db:") || strings.Contains(string(override), "web") {
 		t.Fatalf("override %q %v", override, err)
 	}
-	if got := h.all(); !strings.Contains(got, StopScript("yoho-shop-production", "db")) {
+	if got := h.all(); !strings.Contains(got, StopScript("shop", "production", "db")) {
 		t.Fatalf("stop script not run:\n%s", got)
 	}
 
@@ -273,7 +273,24 @@ func TestDiffShowsStoppedService(t *testing.T) {
 	if strings.Contains(h.all(), "stopped.compose.yaml") {
 		t.Fatal("Diff must not write the override")
 	}
+	// A config change of the stopped Service is still a change: apply
+	// records the new Release and the Service stays stopped.
+	d := testDeploy(t, h, io.Discard)
+	db.Reasons = nil
+	svc := d.Project.Services["db"]
+	svc.Image = "postgres:18"
+	svc.Environment = map[string]*string{"POSTGRES_DB": ptr("other")}
+	d.Project.Services["db"] = svc
+	if cs, err = (Compose{}).Diff(ctx, d); err != nil {
+		t.Fatal(err)
+	}
+	db = byKey(cs)["service db"]
+	if db.Action != plan.ActionUpdate || !db.Stopped || !strings.Contains(strings.Join(db.Reasons, "; "), "image postgres:") || !strings.Contains(strings.Join(db.Reasons, "; "), "config changed: environment") || !strings.Contains(strings.Join(db.Reasons, "; "), "stays stopped") {
+		t.Fatalf("%+v", db)
+	}
 }
+
+func ptr(s string) *string { return &s }
 
 // releaseHost answers readlink with releases/v1 and keeps files in memory.
 type releaseHost struct{ *rolesHost }
@@ -334,5 +351,126 @@ func TestStoppedProviderExplainsConnectionFailure(t *testing.T) {
 	got := stoppedOr(ctx, h, d, "primary", "db", "a", cause)
 	if !errors.Is(got, cause) || !strings.HasPrefix(got.Error(), "connection primary provider db is stopped on a (`yoho app stop`); start it or switch the Connection") {
 		t.Fatal(got)
+	}
+}
+
+// A failed compose up keeps the Service marked stopped, so the rerun still
+// reports the start as a change; the up itself runs without the Service in
+// the override.
+func TestStartServiceFailedUpStaysStopped(t *testing.T) {
+	h, appDir := stopRelease(t)
+	ctx := context.Background()
+	if _, err := StopService(ctx, h, "shop", "production", "db", StoppedEntry{By: "alice"}); err != nil {
+		t.Fatal(err)
+	}
+	failUp := true
+	overrideAtUp := ""
+	h.respond = func(s string) (string, error) {
+		if strings.Contains(s, "'up' '-d' '--no-deps' 'db'") {
+			b, _ := os.ReadFile(filepath.Join(appDir, StoppedOverrideFile))
+			overrideAtUp = string(b)
+			if failUp {
+				return "", errors.New("compose up failed")
+			}
+		}
+		if strings.Contains(s, "'ps' '--all' '-q' 'db'") {
+			return "db1", nil
+		}
+		if strings.Contains(s, "docker inspect") && strings.Contains(s, "State.Status") {
+			return "running healthy 0 0", nil
+		}
+		return "", nil
+	}
+	d := &plan.Deploy{App: "shop", Destination: "production", Servers: []plan.NamedHost{{Name: "s1", Host: h}}, Out: io.Discard}
+	_, err := StartService(ctx, d, "db")
+	var se *StartError
+	if !errors.As(err, &se) || !strings.Contains(se.Hint(), "stays marked stopped") {
+		t.Fatalf("%v", err)
+	}
+	if strings.Contains(overrideAtUp, "db:") {
+		t.Fatalf("compose up ran with db scaled to 0:\n%s", overrideAtUp)
+	}
+	if s, _ := ReadStopped(ctx, h, "shop", "production"); s["db"].By != "alice" {
+		t.Fatalf("failed up cleared the stopped record: %+v", s)
+	}
+	failUp = false
+	if changed, err := StartService(ctx, d, "db"); err != nil || !changed {
+		t.Fatalf("rerun after a failed up: changed=%v %v", changed, err)
+	}
+	if s, _ := ReadStopped(ctx, h, "shop", "production"); len(s) != 0 {
+		t.Fatalf("record kept after start: %+v", s)
+	}
+}
+
+// app start refuses a compose project another App Destination's containers use.
+func TestStartServiceChecksOwnership(t *testing.T) {
+	h, _ := stopRelease(t)
+	ctx := context.Background()
+	if _, err := StopService(ctx, h, "shop", "production", "db", StoppedEntry{By: "alice"}); err != nil {
+		t.Fatal(err)
+	}
+	h.respond = func(s string) (string, error) {
+		if strings.Contains(s, "docker ps -a --filter") && strings.Contains(s, LabelApp) {
+			return "shop-production|x\n", nil
+		}
+		return "", nil
+	}
+	d := &plan.Deploy{App: "shop", Destination: "production", Servers: []plan.NamedHost{{Name: "s1", Host: h}}, Out: io.Discard}
+	_, err := StartService(ctx, d, "db")
+	var oe *release.OwnershipError
+	if !errors.As(err, &oe) {
+		t.Fatalf("%v", err)
+	}
+	if strings.Contains(h.all(), "'up' '-d' '--no-deps' 'db'") {
+		t.Fatal("compose up ran for a foreign project")
+	}
+}
+
+// A stopped same-Server provider fails the readiness check with the
+// stopped message instead of being skipped (Deploy and Rollback share it).
+func TestConnectionReadyStoppedSameServerProvider(t *testing.T) {
+	h := &rolesHost{name: "a", files: map[string][]byte{}}
+	ctx := context.Background()
+	d := &plan.Deploy{App: "shop", Destination: "production"}
+	hostOf := func(string) remote.Host { return h }
+	c := config.Connection{Service: "db", Port: 5432}
+	if err := connectionReady(ctx, d, h, hostOf, "primary", c, []string{"a"}, "a"); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeStopped(ctx, h, "shop", "production", Stopped{"db": {By: "alice"}}); err != nil {
+		t.Fatal(err)
+	}
+	err := connectionReady(ctx, d, h, hostOf, "primary", c, []string{"a"}, "a")
+	if err == nil || err.Error() != "connection primary provider db is stopped on a (`yoho app stop`); start it or switch the Connection" {
+		t.Fatal(err)
+	}
+}
+
+// StopOptions.AfterStop runs between docker stop and docker rm and its
+// output comes back per container; plain stop has no such step.
+func TestStopServiceAfterStop(t *testing.T) {
+	h, _ := stopRelease(t)
+	ctx := context.Background()
+	var script string
+	h.respond = func(s string) (string, error) {
+		if strings.Contains(s, "docker stop $ids") {
+			script = s
+			return "c1 0\nc1| Database cluster state:               shut down\nc1| Latest checkpoint location:           0/3000060", nil
+		}
+		return "", nil
+	}
+	res, err := StopService(ctx, h, "shop", "production", "db", StoppedEntry{By: "alice"}, StopOptions{AfterStop: "pg_controldata_here"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	stop, check, rm := strings.Index(script, "docker stop $ids"), strings.Index(script, "pg_controldata_here"), strings.Index(script, "docker rm $ids")
+	if stop < 0 || check < stop || rm < check {
+		t.Fatalf("after-stop must run between stop and rm:\n%s", script)
+	}
+	if len(res.Containers) != 1 || res.ExitCodes["c1"] != 0 || res.AfterStop["c1"] != "Database cluster state:               shut down\nLatest checkpoint location:           0/3000060" {
+		t.Fatalf("%+v", res)
+	}
+	if strings.Contains(StopScript("shop", "production", "db"), "out=$(") {
+		t.Fatal("plain stop runs an after-stop step")
 	}
 }

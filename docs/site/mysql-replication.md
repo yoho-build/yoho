@@ -103,7 +103,10 @@ only, so `read_only` stops its writes.
   partial data and copies again.
 - MariaDB stores the replication password in `master.info` in the replica's
   data directory, readable only by the `mysql` user. The entrypoint updates it
-  from the secret file on every start. No password is in a command line.
+  from the secret file on every start. No password is in a command line. A
+  failed statement that carries a password (creating the `replicator` user,
+  `CHANGE MASTER TO`, `set-passwords`) prints only its name and exit code,
+  never the client's error, which can quote the statement.
 - The copy holds the `app` database only. Users are created on each node from
   the secrets at initialization. If your App uses stored routines, grant
   `replicator` `SHOW CREATE ROUTINE` on `app` and add `--routines` to the
@@ -230,7 +233,8 @@ printf "ALTER USER 'app'@'%%' IDENTIFIED BY '%s';\n" "$NEW" | yoho app exec -i d
 ```
 
 `printf` is a shell builtin and the statement travels over stdin, so the value
-is not in a command line. If the client reports an error, stop: do not change
+is not in a command line. If the client reports an error, stop (the error can
+quote the statement with the new value, so do not paste it anywhere): do not change
 `.yoho/secrets`. Then put the value in `.yoho/secrets` and run
 `yoho deploy`. This order is not covered by CI.
 

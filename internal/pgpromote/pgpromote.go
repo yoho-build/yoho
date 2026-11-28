@@ -40,13 +40,33 @@ func (n Node) PsqlScript(sql string) string {
 		"psql", "-X", "-At", "-v", "ON_ERROR_STOP=1", "-U", n.User, "-d", "postgres", "-c", sql)
 }
 
+// PsqlError is a psql run that failed: it could not connect or
+// authenticate, or the SQL failed.
+type PsqlError struct{ Err error }
+
+func (e *PsqlError) Error() string { return e.Err.Error() }
+func (e *PsqlError) Unwrap() error { return e.Err }
+
 // Query runs sql on n and returns its trimmed output.
 func (n Node) Query(ctx context.Context, sql string) (string, error) {
 	out, err := n.Host.Output(ctx, remote.Cmd{Script: n.PsqlScript(sql)})
 	if err != nil {
-		return "", fmt.Errorf("%s on %s: %s: %w", n.Service, n.Server, sql, err)
+		return "", &PsqlError{fmt.Errorf("%s on %s: %s: %w", n.Service, n.Server, sql, err)}
 	}
 	return strings.TrimSpace(out), nil
+}
+
+// SystemID is pg_control_system().system_identifier: equal on a primary
+// and its standbys, different for another cluster.
+func (n Node) SystemID(ctx context.Context) (string, error) {
+	out, err := n.Query(ctx, "SELECT system_identifier FROM pg_control_system()")
+	if err != nil {
+		return "", err
+	}
+	if _, e := strconv.ParseUint(out, 10, 64); e != nil {
+		return "", fmt.Errorf("%s on %s: unexpected system identifier %q", n.Service, n.Server, out)
+	}
+	return out, nil
 }
 
 func (n Node) boolean(ctx context.Context, sql string) (bool, error) {
@@ -96,11 +116,13 @@ func (n Node) CurrentLSN(ctx context.Context) (string, error) {
 // ReceiveReplay are pg_last_wal_receive_lsn() and pg_last_wal_replay_lsn()
 // on a standby, "" when NULL.
 func (n Node) ReceiveReplay(ctx context.Context) (string, string, error) {
-	out, err := n.Query(ctx, "SELECT coalesce(pg_last_wal_receive_lsn()::text, '') || ' ' || coalesce(pg_last_wal_replay_lsn()::text, '')")
+	// '|' separates them: Query trims spaces, which would shift a NULL
+	// receive position into the replay field.
+	out, err := n.Query(ctx, "SELECT coalesce(pg_last_wal_receive_lsn()::text, '') || '|' || coalesce(pg_last_wal_replay_lsn()::text, '')")
 	if err != nil {
 		return "", "", err
 	}
-	recv, replay, _ := strings.Cut(out, " ")
+	recv, replay, _ := strings.Cut(out, "|")
 	for _, l := range []string{recv, replay} {
 		if l == "" {
 			continue
@@ -131,18 +153,64 @@ func ParseLSN(s string) (uint64, error) {
 	return h<<32 | l, nil
 }
 
-// Journal is the durable state of one promotion, on the new primary's
-// Server, so a rerun resumes after the last complete step.
+// ControlDataScript is the StopOptions.AfterStop snippet of the fence: it
+// runs pg_controldata on the stopped old primary's data directory (PGDATA
+// from the container's environment, default /var/lib/postgresql/data) in a
+// throwaway container of the same image that shares its volumes.
+const ControlDataScript = `image=$(docker inspect -f '{{.Config.Image}}' "$id")
+pgdata=$(docker inspect -f '{{range .Config.Env}}{{println .}}{{end}}' "$id" | sed -n 's/^PGDATA=//p' | tail -n 1)
+docker run --rm --pull never --network none --volumes-from "$id" -e LC_ALL=C --entrypoint pg_controldata "$image" -D "${pgdata:-/var/lib/postgresql/data}"`
+
+// ControlData is what the fence reads from pg_controldata.
+type ControlData struct {
+	// State is "Database cluster state", "shut down" after a clean stop.
+	State string
+	// Checkpoint is "Latest checkpoint location": after a clean stop the
+	// shutdown checkpoint, the end of the old primary's WAL.
+	Checkpoint string
+	// SystemID is "Database system identifier".
+	SystemID string
+}
+
+// ParseControlData reads pg_controldata output (LC_ALL=C).
+func ParseControlData(out string) ControlData {
+	var cd ControlData
+	for _, l := range strings.Split(out, "\n") {
+		k, v, ok := strings.Cut(l, ":")
+		if !ok {
+			continue
+		}
+		v = strings.TrimSpace(v)
+		switch strings.TrimSpace(k) {
+		case "Database cluster state":
+			cd.State = v
+		case "Latest checkpoint location":
+			cd.Checkpoint = v
+		case "Database system identifier":
+			cd.SystemID = v
+		}
+	}
+	return cd
+}
+
+// Journal is the retry marker of one promotion, on the new primary's
+// Server, so a rerun resumes after the last complete step. `yoho db
+// promote` deletes it once the follow-up apply succeeded.
 type Journal struct {
-	Connection     string            `json:"connection"`
-	From           string            `json:"from"`
-	To             string            `json:"to"`
-	FromServer     string            `json:"from_server"`
-	ToServer       string            `json:"to_server"`
-	TargetLSN      string            `json:"target_lsn,omitempty"`
-	OldPrimaryDown bool              `json:"old_primary_down,omitempty"`
-	Steps          map[string]string `json:"steps"`
-	// State is running, failed or complete (the standby is primary).
+	Connection     string `json:"connection"`
+	From           string `json:"from"`
+	To             string `json:"to"`
+	FromServer     string `json:"from_server"`
+	ToServer       string `json:"to_server"`
+	TargetLSN      string `json:"target_lsn,omitempty"`
+	OldPrimaryDown bool   `json:"old_primary_down,omitempty"`
+	// Unclean records a fence whose old primary did not shut down cleanly
+	// (exit codes or cluster state); a rerun refuses it without
+	// --old-primary-down.
+	Unclean []string          `json:"unclean,omitempty"`
+	Steps   map[string]string `json:"steps"`
+	// State is running, failed or promoted (the standby is primary; the
+	// apply may still be due). Older journals say complete for promoted.
 	State       string    `json:"state"`
 	OperationID string    `json:"operation_id,omitempty"`
 	Started     time.Time `json:"started"`
@@ -179,6 +247,17 @@ func ReadJournal(ctx context.Context, h remote.Host, app, dest, connection strin
 	return &j, nil
 }
 
+// DeleteJournal removes connection's journal on h once the promotion and
+// its apply are done.
+func DeleteJournal(ctx context.Context, h remote.Host, app, dest, connection string) error {
+	return h.Run(ctx, remote.Cmd{Script: "set -eu\nrm -f -- " + remote.Quote(JournalPath(app, dest, connection))})
+}
+
+// Promoted reports whether j says the standby was promoted.
+func (j *Journal) Promoted() bool {
+	return j != nil && (j.State == "promoted" || j.State == "complete")
+}
+
 func writeJournal(ctx context.Context, h remote.Host, app, dest string, j *Journal) error {
 	b, err := json.MarshalIndent(j, "", "  ")
 	if err != nil {
@@ -210,12 +289,48 @@ func (o Options) matches(j *Journal) bool {
 	return j != nil && j.Connection == o.Connection && j.From == o.Old.Service && j.To == o.New.Service
 }
 
+// Fenced reports, from Server state, whether the old primary is fenced:
+// recorded in stopped.json and without running containers.
+func Fenced(ctx context.Context, o Options) (bool, error) {
+	if o.Old.Host == nil {
+		return false, nil
+	}
+	stopped, err := deploy.ReadStopped(ctx, o.Old.Host, o.App, o.Destination)
+	if err != nil {
+		return false, err
+	}
+	if _, ok := stopped[o.Old.Service]; !ok {
+		return false, nil
+	}
+	ids, err := deploy.RunningContainers(ctx, o.Old.Host, o.App, o.Destination, o.Old.Service)
+	if err != nil {
+		return false, err
+	}
+	return len(ids) == 0, nil
+}
+
+// UncleanError refuses to continue after an unclean fence.
+func UncleanError(j *Journal) error {
+	return fmt.Errorf("old primary %s did not shut down cleanly (%s); its last writes may not have reached %s\nhint: `yoho app start %s` restores the old primary; or rerun with --old-primary-down to promote %s at the position it received, accepting that writes it did not receive are lost", j.From, strings.Join(j.Unclean, ", "), j.To, j.From, j.To)
+}
+
+// resumable returns j when it is o's journal and still describes the
+// cluster: a promoted journal whose new primary is in recovery is stale
+// (a later switchover reversed it) and is dropped.
+func (o Options) resumable(j *Journal, inRecovery bool) *Journal {
+	if !o.matches(j) || j.Promoted() && inRecovery {
+		return nil
+	}
+	return j
+}
+
 // Status is what Preflight found.
 type Status struct {
 	// Journal is the existing journal of this promotion, if any.
 	Journal *Journal
-	// Fenced means the old primary is already stopped (journal or
-	// `yoho app stop`); Promoted that the standby is already primary.
+	// Fenced means the old primary is stopped, read from its Server
+	// (stopped.json and no running container), never from the journal;
+	// Promoted that the standby is already primary.
 	Fenced, Promoted bool
 	// Lag is the standby's replay lag behind the old primary in bytes,
 	// when both run.
@@ -229,26 +344,24 @@ func Preflight(ctx context.Context, o Options) (Status, error) {
 	if err != nil {
 		return st, err
 	}
-	if j != nil && !o.matches(j) && j.State != "complete" {
+	if j != nil && !o.matches(j) && !j.Promoted() {
 		return st, fmt.Errorf("an unfinished promotion of %s → %s for Connection %s is journaled on %s\nhint: finish it first: restore that Connection in the Yoho file and rerun `yoho db promote %s`", j.From, j.To, j.Connection, o.New.Server, j.Connection)
-	}
-	if o.matches(j) {
-		st.Journal = j
-		st.Fenced = j.Steps[StepFence] == "complete" || j.Steps[StepFence] == "skipped"
-	}
-	if !st.Fenced && !o.OldPrimaryDown && o.Old.Host != nil {
-		stopped, err := deploy.ReadStopped(ctx, o.Old.Host, o.App, o.Destination)
-		if err != nil {
-			return st, err
-		}
-		_, st.Fenced = stopped[o.Old.Service]
 	}
 	inRecovery, err := o.New.InRecovery(ctx)
 	if err != nil {
 		return st, err
 	}
+	st.Journal = o.resumable(j, inRecovery)
+	// The fence is Server state, never the journal's word: the operator
+	// may have started the old primary again after a failure.
+	if st.Fenced, err = Fenced(ctx, o); err != nil {
+		return st, err
+	}
+	if st.Journal != nil && st.Journal.Steps[StepFence] == "unclean" && st.Fenced && !o.OldPrimaryDown {
+		return st, UncleanError(st.Journal)
+	}
 	if !inRecovery {
-		if !st.Fenced && !o.OldPrimaryDown && (st.Journal == nil || st.Journal.Steps[StepPromote] != "complete") {
+		if !st.Fenced && !o.OldPrimaryDown && (st.Journal == nil || st.Journal.Steps[StepPromote] != "complete" && !st.Journal.Promoted()) {
 			return st, fmt.Errorf("%s on %s is not in recovery: it is already a primary while %s still runs\nhint: stop one of them by hand (`yoho app stop %s`) before anything writes to both", o.New.Service, o.New.Server, o.Old.Service, o.Old.Service)
 		}
 		st.Promoted = true
@@ -274,6 +387,17 @@ func Preflight(ctx context.Context, o Options) (Status, error) {
 	if oldRecovery {
 		return st, fmt.Errorf("%s on %s is in recovery: it is not the primary", o.Old.Service, o.Old.Server)
 	}
+	oldID, err := o.Old.SystemID(ctx)
+	if err != nil {
+		return st, err
+	}
+	newID, err := o.New.SystemID(ctx)
+	if err != nil {
+		return st, err
+	}
+	if oldID != newID {
+		return st, sameClusterError(o, oldID, newID)
+	}
 	cur, err := o.Old.CurrentLSN(ctx)
 	if err != nil {
 		return st, err
@@ -296,14 +420,19 @@ func Preflight(ctx context.Context, o Options) (Status, error) {
 	return st, nil
 }
 
+func sameClusterError(o Options, oldID, newID string) error {
+	return fmt.Errorf("%s (system identifier %s) is not a standby of %s (system identifier %s): they are different clusters\nhint: point the Connection at a standby cloned from %s", o.New.Service, newID, o.Old.Service, oldID, o.Old.Service)
+}
+
 // FenceHint is the next step after a failed fence or replay wait.
 func FenceHint(old string) string {
 	return old + " is stopped and nothing was promoted. `yoho app start " + old + "` restores the old primary. Rerun to continue. `--old-primary-down` promotes at the standby's received position; writes it did not receive are lost."
 }
 
 // Run fences the old primary, waits for the standby to replay its WAL and
-// promotes it, resuming from o's journal. Callers hold every Server's lock
-// and have run Preflight.
+// promotes it, resuming from o's journal, which it leaves in state
+// promoted for the caller to delete after its apply. Callers hold every
+// Server's lock and have run Preflight.
 func Run(ctx context.Context, o Options) (err error) {
 	if o.Poll <= 0 {
 		o.Poll = 2 * time.Second
@@ -315,26 +444,52 @@ func Run(ctx context.Context, o Options) (err error) {
 	if err != nil {
 		return err
 	}
-	if !o.matches(j) {
-		if j != nil && j.State != "complete" {
-			return fmt.Errorf("an unfinished promotion of %s → %s is journaled", j.From, j.To)
-		}
+	if j != nil && !o.matches(j) && !j.Promoted() {
+		return fmt.Errorf("an unfinished promotion of %s → %s is journaled", j.From, j.To)
+	}
+	inRecovery, err := o.New.InRecovery(ctx)
+	if err != nil {
+		return err
+	}
+	if j = o.resumable(j, inRecovery); j == nil {
 		j = &Journal{Connection: o.Connection, From: o.Old.Service, To: o.New.Service, FromServer: o.Old.Server, ToServer: o.New.Server, Steps: map[string]string{}, Started: time.Now().UTC()}
 	}
-	if j.State == "complete" {
+	if j.Promoted() {
 		return nil
+	}
+	save := func(ctx context.Context) error { return writeJournal(ctx, o.New.Host, o.App, o.Destination, j) }
+	// Re-verify the fence from Server state under the locks: after
+	// `yoho app start <old>` the journal's fence no longer holds, so fence
+	// again and take a fresh target.
+	if o.Old.Host != nil && j.Steps[StepFence] != "" {
+		fenced, e := Fenced(ctx, o)
+		if e != nil {
+			return e
+		}
+		if !fenced {
+			delete(j.Steps, StepFence)
+			delete(j.Steps, StepWait)
+			j.TargetLSN, j.Unclean = "", nil
+		} else if j.Steps[StepFence] == "unclean" {
+			if !o.OldPrimaryDown {
+				return UncleanError(j)
+			}
+			// The operator accepts the loss: wait without a target.
+			j.Steps[StepFence], j.OldPrimaryDown, j.TargetLSN = "skipped", true, ""
+		}
 	}
 	j.State = "running"
 	j.OldPrimaryDown = j.OldPrimaryDown || o.OldPrimaryDown
 	if o.OperationID != "" {
 		j.OperationID = o.OperationID
 	}
-	save := func(ctx context.Context) error { return writeJournal(ctx, o.New.Host, o.App, o.Destination, j) }
 	report := func(step, state string) {
 		if o.Progress != nil {
 			o.Progress(step, state, j)
 		}
 	}
+	// step runs one journaled step. A failing run may name the state to
+	// record instead of failed.
 	step := func(name string, run func() (string, error)) error {
 		if s := j.Steps[name]; s == "complete" || s == "skipped" {
 			report(name, s)
@@ -347,59 +502,77 @@ func Run(ctx context.Context, o Options) (err error) {
 		report(name, "running")
 		state, e := run()
 		if e != nil {
-			j.Steps[name] = "failed"
+			if state == "" {
+				state = "failed"
+			}
 			j.State = "failed"
-		} else {
-			j.Steps[name] = state
 		}
+		j.Steps[name] = state
 		report(name, j.Steps[name])
 		return errors.Join(e, save(context.WithoutCancel(ctx)))
 	}
 	stopAttempted := false
 	if err = step(StepFence, func() (string, error) {
-		if o.OldPrimaryDown {
-			return "skipped", nil
-		}
 		if o.Old.Host == nil {
+			if o.OldPrimaryDown {
+				return "skipped", nil
+			}
 			return "", fmt.Errorf("Server %s of the old primary is not connected", o.Old.Server)
 		}
-		stopped, e := deploy.ReadStopped(ctx, o.Old.Host, o.App, o.Destination)
-		if e != nil {
-			return "", e
-		}
-		if _, already := stopped[o.Old.Service]; !already {
-			lsn, e := o.Old.CurrentLSN(ctx)
-			if e != nil {
-				return "", e
-			}
-			j.TargetLSN = lsn
-			if e := save(ctx); e != nil {
-				return "", e
-			}
-		}
 		stopAttempted = true
-		res, e := deploy.StopService(ctx, o.Old.Host, o.App, o.Destination, o.Old.Service, deploy.StoppedEntry{By: o.Performer, At: time.Now().UTC(), Reason: "db promote " + o.Connection})
+		j.TargetLSN, j.Unclean = "", nil
+		res, e := deploy.StopService(ctx, o.Old.Host, o.App, o.Destination, o.Old.Service, deploy.StoppedEntry{By: o.Performer, At: time.Now().UTC(), Reason: "db promote " + o.Connection}, deploy.StopOptions{AfterStop: ControlDataScript})
 		if e != nil {
 			return "", e
 		}
-		if !res.Clean() {
-			var codes []string
-			for _, id := range res.Containers {
-				codes = append(codes, fmt.Sprintf("%s exited %d", id, res.ExitCodes[id]))
+		for _, id := range res.Containers {
+			if code := res.ExitCodes[id]; code != 0 {
+				j.Unclean = append(j.Unclean, fmt.Sprintf("%s exited %d", id, code))
+			} else if cd := ParseControlData(res.AfterStop[id]); cd.State != "shut down" {
+				j.Unclean = append(j.Unclean, fmt.Sprintf("%s cluster state %q", id, cd.State))
 			}
-			return "", fmt.Errorf("old primary %s did not shut down cleanly (%s); its last writes may not have reached %s", o.Old.Service, strings.Join(codes, ", "), o.New.Service)
 		}
+		if len(j.Unclean) > 0 {
+			if o.OldPrimaryDown {
+				j.OldPrimaryDown = true
+				return "skipped", nil
+			}
+			return "unclean", UncleanError(j)
+		}
+		switch len(res.Containers) {
+		case 0:
+			// Already stopped and removed before this run: no target.
+			return "complete", nil
+		case 1:
+		default:
+			return "", fmt.Errorf("old primary %s ran %d containers; a Postgres primary runs one", o.Old.Service, len(res.Containers))
+		}
+		cd := ParseControlData(res.AfterStop[res.Containers[0]])
+		if _, e := ParseLSN(cd.Checkpoint); e != nil {
+			return "", fmt.Errorf("pg_controldata of %s: latest checkpoint location: %w", o.Old.Service, e)
+		}
+		newID, e := o.New.SystemID(ctx)
+		if e != nil {
+			return "", e
+		}
+		if cd.SystemID != newID {
+			return "", sameClusterError(o, cd.SystemID, newID)
+		}
+		j.TargetLSN = cd.Checkpoint
 		return "complete", nil
 	}); err != nil {
-		if stopAttempted {
+		if stopAttempted && j.Steps[StepFence] != "unclean" {
 			return fmt.Errorf("%w\nhint: %s", err, FenceHint(o.Old.Service))
 		}
 		return err
 	}
 	if err = step(StepWait, func() (string, error) {
-		return "complete", waitReplay(ctx, o, j.TargetLSN)
+		if e := waitReplay(ctx, o, j.TargetLSN); e != nil {
+			return "", e
+		}
+		return "complete", nil
 	}); err != nil {
-		if o.OldPrimaryDown {
+		if j.OldPrimaryDown {
 			return err
 		}
 		return fmt.Errorf("%w\nhint: %s", err, FenceHint(o.Old.Service))
@@ -428,12 +601,15 @@ func Run(ctx context.Context, o Options) (err error) {
 	}); err != nil {
 		return err
 	}
-	j.State = "complete"
+	j.State = "promoted"
 	return save(ctx)
 }
 
-// waitReplay polls the standby until it has replayed everything it
-// received and, when target is known, at least target.
+// waitReplay polls the standby. With a target (the old primary's shutdown
+// checkpoint) it waits until replay reaches it; receive is not consulted,
+// it may be NULL once the old primary is gone. Without one it waits until
+// replay is stable for two polls and either everything received is
+// replayed or the WAL receiver is not streaming.
 func waitReplay(ctx context.Context, o Options, target string) error {
 	var want uint64
 	if target != "" {
@@ -450,17 +626,29 @@ func waitReplay(ctx context.Context, o Options, target string) error {
 		return nil // promoted by an earlier run
 	}
 	deadline := time.Now().Add(o.Timeout)
-	last := ""
+	last, prev := "", ""
 	for {
 		recv, replay, err := o.New.ReceiveReplay(ctx)
 		if err != nil {
 			return err
 		}
-		r, _ := ParseLSN(replay)
-		caught := replay != "" && (recv == replay || recv == "" && target == "") && (target == "" || r >= want)
-		if caught {
-			return nil
+		if target != "" {
+			if r, _ := ParseLSN(replay); replay != "" && r >= want {
+				return nil
+			}
+		} else if replay != "" && replay == prev {
+			if recv == replay {
+				return nil
+			}
+			status, err := o.New.ReceiverStatus(ctx)
+			if err != nil {
+				return err
+			}
+			if status != "streaming" {
+				return nil
+			}
 		}
+		prev = replay
 		last = fmt.Sprintf("received %s, replayed %s", or(recv, "nothing"), or(replay, "nothing"))
 		if target != "" {
 			last += ", target " + target
