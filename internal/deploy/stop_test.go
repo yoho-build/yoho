@@ -474,3 +474,132 @@ func TestStopServiceAfterStop(t *testing.T) {
 		t.Fatal("plain stop runs an after-stop step")
 	}
 }
+
+// G11: a Release that proxies a Service `yoho app stop` keeps down is
+// refused by deploy, plan/apply and rollback before anything changes.
+func TestStoppedServiceProxiedInTargetReleaseRefused(t *testing.T) {
+	h, _ := stopRelease(t)
+	ctx := context.Background()
+	if err := writeStopped(ctx, h, "shop", "production", Stopped{"web": {By: "alice"}}); err != nil {
+		t.Fatal(err)
+	}
+	want := "run `yoho app start web` before"
+	d := testDeploy(t, h, io.Discard)
+	d.Version = "v2"
+	if _, err := (Compose{}).Deploy(ctx, d); err == nil || !strings.Contains(err.Error(), want) {
+		t.Fatalf("deploy: %v", err)
+	}
+	if strings.Contains(h.all(), "'up'") {
+		t.Fatal("deploy changed containers before refusing")
+	}
+	if _, err := (Compose{}).Diff(ctx, testDeploy(t, h, io.Discard)); err == nil || !strings.Contains(err.Error(), want) {
+		t.Fatalf("plan: %v", err)
+	}
+	if _, err := (Compose{}).Rollback(ctx, testDeploy(t, h, io.Discard), "v1"); err == nil || !strings.Contains(err.Error(), want) {
+		t.Fatalf("rollback: %v", err)
+	}
+}
+
+// G12: `app start` of a Service no longer in the current Release clears
+// its orphaned stopped entry.
+func TestStartServiceClearsOrphanedEntry(t *testing.T) {
+	h, appDir := stopRelease(t)
+	ctx := context.Background()
+	if err := writeStopped(ctx, h, "shop", "production", Stopped{"gone": {By: "alice"}, "db": {By: "bob"}}); err != nil {
+		t.Fatal(err)
+	}
+	h.respond = func(string) (string, error) { return "", nil }
+	d := &plan.Deploy{App: "shop", Destination: "production", Servers: []plan.NamedHost{{Name: "s1", Host: h}}, Out: io.Discard}
+	changed, err := StartService(ctx, d, "gone")
+	if err != nil || !changed {
+		t.Fatalf("%v %v", changed, err)
+	}
+	s, _ := ReadStopped(ctx, h, "shop", "production")
+	if _, ok := s["gone"]; ok || s["db"].By != "bob" {
+		t.Fatalf("%+v", s)
+	}
+	if strings.Contains(h.all(), "'up'") {
+		t.Fatal("started something for an orphaned entry")
+	}
+	if b, _ := os.ReadFile(filepath.Join(appDir, StoppedOverrideFile)); !strings.Contains(string(b), "db:") {
+		t.Fatalf("override lost db: %s", b)
+	}
+	if _, err := StartService(ctx, d, "gone"); err == nil {
+		t.Fatal("unknown Service without an entry accepted")
+	}
+}
+
+// G13: a start that fails after compose up created containers removes them
+// again and keeps the Service marked stopped, so no restart policy revives
+// a Service marked stopped.
+func TestStartServiceFailureRefences(t *testing.T) {
+	for _, phase := range []string{"up", "readiness"} {
+		t.Run(phase, func(t *testing.T) {
+			h, appDir := stopRelease(t)
+			ctx := context.Background()
+			if _, err := StopService(ctx, h, "shop", "production", "db", StoppedEntry{By: "alice"}); err != nil {
+				t.Fatal(err)
+			}
+			h.scripts = nil
+			stopped := false
+			h.respond = func(s string) (string, error) {
+				switch {
+				case phase == "up" && strings.Contains(s, "'up' '-d' '--no-deps' 'db'"):
+					return "", errors.New("compose up failed")
+				case phase == "readiness" && strings.Contains(s, "expected 1 container(s)"):
+					return "", errors.New("not ready")
+				case strings.Contains(s, "docker stop $ids"):
+					stopped = true
+					return "db9 137", nil
+				}
+				return "", nil
+			}
+			d := &plan.Deploy{App: "shop", Destination: "production", Servers: []plan.NamedHost{{Name: "s1", Host: h}}, Out: io.Discard}
+			_, err := StartService(ctx, d, "db")
+			var se *StartError
+			if !errors.As(err, &se) || !se.StillStopped || !strings.Contains(se.Hint(), "stays marked stopped") {
+				t.Fatalf("%v", err)
+			}
+			if !stopped || !strings.Contains(h.all(), StopScript("shop", "production", "db")) {
+				t.Fatalf("containers not removed:\n%s", h.all())
+			}
+			if s, _ := ReadStopped(ctx, h, "shop", "production"); s["db"].By != "alice" {
+				t.Fatalf("stopped record not kept: %+v", s)
+			}
+			if b, _ := os.ReadFile(filepath.Join(appDir, StoppedOverrideFile)); !strings.Contains(string(b), "db:") {
+				t.Fatalf("override not restored: %s", b)
+			}
+		})
+	}
+}
+
+// G14: StopService revalidates under the lock and surfaces errors reading
+// the current Release.
+func TestStopServiceRevalidatesTarget(t *testing.T) {
+	h, appDir := stopRelease(t)
+	ctx := context.Background()
+	if _, err := StopService(ctx, h, "shop", "production", "web", StoppedEntry{By: "alice"}); err == nil || !strings.Contains(err.Error(), "proxied") {
+		t.Fatal(err)
+	}
+	if _, err := StopService(ctx, h, "shop", "production", "nope", StoppedEntry{By: "alice"}); err == nil || !strings.Contains(err.Error(), "not in the current Release") {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(appDir, StoppedFile)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatal("refused stop wrote stopped.json")
+	}
+	os.Remove(filepath.Join(appDir, "releases", "v1", "plan.json"))
+	if _, err := StopService(ctx, h, "shop", "production", "db", StoppedEntry{By: "alice"}); err == nil {
+		t.Fatal("missing plan.json skipped")
+	}
+}
+
+// G15: running containers exclude one-offs, like the stop script.
+func TestRunningContainersExcludesOneOffs(t *testing.T) {
+	h := &dockerHost{local: &remote.Local{}, respond: func(string) (string, error) { return "", nil }}
+	if _, err := RunningContainers(context.Background(), h, "shop", "production", "db"); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(h.all(), "--filter label=com.docker.compose.oneoff=False") {
+		t.Fatal(h.all())
+	}
+}

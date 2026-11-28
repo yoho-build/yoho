@@ -259,6 +259,9 @@ func (c Compose) Diff(ctx context.Context, d *plan.Deploy) ([]plan.Change, error
 	if err := checkOwnership(ctx, h, d.App, d.Destination, plans); err != nil {
 		return nil, err
 	}
+	if err := checkStoppedProxy(ctx, h, d.App, d.Destination, plans); err != nil {
+		return nil, err
+	}
 	// Stopped Services stay down on apply (ADR 0021). Read-only here.
 	stoppedState, err := ReadStopped(ctx, h, d.App, d.Destination)
 	if err != nil {

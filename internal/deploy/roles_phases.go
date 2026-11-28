@@ -30,6 +30,9 @@ func (Compose) Preflight(ctx context.Context, d *plan.Deploy) error {
 	if e = checkOwnership(ctx, h.Host, d.App, d.Destination, plans); e != nil {
 		return e
 	}
+	if e = checkStoppedProxy(ctx, h.Host, d.App, d.Destination, plans); e != nil {
+		return e
+	}
 	subnet, exists, e := currentSubnet(ctx, h.Host, d.App, d.Destination)
 	if e != nil {
 		return e

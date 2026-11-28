@@ -284,13 +284,20 @@ SERVICE` checks, as deploy does, that no other App Destination's containers
 use the compose project, starts the Service from the current Release's
 compiled compose without its dependencies, removes the record once Compose
 started it, and waits for its healthcheck and `x-yoho.check`. If Compose fails
-to start it, it stays marked stopped; a start that does not become ready
-leaves it marked started. Either way, read `yoho app logs SERVICE` and rerun
-`yoho app start`.
+to start it or it does not become ready, its containers are removed again and
+it stays marked stopped, so no restart policy revives it; read `yoho app logs
+SERVICE` and rerun `yoho app start`. For a Service no longer in the current
+Release, `yoho app start` only clears its stopped entry (`yoho app ps` marks
+such entries "not in the current Release"), so it cannot stop a future Service
+of that name.
 
 - Volumes are never removed.
 - With Roles, both act on every Server hosting the Service; `--server` picks one.
 - Rerunning either on a Service already in that state exits 0 and changes nothing.
+- `app stop` checks the current Release again under the lock, and acts only on
+  containers that are not one-off runs.
+- deploy, apply, plan and rollback refuse a Release that adds `x-yoho.proxy`
+  to a stopped Service: run `yoho app start SERVICE` first.
 - Refused before any change: runtime swarm, scoped access, no current Release,
   a Service not in the current Release, and a proxied Service (set
   `deploy.replicas: 0` and deploy instead).

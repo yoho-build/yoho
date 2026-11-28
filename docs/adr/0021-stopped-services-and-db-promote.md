@@ -28,9 +28,12 @@ hand with `ALTER SYSTEM`, `pg_promote()` and an edited Connection.
    Service is still a change, so apply records the new Release and the
    Service stays stopped. Only `yoho app start SERVICE` ends the state: after
    the same ownership check as deploy, it starts the Service from the current
-   Release and removes the record once Compose started it. Stop and start
-   cover Services without `x-yoho.proxy` on the compose runtime, with
-   operator access.
+   Release and removes the record once Compose started it; a failed start
+   removes the containers again and keeps the record. Stop and start cover
+   Services without `x-yoho.proxy` on the compose runtime, with operator
+   access; a Release that proxies a stopped Service is refused until it is
+   started, and `app start` of a Service no longer in the Release clears its
+   orphaned record.
 
 2. **`yoho db promote` is config first.** The operator edits the Connection so
    the standby is its provider and the old primary a consumer; promote reads

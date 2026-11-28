@@ -170,8 +170,32 @@ func TestAppStopRefusals(t *testing.T) {
 }
 
 func TestStoppedLines(t *testing.T) {
-	got := stoppedLines(deploy.Stopped{"db": {By: "alice", Reason: "db promote primary"}})
+	got := stoppedLines(deploy.Stopped{"db": {By: "alice", Reason: "db promote primary"}}, nil)
 	if len(got) != 1 || got[0] != "db: stopped by `yoho app stop` (alice: db promote primary); `yoho app start db` runs it" {
 		t.Fatal(got)
+	}
+	// G12: an entry of a Service outside the current Release is marked.
+	got = stoppedLines(deploy.Stopped{"db": {By: "alice"}, "gone": {By: "bob"}}, func(n string) bool { return n == "db" })
+	if len(got) != 2 || got[1] != "gone: stopped by `yoho app stop` (bob) (not in the current Release); `yoho app start gone` clears the entry" {
+		t.Fatal(got)
+	}
+}
+
+// G12: `yoho app start` of a Service no longer in the current Release
+// clears its orphaned entry.
+func TestAppStartClearsOrphanedEntry(t *testing.T) {
+	g, _, appDir := stopFixture(t)
+	if err := os.WriteFile(filepath.Join(appDir, deploy.StoppedFile), []byte(`{"gone":{"by":"bob"}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	out, err := runAppStop(t, g, "app", "start", "gone")
+	if err != nil || !strings.Contains(out, "cleared its stopped entry (not in the current Release)") {
+		t.Fatalf("%v\n%s", err, out)
+	}
+	if _, err := os.Stat(filepath.Join(appDir, deploy.StoppedFile)); !os.IsNotExist(err) {
+		t.Fatal("entry kept")
+	}
+	if out, err = runAppStop(t, g, "app", "start", "gone"); err == nil {
+		t.Fatalf("unknown Service accepted: %s", out)
 	}
 }

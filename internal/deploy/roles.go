@@ -538,6 +538,9 @@ func (r Roles) Rollback(ctx context.Context, d *plan.Deploy, version string) (re
 		if e = checkOwnership(ctx, h.Host, d.App, d.Destination, recorded); e != nil {
 			return nil, e
 		}
+		if e = checkStoppedProxy(ctx, h.Host, d.App, d.Destination, recorded); e != nil {
+			return nil, e
+		}
 		subnet, exists, e := currentSubnet(ctx, h.Host, d.App, d.Destination)
 		if e != nil {
 			return nil, e

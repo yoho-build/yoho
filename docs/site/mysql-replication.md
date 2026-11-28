@@ -176,9 +176,9 @@ and confirm that it stays off. Detaching only its external network is not
 enough, because `web` and the old primary may still write to each other on
 Server `a`.
 
-Then promote `db-replica` without a GTID (`entrypoint.sh promote`; there is no
-primary to compare with) and move everything to Server `b`. In `yoho.yml`,
-remove `a` from the top-level `servers` (this also removes it from the mesh)
+Then promote `db-replica` without a GTID (`entrypoint.sh promote --no-wait`;
+there is no primary to compare with, and a plain `promote` needs a GTID) and
+move everything to Server `b`. In `yoho.yml`, remove `a` from the top-level `servers` (this also removes it from the mesh)
 and from the Destination, drop the old Role, place `web` on `b`, and leave
 `web` as the only consumer:
 
@@ -224,24 +224,17 @@ first.
 Between steps 2 and 3, the replica cannot log in and replication waits. Run
 step 3 right after the deploy. After a promotion, run it on `db-replica`.
 
-**MARIADB_PASSWORD** (web uses it): change it in the database first, then
-deploy, so web never holds a password the database rejects. With the new
-value in the shell variable `NEW` (hex characters only):
-
-```sh
-printf "ALTER USER 'app'@'%%' IDENTIFIED BY '%s';\n" "$NEW" | yoho app exec -i db -- sh /etc/yoho-mariadb/entrypoint.sh mariadb
-```
-
-`printf` is a shell builtin and the statement travels over stdin, so the value
-is not in a command line. If the client reports an error, stop (the error can
-quote the statement with the new value, so do not paste it anywhere): do not change
-`.yoho/secrets`. Then put the value in `.yoho/secrets` and run
-`yoho deploy`. This order is not covered by CI.
-
-**MARIADB_ROOT_PASSWORD** is used at initialization and by the entrypoint's
-commands. Change it the same way on the primary
-(`ALTER USER 'root'@'localhost'`); the change is replicated to the replica.
-Then put the value in `.yoho/secrets` and deploy. This is not covered by CI.
+**MARIADB_PASSWORD** (web uses it, tested in CI) and
+**MARIADB_ROOT_PASSWORD**: put the new value in `.yoho/secrets` and run
+`yoho deploy`. The image reads the secret files only when it initializes an
+empty data directory, so on every start the entrypoint passes the server an
+`--init-file` that sets the `app` and `root@localhost` passwords from the
+secret files before it serves clients. The init file runs as the server
+itself, so a changed root secret cannot lock the entrypoint out. It is not
+binary logged: each node sets its own users when it restarts, and the deploy
+restarts both, before `web`, because their secrets changed. The init file is
+in the container's `/run/yoho-mariadb`, readable only by `mysql`. Root
+rotation is not covered by CI.
 
 ## Backups
 

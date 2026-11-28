@@ -78,6 +78,12 @@ func (a *app) stopTargets(ctx context.Context, verb, service, chosen string) ([]
 	var names []string
 	if a.dest.Roles != nil {
 		hs := a.dest.ServiceServers(service)
+		if len(hs) == 0 && verb == "start" {
+			// A Service removed from the config may have orphaned stopped
+			// entries on any Server; start clears them.
+			hs = slices.Clone(a.dest.Servers)
+			slices.Sort(hs)
+		}
 		if len(hs) == 0 {
 			return nil, nil, &hintError{fmt.Sprintf("no placement for Service %s", service), "place it in a Role of this Destination"}
 		}
@@ -109,6 +115,7 @@ func (a *app) stopTargets(ctx context.Context, verb, service, chosen string) ([]
 		}
 		hosts = append(hosts, plan.NamedHost{Name: name, Server: srv, Host: h})
 	}
+	var keep []plan.NamedHost
 	for _, h := range hosts {
 		_, svcs, err := deploy.CurrentServices(ctx, h.Host, a.cfg.App, a.destName)
 		if errors.Is(err, deploy.ErrNoCurrentRelease) {
@@ -133,11 +140,32 @@ func (a *app) stopTargets(ctx context.Context, verb, service, chosen string) ([]
 			}
 		}
 		if !found {
+			if verb == "start" {
+				// `app start` clears an orphaned stopped entry.
+				s, err := deploy.ReadStopped(ctx, h.Host, a.cfg.App, a.destName)
+				if err != nil {
+					done()
+					return nil, nil, err
+				}
+				if _, ok := s[service]; ok {
+					a.orphans[h.Name] = true
+					keep = append(keep, h)
+					continue
+				}
+				if a.dest.Roles != nil && len(a.dest.ServiceServers(service)) == 0 {
+					continue // not placed here and no entry: nothing to do on this Server
+				}
+			}
 			done()
 			return nil, nil, &hintError{fmt.Sprintf("Service %s is not in the current Release on %s", service, h.Name), "Services: " + strings.Join(names, ", ")}
 		}
+		keep = append(keep, h)
 	}
-	return hosts, done, nil
+	if len(keep) == 0 {
+		done()
+		return nil, nil, &hintError{fmt.Sprintf("no placement for Service %s", service), "place it in a Role of this Destination"}
+	}
+	return keep, done, nil
 }
 
 func (a *app) stopService(ctx context.Context, service, chosen, reason string) (err error) {
@@ -192,6 +220,7 @@ func (a *app) stopService(ctx context.Context, service, chosen, reason string) (
 }
 
 func (a *app) startService(ctx context.Context, service, chosen string) (err error) {
+	a.orphans = map[string]bool{}
 	hosts, done, err := a.stopTargets(ctx, "start", service, chosen)
 	if err != nil {
 		return a.fail(&validationError{err})
@@ -226,9 +255,15 @@ func (a *app) startService(ctx context.Context, service, chosen string) (err err
 			return &silentError{e}
 		}
 		detail := "already running"
-		if c {
+		switch {
+		case c && a.orphans[h.Name]:
+			changed++
+			detail = "cleared its stopped entry (not in the current Release)"
+		case c:
 			changed++
 			detail = "started"
+		case a.orphans[h.Name]:
+			detail = "no stopped entry"
 		}
 		step.Done(detail)
 		a.ui.Event("service_start", fmt.Sprintf("%s/%s: %s", h.Name, service, detail), map[string]any{"service": service, "server": h.Name, "changed": c, "ready": true})
@@ -241,10 +276,15 @@ func (a *app) startService(ctx context.Context, service, chosen string) (err err
 	return nil
 }
 
-// stoppedLines are `app ps` lines for the Services stopped on h.
-func stoppedLines(s deploy.Stopped) []string {
+// stoppedLines are `app ps` lines for the Services stopped on h. inRelease
+// reports whether a Service is in the current Release (nil: unknown).
+func stoppedLines(s deploy.Stopped, inRelease func(string) bool) []string {
 	var out []string
 	for _, name := range sortedKeys(s) {
+		if inRelease != nil && !inRelease(name) {
+			out = append(out, fmt.Sprintf("%s: stopped by `yoho app stop` (%s) (not in the current Release); `yoho app start %s` clears the entry", name, s[name].Describe(), name))
+			continue
+		}
 		out = append(out, fmt.Sprintf("%s: stopped by `yoho app stop` (%s); `yoho app start %s` runs it", name, s[name].Describe(), name))
 	}
 	return out

@@ -114,6 +114,18 @@ marked "$server_b" db-replica
 write row3 | grep -F 'wrote row3'
 eventually has_row "$server_b" db-replica row3
 
+# Documented MARIADB_PASSWORD rotation: new secret, deploy. Each node's
+# entrypoint syncs the app password on start, so web keeps working.
+umask 077
+{ grep -v '^MARIADB_PASSWORD=' .yoho/secrets; printf 'MARIADB_PASSWORD=%s\n' "$(openssl rand -hex 24)"; } > "$work/secrets.new"
+mv "$work/secrets.new" .yoho/secrets
+umask 022
+"$yoho_bin" deploy --version v2b
+web health | grep -Fx ok
+write row-pw | grep -F 'wrote row-pw'
+eventually has_row "$server_b" db-replica row-pw
+eventually replicating "$server_b" db-replica
+
 # Promotion, steps 1-5 of the guide.
 # 1. Fence the old primary.
 "$yoho_bin" app exec db -- sh /etc/yoho-mariadb/entrypoint.sh fence

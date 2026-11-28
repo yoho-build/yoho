@@ -1298,7 +1298,13 @@ func (a *app) appPS(cmd *cobra.Command) error {
 	}
 	// Services `yoho app stop` keeps down have no containers to list.
 	if stopped, e := deploy.ReadStopped(ctx, h, a.cfg.App, a.destName); e == nil {
-		for _, l := range stoppedLines(stopped) {
+		var inRelease func(string) bool
+		if _, svcs, e := deploy.CurrentServices(ctx, h, a.cfg.App, a.destName); e == nil {
+			inRelease = func(name string) bool {
+				return slices.ContainsFunc(svcs, func(s deploy.CurrentService) bool { return s.Name == name })
+			}
+		}
+		for _, l := range stoppedLines(stopped, inRelease) {
 			fmt.Fprintln(cmd.OutOrStdout(), l)
 		}
 	}

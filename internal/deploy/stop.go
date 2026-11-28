@@ -272,7 +272,7 @@ func serviceFilters(app, dest, service string) string {
 // RunningContainers are the IDs of service's running containers of this
 // App Destination on h. Read-only.
 func RunningContainers(ctx context.Context, h remote.Host, app, dest, service string) ([]string, error) {
-	out, err := h.Output(ctx, remote.Cmd{Script: "set -eu\ndocker ps -q " + serviceFilters(app, dest, service)})
+	out, err := h.Output(ctx, remote.Cmd{Script: "set -eu\ndocker ps -q " + serviceFilters(app, dest, service) + " --filter label=com.docker.compose.oneoff=False"})
 	if err != nil {
 		return nil, fmt.Errorf("list running containers of %s: %w", service, err)
 	}
@@ -288,6 +288,19 @@ func StopService(ctx context.Context, h remote.Host, app, dest, service string, 
 		o = opts[0]
 	}
 	res := StopResult{Containers: []string{}, ExitCodes: map[string]int{}, AfterStop: map[string]string{}}
+	// Revalidate under the lock: the Release may have changed since the
+	// caller looked.
+	ver, plans, err := currentPlans(ctx, h, app, dest)
+	if err != nil {
+		return res, fmt.Errorf("stop %s: read the current Release: %w", service, err)
+	}
+	sp := findPlan(plans, service)
+	if sp == nil {
+		return res, fmt.Errorf("Service %s is not in the current Release %s", service, ver)
+	}
+	if sp.Proxy != nil {
+		return res, fmt.Errorf("Service %s is proxied; app stop supports Services without x-yoho.proxy", service)
+	}
 	s, err := ReadStopped(ctx, h, app, dest)
 	if err != nil {
 		return res, err
@@ -299,10 +312,8 @@ func StopService(ctx context.Context, h remote.Host, app, dest, service string, 
 			return res, err
 		}
 	}
-	if _, plans, err := currentPlans(ctx, h, app, dest); err == nil {
-		if _, _, err := syncStopped(ctx, h, app, dest, plans); err != nil {
-			return res, err
-		}
+	if _, _, err := syncStopped(ctx, h, app, dest, plans); err != nil {
+		return res, err
 	}
 	out, err := h.Output(ctx, remote.Cmd{Script: stopScript(app, dest, service, o.AfterStop)})
 	if err != nil {
@@ -361,18 +372,6 @@ func StartService(ctx context.Context, d *plan.Deploy, service string) (changed 
 	if err != nil {
 		return false, err
 	}
-	var sp *servicePlan
-	for i := range plans {
-		if plans[i].Name == service {
-			sp = &plans[i]
-		}
-	}
-	if sp == nil {
-		return false, fmt.Errorf("Service %s is not in the current Release %s", service, ver)
-	}
-	if err := checkOwnership(ctx, h, d.App, d.Destination, []servicePlan{*sp}); err != nil {
-		return false, err
-	}
 	s, err := ReadStopped(ctx, h, d.App, d.Destination)
 	if err != nil {
 		return false, err
@@ -384,14 +383,51 @@ func StartService(ctx context.Context, d *plan.Deploy, service string) (changed 
 			rest[name] = e
 		}
 	}
+	sp := findPlan(plans, service)
+	if sp == nil {
+		if !changed {
+			return false, fmt.Errorf("Service %s is not in the current Release %s", service, ver)
+		}
+		// An orphaned entry (the Service left the Release): clear it, or
+		// it would silently stop a future Service of that name.
+		if err := writeStopped(ctx, h, d.App, d.Destination, rest); err != nil {
+			return false, err
+		}
+		_, _, err := syncStopped(ctx, h, d.App, d.Destination, plans)
+		return true, err
+	}
+	if err := checkOwnership(ctx, h, d.App, d.Destination, []servicePlan{*sp}); err != nil {
+		return false, err
+	}
 	r := newRunner(d, path.Join(release.Dir(d.App, d.Destination, ver), "compose.yaml"))
 	r.phase = "service-start"
 	if _, err := enforceStoppedSet(ctx, r, rest, plans); err != nil {
 		return false, err
 	}
+	// refence keeps a Service that was stopped fenced after a failed
+	// start: compose may have created containers a restart policy would
+	// revive, so restore the record and the override and remove them.
+	refence := func(cause error) error {
+		if !changed {
+			return &StartError{Service: service, Err: cause}
+		}
+		ctx := context.WithoutCancel(ctx)
+		e := writeStopped(ctx, h, d.App, d.Destination, s)
+		if e == nil {
+			_, _, e = syncStopped(ctx, h, d.App, d.Destination, plans)
+		}
+		if e == nil {
+			_, e = h.Output(ctx, remote.Cmd{Script: StopScript(d.App, d.Destination, service)})
+		}
+		if e != nil {
+			return &StartError{Service: service, Err: fmt.Errorf("%w; keeping it stopped failed too: %w", cause, e)}
+		}
+		r.logf("%s did not start; removed its containers and kept it stopped", service)
+		return &StartError{Service: service, StillStopped: true, Err: cause}
+	}
 	r.logf("starting %s from Release %s", service, ver)
 	if err := h.Run(ctx, remote.Cmd{Script: r.cc.cmd("up", "-d", "--no-deps", service)}); err != nil {
-		return false, &StartError{Service: service, StillStopped: changed, Err: fmt.Errorf("compose up %s: %w", service, err)}
+		return false, refence(fmt.Errorf("compose up %s: %w", service, err))
 	}
 	if changed {
 		if err := writeStopped(ctx, h, d.App, d.Destination, rest); err != nil {
@@ -400,9 +436,37 @@ func StartService(ctx context.Context, d *plan.Deploy, service string) (changed 
 	}
 	r.phase = "plain-readiness"
 	if err := r.waitServices(ctx, []servicePlan{*sp}, "complete"); err != nil {
-		return changed, &StartError{Service: service, Err: err}
+		if changed {
+			return false, refence(err)
+		}
+		return false, &StartError{Service: service, Err: err}
 	}
 	return changed, nil
+}
+
+func findPlan(plans []servicePlan, service string) *servicePlan {
+	for i := range plans {
+		if plans[i].Name == service {
+			return &plans[i]
+		}
+	}
+	return nil
+}
+
+// checkStoppedProxy refuses a Release that proxies a Service `yoho app
+// stop` keeps down: it would stay at zero replicas and `app start` refuses
+// proxied Services. Read-only.
+func checkStoppedProxy(ctx context.Context, h remote.Host, app, dest string, plans []servicePlan) error {
+	s, err := ReadStopped(ctx, h, app, dest)
+	if err != nil {
+		return err
+	}
+	for _, sp := range plans {
+		if _, ok := s[sp.Name]; ok && sp.Proxy != nil {
+			return fmt.Errorf("Service %s is stopped (`yoho app stop`) but has x-yoho.proxy in the Release being run; a proxied Service cannot stay stopped\nhint: run `yoho app start %s` before adding x-yoho.proxy or rolling back to a Release that proxies it", sp.Name, sp.Name)
+		}
+	}
+	return nil
 }
 
 // StoppedProviderError explains a Connection readiness failure whose

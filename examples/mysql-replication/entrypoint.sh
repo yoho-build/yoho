@@ -11,12 +11,20 @@
 #  - a former primary that is now a consumer: start read-only, no replication.
 #  - otherwise: a primary (the image initializes empty data).
 #
+# On every start with existing data, the server's --init-file sets the `app`
+# and root@localhost passwords from the secret files before it serves
+# clients: the image reads *_FILE only when it initializes empty data, so a
+# rotated secret takes effect with a plain deploy. The init file runs as the
+# server itself, so a changed root secret cannot lock it out. Not binary
+# logged: each node syncs its own users.
+#
 # Admin commands, run with `yoho app exec SERVICE -- sh /etc/yoho-mariadb/entrypoint.sh CMD`:
 #   mariadb [ARGS]  the mariadb client as root on the local socket
 #   set-passwords   primary: set the replicator and app passwords from the secret files
 #   fence           primary: read-only now and after a restart; end App sessions
 #   gtid            primary: print the binary log GTID position
-#   promote [GTID]  replica: wait until GTID is applied, stop replicating, accept writes
+#   promote GTID    replica: wait until GTID is applied, stop replicating, accept writes
+#   promote --no-wait  replica, old primary lost: stop replicating, accept writes
 set -eu
 datadir=/var/lib/mysql
 run=/run/yoho-mariadb
@@ -67,10 +75,12 @@ gtid)
   sql -e 'SELECT @@gtid_binlog_pos'
   exit 0;;
 promote)
-  if [ -n "${2:-}" ]; then
-    case "$2" in *[!0-9,-]*) echo "yoho-mariadb: bad GTID position $2" >&2; exit 2;; esac
-    if [ "$(sql -e "SELECT MASTER_GTID_WAIT('$2', 120)")" != 0 ]; then
-      echo "yoho-mariadb: the replica has not applied $2 within 120s; not promoting" >&2
+  # A GTID is required; only --no-wait (old primary lost) skips the wait.
+  gtid=${2:-}
+  if [ "$gtid" != --no-wait ]; then
+    case "$gtid" in ''|*[!0-9,-]*) echo "yoho-mariadb: promote needs the old primary's GTID position (or --no-wait when it is lost), got '$gtid'" >&2; exit 2;; esac
+    if [ "$(sql -e "SELECT MASTER_GTID_WAIT('$gtid', 120)")" != 0 ]; then
+      echo "yoho-mariadb: the replica has not applied $gtid within 120s; not promoting" >&2
       exit 1
     fi
   fi
@@ -82,6 +92,7 @@ esac
 umask 077
 mkdir -p "$run"
 cp /run/secrets/REPLICATOR_PASSWORD "$run/replicator-password"
+: > "$run/init.sql"
 chown -R mysql:mysql "$run"
 
 host=${YOHO_CONNECTION_PRIMARY_HOST:-}
@@ -105,9 +116,8 @@ elif [ -n "$host" ] && [ -f "$datadir/master.info" ]; then
   h=$(printf '%s' "$host" | q)
   p=$(q < /run/secrets/REPLICATOR_PASSWORD)
   case "$port" in ''|*[!0-9]*) echo "yoho-mariadb: bad port $port" >&2; exit 1;; esac
-  printf "CHANGE MASTER TO MASTER_HOST='%s', MASTER_PORT=%s, MASTER_USER='replicator', MASTER_PASSWORD='%s', MASTER_USE_GTID=slave_pos, MASTER_CONNECT_RETRY=5;\nSTART SLAVE;\n" "$h" "$port" "$p" > "$run/follow.sql"
-  chown mysql:mysql "$run/follow.sql"
-  set -- "$@" --read-only --skip-slave-start --init-file="$run/follow.sql"
+  printf "CHANGE MASTER TO MASTER_HOST='%s', MASTER_PORT=%s, MASTER_USER='replicator', MASTER_PASSWORD='%s', MASTER_USE_GTID=slave_pos, MASTER_CONNECT_RETRY=5;\nSTART SLAVE;\n" "$h" "$port" "$p" > "$run/init.sql"
+  set -- "$@" --read-only --skip-slave-start
 elif [ -n "$host" ]; then
   # A former primary that is now a consumer: never accept writes. Remove its
   # volume to rebuild it as a replica (see the promotion guide).
@@ -117,5 +127,17 @@ fi
 if [ -e "$fenced" ]; then
   echo "yoho-mariadb: fenced; starting read-only" >&2
   set -- "$@" --read-only
+fi
+# Existing data: sync the passwords first (see the top of this file).
+if [ -d "$datadir/mysql" ]; then
+  ap=$(q < /run/secrets/MARIADB_PASSWORD)
+  rootp=$(q < /run/secrets/MARIADB_ROOT_PASSWORD)
+  { printf "SET SESSION sql_log_bin = 0;\nSET PASSWORD FOR 'app'@'%%' = PASSWORD('%s');\nSET PASSWORD FOR 'root'@'localhost' = PASSWORD('%s');\nSET SESSION sql_log_bin = 1;\n" "$ap" "$rootp"
+    cat "$run/init.sql"; } > "$run/init.sql.new"
+  mv "$run/init.sql.new" "$run/init.sql"
+fi
+if [ -s "$run/init.sql" ]; then
+  chown mysql:mysql "$run/init.sql"
+  set -- "$@" --init-file="$run/init.sql"
 fi
 exec docker-entrypoint.sh "$@"

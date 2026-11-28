@@ -135,6 +135,15 @@ func fixture(t *testing.T) (*pgHost, *pgHost, Options) {
 	old := release.Root
 	release.Root = t.TempDir()
 	t.Cleanup(func() { release.Root = old })
+	// A current Release with both Services: app stop revalidates it.
+	relDir := release.Dir("pg", "production", "v1")
+	if err := os.MkdirAll(relDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	os.WriteFile(filepath.Join(relDir, "plan.json"), []byte(`[{"name":"db","replicas":1},{"name":"db-standby","replicas":1}]`), 0o644)
+	if err := os.Symlink("releases/v1", filepath.Join(release.AppDir("pg", "production"), "current")); err != nil {
+		t.Fatal(err)
+	}
 	a := &pgHost{name: "a", recovery: false, current: "0/3000060", stopOut: "c1 0", controlData: "Database system identifier:           7000000000000000001\nDatabase cluster state:               shut down\nLatest checkpoint location:           0/3000080\nLatest checkpoint's TimeLineID:       1", running: "c1", receive: "0/3000000", replay: []string{"0/3000000"}}
 	b := &pgHost{name: "b", recovery: true, receiver: "streaming", replay: []string{"0/3000000", "0/3000060", "0/3000100"}, promoteOut: "t"}
 	o := Options{
