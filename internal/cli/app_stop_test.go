@@ -238,3 +238,33 @@ func TestStartTargetsUnplacedServerForOrphan(t *testing.T) {
 		t.Fatal("stop on an unplaced Server accepted")
 	}
 }
+
+// Round 7: on a Server that does not place the Service, start refuses when
+// that Server's current Release still has it (no Compose run there).
+func TestStartRefusesUnplacedServerStillInRelease(t *testing.T) {
+	old := release.Root
+	release.Root = t.TempDir()
+	t.Cleanup(func() { release.Root = old })
+	h := &stopHost{}
+	previous := connectServer
+	connectServer = func(string, string, bool, remote.SSHOptions) (remote.Host, error) { return h, nil }
+	t.Cleanup(func() { connectServer = previous })
+	appDir := release.AppDir("shop", "production")
+	rel := filepath.Join(appDir, "releases", "v1")
+	os.MkdirAll(rel, 0o700)
+	os.WriteFile(filepath.Join(rel, "plan.json"), []byte(`[{"name":"web","replicas":1},{"name":"db","replicas":1}]`), 0o600)
+	os.Symlink("releases/v1", filepath.Join(appDir, "current"))
+	os.WriteFile(filepath.Join(appDir, deploy.StoppedFile), []byte(`{"db":{"by":"bob"}}`), 0o600)
+	a := &app{
+		cfg:      &config.Config{App: "shop", Servers: map[string]config.Server{"a": {SSH: "root@a"}, "b": {SSH: "root@b"}}},
+		destName: "production",
+		dest: config.Destination{Servers: []string{"a", "b"}, Roles: map[string]config.Role{
+			"app":  {Services: []string{"web"}, Servers: []string{"a"}},
+			"data": {Services: []string{"db"}, Servers: []string{"b"}},
+		}},
+		orphans: map[string]bool{},
+	}
+	if _, _, err := a.stopTargets(context.Background(), "start", "db", "a"); err == nil || !strings.Contains(err.Error(), "not placed on Server a") {
+		t.Fatal(err)
+	}
+}

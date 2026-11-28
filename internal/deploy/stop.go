@@ -401,6 +401,16 @@ func StartService(ctx context.Context, d *plan.Deploy, service string) (changed 
 	if err := checkOwnership(ctx, h, d.App, d.Destination, []servicePlan{*sp}); err != nil {
 		return false, err
 	}
+	if changed {
+		// Invalidate the fence durably before Compose runs: from here on
+		// the Service may run, so no fence that relied on the old record
+		// may match, even if a later write fails.
+		prev := s[service]
+		s[service] = StoppedEntry{By: prev.By, At: time.Now().UTC(), Reason: "`yoho app start` in progress"}
+		if err := writeStopped(ctx, h, d.App, d.Destination, s); err != nil {
+			return false, err
+		}
+	}
 	r := newRunner(d, path.Join(release.Dir(d.App, d.Destination, ver), "compose.yaml"))
 	r.phase = "service-start"
 	if _, err := enforceStoppedSet(ctx, r, rest, plans); err != nil {
@@ -452,6 +462,33 @@ func StartService(ctx context.Context, d *plan.Deploy, service string) (changed 
 		return false, &StartError{Service: service, Err: err}
 	}
 	return changed, nil
+}
+
+// ClearOrphanStopped deletes service's stopped entry on h when service is
+// not in the current Release there; it refuses when it is. It never runs
+// Compose. changed is false when there was no entry. Callers hold the
+// Destination lock.
+func ClearOrphanStopped(ctx context.Context, h remote.Host, app, dest, service string) (changed bool, err error) {
+	ver, plans, err := currentPlans(ctx, h, app, dest)
+	if err != nil {
+		return false, err
+	}
+	if findPlan(plans, service) != nil {
+		return false, fmt.Errorf("Service %s is in the current Release %s on %s; it is not an orphaned entry", service, ver, h.Name())
+	}
+	s, err := ReadStopped(ctx, h, app, dest)
+	if err != nil {
+		return false, err
+	}
+	if _, ok := s[service]; !ok {
+		return false, nil
+	}
+	delete(s, service)
+	if err := writeStopped(ctx, h, app, dest, s); err != nil {
+		return false, err
+	}
+	_, _, err = syncStopped(ctx, h, app, dest, plans)
+	return true, err
 }
 
 func findPlan(plans []servicePlan, service string) *servicePlan {

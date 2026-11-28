@@ -683,3 +683,53 @@ func TestStartServiceClearRecordFailureReported(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+// Round 7: StartService rewrites the stop record before Compose runs.
+func TestStartServiceInvalidatesRecordBeforeUp(t *testing.T) {
+	h, _ := stopRelease(t)
+	ctx := context.Background()
+	at := time.Date(2026, 11, 27, 10, 0, 0, 0, time.UTC)
+	if _, err := StopService(ctx, h, "shop", "production", "db", StoppedEntry{By: "alice", At: at}); err != nil {
+		t.Fatal(err)
+	}
+	var atUp StoppedEntry
+	h.respond = func(s string) (string, error) {
+		if strings.Contains(s, "'up' '-d' '--no-deps' 'db'") {
+			st, _ := ReadStopped(ctx, h, "shop", "production")
+			atUp = st["db"]
+			return "", errors.New("compose up failed")
+		}
+		return "", nil
+	}
+	d := &plan.Deploy{App: "shop", Destination: "production", Servers: []plan.NamedHost{{Name: "s1", Host: h}}, Out: io.Discard}
+	_, _ = StartService(ctx, d, "db")
+	if atUp.At.Equal(at) || !strings.Contains(atUp.Reason, "in progress") {
+		t.Fatalf("record not rewritten before compose up: %+v", atUp)
+	}
+}
+
+// Round 7: ClearOrphanStopped clears only an entry of a Service absent from
+// the current Release and never runs Compose.
+func TestClearOrphanStopped(t *testing.T) {
+	h, _ := stopRelease(t)
+	ctx := context.Background()
+	if err := writeStopped(ctx, h, "shop", "production", Stopped{"db": {By: "alice"}, "gone": {By: "bob"}}); err != nil {
+		t.Fatal(err)
+	}
+	h.scripts = nil
+	if _, err := ClearOrphanStopped(ctx, h, "shop", "production", "db"); err == nil || !strings.Contains(err.Error(), "not an orphaned entry") {
+		t.Fatal(err)
+	}
+	if c, err := ClearOrphanStopped(ctx, h, "shop", "production", "gone"); err != nil || !c {
+		t.Fatal(c, err)
+	}
+	if c, err := ClearOrphanStopped(ctx, h, "shop", "production", "gone"); err != nil || c {
+		t.Fatal(c, err)
+	}
+	if s, _ := ReadStopped(ctx, h, "shop", "production"); s["db"].By != "alice" || len(s) != 1 {
+		t.Fatalf("%+v", s)
+	}
+	if strings.Contains(h.all(), "'up'") {
+		t.Fatal("ran compose")
+	}
+}

@@ -136,6 +136,12 @@ func (a *app) stopTargets(ctx context.Context, verb, service, chosen string) ([]
 				continue
 			}
 			found = true
+			// A Server the Yoho file does not place the Service on is only
+			// for clearing an orphaned entry: never start it there.
+			if verb == "start" && a.dest.Roles != nil && !slices.Contains(a.dest.ServiceServers(service), h.Name) {
+				done()
+				return nil, nil, &hintError{fmt.Sprintf("Service %s is not placed on Server %s, but its current Release there still has it", service, h.Name), "deploy to move it; `app start --server` clears only an entry of a Service no longer in that Server's Release"}
+			}
 			if s.Proxied {
 				done()
 				return nil, nil, &hintError{fmt.Sprintf("Service %s is proxied; app %s supports Services without x-yoho.proxy", service, verb), "to take it down, set deploy.replicas: 0 and deploy"}
@@ -245,7 +251,15 @@ func (a *app) startService(ctx context.Context, service, chosen string) (err err
 	for _, h := range hosts {
 		step := a.ui.Step(h.Name, "Start %s", service)
 		d := &plan.Deploy{App: a.cfg.App, Destination: a.destName, Servers: []plan.NamedHost{h}, Performer: performer(), Out: step.Output()}
-		c, e := deploy.StartService(ctx, d, service)
+		var c bool
+		var e error
+		if a.orphans[h.Name] {
+			// Rechecked under the lock: only an entry of a Service no
+			// longer in this Server's Release is cleared; Compose never runs.
+			c, e = deploy.ClearOrphanStopped(ctx, h.Host, a.cfg.App, a.destName, service)
+		} else {
+			c, e = deploy.StartService(ctx, d, service)
+		}
 		if e != nil {
 			hint := "check that Docker is running on the Server"
 			var se *deploy.StartError

@@ -26,25 +26,27 @@ type pgHost struct {
 	name string
 	mu   sync.Mutex
 	// state
-	recovery     bool
-	receiver     string
-	current      string
-	receive      string
-	replay       []string // successive pg_last_wal_replay_lsn answers
-	promoteOut   string
-	stopOut      string
-	controlData  string // pg_controldata output after the stop
-	sysid        string
-	running      string // docker ps -q answer
-	noReceive    bool   // pg_last_wal_receive_lsn() is NULL
-	tli          string // pg_control_checkpoint().timeline_id
-	recvTLI      string // pg_stat_wal_receiver.received_tli
-	failCheck    error  // the stop script's after-stop check fails (containers kept)
-	failUp       error  // compose up of `yoho app start` fails
-	failQuery    error
-	log          []string
-	writes       int
-	promoteCalls int
+	recovery    bool
+	receiver    string
+	current     string
+	receive     string
+	replay      []string // successive pg_last_wal_replay_lsn answers
+	promoteOut  string
+	stopOut     string
+	controlData string // pg_controldata output after the stop
+	sysid       string
+	running     string // docker ps -q answer
+	noReceive   bool   // pg_last_wal_receive_lsn() is NULL
+	tli         string // pg_control_checkpoint().timeline_id
+	recvTLI     string // pg_stat_wal_receiver.received_tli
+	failCheck   error  // the stop script's after-stop check fails (containers kept)
+	failUp      error  // compose up of `yoho app start` fails
+	// blockStoppedAfterUp makes stopped.json writes fail once compose up ran.
+	blockStoppedAfterUp, upRan bool
+	failQuery                  error
+	log                        []string
+	writes                     int
+	promoteCalls               int
 }
 
 func (h *pgHost) Name() string { return h.name }
@@ -52,7 +54,11 @@ func (h *pgHost) Name() string { return h.name }
 func (h *pgHost) WriteFile(ctx context.Context, p string, b []byte, m os.FileMode, sudo bool) error {
 	h.mu.Lock()
 	h.writes++
+	blocked := h.blockStoppedAfterUp && h.upRan && strings.HasSuffix(p, deploy.StoppedFile)
 	h.mu.Unlock()
+	if blocked {
+		return errors.New("disk full")
+	}
 	return h.Local.WriteFile(ctx, p, b, m, sudo)
 }
 
@@ -85,6 +91,7 @@ func (h *pgHost) Output(ctx context.Context, c remote.Cmd) (string, error) {
 		h.running = ""
 		return out, nil
 	case strings.Contains(s, "'up' '-d' '--no-deps'"):
+		h.upRan = true
 		return "", h.failUp
 	case strings.Contains(s, "docker ps -q "):
 		return h.running, nil
@@ -771,5 +778,32 @@ func TestFailedAppStartInvalidatesFence(t *testing.T) {
 	err := Run(context.Background(), o)
 	if err == nil || !strings.Contains(err.Error(), "did not shut down cleanly") || b.promoteCalls != 0 {
 		t.Fatalf("pre-restart target reused: %v, promotes %d", err, b.promoteCalls)
+	}
+}
+
+// Round 7: the fence is invalidated before Compose runs, so even when the
+// replacement record after a failed up cannot be written, a promotion
+// retry does not reuse the target taken before the start.
+func TestFailedAppStartInvalidatesFenceWhenRecordWriteFails(t *testing.T) {
+	a, b, o := fixture(t)
+	b.replay = []string{"0/3000000"}
+	b.receive = "0/3000000"
+	o.Timeout = 20 * time.Millisecond
+	if err := Run(context.Background(), o); err == nil {
+		t.Fatal("wait should time out")
+	}
+	a.failUp = errors.New("compose up failed")
+	a.blockStoppedAfterUp = true
+	a.stopOut = ""
+	d := &plan.Deploy{App: "pg", Destination: "production", Servers: []plan.NamedHost{{Name: "a", Host: a}}, Out: io.Discard}
+	if _, err := deploy.StartService(context.Background(), d, "db"); err == nil || !strings.Contains(err.Error(), "keeping it stopped failed too") {
+		t.Fatalf("expected the replacement record write to fail: %v", err)
+	}
+	a.blockStoppedAfterUp = false
+	b.replay = []string{"0/3000080"}
+	b.receive = "0/3000080"
+	err := Run(context.Background(), o)
+	if err == nil || !strings.Contains(err.Error(), "did not shut down cleanly") || b.promoteCalls != 0 {
+		t.Fatalf("pre-start target reused: %v, promotes %d", err, b.promoteCalls)
 	}
 }
